@@ -1315,20 +1315,51 @@
     return `${message}${batchText} Elapsed ${formatDuration(elapsedSeconds)}.${tokenText}`;
   };
 
+  const monthlyReportProgressStageMeta = (stage, current, total) => {
+    const normalizedStage = String(stage || 'preparing_sources');
+    const scale = (start, end) => {
+      if (!total) return start;
+      const ratio = Math.max(0, Math.min(1, Number(current || 0) / Number(total || 1)));
+      return Math.round(start + ((end - start) * ratio));
+    };
+    if (normalizedStage.includes('final') || normalizedStage.includes('draft') || normalizedStage.includes('codex')) {
+      return { activeStep: 'draft', percent: scale(88, 96) };
+    }
+    if (
+      (normalizedStage.includes('summarizing_') && !normalizedStage.includes('summarizing_prd_scope'))
+      || normalizedStage.includes('merging')
+      || normalizedStage.includes('compressing')
+    ) {
+      if (normalizedStage.includes('merging')) return { activeStep: 'compact', percent: scale(78, 84) };
+      if (normalizedStage.includes('compressing')) return { activeStep: 'compact', percent: scale(82, 88) };
+      return { activeStep: 'compact', percent: scale(52, 78) };
+    }
+    const prepareRanges = [
+      { match: 'collecting_seatalk', start: 12, end: 18 },
+      { match: 'searching_vip_gmail', start: 18, end: 28 },
+      { match: 'searching_topic_gmail', start: 28, end: 42 },
+      { match: 'ingesting_prd', start: 42, end: 48 },
+      { match: 'summarizing_prd_scope', start: 48, end: 52 },
+      { match: 'building_evidence', start: 52, end: 56 },
+    ];
+    const matchedRange = prepareRanges.find((range) => normalizedStage.includes(range.match));
+    if (matchedRange) {
+      return { activeStep: 'prepare', percent: scale(matchedRange.start, matchedRange.end) };
+    }
+    return { activeStep: 'prepare', percent: scale(8, 12) };
+  };
+
   const renderMonthlyReportProgress = (progress) => {
     monthlyReportLastProgress = progress || monthlyReportLastProgress || {};
     const stage = String(monthlyReportLastProgress.stage || 'preparing_sources');
     const total = Number(monthlyReportLastProgress.total || 0);
     const current = Number(monthlyReportLastProgress.current || 0);
-    const percent = total ? Math.max(8, Math.min(94, Math.round((current / total) * 86))) : 8;
-    let activeStep = 'prepare';
-    if (stage.includes('summarizing') || stage.includes('merging') || stage.includes('compressing')) {
-      activeStep = 'compact';
+    if (String(monthlyReportLastProgress.state || '') === 'completed') {
+      setMonthlyReportProgressStep('done', 100, monthlyReportProgressText(monthlyReportLastProgress));
+      return;
     }
-    if (stage.includes('final') || stage.includes('draft') || stage.includes('codex')) {
-      activeStep = 'draft';
-    }
-    setMonthlyReportProgressStep(activeStep, percent, monthlyReportProgressText(monthlyReportLastProgress));
+    const meta = monthlyReportProgressStageMeta(stage, current, total);
+    setMonthlyReportProgressStep(meta.activeStep, meta.percent, monthlyReportProgressText(monthlyReportLastProgress));
   };
 
   const startMonthlyReportProgress = () => {

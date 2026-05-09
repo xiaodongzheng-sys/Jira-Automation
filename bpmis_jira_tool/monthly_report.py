@@ -226,9 +226,11 @@ class MonthlyReportService:
         _emit_monthly_report_progress(progress_callback, "preparing_sources", "Preparing Key Projects, Jira, PRD, and SeaTalk sources.", 0, 0)
         key_projects = self._key_projects(team_payloads)
         step_started = time.monotonic()
+        _emit_monthly_report_progress(progress_callback, "collecting_seatalk", "Exporting SeaTalk history for the report period.", 0, 0)
         history_text, product_scope_filtered_count = self._seatalk_history(report_period)
         _record_monthly_report_timing(timings, "seatalk_export", step_started)
         step_started = time.monotonic()
+        _emit_monthly_report_progress(progress_callback, "searching_vip_gmail", "Searching VIP Gmail evidence for the report period.", 0, 0)
         vip_gmail_text, vip_gmail_summary = self._vip_gmail_history(report_period)
         _record_monthly_report_timing(timings, "vip_gmail", step_started)
         highlight_project_matches = match_monthly_report_highlight_topics(normalized_highlight_topics, key_projects)
@@ -242,12 +244,21 @@ class MonthlyReportService:
         highlight_gmail_evidence, highlight_gmail_summary = self._highlight_gmail_history(
             report_period,
             normalized_highlight_topics,
+            progress_callback=progress_callback,
         )
         _record_monthly_report_timing(timings, "topic_gmail", step_started)
         step_started = time.monotonic()
+        _emit_monthly_report_progress(progress_callback, "ingesting_prd", "Collecting PRD context for highlight projects.", 0, 0)
         prd_sources, prd_errors = self._prd_sources(key_projects, project_ids=highlight_project_ids)
         _record_monthly_report_timing(timings, "prd_ingest", step_started)
         step_started = time.monotonic()
+        _emit_monthly_report_progress(
+            progress_callback,
+            "summarizing_prd_scope",
+            "Summarizing PRD scope evidence.",
+            0,
+            len(prd_sources),
+        )
         prd_scope_summaries = self._prd_scope_summaries(
             prd_sources=prd_sources,
             generated_at=self.now,
@@ -255,6 +266,7 @@ class MonthlyReportService:
             progress_callback=progress_callback,
         )
         _record_monthly_report_timing(timings, "prd_summary", step_started)
+        _emit_monthly_report_progress(progress_callback, "building_evidence", "Building Monthly Report evidence from collected sources.", 0, 0)
         monthly_evidence_brief = build_monthly_project_evidence_brief(
             key_projects=key_projects,
             seatalk_history_text=history_text,
@@ -647,9 +659,23 @@ class MonthlyReportService:
             "product_scope_filtered_count": filtered_count,
         }
 
-    def _highlight_gmail_history(self, report_period: MonthlyReportPeriod, highlight_topics: list[str]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    def _highlight_gmail_history(
+        self,
+        report_period: MonthlyReportPeriod,
+        highlight_topics: list[str],
+        *,
+        progress_callback: Any | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
         if not highlight_topics:
             return [], {"thread_count": 0, "message_count": 0, "error_count": 0, "cache_hit_count": 0}
+        total_topics = len(highlight_topics)
+        _emit_monthly_report_progress(
+            progress_callback,
+            "searching_topic_gmail",
+            "Searching Gmail evidence for highlight topics.",
+            0,
+            total_topics,
+        )
 
         def load_topic(index: int, topic: str) -> tuple[int, dict[str, Any]]:
             cache_path = _monthly_report_gmail_topic_cache_path(
@@ -704,9 +730,17 @@ class MonthlyReportService:
                 executor.submit(load_topic, index, topic)
                 for index, topic in enumerate(highlight_topics)
             ]
-            for future in as_completed(futures):
+            for completed, future in enumerate(as_completed(futures), start=1):
                 index, item = future.result()
                 ordered[index] = item
+                topic_label = str(item.get("topic") or "highlight topic").strip()
+                _emit_monthly_report_progress(
+                    progress_callback,
+                    "searching_topic_gmail",
+                    f"Loaded Gmail evidence for highlight topic {completed}/{total_topics}: {topic_label}.",
+                    completed,
+                    total_topics,
+                )
         items = [item for item in ordered if item is not None]
         return items, {
             "thread_count": sum(_safe_int(item.get("thread_count")) for item in items),

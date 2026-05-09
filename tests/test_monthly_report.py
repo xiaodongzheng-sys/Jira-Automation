@@ -291,7 +291,21 @@ class MonthlyReportTests(unittest.TestCase):
                     "priority_keywords": ["approval"],
                 },
             )
-            result = service.generate_draft(template="# Template", team_payloads=team_payloads, highlight_topics=["Key Fraud Project", "GRC Phase 1"])
+            progress_events = []
+            result = service.generate_draft(
+                template="# Template",
+                team_payloads=team_payloads,
+                highlight_topics=["Key Fraud Project", "GRC Phase 1"],
+                progress_callback=lambda stage, message, current, total, **kwargs: progress_events.append(
+                    {
+                        "stage": stage,
+                        "message": message,
+                        "current": current,
+                        "total": total,
+                        **kwargs,
+                    }
+                ),
+            )
 
         self.assertEqual(result["draft_markdown"], "# Draft")
         self.assertEqual(seatalk.calls[0]["since"].isoformat(), "2026-04-13T00:00:00+08:00")
@@ -340,6 +354,20 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(result["generation_summary"]["period_end"], "2026-05-03")
         self.assertEqual(result["generation_summary"]["period_end_exclusive"], "2026-05-04T00:00:00+08:00")
         self.assertEqual(result["generation_summary"]["highlight_topics"], ["Key Fraud Project", "GRC Phase 1"])
+        progress_stages = [item["stage"] for item in progress_events]
+        for stage in (
+            "preparing_sources",
+            "collecting_seatalk",
+            "searching_vip_gmail",
+            "searching_topic_gmail",
+            "ingesting_prd",
+            "summarizing_prd_scope",
+            "building_evidence",
+            "merging_summaries",
+            "generating_final_draft",
+        ):
+            self.assertIn(stage, progress_stages)
+        self.assertTrue(any(item["stage"] == "searching_topic_gmail" and item["total"] == 2 for item in progress_events))
         self.assertEqual(result["evidence_summary"]["highlight_topic_count"], 2)
         self.assertEqual(result["evidence_summary"]["highlight_project_topic_count"], 1)
         self.assertEqual(result["generation_summary"]["scheduled_period_end"], "2026-05-08")
