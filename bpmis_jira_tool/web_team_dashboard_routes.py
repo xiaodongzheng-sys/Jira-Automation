@@ -365,16 +365,16 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             mappings = mapping_store.mappings()
             mapped_keys = {alias for key in mappings for alias in SeaTalkNameMappingStore.equivalent_keys(key)}
             candidates = dict(candidates)
+            candidates["unknown_ids"] = _dedupe_seatalk_name_mapping_candidates([
+                row for row in (candidates.get("unknown_ids") or [])
+                if isinstance(row, dict) and not (SeaTalkNameMappingStore.equivalent_keys(row.get("id")) & mapped_keys)
+            ])
             visible_keys = {
                 alias
                 for row in (candidates.get("unknown_ids") or [])
                 if isinstance(row, dict)
                 for alias in SeaTalkNameMappingStore.equivalent_keys(row.get("id"))
             }
-            candidates["unknown_ids"] = _dedupe_seatalk_name_mapping_candidates([
-                row for row in (candidates.get("unknown_ids") or [])
-                if isinstance(row, dict) and not (SeaTalkNameMappingStore.equivalent_keys(row.get("id")) & mapped_keys)
-            ])
             visible_mappings = {key: value for key, value in mappings.items() if key in visible_keys}
             return jsonify({"status": "ok", "mappings": visible_mappings, **candidates})
         except (ConfigError, ToolError) as error:
