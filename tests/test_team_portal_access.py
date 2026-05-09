@@ -238,6 +238,31 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self.assertEqual(response.headers.get("Pragma"), "no-cache")
                 self.assertEqual(response.headers.get("Expires"), "0")
 
+    def test_static_css_and_js_revalidate_to_avoid_stale_mobile_assets(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                css_response = client.get("/static/team_dashboard.css")
+                js_response = client.get("/static/team_dashboard.js")
+
+        self.assertEqual(css_response.status_code, 200)
+        self.assertEqual(js_response.status_code, 200)
+        self.assertEqual(css_response.headers.get("Cache-Control"), "no-cache, max-age=0, must-revalidate")
+        self.assertEqual(js_response.headers.get("Cache-Control"), "no-cache, max-age=0, must-revalidate")
+        self.assertEqual(css_response.headers.get("Pragma"), "no-cache")
+        self.assertEqual(js_response.headers.get("Pragma"), "no-cache")
+        self.assertEqual(css_response.headers.get("Expires"), "0")
+        self.assertEqual(js_response.headers.get("Expires"), "0")
+
     def test_uat_stage_renders_environment_banner(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
