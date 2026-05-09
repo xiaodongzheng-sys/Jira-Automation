@@ -217,6 +217,11 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
                 "period_end": generation_summary.get("period_end") or "",
                 "period_end_exclusive": generation_summary.get("period_end_exclusive") or "",
                 "highlight_topics": highlight_topics if isinstance(highlight_topics, list) else [],
+                "generation_summary": generation_summary,
+                "evidence_summary": (result or {}).get("evidence_summary") if isinstance((result or {}).get("evidence_summary"), dict) else {},
+                "highlight_evidence_map": (result or {}).get("highlight_evidence_map") if isinstance((result or {}).get("highlight_evidence_map"), list) else [],
+                "highlight_narratives": (result or {}).get("highlight_narratives") if isinstance((result or {}).get("highlight_narratives"), list) else [],
+                "generation_diagnostics": (result or {}).get("generation_diagnostics") if isinstance((result or {}).get("generation_diagnostics"), dict) else {},
             }
         )
 

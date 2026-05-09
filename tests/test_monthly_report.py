@@ -19,6 +19,8 @@ from bpmis_jira_tool.monthly_report import (
     _estimate_token_count,
     build_monthly_highlight_deep_evidence,
     build_monthly_highlight_evidence_map,
+    build_monthly_highlight_topic_narrative_prompt,
+    build_monthly_requirements_target_map,
     build_monthly_project_evidence_brief,
     build_monthly_report_final_prompt,
     generate_monthly_report_with_codex,
@@ -291,6 +293,48 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertTrue(second[0]["cache_hit"])
         self.assertEqual(second[0]["summary_markdown"], "Cached batch summary")
 
+    def test_highlight_topic_narrative_cache_reuses_same_topic_evidence(self):
+        report_period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
+        topic_evidence = [
+            {
+                "topic": "AF launch",
+                "confidence": "high",
+                "recommended_tone": "Write as a confident executive progress update.",
+                "seatalk_evidence": ["AF launch owner confirmed."],
+                "gmail_evidence": [],
+                "project_updates": [],
+                "evidence_map": {"source_counts": {"seatalk": 1}},
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = MonthlyReportService(
+                settings=_settings(temp_dir),
+                workspace_root=Path(temp_dir),
+                seatalk_service=_FakeSeaTalkService(),
+            )
+            with patch.object(
+                service,
+                "_guarded_generate",
+                return_value={"result_markdown": "AF launch remains on track with owner confirmation.", "model_id": "codex-cli", "trace": {"id": "trace-1"}},
+            ) as mock_generate:
+                first = service._highlight_topic_narratives(
+                    generated_at=datetime(2026, 5, 8, 12, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+                    report_period=report_period,
+                    highlight_deep_evidence=topic_evidence,
+                    progress_callback=None,
+                )
+                second = service._highlight_topic_narratives(
+                    generated_at=datetime(2026, 5, 9, 12, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+                    report_period=report_period,
+                    highlight_deep_evidence=topic_evidence,
+                    progress_callback=None,
+                )
+
+        self.assertEqual(mock_generate.call_count, 1)
+        self.assertFalse(first[0]["cache_hit"])
+        self.assertTrue(second[0]["cache_hit"])
+        self.assertEqual(second[0]["narrative_markdown"], "AF launch remains on track with owner confirmation.")
+
     def test_generate_draft_uses_period_product_scope_key_projects_prd_and_vip_gmail(self):
         seatalk = _FakeSeaTalkService()
         confluence = _FakeConfluence()
@@ -455,6 +499,7 @@ class MonthlyReportTests(unittest.TestCase):
             "ingesting_prd",
             "summarizing_prd_scope",
             "building_evidence",
+            "generating_highlight_narrative",
             "merging_summaries",
             "generating_final_draft",
         ):
@@ -465,7 +510,11 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertIn("highlight_confidence_counts", result["evidence_summary"])
         self.assertEqual(len(result["highlight_evidence_map"]), 2)
         self.assertTrue({item["topic"] for item in result["highlight_evidence_map"]}.issuperset({"Key Fraud Project", "GRC Phase 1"}))
+        self.assertEqual(len(result["highlight_narratives"]), 2)
+        self.assertIn("generation_diagnostics", result)
+        self.assertIn("target_tech_live_source_counts", result["generation_diagnostics"])
         self.assertIn("batch_summary_cache_hit_count", result["generation_summary"])
+        self.assertIn("highlight_narrative_cache_hit_count", result["generation_summary"])
         self.assertEqual(result["generation_summary"]["scheduled_period_end"], "2026-05-08")
         self.assertGreater(result["generation_summary"]["prompt_chars"], 0)
         self.assertGreater(result["generation_summary"]["estimated_prompt_tokens"], 0)
@@ -473,7 +522,7 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertTrue(result["generation_summary"]["batch_mode"])
         self.assertGreaterEqual(result["generation_summary"]["total_batches"], 3)
         self.assertIn("elapsed_seconds", result["generation_summary"])
-        for key in ("seatalk_export", "vip_gmail", "requirements_gmail", "topic_gmail", "prd_ingest", "prd_summary", "batch_summary", "merge", "final", "total"):
+        for key in ("seatalk_export", "vip_gmail", "requirements_gmail", "topic_gmail", "prd_ingest", "prd_summary", "highlight_narrative", "batch_summary", "merge", "final", "total"):
             self.assertIn(key, result["generation_summary"]["timings"])
 
     def test_generate_draft_does_not_batch_full_seatalk_history_for_non_project_highlight(self):
@@ -661,6 +710,7 @@ class MonthlyReportTests(unittest.TestCase):
             evidence_brief="Compact brief",
             monthly_evidence_brief=evidence,
             highlight_topics=["CIB Phase 2"],
+            highlight_narratives=[{"topic": "CIB Phase 2", "narrative_markdown": "CIB Phase 2 is moving through UAT."}],
         )
 
         self.assertLessEqual(_estimate_token_count(prompt), MONTHLY_REPORT_FINAL_MAX_TOKENS)
@@ -673,6 +723,8 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertNotIn("evidence_sources", prompt)
         self.assertNotIn("AF-00-00", prompt)
         self.assertIn("Highlight Deep Evidence", prompt)
+        self.assertIn("Highlight Narrative Candidates", prompt)
+        self.assertIn("CIB Phase 2 is moving through UAT", prompt)
         self.assertIn("Other Key Project Updates", prompt)
         self.assertIn('"current_status"', prompt)
         self.assertIn("The audience is Xiaodong's manager", prompt)
@@ -975,6 +1027,7 @@ class MonthlyReportTests(unittest.TestCase):
             "| SG | SP | Balance Transfer open to NTB application | Sep 2026 |\n"
             "| SG | P1 | SME RCF drawdown check | Oct 2026 |\n"
         )
+        requirements_targets = build_monthly_requirements_target_map(requirements_text)
         brief = build_monthly_project_evidence_brief(
             key_projects=[
                 {
@@ -1010,14 +1063,18 @@ class MonthlyReportTests(unittest.TestCase):
             ],
             seatalk_history_text="",
             vip_gmail_text="",
-            monthly_requirements_text=requirements_text,
+            monthly_requirements_targets=requirements_targets,
             prd_scope_summaries=[],
             report_period=period,
         )
 
         by_id = {item["project_id"]: item for item in brief}
+        self.assertEqual(len(requirements_targets), 2)
         self.assertEqual(by_id["SP-EMAIL"]["target_tech_live_date"], "Sep 2026")
         self.assertEqual(by_id["SP-EMAIL"]["target_tech_live_source"], "monthly_requirements_email")
+        self.assertEqual(by_id["SP-EMAIL"]["target_tech_live_source_detail"]["sender"], "xinni.oon@npt.sg")
+        self.assertIn("Balance Transfer", by_id["SP-EMAIL"]["target_tech_live_source_detail"]["matched_line"])
+        self.assertTrue(by_id["SP-EMAIL"]["target_tech_live_source_detail"]["matched_alias"])
         self.assertEqual(by_id["P1-JIRA"]["target_tech_live_date"], "Jul 2026")
         self.assertEqual(by_id["P1-JIRA"]["target_tech_live_source"], "jira_version")
 
