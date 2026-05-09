@@ -137,8 +137,12 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(normalize_monthly_report_highlight_topics([" AF ", "", "CRMS", "AF"]), ["AF", "CRMS"])
         with self.assertRaises(ToolError):
             normalize_monthly_report_highlight_topics([])
+        self.assertEqual(
+            normalize_monthly_report_highlight_topics(["one", "two", "three", "four", "five", "six"]),
+            ["one", "two", "three", "four", "five", "six"],
+        )
         with self.assertRaises(ToolError):
-            normalize_monthly_report_highlight_topics(["one", "two", "three", "four", "five", "six"])
+            normalize_monthly_report_highlight_topics(["one", "two", "three", "four", "five", "six", "seven"])
 
         period = resolve_monthly_report_period_from_user_range(period_start="2026-04-01", period_end="2026-04-30")
         self.assertEqual(period.start.isoformat(), "2026-04-01T00:00:00+08:00")

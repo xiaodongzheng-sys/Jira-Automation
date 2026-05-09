@@ -213,17 +213,17 @@
       .filter(Boolean);
     const uniqueTopics = [...new Set(topics)];
     if (strict && uniqueTopics.length === 0) {
-      throw new Error('Add 1 to 5 highlight topics before generating the Monthly Report.');
+      throw new Error('Add 1 to 6 highlight topics before generating the Monthly Report.');
     }
-    if (strict && uniqueTopics.length > 5) {
-      throw new Error('Monthly Report supports at most 5 highlight topics.');
+    if (strict && uniqueTopics.length > 6) {
+      throw new Error('Monthly Report supports at most 6 highlight topics.');
     }
-    return uniqueTopics.slice(0, 5);
+    return uniqueTopics.slice(0, 6);
   };
 
   const applyMonthlyReportInputs = (payload = {}, { onlyEmpty = false } = {}) => {
     if (monthlyReportTopics && Array.isArray(payload.highlight_topics) && payload.highlight_topics.length && (!onlyEmpty || !monthlyReportTopics.value.trim())) {
-      monthlyReportTopics.value = payload.highlight_topics.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 5).join('\n');
+      monthlyReportTopics.value = payload.highlight_topics.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 6).join('\n');
     }
     if (monthlyReportPeriodStart && payload.period_start && (!onlyEmpty || !monthlyReportPeriodStart.value)) {
       monthlyReportPeriodStart.value = String(payload.period_start).slice(0, 10);

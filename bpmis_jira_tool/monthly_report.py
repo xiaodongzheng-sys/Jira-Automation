@@ -43,7 +43,7 @@ MONTHLY_REPORT_MAX_TICKETS_PER_PROJECT = 18
 MONTHLY_REPORT_MAX_PRD_PAGES = 10
 MONTHLY_REPORT_MAX_PRD_CHARS_PER_PAGE = 8_000
 MONTHLY_REPORT_MAX_DESCRIPTION_CHARS = 4_000
-MONTHLY_REPORT_MAX_HIGHLIGHT_TOPICS = 5
+MONTHLY_REPORT_MAX_HIGHLIGHT_TOPICS = 6
 MONTHLY_REPORT_TOKEN_CHARS_PER_TOKEN = 4
 MONTHLY_REPORT_TOKEN_RISK_WARNING = 120_000
 MONTHLY_REPORT_TOKEN_RISK_HIGH = 180_000
@@ -917,7 +917,7 @@ def normalize_monthly_report_highlight_topics(value: Any) -> list[str]:
         raw_items = []
     topics = _dedupe_preserve_order([str(item or "").strip() for item in raw_items if str(item or "").strip()])
     if not topics:
-        raise ToolError("Monthly Report highlight topics are required. Add 1 to 5 topics before generating.")
+        raise ToolError(f"Monthly Report highlight topics are required. Add 1 to {MONTHLY_REPORT_MAX_HIGHLIGHT_TOPICS} topics before generating.")
     if len(topics) > MONTHLY_REPORT_MAX_HIGHLIGHT_TOPICS:
         raise ToolError(f"Monthly Report supports at most {MONTHLY_REPORT_MAX_HIGHLIGHT_TOPICS} highlight topics.")
     return topics
