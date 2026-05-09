@@ -45,6 +45,7 @@ from bpmis_jira_tool.source_code_qa_evidence_policy import (
 from bpmis_jira_tool.source_code_qa_cache_telemetry import attach_cache_telemetry_helpers
 from bpmis_jira_tool.source_code_qa_components import (
     SourceCodeQAAnswerGenerationComponent,
+    SourceCodeQAIndexingSyncComponent,
     SourceCodeQAQualityJudgeComponent,
     SourceCodeQARetrievalComponent,
 )
@@ -319,6 +320,7 @@ class SourceCodeQAService:
         self.git_timeout_seconds = max(5, int(git_timeout_seconds or 90))
         self.max_file_bytes = max(20_000, int(max_file_bytes or 500_000))
         self._retrieval = SourceCodeQARetrievalComponent(self)
+        self._indexing_sync = SourceCodeQAIndexingSyncComponent(self)
         self._answer_generation = SourceCodeQAAnswerGenerationComponent(self)
         self._quality_judge = SourceCodeQAQualityJudgeComponent(self)
 
@@ -1375,6 +1377,9 @@ class SourceCodeQAService:
         return {"key": key, "repositories": updated_payload["mappings"][key], "config": updated_payload}
 
     def sync(self, *, pm_team: str, country: str) -> dict[str, Any]:
+        return self._indexing_sync.sync(pm_team=pm_team, country=country)
+
+    def _sync_impl(self, *, pm_team: str, country: str) -> dict[str, Any]:
         key = self.mapping_key(pm_team, country)
         if not self.gitlab_token:
             raise ToolError("SOURCE_CODE_QA_GITLAB_TOKEN is required before Source Code Q&A can sync HTTPS repositories.")
@@ -1427,6 +1432,9 @@ class SourceCodeQAService:
         return start_date + timedelta(days=periods * interval_days)
 
     def ensure_synced_today(self, *, pm_team: str, country: str) -> dict[str, Any]:
+        return self._indexing_sync.ensure_synced_today(pm_team=pm_team, country=country)
+
+    def _ensure_synced_today_impl(self, *, pm_team: str, country: str) -> dict[str, Any]:
         key = self.mapping_key(pm_team, country)
         entries = self._load_entries_for_key(key)
         if not entries:
@@ -2868,6 +2876,9 @@ class SourceCodeQAService:
         return max(1, min(int(limit or 12), 30))
 
     def repo_status(self, key: str) -> list[dict[str, Any]]:
+        return self._indexing_sync.repo_status(key)
+
+    def _repo_status_impl(self, key: str) -> list[dict[str, Any]]:
         entries = self._load_entries_for_key(key)
         statuses = []
         for entry in entries:
@@ -2892,6 +2903,9 @@ class SourceCodeQAService:
         return statuses
 
     def index_health_payload(self) -> dict[str, Any]:
+        return self._indexing_sync.index_health_payload()
+
+    def _index_health_payload_impl(self) -> dict[str, Any]:
         config = self.load_config()
         mappings = config.get("mappings") or {}
         keys: dict[str, Any] = {}
@@ -2943,8 +2957,11 @@ class SourceCodeQAService:
             "keys": keys,
         }
 
+    def _index_freshness_payload(self, repo_status: list[dict[str, Any]]) -> dict[str, Any]:
+        return self._indexing_sync.index_freshness_payload(repo_status)
+
     @staticmethod
-    def _index_freshness_payload(repo_status: list[dict[str, Any]]) -> dict[str, Any]:
+    def _index_freshness_payload_impl(repo_status: list[dict[str, Any]]) -> dict[str, Any]:
         repo_count = len(repo_status)
         stale_repos = []
         revisions = []
@@ -3120,6 +3137,9 @@ class SourceCodeQAService:
         return ALL_COUNTRY
 
     def _sync_entry(self, key: str, entry: RepositoryEntry) -> dict[str, Any]:
+        return self._indexing_sync.sync_entry(key, entry)
+
+    def _sync_entry_impl(self, key: str, entry: RepositoryEntry) -> dict[str, Any]:
         repo_path = self._repo_path(key, entry)
         repo_path.parent.mkdir(parents=True, exist_ok=True)
         if (repo_path / ".git").exists():
@@ -3162,6 +3182,9 @@ class SourceCodeQAService:
         )
 
     def _sync_result(self, entry: RepositoryEntry, repo_path: Path, state: str, message: str) -> dict[str, Any]:
+        return self._indexing_sync.sync_result(entry, repo_path, state, message)
+
+    def _sync_result_impl(self, entry: RepositoryEntry, repo_path: Path, state: str, message: str) -> dict[str, Any]:
         return {
             "display_name": entry.display_name,
             "url": entry.url,
@@ -3171,6 +3194,9 @@ class SourceCodeQAService:
         }
 
     def sync_job_status(self, key: str) -> dict[str, Any]:
+        return self._indexing_sync.sync_job_status(key)
+
+    def _sync_job_status_impl(self, key: str) -> dict[str, Any]:
         try:
             try:
                 payload = json.loads(self.sync_jobs_path.read_text(encoding="utf-8")) if self.sync_jobs_path.exists() else {}
@@ -3181,6 +3207,9 @@ class SourceCodeQAService:
         return payload.get(key) if isinstance(payload.get(key), dict) else {"status": "idle", "key": key}
 
     def _start_sync_job(self, key: str, entries: list[RepositoryEntry]) -> dict[str, Any]:
+        return self._indexing_sync.start_sync_job(key, entries)
+
+    def _start_sync_job_impl(self, key: str, entries: list[RepositoryEntry]) -> dict[str, Any]:
         job = {
             "job_id": hashlib.sha1(f"{key}:{time.time()}".encode("utf-8")).hexdigest()[:12],
             "key": key,
@@ -3194,6 +3223,9 @@ class SourceCodeQAService:
         return job
 
     def _finish_sync_job(self, key: str, job_id: str, *, status: str, results: list[dict[str, Any]]) -> None:
+        self._indexing_sync.finish_sync_job(key, job_id, status=status, results=results)
+
+    def _finish_sync_job_impl(self, key: str, job_id: str, *, status: str, results: list[dict[str, Any]]) -> None:
         job = self.sync_job_status(key)
         if job.get("job_id") != job_id:
             return
@@ -3201,6 +3233,9 @@ class SourceCodeQAService:
         self._write_sync_job(key, job)
 
     def _write_sync_job(self, key: str, job: dict[str, Any]) -> None:
+        self._indexing_sync.write_sync_job(key, job)
+
+    def _write_sync_job_impl(self, key: str, job: dict[str, Any]) -> None:
         lock_path = self.sync_jobs_path.with_suffix(".lock")
         acquired = False
         started_at = time.monotonic()

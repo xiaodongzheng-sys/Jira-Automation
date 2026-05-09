@@ -632,6 +632,12 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "create_sync_bpmis_projects_job": "bpmis_jira_tool.web_bpmis_routes",
                 "meeting_recorder_page": "bpmis_jira_tool.web_meeting_recorder_routes",
                 "meeting_translation_start_api": "bpmis_jira_tool.web_meeting_recorder_routes",
+                "prd_self_assessment_page": "bpmis_jira_tool.web_prd_self_assessment_routes",
+                "prd_self_assessment_review_api": "bpmis_jira_tool.web_prd_self_assessment_routes",
+                "gmail_seatalk_demo_dashboard_api": "bpmis_jira_tool.web_gmail_seatalk_routes",
+                "gmail_seatalk_demo_seatalk_insights_api": "bpmis_jira_tool.web_gmail_seatalk_routes",
+                "productization_upgrade_summary_versions": "bpmis_jira_tool.web_productization_routes",
+                "productization_upgrade_summary_llm_descriptions": "bpmis_jira_tool.web_productization_routes",
                 "team_dashboard_page": "bpmis_jira_tool.web_team_dashboard_routes",
                 "team_dashboard_tasks": "bpmis_jira_tool.web_team_dashboard_routes",
                 "team_dashboard_monthly_report_draft": "bpmis_jira_tool.web_team_dashboard_routes",
@@ -726,6 +732,7 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertIsNone(source_soup.select_one("[data-source-view-tab='admin']"))
         self.assertIsNone(source_soup.select_one("[data-source-view-tab='effort']"))
         self.assertIsNotNone(source_soup.find("link", href=lambda value: value and "source_code_qa.css" in value))
+        self.assertIsNotNone(source_soup.find("script", src=lambda value: value and "source_code_qa_api.js" in value))
         self.assertIsNotNone(source_soup.find("script", src=lambda value: value and "source_code_qa.js" in value))
 
         prd_soup = BeautifulSoup(prd_response.get_data(as_text=True), "html.parser")

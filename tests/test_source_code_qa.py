@@ -201,13 +201,17 @@ class SourceCodeQARouteTests(unittest.TestCase):
         template = Path("templates/source_code_qa.html").read_text(encoding="utf-8")
         global_stylesheet = Path("static/style.css").read_text(encoding="utf-8")
         page_stylesheet = Path("static/source_code_qa.css").read_text(encoding="utf-8")
+        api_script = Path("static/source_code_qa_api.js").read_text(encoding="utf-8")
 
         self.assertIn("source_code_qa.css", template)
+        self.assertIn("source_code_qa_api.js", template)
         self.assertIn(".source-qa-chat-shell", page_stylesheet)
         self.assertIn(".source-qa-session-messages", page_stylesheet)
-        self.assertIn(".source-qa-status", global_stylesheet)
+        self.assertIn(".source-qa-status", page_stylesheet)
+        self.assertIn("window.SourceCodeQAApi", api_script)
         self.assertNotIn(".source-qa-chat-shell", global_stylesheet)
         self.assertNotIn(".source-qa-session-messages", global_stylesheet)
+        self.assertNotIn(".source-qa-status", global_stylesheet)
 
     def test_frontend_caches_effort_assessment_draft_and_result(self):
         script = Path("static/source_code_qa.js").read_text(encoding="utf-8")
@@ -2538,6 +2542,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
     def test_service_uses_internal_responsibility_components(self):
         from bpmis_jira_tool.source_code_qa_components import (
             SourceCodeQAAnswerGenerationComponent,
+            SourceCodeQAIndexingSyncComponent,
             SourceCodeQAQualityJudgeComponent,
             SourceCodeQARetrievalComponent,
         )
@@ -2545,12 +2550,17 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIsInstance(self.service._retrieval, SourceCodeQARetrievalComponent)
         self.assertIsInstance(self.service._answer_generation, SourceCodeQAAnswerGenerationComponent)
         self.assertIsInstance(self.service._quality_judge, SourceCodeQAQualityJudgeComponent)
+        self.assertIsInstance(self.service._indexing_sync, SourceCodeQAIndexingSyncComponent)
         self.assertIs(self.service._retrieval._service, self.service)
         self.assertIs(self.service._answer_generation._service, self.service)
         self.assertIs(self.service._quality_judge._service, self.service)
+        self.assertIs(self.service._indexing_sync._service, self.service)
         self.assertTrue(callable(self.service._rank_and_expand_query_matches))
         self.assertTrue(callable(self.service._build_llm_answer))
         self.assertTrue(callable(self.service._run_answer_judge))
+        self.assertTrue(callable(self.service.sync))
+        self.assertTrue(callable(self.service.ensure_synced_today))
+        self.assertTrue(callable(self.service.index_health_payload))
 
     def test_with_codex_timeout_seconds_keeps_original_service_unchanged(self):
         tuned = self.service.with_codex_timeout_seconds(600)

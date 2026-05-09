@@ -232,7 +232,10 @@ from bpmis_jira_tool.user_config import (
     WebConfigStore,
 )
 from bpmis_jira_tool.web_bpmis_routes import build_bpmis_handlers, register_bpmis_routes
+from bpmis_jira_tool.web_gmail_seatalk_routes import build_gmail_seatalk_handlers, register_gmail_seatalk_routes
 from bpmis_jira_tool.web_meeting_recorder_routes import build_meeting_recorder_handlers, register_meeting_recorder_routes
+from bpmis_jira_tool.web_prd_self_assessment_routes import build_prd_self_assessment_handlers, register_prd_self_assessment_routes
+from bpmis_jira_tool.web_productization_routes import build_productization_handlers, register_productization_routes
 from bpmis_jira_tool.web_source_code_qa_routes import register_source_code_qa_routes
 from bpmis_jira_tool.web_team_dashboard_routes import build_team_dashboard_handlers, register_team_dashboard_routes
 from bpmis_jira_tool.web_work_memory_routes import register_work_memory_routes
@@ -915,21 +918,6 @@ def create_app() -> Flask:
             google_authorized=True,
         )
 
-    @app.get("/prd-self-assessment")
-    @app.get("/prd-self-assessment/")
-    def prd_self_assessment_page():
-        access_gate = _require_prd_self_assessment_access(settings)
-        if access_gate is not None:
-            return access_gate
-        return render_template(
-            "prd_self_assessment.html",
-            page_title="PRD Self-Assessment",
-            user_identity=_get_user_identity(settings),
-            review_url=url_for("prd_self_assessment_review_api"),
-            summary_url=url_for("prd_self_assessment_summary_api"),
-            asset_revision=_current_release_revision(),
-        )
-
     @app.get("/healthz")
     def healthz():
         return jsonify({"status": "ok", "revision": _current_release_revision()}), HTTPStatus.OK
@@ -939,6 +927,22 @@ def create_app() -> Flask:
         return render_template("access_denied.html", page_title="Access Restricted"), HTTPStatus.FORBIDDEN
 
     register_source_code_qa_routes(app, settings, globals())
+    register_prd_self_assessment_routes(
+        app,
+        build_prd_self_assessment_handlers(
+            SimpleNamespace(
+                settings=settings,
+                _require_prd_self_assessment_access=_require_prd_self_assessment_access,
+                _get_user_identity=_get_user_identity,
+                _current_release_revision=_current_release_revision,
+                _run_prd_self_assessment_action=_run_prd_self_assessment_action,
+                _local_agent_source_code_qa_enabled=_local_agent_source_code_qa_enabled,
+                _build_local_agent_client=_build_local_agent_client,
+                _get_prd_latest_result=_get_prd_latest_result,
+                web_globals=globals(),
+            )
+        ),
+    )
 
     register_work_memory_routes(
         app,
@@ -1006,561 +1010,32 @@ def create_app() -> Flask:
             flash(str(error), "error")
         return redirect(url_for("index"))
 
-    @app.get("/gmail-sea-talk-demo")
-    def gmail_seatalk_demo():
-        access_gate = _require_gmail_seatalk_demo_access(settings)
-        if access_gate is not None:
-            return access_gate
-        return redirect(url_for("reports_page", tab="seatalk-name-mapping"))
-
-    @app.get("/api/gmail-sea-talk-demo/dashboard")
-    def gmail_seatalk_demo_dashboard_api():
-        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        if not _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
-            return jsonify(
-                {
-                    "status": "error",
-                    "message": "Gmail access is not available for this Google session yet. Please sign in with Google again to grant Gmail read access.",
-                }
-            ), HTTPStatus.BAD_REQUEST
-        try:
-            dashboard = _build_gmail_dashboard_service().build_overview()
-            return jsonify({"status": "ok", **dashboard})
-        except ToolError as error:
-            error_details = _classify_portal_error(error)
-            _log_portal_event(
-                "gmail_seatalk_dashboard_tool_error",
-                level=logging.WARNING,
-                **_build_request_log_context(
-                    settings,
-                    user_identity=_get_user_identity(settings),
-                    extra=error_details,
-                ),
+    register_gmail_seatalk_routes(
+        app,
+        build_gmail_seatalk_handlers(
+            SimpleNamespace(
+                web_globals=globals(),
+                settings=settings,
+                GMAIL_READONLY_SCOPE=GMAIL_READONLY_SCOPE,
+                _require_gmail_seatalk_demo_access=_require_gmail_seatalk_demo_access,
+                _google_credentials_have_scopes=_google_credentials_have_scopes,
+                _build_gmail_dashboard_service=_build_gmail_dashboard_service,
+                _build_seatalk_dashboard_service=_build_seatalk_dashboard_service,
+                _classify_portal_error=_classify_portal_error,
+                _log_portal_event=_log_portal_event,
+                _build_request_log_context=_build_request_log_context,
+                _get_user_identity=_get_user_identity,
+                _safe_email_identity=_safe_email_identity,
+                _try_acquire_gmail_export_lock=_try_acquire_gmail_export_lock,
+                _release_gmail_export_lock=_release_gmail_export_lock,
+                _current_google_email=_current_google_email,
+                _get_seatalk_todo_store=_get_seatalk_todo_store,
+                _get_seatalk_name_mapping_store=_get_seatalk_name_mapping_store,
+                _callable_accepts_keyword=_callable_accepts_keyword,
+                _dedupe_seatalk_name_mapping_candidates=_dedupe_seatalk_name_mapping_candidates,
             )
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-        except Exception:
-            _log_portal_event(
-                "gmail_seatalk_dashboard_unexpected_error",
-                level=logging.ERROR,
-                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
-            )
-            current_app.logger.exception("Gmail dashboard load failed.")
-            return jsonify({"status": "error", "message": "Gmail data could not be loaded right now. Please try again shortly."}), HTTPStatus.INTERNAL_SERVER_ERROR
-
-    @app.get("/api/gmail-sea-talk-demo/network")
-    def gmail_seatalk_demo_network_api():
-        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        if not _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
-            return jsonify(
-                {
-                    "status": "error",
-                    "message": "Gmail access is not available for this Google session yet. Please sign in with Google again to grant Gmail read access.",
-                }
-            ), HTTPStatus.BAD_REQUEST
-        try:
-            network = _build_gmail_dashboard_service().build_network()
-            return jsonify({"status": "ok", **network})
-        except ToolError as error:
-            error_details = _classify_portal_error(error)
-            _log_portal_event(
-                "gmail_seatalk_network_tool_error",
-                level=logging.WARNING,
-                **_build_request_log_context(
-                    settings,
-                    user_identity=_get_user_identity(settings),
-                    extra=error_details,
-                ),
-            )
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-        except Exception:
-            _log_portal_event(
-                "gmail_seatalk_network_unexpected_error",
-                level=logging.ERROR,
-                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
-            )
-            current_app.logger.exception("Gmail network load failed.")
-            return jsonify({"status": "error", "message": "Gmail network rankings could not be loaded right now. Please try again shortly."}), HTTPStatus.INTERNAL_SERVER_ERROR
-
-    @app.get("/api/gmail-sea-talk-demo/gmail/export-manifest")
-    def gmail_seatalk_demo_gmail_export_manifest():
-        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        if not _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
-            return jsonify(
-                {
-                    "status": "error",
-                    "message": "Gmail access is not available for this Google session yet. Please sign in with Google again to grant Gmail read access.",
-                }
-            ), HTTPStatus.BAD_REQUEST
-        try:
-            manifest = _build_gmail_dashboard_service().build_export_manifest()
-            return jsonify({"status": "ok", **manifest})
-        except ToolError as error:
-            error_details = _classify_portal_error(error)
-            _log_portal_event(
-                "gmail_seatalk_gmail_export_manifest_tool_error",
-                level=logging.WARNING,
-                **_build_request_log_context(
-                    settings,
-                    user_identity=_get_user_identity(settings),
-                    extra=error_details,
-                ),
-            )
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-        except Exception:
-            _log_portal_event(
-                "gmail_seatalk_gmail_export_manifest_unexpected_error",
-                level=logging.ERROR,
-                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
-            )
-            current_app.logger.exception("Gmail export manifest failed.")
-            return (
-                jsonify({"status": "error", "message": "Gmail export batches could not be prepared right now. Please try again shortly."}),
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-
-    @app.get("/api/gmail-sea-talk-demo/gmail/export")
-    def gmail_seatalk_demo_gmail_export():
-        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        if not _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
-            return jsonify(
-                {
-                    "status": "error",
-                    "message": "Gmail access is not available for this Google session yet. Please sign in with Google again to grant Gmail read access.",
-                }
-            ), HTTPStatus.BAD_REQUEST
-        try:
-            batch = max(int(request.args.get("batch", "1")), 1)
-        except ValueError:
-            return jsonify({"status": "error", "message": "Invalid Gmail export batch. Please refresh and try again."}), HTTPStatus.BAD_REQUEST
-        user_email = _safe_email_identity(_get_user_identity(settings))
-        service = _build_gmail_dashboard_service()
-        if not _try_acquire_gmail_export_lock(user_email):
-            cached_payload = service.get_cached_export_history_text(batch=batch)
-            if cached_payload is not None:
-                content, filename = cached_payload
-                return send_file(
-                    io.BytesIO(content.encode("utf-8")),
-                    mimetype="text/plain; charset=utf-8",
-                    as_attachment=True,
-                    download_name=filename,
-                )
-            return (
-                jsonify({"status": "error", "message": "A Gmail export is already running for this account. Please wait a few seconds and try again."}),
-                HTTPStatus.TOO_MANY_REQUESTS,
-            )
-        try:
-            content, filename = service.export_history_text(batch=batch)
-            return send_file(
-                io.BytesIO(content.encode("utf-8")),
-                mimetype="text/plain; charset=utf-8",
-                as_attachment=True,
-                download_name=filename,
-            )
-        except ToolError as error:
-            error_details = _classify_portal_error(error)
-            _log_portal_event(
-                "gmail_seatalk_gmail_export_tool_error",
-                level=logging.WARNING,
-                **_build_request_log_context(
-                    settings,
-                    user_identity=_get_user_identity(settings),
-                    extra=error_details,
-                ),
-            )
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-        except Exception:
-            _log_portal_event(
-                "gmail_seatalk_gmail_export_unexpected_error",
-                level=logging.ERROR,
-                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
-            )
-            current_app.logger.exception("Gmail history export failed.")
-            return (
-                jsonify({"status": "error", "message": "Gmail mail history could not be exported right now. Please try again shortly."}),
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-        finally:
-            _release_gmail_export_lock(user_email)
-
-    @app.post("/api/gmail-sea-talk-demo/gmail/export-prewarm")
-    def gmail_seatalk_demo_gmail_export_prewarm():
-        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        if not _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
-            return jsonify(
-                {
-                    "status": "error",
-                    "message": "Gmail access is not available for this Google session yet. Please sign in with Google again to grant Gmail read access.",
-                }
-            ), HTTPStatus.BAD_REQUEST
-        try:
-            batch = max(int(request.args.get("batch", "1")), 1)
-        except ValueError:
-            return jsonify({"status": "error", "message": "Invalid Gmail export batch. Please refresh and try again."}), HTTPStatus.BAD_REQUEST
-        user_email = _safe_email_identity(_get_user_identity(settings))
-        service = _build_gmail_dashboard_service()
-        cached_payload = service.get_cached_export_history_text(batch=batch)
-        if cached_payload is not None:
-            return jsonify({"status": "ok", "cached": True, "batch": batch}), HTTPStatus.OK
-        if not _try_acquire_gmail_export_lock(user_email):
-            return jsonify({"status": "ok", "cached": False, "in_progress": True, "batch": batch}), HTTPStatus.ACCEPTED
-        try:
-            service.prewarm_export_history_text(batch=batch)
-            return jsonify({"status": "ok", "cached": True, "batch": batch}), HTTPStatus.OK
-        except ToolError as error:
-            error_details = _classify_portal_error(error)
-            _log_portal_event(
-                "gmail_seatalk_gmail_export_prewarm_tool_error",
-                level=logging.WARNING,
-                **_build_request_log_context(
-                    settings,
-                    user_identity=_get_user_identity(settings),
-                    extra=error_details,
-                ),
-            )
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-        except Exception:
-            _log_portal_event(
-                "gmail_seatalk_gmail_export_prewarm_unexpected_error",
-                level=logging.ERROR,
-                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
-            )
-            current_app.logger.exception("Gmail export prewarm failed.")
-            return (
-                jsonify({"status": "error", "message": "Gmail export prewarm could not be completed right now. Please try again shortly."}),
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-        finally:
-            _release_gmail_export_lock(user_email)
-
-    @app.get("/api/gmail-sea-talk-demo/seatalk")
-    def gmail_seatalk_demo_seatalk_api():
-        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        try:
-            payload = _build_seatalk_dashboard_service(settings).build_overview()
-            return jsonify({"status": "ok", **payload})
-        except ToolError as error:
-            error_details = _classify_portal_error(error)
-            _log_portal_event(
-                "gmail_seatalk_seatalk_tool_error",
-                level=logging.WARNING,
-                **_build_request_log_context(
-                    settings,
-                    user_identity=_get_user_identity(settings),
-                    extra=error_details,
-                ),
-            )
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-        except Exception:
-            _log_portal_event(
-                "gmail_seatalk_seatalk_unexpected_error",
-                level=logging.ERROR,
-                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
-            )
-            current_app.logger.exception("SeaTalk dashboard load failed.")
-            return (
-                jsonify({"status": "error", "message": "SeaTalk data could not be loaded right now. Please try again shortly."}),
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-
-    @app.get("/api/gmail-sea-talk-demo/seatalk/insights")
-    def gmail_seatalk_demo_seatalk_insights_api():
-        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        try:
-            owner_email = _current_google_email() or settings.gmail_seatalk_demo_owner_email
-            todo_store = _get_seatalk_todo_store(settings)
-            service = _build_seatalk_dashboard_service(settings)
-            todo_since = todo_store.processed_until(owner_email=owner_email)
-            if _callable_accepts_keyword(service.build_insights, "todo_since"):
-                payload = service.build_insights(todo_since=todo_since)
-            else:
-                payload = service.build_insights()
-            completed_ids = todo_store.completed_ids(owner_email=owner_email)
-            payload = dict(payload)
-            open_todos = todo_store.merge_open_todos(
-                owner_email=owner_email,
-                todos=[todo for todo in (payload.get("my_todos") or []) if isinstance(todo, dict)],
-            )
-            todo_store.mark_processed_until(
-                owner_email=owner_email,
-                processed_until=str(payload.get("todo_processed_until") or ""),
-            )
-            payload["my_todos"] = [
-                todo for todo in SeaTalkDashboardService._sort_todos(open_todos)
-                if SeaTalkTodoStore.todo_id(todo) not in completed_ids
-            ]
-            payload["team_todos"] = []
-            return jsonify({"status": "ok", **payload})
-        except ToolError as error:
-            error_details = _classify_portal_error(error)
-            _log_portal_event(
-                "gmail_seatalk_seatalk_insights_tool_error",
-                level=logging.WARNING,
-                **_build_request_log_context(
-                    settings,
-                    user_identity=_get_user_identity(settings),
-                    extra=error_details,
-                ),
-            )
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-        except Exception:
-            _log_portal_event(
-                "gmail_seatalk_seatalk_insights_unexpected_error",
-                level=logging.ERROR,
-                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
-            )
-            current_app.logger.exception("SeaTalk insights load failed.")
-            return (
-                jsonify({"status": "error", "message": "SeaTalk insights could not be loaded right now. Please try again shortly."}),
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-
-    @app.get("/api/gmail-sea-talk-demo/seatalk/project-updates")
-    def gmail_seatalk_demo_seatalk_project_updates_api():
-        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        try:
-            service = _build_seatalk_dashboard_service(settings)
-            if hasattr(service, "build_project_updates"):
-                payload = service.build_project_updates()
-            else:
-                payload = service.build_insights()
-            payload = dict(payload)
-            payload["my_todos"] = []
-            payload["team_todos"] = []
-            return jsonify({"status": "ok", **payload})
-        except ToolError as error:
-            error_details = _classify_portal_error(error)
-            _log_portal_event(
-                "gmail_seatalk_seatalk_project_updates_tool_error",
-                level=logging.WARNING,
-                **_build_request_log_context(
-                    settings,
-                    user_identity=_get_user_identity(settings),
-                    extra=error_details,
-                ),
-            )
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-        except Exception:
-            _log_portal_event(
-                "gmail_seatalk_seatalk_project_updates_unexpected_error",
-                level=logging.ERROR,
-                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
-            )
-            current_app.logger.exception("SeaTalk project updates load failed.")
-            return (
-                jsonify({"status": "error", "message": "SeaTalk project updates could not be loaded right now. Please try again shortly."}),
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-
-    @app.get("/api/gmail-sea-talk-demo/seatalk/todos/open")
-    def gmail_seatalk_demo_seatalk_open_todos_api():
-        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        try:
-            owner_email = _current_google_email() or settings.gmail_seatalk_demo_owner_email
-            todo_store = _get_seatalk_todo_store(settings)
-            completed_ids = todo_store.completed_ids(owner_email=owner_email)
-            open_todos = [
-                todo for todo in SeaTalkDashboardService._sort_todos(todo_store.open_todos(owner_email=owner_email))
-                if SeaTalkTodoStore.todo_id(todo) not in completed_ids
-            ]
-            return jsonify({"status": "ok", "my_todos": open_todos, "team_todos": [], "project_updates": []})
-        except ToolError as error:
-            error_details = _classify_portal_error(error)
-            _log_portal_event(
-                "gmail_seatalk_open_todos_tool_error",
-                level=logging.WARNING,
-                **_build_request_log_context(
-                    settings,
-                    user_identity=_get_user_identity(settings),
-                    extra=error_details,
-                ),
-            )
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-        except Exception:
-            _log_portal_event(
-                "gmail_seatalk_open_todos_unexpected_error",
-                level=logging.ERROR,
-                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
-            )
-            current_app.logger.exception("SeaTalk open to-dos load failed.")
-            return (
-                jsonify({"status": "error", "message": "Saved SeaTalk to-dos could not be loaded right now. Please try again shortly."}),
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-
-    @app.get("/api/gmail-sea-talk-demo/seatalk/todos")
-    def gmail_seatalk_demo_seatalk_todos_api():
-        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        try:
-            owner_email = _current_google_email() or settings.gmail_seatalk_demo_owner_email
-            todo_store = _get_seatalk_todo_store(settings)
-            service = _build_seatalk_dashboard_service(settings)
-            todo_since = todo_store.processed_until(owner_email=owner_email)
-            if hasattr(service, "build_todos") and _callable_accepts_keyword(service.build_todos, "todo_since"):
-                payload = service.build_todos(todo_since=todo_since)
-            elif _callable_accepts_keyword(service.build_insights, "todo_since"):
-                payload = service.build_insights(todo_since=todo_since)
-            else:
-                payload = service.build_insights()
-            completed_ids = todo_store.completed_ids(owner_email=owner_email)
-            payload = dict(payload)
-            open_todos = todo_store.merge_open_todos(
-                owner_email=owner_email,
-                todos=[todo for todo in (payload.get("my_todos") or []) if isinstance(todo, dict)],
-            )
-            todo_store.mark_processed_until(
-                owner_email=owner_email,
-                processed_until=str(payload.get("todo_processed_until") or ""),
-            )
-            payload["project_updates"] = []
-            payload["my_todos"] = [
-                todo for todo in SeaTalkDashboardService._sort_todos(open_todos)
-                if SeaTalkTodoStore.todo_id(todo) not in completed_ids
-            ]
-            payload["team_todos"] = []
-            return jsonify({"status": "ok", **payload})
-        except ToolError as error:
-            error_details = _classify_portal_error(error)
-            _log_portal_event(
-                "gmail_seatalk_seatalk_todos_tool_error",
-                level=logging.WARNING,
-                **_build_request_log_context(
-                    settings,
-                    user_identity=_get_user_identity(settings),
-                    extra=error_details,
-                ),
-            )
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-        except Exception:
-            _log_portal_event(
-                "gmail_seatalk_seatalk_todos_unexpected_error",
-                level=logging.ERROR,
-                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
-            )
-            current_app.logger.exception("SeaTalk to-do load failed.")
-            return (
-                jsonify({"status": "error", "message": "SeaTalk to-dos could not be loaded right now. Please try again shortly."}),
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-
-    @app.post("/api/gmail-sea-talk-demo/seatalk/todos/complete")
-    def gmail_seatalk_demo_seatalk_todo_complete():
-        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        payload = request.get_json(silent=True) or {}
-        todo = payload.get("todo") if isinstance(payload.get("todo"), dict) else payload
-        try:
-            todo_store = _get_seatalk_todo_store(settings)
-            result = todo_store.mark_completed(
-                owner_email=_current_google_email() or settings.gmail_seatalk_demo_owner_email,
-                todo=todo,
-            )
-            return jsonify(result)
-        except ToolError as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-
-    @app.route("/api/gmail-sea-talk-demo/seatalk/name-mappings", methods=["GET", "POST"])
-    def gmail_seatalk_demo_seatalk_name_mappings():
-        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        mapping_store = _get_seatalk_name_mapping_store(settings)
-        if request.method == "POST":
-            payload = request.get_json(silent=True) or {}
-            mappings = mapping_store.merge_mappings(payload.get("mappings") if isinstance(payload, dict) else {})
-            SeaTalkDashboardService.clear_cache()
-            return jsonify({"status": "ok", "mappings": mappings})
-        try:
-            force_refresh = str(request.args.get("refresh") or "").strip().lower() in {"1", "true", "yes", "on"}
-            candidates = _build_seatalk_dashboard_service(settings).build_name_mappings(force_refresh=force_refresh)
-            mappings = mapping_store.mappings()
-            mapped_keys = {alias for key in mappings for alias in SeaTalkNameMappingStore.equivalent_keys(key)}
-            candidates = dict(candidates)
-            candidates["unknown_ids"] = _dedupe_seatalk_name_mapping_candidates([
-                row for row in (candidates.get("unknown_ids") or [])
-                if isinstance(row, dict) and not (SeaTalkNameMappingStore.equivalent_keys(row.get("id")) & mapped_keys)
-            ])
-            return jsonify({"status": "ok", "mappings": mappings, **candidates})
-        except ToolError as error:
-            error_details = _classify_portal_error(error)
-            _log_portal_event(
-                "gmail_seatalk_seatalk_name_mappings_tool_error",
-                level=logging.WARNING,
-                **_build_request_log_context(
-                    settings,
-                    user_identity=_get_user_identity(settings),
-                    extra=error_details,
-                ),
-            )
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-        except Exception:
-            _log_portal_event(
-                "gmail_seatalk_seatalk_name_mappings_unexpected_error",
-                level=logging.ERROR,
-                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
-            )
-            current_app.logger.exception("SeaTalk name mapping load failed.")
-            return (
-                jsonify({"status": "error", "message": "SeaTalk name mappings could not be loaded right now. Please try again shortly."}),
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-
-    @app.get("/api/gmail-sea-talk-demo/seatalk/export")
-    def gmail_seatalk_demo_seatalk_export():
-        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        try:
-            content, filename = _build_seatalk_dashboard_service(settings).export_history_text()
-            return send_file(
-                io.BytesIO(content.encode("utf-8")),
-                mimetype="text/plain; charset=utf-8",
-                as_attachment=True,
-                download_name=filename,
-            )
-        except ToolError as error:
-            error_details = _classify_portal_error(error)
-            _log_portal_event(
-                "gmail_seatalk_seatalk_export_tool_error",
-                level=logging.WARNING,
-                **_build_request_log_context(
-                    settings,
-                    user_identity=_get_user_identity(settings),
-                    extra=error_details,
-                ),
-            )
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-        except Exception:
-            _log_portal_event(
-                "gmail_seatalk_seatalk_export_unexpected_error",
-                level=logging.ERROR,
-                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
-            )
-            current_app.logger.exception("SeaTalk history export failed.")
-            return (
-                jsonify({"status": "error", "message": "SeaTalk chat history could not be exported right now. Please try again shortly."}),
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
+        ),
+    )
 
     @app.post("/auth/google/logout")
     def google_logout():
@@ -1568,32 +1043,6 @@ def create_app() -> Flask:
         session.pop("google_profile", None)
         flash("Google session cleared.", "success")
         return redirect(url_for("index"))
-
-    @app.post("/api/prd-self-assessment/review")
-    def prd_self_assessment_review_api():
-        return _run_prd_self_assessment_action(settings, action="review")
-
-    @app.post("/api/prd-self-assessment/summary")
-    def prd_self_assessment_summary_api():
-        return _run_prd_self_assessment_action(settings, action="summary")
-
-    @app.get("/api/prd-self-assessment/latest")
-    def prd_self_assessment_latest_api():
-        access_gate = _require_prd_self_assessment_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        user_identity = _get_user_identity(settings)
-        owner_key = str(user_identity.get("config_key") or "")
-        try:
-            if _local_agent_source_code_qa_enabled(settings):
-                return jsonify(_build_local_agent_client(settings).prd_self_assessment_latest(owner_key=owner_key))
-            latest = _get_prd_latest_result(owner_key=owner_key, tool_key="prd_self_assessment")
-            return jsonify({"status": "ok", "latest": latest})
-        except ToolError as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-        except Exception as error:  # noqa: BLE001
-            current_app.logger.exception("PRD Self-Assessment latest load failed.")
-            return jsonify({"status": "error", "message": str(error) or "Could not load latest PRD Self-Assessment result."}), HTTPStatus.BAD_REQUEST
 
     @app.route("/api/local-agent/<path:agent_path>", methods=["GET", "POST", "PATCH", "DELETE"])
     def local_agent_public_proxy(agent_path: str):
@@ -1607,192 +1056,25 @@ def create_app() -> Flask:
     def uat_local_agent_public_proxy(agent_path: str):
         return _proxy_local_agent_request(agent_path, base_url=_uat_local_agent_loopback_base_url(), use_api_prefix=True)
 
-    @app.get("/api/productization-upgrade-summary/versions")
-    def productization_upgrade_summary_versions():
-        login_gate = _require_google_login(settings, api=True)
-        if login_gate is not None:
-            return login_gate
-
-        started_at = time.monotonic()
-        query = str(request.args.get("q") or "").strip()
-        if not query:
-            return jsonify({"status": "error", "message": "Version keyword is required."}), HTTPStatus.BAD_REQUEST
-
-        try:
-            bpmis_client = _build_bpmis_client_for_current_user(settings)
-            versions = bpmis_client.search_versions(query)
-            return jsonify(
-                {
-                    "status": "ok",
-                    "items": [_serialize_productization_version_candidate(item) for item in versions],
-                    "elapsed_seconds": round(time.monotonic() - started_at, 3),
-                }
-            )
-        except ToolError as error:
-            error_details = _classify_portal_error(error)
-            _log_portal_event(
-                "productization_version_search_tool_error",
-                level=logging.WARNING,
-                **_build_request_log_context(settings, extra={**error_details, "query": query}),
-            )
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-        except Exception:
-            _log_portal_event(
-                "productization_version_search_unexpected_error",
-                level=logging.ERROR,
-                **_build_request_log_context(settings, extra={"query": query}),
-            )
-            current_app.logger.exception("Productization version search failed.")
-            return (
-                jsonify(
-                    {
-                        "status": "error",
-                        "message": "Unable to search versions right now. Please try again shortly.",
-                    }
-                ),
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-
-    @app.get("/api/productization-upgrade-summary/issues")
-    def productization_upgrade_summary_issues():
-        login_gate = _require_google_login(settings, api=True)
-        if login_gate is not None:
-            return login_gate
-
-        started_at = time.monotonic()
-        version_id = str(request.args.get("version_id") or "").strip()
-        show_all_before_team_filtering = str(request.args.get("show_all_before_team_filtering") or "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        if not version_id:
-            return jsonify({"status": "error", "message": "version_id is required."}), HTTPStatus.BAD_REQUEST
-
-        try:
-            bpmis_client = _build_bpmis_client_for_current_user(settings)
-            rows = bpmis_client.list_issues_for_version(version_id)
-            config_data = _load_current_user_config(settings)
-            raw_count = len(rows)
-            rows, filter_metadata = _filter_productization_issue_rows_for_pm_team(
-                rows,
-                config_data,
-                show_all_before_team_filtering=show_all_before_team_filtering,
-            )
-            normalized_items = [_normalize_productization_issue_row(item) for item in rows]
-            return jsonify(
-                {
-                    "status": "ok",
-                    "items": normalized_items,
-                    "raw_count": raw_count,
-                    "filtered_count": len(rows),
-                    "llm_description_generated": False,
-                    "llm_generated_count": 0,
-                    "codex_detailed_feature": False,
-                    "codex_generated_count": 0,
-                    "elapsed_seconds": round(time.monotonic() - started_at, 3),
-                    **filter_metadata,
-                }
-            )
-        except ToolError as error:
-            error_details = _classify_portal_error(error)
-            _log_portal_event(
-                "productization_issue_lookup_tool_error",
-                level=logging.WARNING,
-                **_build_request_log_context(settings, extra={**error_details, "version_id": version_id}),
-            )
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-        except Exception:
-            _log_portal_event(
-                "productization_issue_lookup_unexpected_error",
-                level=logging.ERROR,
-                **_build_request_log_context(settings, extra={"version_id": version_id}),
-            )
-            current_app.logger.exception("Productization issue lookup failed.")
-            return (
-                jsonify(
-                    {
-                        "status": "error",
-                        "message": "Unable to load upgrade tickets right now. Please try again shortly.",
-                    }
-                ),
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-
-    @app.get("/api/productization-upgrade-summary/llm-descriptions")
-    def productization_upgrade_summary_llm_descriptions():
-        login_gate = _require_google_login(settings, api=True)
-        if login_gate is not None:
-            return login_gate
-
-        started_at = time.monotonic()
-        version_id = str(request.args.get("version_id") or "").strip()
-        show_all_before_team_filtering = str(request.args.get("show_all_before_team_filtering") or "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        if not version_id:
-            return jsonify({"status": "error", "message": "version_id is required."}), HTTPStatus.BAD_REQUEST
-
-        try:
-            bpmis_client = _build_bpmis_client_for_current_user(settings)
-            rows = bpmis_client.list_issues_for_version(version_id)
-            config_data = _load_current_user_config(settings)
-            raw_count = len(rows)
-            rows, filter_metadata = _filter_productization_issue_rows_for_pm_team(
-                rows,
-                config_data,
-                show_all_before_team_filtering=show_all_before_team_filtering,
-            )
-            normalized_items = [_normalize_productization_issue_row(item) for item in rows]
-            codex_metadata = _apply_codex_productization_detailed_features(
-                normalized_items,
-                rows,
+    register_productization_routes(
+        app,
+        build_productization_handlers(
+            SimpleNamespace(
+                web_globals=globals(),
                 settings=settings,
+                _require_google_login=_require_google_login,
+                _build_bpmis_client_for_current_user=_build_bpmis_client_for_current_user,
+                _serialize_productization_version_candidate=_serialize_productization_version_candidate,
+                _load_current_user_config=_load_current_user_config,
+                _filter_productization_issue_rows_for_pm_team=_filter_productization_issue_rows_for_pm_team,
+                _normalize_productization_issue_row=_normalize_productization_issue_row,
+                _apply_codex_productization_detailed_features=_apply_codex_productization_detailed_features,
+                _classify_portal_error=_classify_portal_error,
+                _log_portal_event=_log_portal_event,
+                _build_request_log_context=_build_request_log_context,
             )
-            return jsonify(
-                {
-                    "status": "ok",
-                    "items": normalized_items,
-                    "raw_count": raw_count,
-                    "filtered_count": len(rows),
-                    "elapsed_seconds": round(time.monotonic() - started_at, 3),
-                    **codex_metadata,
-                    **filter_metadata,
-                }
-            )
-        except ToolError as error:
-            error_details = _classify_portal_error(error)
-            _log_portal_event(
-                "productization_llm_description_tool_error",
-                level=logging.WARNING,
-                **_build_request_log_context(settings, extra=error_details),
-            )
-            return jsonify({"status": "error", "message": str(error), **error_details}), HTTPStatus.BAD_REQUEST
-        except Exception:
-            request_id = getattr(g, "request_id", "")
-            _log_portal_event(
-                "productization_llm_description_unexpected_error",
-                level=logging.ERROR,
-                **_build_request_log_context(settings, extra={"version_id": version_id}),
-            )
-            current_app.logger.exception("Productization LLM Description generation failed.")
-            return (
-                jsonify(
-                    {
-                        "status": "error",
-                        "message": "Productization LLM Description generation failed unexpectedly. Please retry or share the request ID.",
-                        "request_id": request_id,
-                        "error_category": "unexpected_internal",
-                        "error_code": "server_error",
-                        "error_retryable": True,
-                    }
-                ),
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
+        ),
+    )
 
     @app.get("/api/jobs/<job_id>")
     def get_job(job_id: str):

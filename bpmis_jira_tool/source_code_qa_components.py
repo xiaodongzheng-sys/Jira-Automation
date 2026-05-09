@@ -27,6 +27,43 @@ class SourceCodeQARetrievalComponent(_SourceCodeQAComponent):
         return self._service._build_query_answer_context_impl(**kwargs)
 
 
+class SourceCodeQAIndexingSyncComponent(_SourceCodeQAComponent):
+    """Owns repository sync and index-health orchestration."""
+
+    def sync(self, **kwargs: Any) -> dict[str, Any]:
+        return self._service._sync_impl(**kwargs)
+
+    def ensure_synced_today(self, **kwargs: Any) -> dict[str, Any]:
+        return self._service._ensure_synced_today_impl(**kwargs)
+
+    def repo_status(self, key: str) -> list[dict[str, Any]]:
+        return self._service._repo_status_impl(key)
+
+    def index_health_payload(self) -> dict[str, Any]:
+        return self._service._index_health_payload_impl()
+
+    def index_freshness_payload(self, repo_status: list[dict[str, Any]]) -> dict[str, Any]:
+        return self._service._index_freshness_payload_impl(repo_status)
+
+    def sync_entry(self, key: str, entry: Any) -> dict[str, Any]:
+        return self._service._sync_entry_impl(key, entry)
+
+    def sync_result(self, entry: Any, repo_path: Any, state: str, message: str) -> dict[str, Any]:
+        return self._service._sync_result_impl(entry, repo_path, state, message)
+
+    def sync_job_status(self, key: str) -> dict[str, Any]:
+        return self._service._sync_job_status_impl(key)
+
+    def start_sync_job(self, key: str, entries: list[Any]) -> dict[str, Any]:
+        return self._service._start_sync_job_impl(key, entries)
+
+    def finish_sync_job(self, key: str, job_id: str, *, status: str, results: list[dict[str, Any]]) -> None:
+        self._service._finish_sync_job_impl(key, job_id, status=status, results=results)
+
+    def write_sync_job(self, key: str, job: dict[str, Any]) -> None:
+        self._service._write_sync_job_impl(key, job)
+
+
 class SourceCodeQAAnswerGenerationComponent(_SourceCodeQAComponent):
     """Owns LLM/Codex answer construction and payload enrichment."""
 
