@@ -563,6 +563,47 @@
   margin: 0 0 16px;
 }
 
+.team-dashboard-monthly-report-topic-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.team-dashboard-monthly-report-topic-row {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(360px, auto);
+  gap: 12px;
+  align-items: center;
+  min-width: 0;
+}
+
+.team-dashboard-monthly-report-topic-row input[type="text"] {
+  min-height: 42px;
+  min-width: 0;
+}
+
+.team-dashboard-monthly-report-source-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.team-dashboard-monthly-report-source-group label {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  min-height: 32px;
+  padding: 5px 8px;
+  border: 1px solid #dbe5f1;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #334155;
+  font-size: 0.86rem;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
 .team-dashboard-monthly-report-date-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(180px, 240px));
@@ -576,7 +617,6 @@
 }
 
 .team-dashboard-monthly-report-editor textarea,
-.team-dashboard-monthly-report-topic-field textarea,
 .team-dashboard-monthly-report-template-form textarea {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   line-height: 1.5;
@@ -592,13 +632,18 @@
 
 .team-dashboard-monthly-report-preview summary {
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto;
+  grid-template-columns: 16px minmax(0, 1fr) minmax(0, auto);
   align-items: center;
   gap: 10px;
   cursor: pointer;
   color: #14213d;
   font-weight: 800;
   list-style: none;
+}
+
+.team-dashboard-monthly-report-preview summary span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .team-dashboard-monthly-report-preview summary::-webkit-details-marker {
@@ -741,7 +786,8 @@
   }
 
   .team-dashboard-page .team-dashboard-panel {
-    padding: 14px;
+    gap: 10px;
+    padding: 12px;
   }
 
   .team-dashboard-team-head,
@@ -749,6 +795,10 @@
   .team-dashboard-page .productization-section-head {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .team-dashboard-page .productization-section-head .button-row {
+    width: 100%;
   }
 
   .team-dashboard-team-actions {
@@ -767,6 +817,81 @@
     overflow-x: auto;
     overflow-y: hidden;
     -webkit-overflow-scrolling: touch;
+  }
+
+  .team-dashboard-monthly-report-topic-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    padding: 10px;
+    border: 1px solid #e0e7f2;
+    border-radius: 8px;
+    background: #f8fbff;
+  }
+
+  .team-dashboard-monthly-report-source-group {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .team-dashboard-monthly-report-source-group label {
+    justify-content: center;
+    min-height: 44px;
+    padding: 6px;
+    text-align: center;
+    white-space: normal;
+  }
+
+  .team-dashboard-monthly-report-date-grid {
+    gap: 10px;
+    margin: 10px 0 12px;
+  }
+
+  .team-dashboard-monthly-report-date-grid .field-group,
+  .team-dashboard-monthly-report-topic-field,
+  .team-dashboard-monthly-report-editor {
+    padding: 10px;
+    border-radius: 10px;
+  }
+
+  .team-dashboard-monthly-report-editor textarea {
+    min-height: 52vh;
+    max-height: 62vh;
+  }
+
+  .team-dashboard-monthly-report-preview {
+    min-height: 0;
+    padding: 12px;
+    border-radius: 8px;
+  }
+
+  .team-dashboard-monthly-report-preview summary {
+    grid-template-columns: 14px minmax(0, 1fr);
+  }
+
+  .team-dashboard-monthly-report-preview summary span:last-child {
+    grid-column: 2;
+    color: #667085;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .team-dashboard-monthly-report-preview-body {
+    max-height: 58vh;
+  }
+
+  .team-dashboard-monthly-report-template-form .config-card {
+    padding: 12px;
+  }
+}
+
+@media (max-width: 420px) {
+  .team-dashboard-monthly-report-source-group {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .team-dashboard-monthly-report-source-group label:last-child {
+    grid-column: 1 / -1;
   }
 }
 @media (max-width: 980px) {

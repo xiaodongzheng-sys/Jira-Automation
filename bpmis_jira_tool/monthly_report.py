@@ -62,6 +62,14 @@ MONTHLY_REPORT_MAX_REQUIREMENTS_GMAIL_THREADS = 12
 MONTHLY_REPORT_MAX_HIGHLIGHT_GMAIL_THREADS_PER_TOPIC = 8
 MONTHLY_REPORT_HIGHLIGHT_EVIDENCE_MAX_LINES = 24
 MONTHLY_REPORT_EVIDENCE_WORKERS = 2
+MONTHLY_REPORT_HIGHLIGHT_SOURCE_SEATALK = "seatalk"
+MONTHLY_REPORT_HIGHLIGHT_SOURCE_GMAIL = "gmail"
+MONTHLY_REPORT_HIGHLIGHT_SOURCE_TEAM_DASHBOARD = "team_dashboard"
+MONTHLY_REPORT_HIGHLIGHT_SOURCES = (
+    MONTHLY_REPORT_HIGHLIGHT_SOURCE_SEATALK,
+    MONTHLY_REPORT_HIGHLIGHT_SOURCE_GMAIL,
+    MONTHLY_REPORT_HIGHLIGHT_SOURCE_TEAM_DASHBOARD,
+)
 MONTHLY_REPORT_GMAIL_TOPIC_CACHE_VERSION = "v3"
 MONTHLY_REPORT_GMAIL_TOPIC_CACHE_TTL_SECONDS = 6 * 60 * 60
 MONTHLY_REPORT_PRD_SCOPE_CACHE_VERSION = "v1"
@@ -228,6 +236,7 @@ class MonthlyReportService:
         period_end: str | None = None,
         period_end_exclusive: str | None = None,
         highlight_topics: list[str] | str | None = None,
+        highlight_topic_sources: Any | None = None,
         product_scope: list[str] | None = None,
         progress_callback: Any | None = None,
     ) -> dict[str, Any]:
@@ -244,19 +253,46 @@ class MonthlyReportService:
         )
         evidence_period = _monthly_report_evidence_period(report_period)
         effective_template = normalize_monthly_report_template(template)
+        normalized_highlight_sources = normalize_monthly_report_highlight_topic_sources(
+            highlight_topic_sources,
+            normalized_highlight_topics,
+        )
         _emit_monthly_report_progress(progress_callback, "preparing_sources", "Preparing Key Projects, Jira, PRD, and SeaTalk sources.", 0, 0)
         key_projects = self._key_projects(team_payloads)
         highlight_project_matches = match_monthly_report_highlight_topics(normalized_highlight_topics, key_projects)
         highlight_project_ids = {
             str(project_id).strip()
             for match in highlight_project_matches
+            if _monthly_report_topic_uses_source(
+                str(match.get("topic") or ""),
+                normalized_highlight_sources,
+                MONTHLY_REPORT_HIGHLIGHT_SOURCE_TEAM_DASHBOARD,
+            )
             for project_id in (match.get("project_ids") or [])
             if str(project_id).strip()
         }
+        seatalk_highlight_topics = [
+            topic for topic in normalized_highlight_topics
+            if _monthly_report_topic_uses_source(topic, normalized_highlight_sources, MONTHLY_REPORT_HIGHLIGHT_SOURCE_SEATALK)
+        ]
+        gmail_highlight_topics = [
+            topic for topic in normalized_highlight_topics
+            if _monthly_report_topic_uses_source(topic, normalized_highlight_sources, MONTHLY_REPORT_HIGHLIGHT_SOURCE_GMAIL)
+        ]
+        seatalk_project_matches = [
+            match
+            if _monthly_report_topic_uses_source(
+                str(match.get("topic") or ""),
+                normalized_highlight_sources,
+                MONTHLY_REPORT_HIGHLIGHT_SOURCE_TEAM_DASHBOARD,
+            )
+            else {**match, "project_ids": []}
+            for match in highlight_project_matches
+        ]
         highlight_seatalk_aliases = _highlight_seatalk_aliases(
-            normalized_highlight_topics,
+            seatalk_highlight_topics,
             key_projects=key_projects,
-            topic_project_matches=highlight_project_matches,
+            topic_project_matches=seatalk_project_matches,
         )
         step_started = time.monotonic()
         _emit_monthly_report_progress(progress_callback, "collecting_seatalk", "Exporting SeaTalk history for the report period.", 0, 0)
@@ -277,7 +313,7 @@ class MonthlyReportService:
         step_started = time.monotonic()
         highlight_gmail_evidence, highlight_gmail_summary = self._highlight_gmail_history(
             evidence_period,
-            normalized_highlight_topics,
+            gmail_highlight_topics,
             progress_callback=progress_callback,
         )
         _record_monthly_report_timing(timings, "topic_gmail", step_started)
@@ -320,6 +356,7 @@ class MonthlyReportService:
             monthly_requirements_targets=monthly_requirements_targets,
             prd_scope_summaries=prd_scope_summaries,
             report_period=evidence_period,
+            highlight_topic_sources=normalized_highlight_sources,
             fallback_reference_date=self.now.date(),
         )
         highlight_evidence_map = build_monthly_highlight_evidence_map(highlight_deep_evidence)
@@ -444,6 +481,7 @@ class MonthlyReportService:
             "generated_at": self.now.isoformat(),
             "subject": monthly_report_subject(period=report_period),
             "highlight_topics": normalized_highlight_topics,
+            "highlight_topic_sources": normalized_highlight_sources,
             "generation_version": MONTHLY_REPORT_GENERATION_VERSION,
             "model_id": generated["model_id"],
             "trace": generated["trace"],
@@ -456,6 +494,7 @@ class MonthlyReportService:
                 "period_end": report_period.end_date,
                 "period_end_exclusive": report_period.end_exclusive.isoformat(),
                 "highlight_topics": normalized_highlight_topics,
+                "highlight_topic_sources": normalized_highlight_sources,
                 "scheduled_period_start": report_period.scheduled_start_date,
                 "scheduled_period_end": report_period.scheduled_end_date,
                 "effective_period_start": report_period.start_date,
@@ -488,6 +527,7 @@ class MonthlyReportService:
                 "prd_scope_summary_count": len(prd_scope_summaries),
                 "report_intelligence_evidence_count": len(evidence_sidecar),
                 "highlight_topic_count": len(normalized_highlight_topics),
+                "highlight_topic_sources": normalized_highlight_sources,
                 "highlight_project_topic_count": len([item for item in highlight_project_matches if item.get("project_ids")]),
                 "highlight_confidence_counts": confidence_counts,
                 "highlight_low_confidence_count": int(confidence_counts.get("low") or 0),
@@ -1192,25 +1232,92 @@ def normalize_monthly_report_highlight_topics(value: Any) -> list[str]:
     return topics
 
 
+def normalize_monthly_report_highlight_topic_sources(value: Any, highlight_topics: list[str]) -> dict[str, list[str]]:
+    default_sources = list(MONTHLY_REPORT_HIGHLIGHT_SOURCES)
+    normalized: dict[str, list[str]] = {topic: list(default_sources) for topic in highlight_topics}
+    if value in (None, "", []):
+        return normalized
+
+    entries: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        for topic, sources in value.items():
+            entries.append({"topic": topic, "sources": sources})
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                entries.append(item)
+    for entry in entries:
+        topic = str(entry.get("topic") or "").strip()
+        if topic not in normalized:
+            continue
+        sources = _normalize_monthly_report_highlight_source_list(entry.get("sources"))
+        if not sources:
+            raise ToolError(f"Monthly Report highlight topic '{topic}' must select at least one source.")
+        normalized[topic] = sources
+    return normalized
+
+
+def _normalize_monthly_report_highlight_source_list(value: Any) -> list[str]:
+    raw_items = value if isinstance(value, list) else [value]
+    sources: list[str] = []
+    aliases = {
+        "seatalk": MONTHLY_REPORT_HIGHLIGHT_SOURCE_SEATALK,
+        "sea_talk": MONTHLY_REPORT_HIGHLIGHT_SOURCE_SEATALK,
+        "gmail": MONTHLY_REPORT_HIGHLIGHT_SOURCE_GMAIL,
+        "email": MONTHLY_REPORT_HIGHLIGHT_SOURCE_GMAIL,
+        "team_dashboard": MONTHLY_REPORT_HIGHLIGHT_SOURCE_TEAM_DASHBOARD,
+        "team-dashboard": MONTHLY_REPORT_HIGHLIGHT_SOURCE_TEAM_DASHBOARD,
+        "dashboard": MONTHLY_REPORT_HIGHLIGHT_SOURCE_TEAM_DASHBOARD,
+        "jira": MONTHLY_REPORT_HIGHLIGHT_SOURCE_TEAM_DASHBOARD,
+        "prd": MONTHLY_REPORT_HIGHLIGHT_SOURCE_TEAM_DASHBOARD,
+    }
+    for item in raw_items:
+        key = str(item or "").strip().casefold().replace(" ", "_")
+        source = aliases.get(key)
+        if source and source not in sources:
+            sources.append(source)
+    return sources
+
+
+def _monthly_report_topic_uses_source(topic: str, source_map: dict[str, list[str]], source: str) -> bool:
+    return source in (source_map.get(str(topic or "").strip()) or list(MONTHLY_REPORT_HIGHLIGHT_SOURCES))
+
+
 def match_monthly_report_highlight_topics(highlight_topics: list[str], key_projects: list[dict[str, Any]]) -> list[dict[str, Any]]:
     matches: list[dict[str, Any]] = []
     for topic in highlight_topics:
         topic_aliases = _highlight_topic_aliases(topic)
         product_area_scope = _monthly_report_highlight_product_area_scope(topic)
-        project_ids: list[str] = []
-        project_names: list[str] = []
+        qualifier_marker_groups = _monthly_report_highlight_qualifier_marker_groups(topic)
+        matched_projects: list[dict[str, Any]] = []
         for project in key_projects:
             if product_area_scope and _project_product_area(project) != product_area_scope:
                 continue
+            project_text = _monthly_report_project_match_text(project)
             if _highlight_topic_matches_project(topic_aliases, project):
-                project_id = str(project.get("bpmis_id") or "").strip()
-                if project_id and project_id not in project_ids:
-                    project_ids.append(project_id)
-                    project_names.append(str(project.get("project_name") or "").strip())
+                matched_projects.append(project)
+        qualified_projects = [
+            project
+            for project in matched_projects
+            if _monthly_report_text_matches_qualifier_marker_groups(
+                _monthly_report_project_match_text(project),
+                qualifier_marker_groups,
+            )
+        ]
+        if qualifier_marker_groups and qualified_projects:
+            matched_projects = qualified_projects
+        project_ids: list[str] = []
+        project_names: list[str] = []
+        for project in matched_projects:
+            project_id = str(project.get("bpmis_id") or "").strip()
+            if project_id and project_id not in project_ids:
+                project_ids.append(project_id)
+                project_names.append(str(project.get("project_name") or "").strip())
         matches.append(
             {
                 "topic": topic,
                 "product_area_scope": product_area_scope,
+                "qualifier_marker_groups": [list(group) for group in qualifier_marker_groups],
                 "project_ids": project_ids,
                 "project_names": [name for name in project_names if name],
             }
@@ -1228,6 +1335,7 @@ def build_monthly_highlight_deep_evidence(
     prd_scope_summaries: list[dict[str, Any]],
     report_period: MonthlyReportPeriod,
     monthly_requirements_targets: list[dict[str, Any]] | None = None,
+    highlight_topic_sources: dict[str, list[str]] | None = None,
     fallback_reference_date: date | None = None,
 ) -> list[dict[str, Any]]:
     projects_by_id = {str(project.get("bpmis_id") or "").strip(): project for project in key_projects if str(project.get("bpmis_id") or "").strip()}
@@ -1236,16 +1344,45 @@ def build_monthly_highlight_deep_evidence(
     match_by_topic = {str(item.get("topic") or "").strip(): item for item in topic_project_matches if isinstance(item, dict)}
     evidence: list[dict[str, Any]] = []
     for topic in highlight_topics:
+        selected_sources = (highlight_topic_sources or {}).get(topic) or list(MONTHLY_REPORT_HIGHLIGHT_SOURCES)
+        use_seatalk = MONTHLY_REPORT_HIGHLIGHT_SOURCE_SEATALK in selected_sources
+        use_gmail = MONTHLY_REPORT_HIGHLIGHT_SOURCE_GMAIL in selected_sources
+        use_team_dashboard = MONTHLY_REPORT_HIGHLIGHT_SOURCE_TEAM_DASHBOARD in selected_sources
         match = match_by_topic.get(topic) or {"topic": topic, "project_ids": []}
         product_area_scope = str(match.get("product_area_scope") or _monthly_report_highlight_product_area_scope(topic) or "").strip()
+        qualifier_marker_groups = [
+            tuple(str(marker or "").strip() for marker in group if str(marker or "").strip())
+            for group in (
+                match.get("qualifier_marker_groups")
+                or match.get("required_marker_groups")
+                or _monthly_report_highlight_qualifier_marker_groups(topic)
+                or []
+            )
+            if isinstance(group, (list, tuple)) and any(str(marker or "").strip() for marker in group)
+        ]
         project_ids = [str(project_id or "").strip() for project_id in (match.get("project_ids") or []) if str(project_id or "").strip()]
-        projects = [projects_by_id[project_id] for project_id in project_ids if project_id in projects_by_id]
+        projects = [projects_by_id[project_id] for project_id in project_ids if project_id in projects_by_id] if use_team_dashboard else []
         topic_intent = _monthly_report_highlight_topic_intent(topic)
         intent_focus = _monthly_report_highlight_intent_focus(topic_intent)
         aliases = _highlight_topic_aliases(topic)
         for project in projects:
             aliases.update(_project_aliases(project))
-        matched_seatalk = _matched_lines_for_project(seatalk_history_text, aliases, limit=MONTHLY_REPORT_HIGHLIGHT_EVIDENCE_MAX_LINES)
+        matched_seatalk = [] if not use_seatalk else (
+            _matched_context_lines_for_project(
+                seatalk_history_text,
+                _monthly_report_issue_followup_aliases(topic, aliases),
+                limit=MONTHLY_REPORT_HIGHLIGHT_EVIDENCE_MAX_LINES,
+                context_lines=6,
+            )
+            if topic_intent == "issue_followup"
+            else (
+                _matched_conversation_context_lines_for_project(
+                    seatalk_history_text,
+                    aliases,
+                    limit=MONTHLY_REPORT_HIGHLIGHT_EVIDENCE_MAX_LINES,
+                )
+            )
+        )
         project_updates: list[dict[str, Any]] = []
         prd_facts: list[str] = []
         for project in projects:
@@ -1285,10 +1422,10 @@ def build_monthly_highlight_deep_evidence(
                 }
             )
         gmail_item = gmail_by_topic.get(topic) or {}
-        gmail_text = str(gmail_item.get("text") or "").strip()
+        gmail_text = str(gmail_item.get("text") or "").strip() if use_gmail else ""
         compact_seatalk = _compact_report_text_list(matched_seatalk, limit=16, max_chars=600)
         compact_gmail = _compact_report_text_list(_matched_sections_for_project(gmail_text, aliases, limit=8), limit=8, max_chars=900)
-        compact_sheets = _compact_google_sheet_evidence(gmail_item.get("google_sheet_evidence"))
+        compact_sheets = _compact_google_sheet_evidence(gmail_item.get("google_sheet_evidence")) if use_gmail else []
         compact_prd = _compact_report_text_list(prd_facts, limit=6, max_chars=700)
         compact_seatalk = _filter_monthly_report_texts_by_product_area_scope(compact_seatalk, product_area_scope)
         compact_gmail = _filter_monthly_report_texts_by_product_area_scope(compact_gmail, product_area_scope)
@@ -1298,6 +1435,10 @@ def build_monthly_highlight_deep_evidence(
             if _monthly_report_text_allowed_by_product_area_scope(str(sheet.get("text") or ""), product_area_scope)
         ]
         compact_prd = _filter_monthly_report_texts_by_product_area_scope(compact_prd, product_area_scope)
+        compact_seatalk = _prefer_monthly_report_texts_by_qualifier_marker_groups(compact_seatalk, qualifier_marker_groups)
+        compact_gmail = _prefer_monthly_report_texts_by_qualifier_marker_groups(compact_gmail, qualifier_marker_groups)
+        compact_sheets = _prefer_monthly_report_sheet_evidence_by_qualifier_marker_groups(compact_sheets, qualifier_marker_groups)
+        compact_prd = _prefer_monthly_report_texts_by_qualifier_marker_groups(compact_prd, qualifier_marker_groups)
         intent_signal_count = _monthly_report_intent_signal_count(
             topic_intent,
             [
@@ -1308,6 +1449,17 @@ def build_monthly_highlight_deep_evidence(
                 *[str(fact) for project in project_updates for fact in (project.get("status_facts") or [])],
                 *[str(fact) for project in project_updates for fact in (project.get("timeline_facts") or [])],
             ],
+        )
+        issue_followup_facts = (
+            _monthly_report_issue_followup_facts(
+                [
+                    *compact_seatalk,
+                    *compact_gmail,
+                    *[str(sheet.get("text") or "") for sheet in compact_sheets],
+                ]
+            )
+            if topic_intent == "issue_followup"
+            else {}
         )
         evidence_map = _monthly_highlight_topic_evidence_map(
             topic=topic,
@@ -1321,15 +1473,18 @@ def build_monthly_highlight_deep_evidence(
             prd_scope_summaries=compact_prd,
             gmail_error=str(gmail_item.get("error") or "").strip(),
             intent_signal_count=intent_signal_count,
+            issue_followup_facts=issue_followup_facts,
+            selected_sources=selected_sources,
         )
         evidence.append(
             {
                 "topic": topic,
+                "selected_sources": selected_sources,
                 "topic_intent": topic_intent,
                 "intent_focus": intent_focus,
                 "product_area_scope": product_area_scope,
                 "topic_type": "project_update" if projects else "general_topic",
-                "matched_project_ids": project_ids,
+                "matched_project_ids": project_ids if use_team_dashboard else [],
                 "matched_project_names": [str(project.get("project_name") or "").strip() for project in projects if str(project.get("project_name") or "").strip()],
                 "project_updates": project_updates,
                 "seatalk_evidence": compact_seatalk,
@@ -1337,6 +1492,7 @@ def build_monthly_highlight_deep_evidence(
                 "google_sheet_evidence": compact_sheets,
                 "gmail_error": str(gmail_item.get("error") or "").strip(),
                 "prd_scope_summaries": compact_prd,
+                "issue_followup_facts": issue_followup_facts,
                 "evidence_map": evidence_map,
                 "confidence": evidence_map["confidence"],
                 "recommended_tone": evidence_map["recommended_tone"],
@@ -1367,6 +1523,8 @@ def build_monthly_highlight_evidence_map(highlight_deep_evidence: list[dict[str,
                 prd_scope_summaries=[str(value) for value in (item.get("prd_scope_summaries") or []) if str(value).strip()],
                 gmail_error=str(item.get("gmail_error") or "").strip(),
                 intent_signal_count=_safe_int(item.get("intent_signal_count")),
+                issue_followup_facts=item.get("issue_followup_facts") if isinstance(item.get("issue_followup_facts"), dict) else {},
+                selected_sources=[str(source) for source in (item.get("selected_sources") or []) if str(source).strip()],
             )
         )
     return maps
@@ -1385,7 +1543,10 @@ def _monthly_highlight_topic_evidence_map(
     product_area_scope: str = "",
     gmail_error: str = "",
     intent_signal_count: int = 0,
+    issue_followup_facts: dict[str, list[str]] | None = None,
+    selected_sources: list[str] | None = None,
 ) -> dict[str, Any]:
+    source_selection = selected_sources or list(MONTHLY_REPORT_HIGHLIGHT_SOURCES)
     project_count = len(project_updates)
     source_counts = {
         "project": project_count,
@@ -1421,13 +1582,13 @@ def _monthly_highlight_topic_evidence_map(
     else:
         confidence = "none"
     gaps: list[str] = []
-    if not seatalk_evidence:
+    if MONTHLY_REPORT_HIGHLIGHT_SOURCE_SEATALK in source_selection and not seatalk_evidence:
         gaps.append("seatalk")
-    if not gmail_evidence and not google_sheet_evidence:
+    if MONTHLY_REPORT_HIGHLIGHT_SOURCE_GMAIL in source_selection and not gmail_evidence and not google_sheet_evidence:
         gaps.append("email_or_sheet")
-    if topic_type == "project_update" and not prd_scope_summaries:
+    if MONTHLY_REPORT_HIGHLIGHT_SOURCE_TEAM_DASHBOARD in source_selection and topic_type == "project_update" and not prd_scope_summaries:
         gaps.append("prd")
-    if gmail_error:
+    if MONTHLY_REPORT_HIGHLIGHT_SOURCE_GMAIL in source_selection and gmail_error:
         gaps.append("gmail_error")
     if intent != "general_progress" and intent_signal_count <= 0:
         gaps.append(f"{intent}_evidence")
@@ -1443,6 +1604,7 @@ def _monthly_highlight_topic_evidence_map(
         recommended_tone = f"{recommended_tone} {intent_focus['tone_suffix']}"
     return {
         "topic": topic,
+        "selected_sources": source_selection,
         "topic_type": topic_type,
         "topic_intent": intent,
         "product_area_scope": product_area_scope,
@@ -1458,6 +1620,7 @@ def _monthly_highlight_topic_evidence_map(
             if str(project.get("project_name") or "").strip()
         ],
         "project_statuses": _dedupe_preserve_order(project_statuses),
+        "issue_followup_facts": issue_followup_facts or {},
         "gaps": gaps,
         "recommended_tone": recommended_tone,
     }
@@ -1786,6 +1949,7 @@ def build_monthly_report_batch_prompt(
         "For each highlight topic, respect its topic_intent/intent_focus/confidence/recommended_tone when present. High-confidence topics can be written as progress; low-confidence topics should remain monitoring items without over-claiming.\n"
         "If a highlight topic has product_area_scope, preserve only that product area's changes and timeline for that topic. Do not mix similarly named projects from other product areas into the highlight narrative.\n"
         "For go-live outcome topics, preserve launch result, employee/pilot feedback, production issue, stabilization, and post-live next-action facts. Do not substitute generic development or PRD progress for missing go-live outcome evidence.\n"
+        "For issue follow-up topics, preserve the structured impact, root cause, completed mitigation, long-term solution, and next action when provided. Do not substitute broad project progress for missing incident follow-up evidence.\n"
         "Preserve concrete project names, Jira IDs, owners, markets, dates, decisions, blockers, and launch/status facts.\n"
         "If this batch has no material in-scope evidence, return only: No material update found.\n"
         "Do not include raw transcripts or long excerpts.\n\n"
@@ -1816,6 +1980,7 @@ def build_monthly_highlight_topic_narrative_prompt(
         "Use the topic_intent, intent_focus, confidence, and recommended_tone fields to decide what kind of update this is.\n"
         "If product_area_scope is present, focus only on that product area's changes and timeline. Do not include similarly named project progress from other product areas.\n"
         "If topic_intent is go_live_outcome, focus on whether go-live happened, post-go-live result, employee/pilot feedback, production issues, stabilization, and next rollout/remediation. Do not replace missing go-live outcome evidence with generic development/testing/PRD progress; use generic project progress only as brief background.\n"
+        "If topic_intent is issue_followup, use issue_followup_facts first: explain the business impact, root cause, completed containment, long-term remediation, and next action. Do not replace incident follow-up evidence with generic project progress.\n"
         "- high: state progress, business impact, risk/decision, and next movement clearly.\n"
         "- medium: describe directional progress and pending confirmation carefully.\n"
         "- low or none: frame as a monitoring item or pending confirmation; do not imply committed delivery.\n"
@@ -1903,6 +2068,7 @@ def build_monthly_report_final_prompt(
         "Use the topic_intent/intent_focus/confidence/recommended_tone fields inside Highlight Deep Evidence to calibrate wording: high confidence can state progress directly; medium confidence should be framed as directional progress with pending confirmation; low or none should be framed as a watch item or pending confirmation, not as a failure to find evidence.\n"
         "If a Highlight Deep Evidence item has product_area_scope, write that Highlight only from that product area's changes and timeline. For example, a Credit Risk topic should not include Anti-Fraud progress even if the project names overlap.\n"
         "For go_live_outcome highlights, do not let general project development/testing progress replace launch result or feedback. If launch outcome evidence is missing, write that the go-live outcome remains pending confirmation in manager-ready language.\n"
+        "For issue_followup highlights, use issue_followup_facts when available and cover impact, root cause, completed mitigation, long-term solution, and next action in manager-ready wording. Do not dilute these topics into generic project progress.\n"
         f"Hard scope: the final report must contain only Xiaodong-owned {', '.join(MONTHLY_REPORT_PRODUCT_SCOPE)} product updates. Do not include unrelated general awareness, HR, hiring, personal chat, random live issue, or generic IT/process/material-check updates. VIP or priority-keyword mentions are not enough unless the evidence is in-scope.\n"
         "Never include a project-table row unless it is attached to an item where include=true in Other Key Project Updates JSON. Non-project highlight topics may appear only in Highlights when supported by Highlight Deep Evidence.\n"
         "Do not write 'Evidence-limited' unless that exact wording appears in the structured status_facts for an included project.\n"
@@ -2449,7 +2615,7 @@ def _highlight_deep_evidence_text(items: list[dict[str, Any]]) -> str:
 def _project_product_area(project: dict[str, Any]) -> str:
     teams = " ".join(str(item or "") for item in (project.get("teams") or []))
     text = f"{teams} {project.get('project_name') or ''}".casefold()
-    if "anti" in text or "fraud" in text or "af" in text:
+    if "anti" in text or "fraud" in text or "afasa" in text or "scam" in text or re.search(r"\baf\b", text):
         return "Anti-fraud"
     if "grc" in text or "ops" in text or "operational risk" in text or "rcsa" in text:
         return "Ops Risk"
@@ -2459,13 +2625,78 @@ def _project_product_area(project: dict[str, Any]) -> str:
 def _monthly_report_highlight_product_area_scope(topic: Any) -> str:
     text = str(topic or "").strip().casefold()
     compact = _normalize_alias_token(text)
-    if "credit risk" in text or "creditrisk" in compact:
-        return "Credit Risk"
-    if "anti-fraud" in text or "anti fraud" in text or "antifraud" in compact:
+    if "anti-fraud" in text or "anti fraud" in text or "antifraud" in compact or "afasa" in compact or re.search(r"\baf\b", text):
         return "Anti-fraud"
     if "ops risk" in text or "operational risk" in text or "grc" in text:
         return "Ops Risk"
+    if "credit risk" in text or "creditrisk" in compact:
+        return "Credit Risk"
     return ""
+
+
+def _monthly_report_highlight_qualifier_marker_groups(topic: Any) -> list[tuple[str, ...]]:
+    text = str(topic or "").strip().casefold()
+    compact = _normalize_alias_token(text)
+    anti_fraud_signal = (
+        "anti-fraud" in text
+        or "anti fraud" in text
+        or "antifraud" in compact
+        or "afasa" in compact
+        or bool(re.search(r"\baf\b", text))
+    )
+    marker_groups: list[tuple[str, ...]] = []
+    if anti_fraud_signal and re.search(r"\bbank\b", text):
+        marker_groups.append(("bank", "maribank", "seabank"))
+    return marker_groups
+
+
+def _monthly_report_text_matches_qualifier_marker_groups(text: str, marker_groups: list[tuple[str, ...]]) -> bool:
+    if not marker_groups:
+        return True
+    lowered = str(text or "").casefold()
+    compact = _normalize_alias_token(lowered)
+    for group in marker_groups:
+        if not any(_monthly_report_text_matches_qualifier_marker(lowered, compact, marker) for marker in group):
+            return False
+    return True
+
+
+def _monthly_report_text_matches_qualifier_marker(lowered_text: str, compact_text: str, marker: str) -> bool:
+    normalized_marker = str(marker or "").casefold().strip()
+    if not normalized_marker:
+        return False
+    if normalized_marker == "bank":
+        return bool(re.search(r"\bbank\b", lowered_text))
+    compact_marker = _normalize_alias_token(normalized_marker)
+    return normalized_marker in lowered_text or bool(compact_marker and compact_marker in compact_text)
+
+
+def _prefer_monthly_report_texts_by_qualifier_marker_groups(items: list[str], marker_groups: list[tuple[str, ...]]) -> list[str]:
+    if not marker_groups:
+        return items
+    matched = [
+        item
+        for item in items
+        if _monthly_report_text_matches_qualifier_marker_groups(item, marker_groups)
+    ]
+    return matched or items
+
+
+def _prefer_monthly_report_sheet_evidence_by_qualifier_marker_groups(
+    items: list[dict[str, str]],
+    marker_groups: list[tuple[str, ...]],
+) -> list[dict[str, str]]:
+    if not marker_groups:
+        return items
+    matched = [
+        item
+        for item in items
+        if _monthly_report_text_matches_qualifier_marker_groups(
+            " ".join(str(item.get(key) or "") for key in ("title", "text", "access_status")),
+            marker_groups,
+        )
+    ]
+    return matched or items
 
 
 def _filter_monthly_report_texts_by_product_area_scope(items: list[str], product_area_scope: str) -> list[str]:
@@ -2537,6 +2768,9 @@ def _project_aliases(project: dict[str, Any]) -> set[str]:
             continue
         add(ticket.get("jira_id") or ticket.get("issue_id"))
         add(ticket.get("jira_title"))
+    combined_text = " ".join(str(value or "") for value in aliases).casefold()
+    if "google" in combined_text and "pay" in combined_text:
+        aliases.update({"google pay", "card on google pay", "maribank card on google pay"})
     expanded: set[str] = set()
     for alias in aliases:
         expanded.add(alias)
@@ -2545,8 +2779,32 @@ def _project_aliases(project: dict[str, Any]) -> set[str]:
     return {item for item in expanded if item}
 
 
+def _monthly_report_project_match_text(project: dict[str, Any]) -> str:
+    return " ".join(
+        [
+            str(project.get("bpmis_id") or ""),
+            str(project.get("project_name") or ""),
+            str(project.get("market") or ""),
+            str(project.get("priority") or ""),
+            str(project.get("regional_pm_pic") or ""),
+            " ".join(str(item or "") for item in (project.get("teams") or [])),
+            *[
+                " ".join(
+                    [
+                        str(ticket.get("jira_id") or ticket.get("issue_id") or ""),
+                        str(ticket.get("jira_title") or ""),
+                        str(ticket.get("description") or ""),
+                    ]
+                )
+                for ticket in (project.get("jira_tickets") or [])
+                if isinstance(ticket, dict)
+            ],
+        ]
+    )
+
+
 def _monthly_report_highlight_topic_intent(topic: Any) -> str:
-    text = str(topic or "").strip().casefold()
+    text = _monthly_report_topic_intent_text(topic)
     compact = _normalize_alias_token(text)
     if any(term in text for term in ("go live", "went live", "post live", "post-live", "post launch", "post-launch")) or "golive" in compact:
         return "go_live_outcome"
@@ -2559,6 +2817,14 @@ def _monthly_report_highlight_topic_intent(topic: Any) -> str:
     if any(term in text for term in ("decision", "confirm", "alignment", "approval", "sign off", "sign-off")):
         return "decision_needed"
     return "general_progress"
+
+
+def _monthly_report_topic_intent_text(topic: Any) -> str:
+    text = str(topic or "").strip().casefold()
+    text = re.sub(r"\bcredit\s+risk\b", " ", text)
+    text = re.sub(r"\bops\s+risk\b|\boperational\s+risk\b", " ", text)
+    text = re.sub(r"\banti[-\s]?fraud\b", " ", text)
+    return " ".join(text.split())
 
 
 def _monthly_report_highlight_intent_focus(intent: str) -> dict[str, Any]:
@@ -2618,6 +2884,121 @@ def _monthly_report_highlight_intent_focus(intent: str) -> dict[str, Any]:
         ],
         "tone_suffix": "",
     }
+
+
+def _monthly_report_issue_followup_facts(evidence_texts: list[str]) -> dict[str, list[str]]:
+    facts: dict[str, list[str]] = {
+        "impact": [],
+        "root_cause": [],
+        "short_term_solution": [],
+        "long_term_solution": [],
+        "next_action": [],
+    }
+    category_terms = {
+        "impact": (
+            "impact",
+            "affected",
+            "login",
+            "transactional",
+            "failure",
+            "failed",
+            "customers",
+            "applications",
+            "影响",
+            "用户",
+            "客户",
+            "失败",
+            "登录",
+        ),
+        "root_cause": (
+            "root cause",
+            "caused by",
+            "qps",
+            "database",
+            "db ",
+            "overload",
+            "overloaded",
+            "running threads",
+            "capacity",
+            "traffic",
+            "原因",
+            "根因",
+            "容量",
+            "高并发",
+            "读写",
+            "过载",
+            "线程",
+        ),
+        "short_term_solution": (
+            "resolution",
+            "short-term",
+            "short term",
+            "stabilize",
+            "scaled down",
+            "qps limit",
+            "restored",
+            "hotfix",
+            "disabled",
+            "expanded",
+            "done",
+            "mitigation",
+            "缓解",
+            "修复",
+            "短期",
+            "临时",
+            "限流",
+            "热修",
+            "关闭",
+            "扩容",
+            "完成",
+        ),
+        "long_term_solution": (
+            "long-term",
+            "long term",
+            "codis",
+            "cache",
+            "es index",
+            "indexing",
+            "migrated",
+            "reduce db load",
+            "sop",
+            "dismantled",
+            "q4",
+            "长期",
+            "方案",
+            "迁移",
+            "索引",
+            "告警",
+            "拆分",
+        ),
+        "next_action": (
+            "eta",
+            "30 june",
+            "30 jun",
+            "21 may",
+            "q4",
+            "next",
+            "follow up",
+            "follow-up",
+            "owner",
+            "confirm",
+            "待",
+            "下一步",
+            "计划",
+            "负责人",
+            "确认",
+        ),
+    }
+    for raw_text in evidence_texts:
+        for line in str(raw_text or "").splitlines():
+            clean = line.strip()
+            if len(clean) < 8:
+                continue
+            lowered = clean.casefold()
+            for category, terms in category_terms.items():
+                if any(term in lowered for term in terms):
+                    facts[category].append(clean[:600])
+    return {category: _dedupe_preserve_order(values)[:6] for category, values in facts.items() if values}
 
 
 def _monthly_report_intent_signal_count(intent: str, evidence_texts: list[str]) -> int:
@@ -2697,11 +3078,52 @@ def _highlight_topic_aliases(topic: Any) -> set[str]:
     if len(text) >= 3:
         aliases.add(text.casefold())
         aliases.add(_normalize_alias_token(text))
+    tokens: list[str] = []
     for part in re.split(r"[\s/_:()[\],.-]+", text):
         token = part.strip().casefold()
+        if token:
+            tokens.append(token)
         if _is_useful_alias_token(token):
             aliases.add(token)
+    aliases.update(_highlight_topic_phrase_aliases(tokens))
     return {alias for alias in aliases if alias}
+
+
+def _highlight_topic_phrase_aliases(tokens: list[str]) -> set[str]:
+    aliases: set[str] = set()
+    for size in (3, 2):
+        for index in range(0, max(0, len(tokens) - size + 1)):
+            phrase_tokens = [token for token in tokens[index : index + size] if token]
+            if len(phrase_tokens) != size:
+                continue
+            has_descriptor_anchor = any(token in {"workflow", "flow", "process"} for token in phrase_tokens)
+            normalized_phrase = _normalize_alias_token(" ".join(phrase_tokens))
+            known_product_phrase = normalized_phrase in {
+                "creditcard",
+                "cashloan",
+                "termloan",
+                "standalonecashloan",
+                "retaillimit",
+                "limitassignment",
+            }
+            if not any(_is_useful_alias_token(token) for token in phrase_tokens) and not has_descriptor_anchor:
+                if not known_product_phrase:
+                    continue
+            if all(_is_monthly_report_scope_token(token) for token in phrase_tokens):
+                continue
+            if all(_is_monthly_report_generic_descriptor_token(token) for token in phrase_tokens):
+                if not has_descriptor_anchor:
+                    continue
+                phrase = " ".join(phrase_tokens)
+                if len(_normalize_alias_token(phrase)) >= 10:
+                    aliases.add(phrase)
+                    aliases.add(_normalize_alias_token(phrase))
+                continue
+            phrase = " ".join(phrase_tokens)
+            if len(_normalize_alias_token(phrase)) >= 8:
+                aliases.add(phrase)
+                aliases.add(_normalize_alias_token(phrase))
+    return aliases
 
 
 def _highlight_seatalk_aliases(
@@ -2736,6 +3158,8 @@ def _is_useful_seatalk_highlight_alias(alias: str) -> bool:
         return False
     compact = _normalize_alias_token(text)
     if not compact or compact.isdigit():
+        return False
+    if _is_monthly_report_scope_token(text) or _is_monthly_report_generic_descriptor_token(text):
         return False
     if any(character.isdigit() for character in compact):
         return True
@@ -2789,9 +3213,75 @@ def _highlight_topic_matches_project(topic_aliases: set[str], project: dict[str,
 def _is_useful_alias_token(token: str) -> bool:
     if not token or token.isdigit():
         return False
-    if token in {"feature", "support", "model", "upgrade", "project", "system", "productization", "strategy", "phase", "update", "status"}:
+    if _is_monthly_report_scope_token(token) or _is_monthly_report_generic_descriptor_token(token):
+        return False
+    if token in {
+        "feature",
+        "monthly",
+        "model",
+        "project",
+        "productization",
+        "report",
+        "phase",
+        "status",
+        "strategy",
+        "support",
+        "system",
+        "transaction",
+        "transactions",
+        "update",
+        "upgrade",
+    }:
         return False
     return any(character.isdigit() for character in token) or len(token) >= 6
+
+
+def _is_monthly_report_scope_token(token: str) -> bool:
+    text = str(token or "").strip().casefold()
+    return text in {
+        "sg",
+        "id",
+        "ph",
+        "regional",
+        "credit",
+        "risk",
+        "cr",
+        "crms",
+        "anti",
+        "fraud",
+        "af",
+        "afasa",
+        "ops",
+        "grc",
+        "bank",
+    }
+
+
+def _is_monthly_report_generic_descriptor_token(token: str) -> bool:
+    text = str(token or "").strip().casefold()
+    return text in {
+        "a",
+        "an",
+        "the",
+        "more",
+        "less",
+        "new",
+        "old",
+        "better",
+        "flexible",
+        "workflow",
+        "flow",
+        "process",
+        "support",
+        "change",
+        "changes",
+        "enhance",
+        "enhancement",
+        "improve",
+        "improvement",
+        "optimize",
+        "optimization",
+    }
 
 
 def _normalize_alias_token(value: str) -> str:
@@ -2821,6 +3311,192 @@ def _matched_lines_for_project(text: str, aliases: set[str], *, limit: int) -> l
         if len(matches) >= limit:
             break
     return matches
+
+
+def _matched_conversation_context_lines_for_project(text: str, aliases: set[str], *, limit: int) -> list[str]:
+    raw_lines = str(text or "").splitlines()
+    if not raw_lines:
+        return []
+    if not any(line.strip().startswith("===") for line in raw_lines):
+        return _matched_lines_for_project(text, aliases, limit=limit)
+    groups = _monthly_report_seatalk_conversation_groups(raw_lines)
+    matches: list[str] = []
+    for _header, start, end in groups:
+        conversation_lines = raw_lines[start:end]
+        if not any(_text_matches_aliases(line.strip(), aliases) for line in conversation_lines if line.strip()):
+            continue
+        for line in conversation_lines:
+            clean = line.strip()
+            if not clean or len(clean) < 8 or clean.startswith("==="):
+                continue
+            if _is_monthly_report_context_noise_line(clean):
+                continue
+            matches.append(clean[:800])
+            if len(matches) >= limit:
+                return matches
+    return matches
+
+
+def _matched_forward_context_lines_for_project(text: str, aliases: set[str], *, limit: int, context_lines: int) -> list[str]:
+    raw_lines = str(text or "").splitlines()
+    selected_indexes: set[int] = set()
+    has_conversation_markers = any(line.strip().startswith("===") for line in raw_lines)
+    within_conversation = not has_conversation_markers
+    for index, line in enumerate(raw_lines):
+        clean = line.strip()
+        if clean.startswith("==="):
+            within_conversation = True
+        if not within_conversation:
+            continue
+        if not clean or len(clean) < 8:
+            continue
+        if not _text_matches_aliases(clean, aliases):
+            continue
+        selected_indexes.add(index)
+        follow_count = 0
+        for next_index in range(index + 1, len(raw_lines)):
+            if follow_count >= max(0, int(context_lines or 0)):
+                break
+            next_clean = raw_lines[next_index].strip()
+            if next_clean.startswith("==="):
+                break
+            if not next_clean or len(next_clean) < 8:
+                continue
+            if _is_monthly_report_context_noise_line(next_clean):
+                continue
+            selected_indexes.add(next_index)
+            follow_count += 1
+    matches: list[str] = []
+    for index in sorted(selected_indexes):
+        clean = raw_lines[index].strip()
+        if not clean or len(clean) < 8 or clean.startswith("==="):
+            continue
+        if _is_monthly_report_context_noise_line(clean):
+            continue
+        matches.append(clean[:800])
+        if len(matches) >= limit:
+            break
+    return matches
+
+
+def _is_monthly_report_context_noise_line(line: str) -> bool:
+    text = str(line or "").strip().casefold()
+    return any(
+        marker in text
+        for marker in (
+            "github bot:",
+            "github actions",
+            "build cloud run image workflow run",
+            "workflow run failed",
+        )
+    )
+
+
+def _matched_context_lines_for_project(text: str, aliases: set[str], *, limit: int, context_lines: int) -> list[str]:
+    raw_lines = str(text or "").splitlines()
+    selected_indexes: set[int] = set()
+    has_conversation_markers = any(line.strip().startswith("===") for line in raw_lines)
+    within_conversation = not has_conversation_markers
+    for index, line in enumerate(raw_lines):
+        clean = line.strip()
+        if clean.startswith("==="):
+            within_conversation = True
+        if not within_conversation:
+            continue
+        if not clean or len(clean) < 8:
+            continue
+        if not _text_matches_aliases(clean, aliases):
+            continue
+        start = max(0, index - max(0, int(context_lines or 0)))
+        end = min(len(raw_lines), index + max(0, int(context_lines or 0)) + 1)
+        selected_indexes.update(range(start, end))
+    matches: list[str] = []
+    for index in sorted(selected_indexes):
+        clean = raw_lines[index].strip()
+        if not clean or len(clean) < 8:
+            continue
+        matches.append(clean[:800])
+        if len(matches) >= limit:
+            break
+    return matches
+
+
+def _monthly_report_issue_followup_aliases(topic: Any, aliases: set[str]) -> set[str]:
+    focused: set[str] = set()
+    ignored_tokens = {
+        "id",
+        "sg",
+        "ph",
+        "issue",
+        "issues",
+        "recent",
+        "system",
+        "impact",
+        "follow",
+        "up",
+        "actions",
+        "action",
+        "risk",
+    }
+    strong_terms = {
+        "database",
+        "capacity",
+        "downgrade",
+        "qps",
+        "db",
+        "root cause",
+        "resolution",
+        "mitigation",
+        "dbp-antifraud",
+        "risk database",
+        "codis",
+        "es index",
+        "数据库",
+        "容量",
+        "压力",
+        "降级",
+        "根因",
+        "原因",
+        "解决方案",
+        "处理方案",
+        "缓解",
+        "修复",
+        "限流",
+        "告警",
+        "迁移",
+    }
+    equivalent_terms = {
+        "database": ("数据库",),
+        "risk database": ("风险库", "风控库", "数据库"),
+        "capacity": ("容量", "压力"),
+        "downgrade": ("降级",),
+        "qps": ("qps", "限流"),
+        "db": ("db", "数据库"),
+        "root cause": ("根因", "原因"),
+        "resolution": ("解决方案", "处理方案"),
+        "mitigation": ("缓解", "修复"),
+        "codis": ("codis", "缓存"),
+        "es index": ("es index", "索引"),
+    }
+    topic_text = str(topic or "").casefold()
+    for term in strong_terms:
+        if term in topic_text or _normalize_alias_token(term) in _normalize_alias_token(topic_text):
+            focused.add(term)
+            focused.add(_normalize_alias_token(term))
+            for equivalent in equivalent_terms.get(term, ()):
+                focused.add(equivalent)
+                focused.add(_normalize_alias_token(equivalent))
+    for alias in aliases:
+        clean = _normalize_alias_token(alias)
+        lowered = str(alias or "").casefold().strip()
+        if not lowered or clean in ignored_tokens or lowered in ignored_tokens:
+            continue
+        if len(clean) <= 3 and clean not in {"qps", "db", "dbp"}:
+            continue
+        if lowered in strong_terms or clean in {_normalize_alias_token(term) for term in strong_terms}:
+            focused.add(lowered)
+            focused.add(clean)
+    return focused or {alias for alias in aliases if len(_normalize_alias_token(alias)) > 3}
 
 
 def _matched_sections_for_project(text: str, aliases: set[str], *, limit: int) -> list[str]:
@@ -2949,21 +3625,39 @@ def _monthly_requirements_target_tech_live_date(project: dict[str, Any], monthly
     if priority not in {"SP", "P0"}:
         return None
     entries = _monthly_requirements_entries_for_project(project, monthly_requirements_targets, limit=10)
-    latest: tuple[date, dict[str, Any]] | None = None
+    dated_entries: list[tuple[date, dict[str, Any]]] = []
     for entry in entries:
         parsed = _monthly_requirements_entry_date(entry)
         if parsed is None:
             continue
-        if latest is None or parsed > latest[0]:
-            latest = (parsed, entry)
-    if latest is None:
+        dated_entries.append((parsed, entry))
+    if not dated_entries:
         return None
+    preferred_entries = [
+        item
+        for item in dated_entries
+        if str(item[1].get("target_label") or "") in {"tech_live", "table_target"}
+        or _monthly_requirements_has_tech_live_label(str(item[1].get("matched_line") or ""))
+    ]
+    if not preferred_entries:
+        return None
+    latest: tuple[date, dict[str, Any]] | None = None
+    latest_rank: tuple[date, int, date] | None = None
+    for parsed, entry in (preferred_entries or dated_entries):
+        source_date = _monthly_requirements_entry_source_date(entry)
+        entry_index = _safe_int(entry.get("entry_index"))
+        rank = (source_date or date.min, entry_index, parsed)
+        if latest is None or latest_rank is None or rank > latest_rank:
+            latest = (parsed, entry)
+            latest_rank = rank
     detail = {
         "market": str(latest[1].get("market") or "").strip(),
         "source_subject": str(latest[1].get("source_subject") or "").strip(),
         "sender": str(latest[1].get("sender") or "").strip(),
         "matched_line": str(latest[1].get("matched_line") or "").strip()[:500],
         "matched_alias": str(latest[1].get("matched_alias") or "").strip(),
+        "source_date_hint": str(latest[1].get("source_date_hint") or "").strip(),
+        "target_label": str(latest[1].get("target_label") or "").strip(),
     }
     return _monthly_report_month_label(latest[0]), "Monthly Requirements Biweekly Update", detail
 
@@ -2976,6 +3670,7 @@ def build_monthly_requirements_target_map(monthly_requirements_text: str) -> lis
     current_market = ""
     current_subject = ""
     current_sender = ""
+    previous_context_line = ""
     for line in raw.splitlines():
         clean = line.strip()
         if not clean:
@@ -2994,25 +3689,103 @@ def build_monthly_requirements_target_map(monthly_requirements_text: str) -> lis
             continue
         if "planning" in clean.casefold():
             continue
-        candidates = _monthly_requirements_month_candidates(clean)
+        line_is_context = _monthly_requirements_is_project_context_line(clean)
+        source_year = _monthly_requirements_year_from_subject(current_subject)
+        candidates = _monthly_requirements_target_month_candidates(clean, source_year=source_year)
         if not candidates:
+            if line_is_context:
+                previous_context_line = clean
             continue
         latest = max(candidates)
+        matched_line = clean
+        if line_is_context:
+            previous_context_line = clean
+        elif previous_context_line:
+            matched_line = f"{previous_context_line} {clean}"
         entries.append(
             {
                 "market": current_market,
                 "source_subject": current_subject,
                 "sender": current_sender,
-                "matched_line": clean,
+                "matched_line": matched_line,
                 "target_month": _monthly_report_month_label(latest),
                 "target_date": latest.isoformat(),
+                "target_label": _monthly_requirements_target_label(clean, matched_line),
+                "source_date_hint": _monthly_requirements_source_date_hint(current_subject),
+                "entry_index": len(entries),
             }
         )
     return entries
 
 
+def _monthly_requirements_is_project_context_line(text: str) -> bool:
+    clean = str(text or "").strip()
+    if len(clean) < 8:
+        return False
+    lowered = clean.casefold()
+    if lowered.startswith(("thread ", "message ", "body:", "market:", "subject:", "from:")):
+        return False
+    if set(clean) <= {"=", "-", "_"}:
+        return False
+    if "|" in clean and re.search(r"\bregion\b|\bpriority\b|\bproject\b", clean, flags=re.IGNORECASE):
+        return False
+    return bool(re.search(r"\[[A-Z]{2}\]|\b(?:strategic\s+project|project)\b", clean, flags=re.IGNORECASE))
+
+
+def _monthly_requirements_target_label(line: str, matched_line: str) -> str:
+    if _monthly_requirements_has_tech_live_label(matched_line):
+        return "tech_live"
+    if _monthly_requirements_is_target_table_row(line):
+        return "table_target"
+    return "date"
+
+
+def _monthly_requirements_is_target_table_row(text: str) -> bool:
+    clean = str(text or "").strip()
+    if "|" not in clean:
+        return False
+    parts = [part.strip() for part in clean.strip("|").split("|")]
+    if len(parts) < 4:
+        return False
+    if parts[0].strip().upper() not in {"SG", "ID", "PH", "REGIONAL"}:
+        return False
+    if parts[1].strip().upper() not in {"SP", "P0", "P1", "P2"}:
+        return False
+    return bool(_monthly_requirements_month_candidates(parts[-1]))
+
+
+def _monthly_requirements_target_month_candidates(text: str, *, source_year: int | None = None) -> list[date]:
+    clean = str(text or "")
+    tech_live_candidates = _monthly_requirements_tech_live_month_candidates(clean, source_year=source_year)
+    if tech_live_candidates:
+        return tech_live_candidates
+    return _monthly_requirements_month_candidates(clean)
+
+
+def _monthly_requirements_has_tech_live_label(text: str) -> bool:
+    return bool(re.search(r"\b(?:tech\s*)?(?:go\s*live|golive|tech\s+live)\b", str(text or ""), flags=re.IGNORECASE))
+
+
+def _monthly_requirements_tech_live_month_candidates(text: str, *, source_year: int | None = None) -> list[date]:
+    clean = str(text or "")
+    candidates: list[date] = []
+    label_pattern = re.compile(r"\b(?:tech\s*(?:go\s*)?live|tech\s+live|go\s*live|golive)\b\s*[:：]?", flags=re.IGNORECASE)
+    next_label_pattern = re.compile(
+        r"\b(?:PRD|DEV|SIT|UAT|REG|LV|Public(?:\s+(?:Live|Launch))?|Planning|Requirement|Timeline)\b\s*[:：]",
+        flags=re.IGNORECASE,
+    )
+    for match in label_pattern.finditer(clean):
+        segment = clean[match.end() :]
+        next_label = next_label_pattern.search(segment)
+        if next_label:
+            segment = segment[: next_label.start()]
+        parsed = _monthly_requirements_month_candidates(segment, source_year=source_year)
+        candidates.extend(parsed)
+    return candidates
+
+
 def _monthly_requirements_entries_for_project(project: dict[str, Any], monthly_requirements_targets: list[dict[str, Any]], *, limit: int = 5) -> list[dict[str, Any]]:
-    aliases = _project_aliases(project)
+    aliases = _monthly_requirements_match_aliases(project)
     if not aliases:
         return []
     market = _monthly_requirements_market_for_project(project)
@@ -3021,7 +3794,7 @@ def _monthly_requirements_entries_for_project(project: dict[str, Any], monthly_r
         if market and str(entry.get("market") or "").strip().upper() != market:
             continue
         line = str(entry.get("matched_line") or "").strip()
-        if not line or not _text_matches_aliases(line, aliases):
+        if not line or not _monthly_requirements_line_matches_project(line, aliases):
             continue
         enriched = dict(entry)
         enriched["matched_alias"] = _first_matching_alias(line, aliases)
@@ -3029,6 +3802,44 @@ def _monthly_requirements_entries_for_project(project: dict[str, Any], monthly_r
         if len(matched) >= limit:
             break
     return matched
+
+
+def _monthly_requirements_line_matches_project(text: str, aliases: set[str]) -> bool:
+    normalized_text = str(text or "").casefold()
+    compact_text = _normalize_alias_token(normalized_text)
+    token_matches = 0
+    for alias in aliases:
+        clean_alias = str(alias or "").strip().casefold()
+        compact_alias = _normalize_alias_token(clean_alias)
+        if not clean_alias or not compact_alias:
+            continue
+        has_separator = bool(re.search(r"[\s/_:()[\],.-]+", clean_alias))
+        if has_separator and len(compact_alias) >= 8 and (clean_alias in normalized_text or compact_alias in compact_text):
+            return True
+        if not has_separator and len(compact_alias) >= 5 and re.search(rf"\b{re.escape(clean_alias)}\b", normalized_text):
+            token_matches += 1
+    return token_matches >= 2
+
+
+def _monthly_requirements_match_aliases(project: dict[str, Any]) -> set[str]:
+    ignored_aliases = {
+        "bank",
+        "maribank",
+        "seabank",
+        "project",
+        "strategic",
+        "requirement",
+        "requirements",
+        "system",
+    }
+    aliases = set()
+    for alias in _project_aliases(project):
+        clean = _normalize_alias_token(alias)
+        lowered = str(alias or "").casefold().strip()
+        if not clean or clean in ignored_aliases or lowered in ignored_aliases:
+            continue
+        aliases.add(alias)
+    return aliases
 
 
 def _first_matching_alias(text: str, aliases: set[str]) -> str:
@@ -3073,6 +3884,62 @@ def _monthly_requirements_entry_date(entry: dict[str, Any]) -> date | None:
         return None
 
 
+def _monthly_requirements_entry_source_date(entry: dict[str, Any]) -> date | None:
+    raw = str((entry or {}).get("source_date_hint") or "").strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw[:10])
+    except ValueError:
+        return None
+
+
+def _monthly_requirements_source_date_hint(subject: str) -> str:
+    parsed = _monthly_requirements_source_date_from_subject(subject)
+    return parsed.isoformat() if parsed else ""
+
+
+def _monthly_requirements_source_date_from_subject(subject: str) -> date | None:
+    text = str(subject or "")
+    year_match = re.search(r"(?<!\d)(20\d{2})(?!\d)", text)
+    full_suffix_match = re.search(r"_(\d{2})(\d{2})(\d{2})(?!\d)", text)
+    if full_suffix_match:
+        try:
+            return date(
+                2000 + int(full_suffix_match.group(1)),
+                int(full_suffix_match.group(2)),
+                int(full_suffix_match.group(3)),
+            )
+        except ValueError:
+            pass
+    suffix_matches = list(re.finditer(r"_(\d{2})(\d{2})(?!\d)", text))
+    if not year_match or not suffix_matches:
+        return None
+    for suffix_match in reversed(suffix_matches):
+        try:
+            return date(int(year_match.group(1)), int(suffix_match.group(1)), int(suffix_match.group(2)))
+        except ValueError:
+            continue
+    return None
+
+
+def _monthly_requirements_year_from_subject(subject: str) -> int | None:
+    text = str(subject or "")
+    full_suffix_match = re.search(r"_(\d{2})(\d{2})(\d{2})(?!\d)", text)
+    if full_suffix_match:
+        try:
+            return 2000 + int(full_suffix_match.group(1))
+        except ValueError:
+            return None
+    match = re.search(r"(?<!\d)(20\d{2})(?!\d)", text)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
 def _monthly_requirements_market_for_project(project: dict[str, Any]) -> str:
     text = " ".join(
         [
@@ -3082,13 +3949,25 @@ def _monthly_requirements_market_for_project(project: dict[str, Any]) -> str:
             str(project.get("project_name") or ""),
         ]
     ).casefold()
+    country_markets = {
+        "singapore": "SG",
+        "sg": "SG",
+        "indonesia": "ID",
+        "id": "ID",
+        "philippines": "PH",
+        "philippine": "PH",
+        "ph": "PH",
+    }
+    for token, market in country_markets.items():
+        if re.search(rf"\b{re.escape(token)}\b", text):
+            return market
     for market in ("SG", "ID", "PH"):
         if re.search(rf"\b{re.escape(market.casefold())}\b", text):
             return market
     return ""
 
 
-def _monthly_requirements_month_candidates(text: str) -> list[date]:
+def _monthly_requirements_month_candidates(text: str, *, source_year: int | None = None) -> list[date]:
     if re.search(r"\bplanning\b", text, flags=re.IGNORECASE):
         # Planning rows do not carry a committed tech-live window.
         text = "\n".join(line for line in text.splitlines() if "planning" not in line.casefold())
@@ -3131,11 +4010,26 @@ def _monthly_requirements_month_candidates(text: str) -> list[date]:
             candidates.append(date(int(match.group(3)), month, 1))
         except ValueError:
             continue
-    for match in re.finditer(r"\b(\d{4})[-/](\d{1,2})(?:[-/]\d{1,2})?\b", text):
+    for match in re.finditer(r"\b(\d{4})[-/.](\d{1,2})(?:[-/.]\d{1,2})?\b", text):
         try:
             candidates.append(date(int(match.group(1)), int(match.group(2)), 1))
         except ValueError:
             continue
+    for match in re.finditer(r"\b(\d{2})(\d{2})(\d{2})\b", text):
+        try:
+            year = 2000 + int(match.group(1))
+            candidates.append(date(year, int(match.group(2)), 1))
+        except ValueError:
+            continue
+    if source_year:
+        for match in re.finditer(r"\b(?:early|mid|late)?\s*([A-Za-z]{3,9})\b", text, flags=re.IGNORECASE):
+            month = month_numbers.get(match.group(1).casefold())
+            if not month:
+                continue
+            try:
+                candidates.append(date(int(source_year), month, 1))
+            except ValueError:
+                continue
     return candidates
 
 
@@ -3313,25 +4207,34 @@ def _filter_text_by_product_scope_or_highlight_aliases(text: str, highlight_alia
 
     keep = [False] * len(lines)
     highlight_match_count = 0
-    for index, line in enumerate(lines):
-        clean = line.strip()
-        if not clean:
-            continue
-        if _is_product_scope_text(clean):
-            keep[index] = True
-        if _text_matches_aliases(clean, highlight_aliases):
-            highlight_match_count += 1
-            start = max(0, index - 2)
-            end = min(len(lines), index + 4)
-            for nearby_index in range(start, end):
-                keep[nearby_index] = True
-            for header_index in range(index, -1, -1):
-                header = lines[header_index].strip()
-                if header.startswith("==="):
-                    keep[header_index] = True
-                    break
-                if header_index != index and header.startswith("["):
-                    break
+    if not any(line.strip().startswith("===") for line in lines):
+        for index, line in enumerate(lines):
+            clean = line.strip()
+            if not clean:
+                continue
+            if _is_product_scope_text(clean):
+                keep[index] = True
+            if _text_matches_aliases(clean, highlight_aliases):
+                highlight_match_count += 1
+                start = max(0, index - 2)
+                end = min(len(lines), index + 4)
+                for nearby_index in range(start, end):
+                    keep[nearby_index] = True
+    else:
+        for _header, start, end in _monthly_report_seatalk_conversation_groups(lines):
+            section_matches = False
+            for index in range(start, end):
+                clean = lines[index].strip()
+                if not clean:
+                    continue
+                if _is_product_scope_text(clean):
+                    keep[index] = True
+                if _text_matches_aliases(clean, highlight_aliases):
+                    highlight_match_count += 1
+                    section_matches = True
+            if section_matches:
+                for index in range(start, end):
+                    keep[index] = True
 
     kept: list[str] = []
     filtered = 0
@@ -3349,6 +4252,23 @@ def _filter_text_by_product_scope_or_highlight_aliases(text: str, highlight_alia
             continue
         filtered += 1
     return "\n".join(kept).strip(), filtered, highlight_match_count
+
+
+def _monthly_report_seatalk_conversation_groups(lines: list[str]) -> list[tuple[str, int, int]]:
+    groups: list[tuple[str, int, int]] = []
+    current_header = ""
+    current_start = 0
+    for index, line in enumerate(lines):
+        clean = str(line or "").strip()
+        if not clean.startswith("==="):
+            continue
+        if index > current_start:
+            groups.append((current_header, current_start, index))
+        current_header = clean
+        current_start = index
+    if len(lines) > current_start:
+        groups.append((current_header, current_start, len(lines)))
+    return groups or [("", 0, len(lines))]
 
 
 def _filter_thread_export_by_product_scope(text: str) -> tuple[str, int]:

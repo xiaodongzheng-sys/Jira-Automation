@@ -17,6 +17,7 @@ from bpmis_jira_tool.monthly_report import (
     MONTHLY_REPORT_SEATALK_HIGHLIGHT_CONVERSATION_SCOPE,
     MonthlyReportService,
     _estimate_token_count,
+    _highlight_topic_aliases,
     build_monthly_highlight_deep_evidence,
     build_monthly_highlight_evidence_map,
     build_monthly_highlight_topic_narrative_prompt,
@@ -25,6 +26,7 @@ from bpmis_jira_tool.monthly_report import (
     build_monthly_report_final_prompt,
     generate_monthly_report_with_codex,
     match_monthly_report_highlight_topics,
+    normalize_monthly_report_highlight_topic_sources,
     monthly_report_markdown_to_html,
     normalize_monthly_report_highlight_topics,
     normalize_monthly_report_template,
@@ -177,6 +179,15 @@ class MonthlyReportTests(unittest.TestCase):
         )
         with self.assertRaises(ToolError):
             normalize_monthly_report_highlight_topics(["one", "two", "three", "four", "five", "six", "seven"])
+
+        sources = normalize_monthly_report_highlight_topic_sources(
+            [{"topic": "AF", "sources": ["seatalk", "team-dashboard"]}],
+            ["AF", "CRMS"],
+        )
+        self.assertEqual(sources["AF"], ["seatalk", "team_dashboard"])
+        self.assertEqual(sources["CRMS"], ["seatalk", "gmail", "team_dashboard"])
+        with self.assertRaises(ToolError):
+            normalize_monthly_report_highlight_topic_sources([{"topic": "AF", "sources": []}], ["AF"])
 
         period = resolve_monthly_report_period_from_user_range(period_start="2026-04-01", period_end="2026-04-30")
         self.assertEqual(period.start.isoformat(), "2026-04-01T00:00:00+08:00")
@@ -587,6 +598,52 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertGreater(result["evidence_summary"]["highlight_seatalk_raw_match_count"], 0)
         self.assertGreater(result["evidence_summary"]["highlight_seatalk_line_match_count"], 0)
 
+    def test_generate_draft_prioritizes_seatalk_phrase_for_descriptive_credit_risk_highlight(self):
+        topic = "SG Credit Risk a more flexible workflow"
+        aliases = _highlight_topic_aliases(topic)
+        self.assertIn("flexible workflow", aliases)
+        self.assertNotIn("workflow", aliases)
+        self.assertNotIn("flexible", aliases)
+        self.assertNotIn("credit", aliases)
+
+        seatalk = _FakeSeaTalkService()
+        seatalk.export_history_since = lambda **_kwargs: "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== SG Credit Risk PM ===",
+                "[2026-05-02 09:59:00] PM: previous discussion covered suspension fallback options and owner alignment.",
+                "[2026-05-02 10:01:00] GitHub Bot: Build Cloud Run image workflow run failed.",
+                "[2026-05-02 10:02:00] Alice: SG Credit Risk needs a more flexible workflow for the BTI suspension feature.",
+                "[2026-05-02 10:03:00] Xiaodong Zheng: align the fallback and exception handling with local PM before PRD review.",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temp_dir, patch("bpmis_jira_tool.monthly_report.generate_monthly_report_with_codex") as mock_generate:
+            mock_generate.return_value = {"result_markdown": "# Draft", "model_id": "codex-cli", "trace": {}}
+            service = MonthlyReportService(
+                settings=_settings(temp_dir),
+                workspace_root=Path(temp_dir),
+                seatalk_service=seatalk,
+                confluence=_FakeConfluence(),
+                gmail_service=_FakeGmailService(),
+                now=datetime(2026, 5, 9, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            )
+
+            result = service.generate_draft(
+                template="# Template",
+                team_payloads=[],
+                highlight_topics=[topic],
+                period_start="2026-04-13",
+                period_end="2026-05-08",
+            )
+
+        joined_prompts = "\n".join(call.kwargs["prompt"] for call in mock_generate.call_args_list)
+        self.assertIn("previous discussion covered suspension fallback options", joined_prompts)
+        self.assertIn("more flexible workflow for the BTI suspension feature", joined_prompts)
+        self.assertIn("align the fallback and exception handling", joined_prompts)
+        self.assertNotIn("Build Cloud Run image workflow run failed", joined_prompts)
+        self.assertGreater(result["evidence_summary"]["highlight_seatalk_raw_match_count"], 0)
+        self.assertGreater(result["evidence_summary"]["highlight_seatalk_line_match_count"], 0)
+
     def test_generate_draft_splits_large_project_evidence_brief_batches(self):
         seatalk = _FakeSeaTalkService()
         projects = []
@@ -836,6 +893,139 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertIn("product_area_scope", prompt)
         self.assertIn("focus only on that product area's changes and timeline", prompt)
 
+    def test_highlight_bank_af_scope_keeps_bank_anti_fraud_only(self):
+        period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
+        topic = "PH afasa ShopeePay Transaction limit Bank AF"
+        projects = [
+            {
+                "bpmis_id": "BANK-AF",
+                "project_name": "PH AFASA ShopeePay Transaction Limit Bank AF",
+                "market": "PH",
+                "priority": "SP",
+                "teams": ["Anti-fraud"],
+                "jira_tickets": [{"jira_id": "AF-1", "jira_title": "ShopeePay transaction limit for Bank AF"}],
+            },
+            {
+                "bpmis_id": "WALLET-AF",
+                "project_name": "PH ShopeePay Wallet Transaction Limit Anti-Fraud",
+                "market": "PH",
+                "priority": "SP",
+                "teams": ["Anti-fraud"],
+                "jira_tickets": [{"jira_id": "AF-2", "jira_title": "ShopeePay transaction risk rules"}],
+            },
+            {
+                "bpmis_id": "CR-TXN",
+                "project_name": "PH Credit Card Transaction Limit",
+                "market": "PH",
+                "priority": "P1",
+                "teams": ["Credit Risk"],
+                "jira_tickets": [{"jira_id": "CR-1", "jira_title": "Credit transaction limit"}],
+            },
+        ]
+
+        matches = match_monthly_report_highlight_topics([topic], projects)
+        self.assertEqual(matches[0]["product_area_scope"], "Anti-fraud")
+        self.assertEqual(matches[0]["project_ids"], ["BANK-AF"])
+        self.assertEqual(matches[0]["qualifier_marker_groups"], [["bank", "maribank", "seabank"]])
+
+        deep = build_monthly_highlight_deep_evidence(
+            highlight_topics=[topic],
+            key_projects=projects,
+            topic_project_matches=matches,
+            seatalk_history_text=(
+                "2026-05-01 PH ShopeePay wallet transaction risk rule continued.\n"
+                "2026-05-02 PH ShopeePay transaction limit Bank AF UAT completed.\n"
+                "2026-05-03 PH Credit Card transaction limit alignment continued.\n"
+                "2026-05-04 Banking Product Update covered unrelated ShopeePay wallet status."
+            ),
+            topic_gmail_evidence=[],
+            prd_scope_summaries=[],
+            report_period=period,
+        )
+
+        self.assertEqual([project["bpmis_id"] for project in deep[0]["project_updates"]], ["BANK-AF"])
+        self.assertTrue(any("Bank AF" in item for item in deep[0]["seatalk_evidence"]))
+        self.assertFalse(any("wallet transaction" in item for item in deep[0]["seatalk_evidence"]))
+        self.assertFalse(any("Credit Card" in item for item in deep[0]["seatalk_evidence"]))
+        self.assertFalse(any("Banking Product Update" in item for item in deep[0]["seatalk_evidence"]))
+
+    def test_highlight_bank_af_qualifier_does_not_search_by_bank_only_or_clear_primary_match(self):
+        topic = "PH afasa ShopeePay Transaction limit Bank AF"
+        projects = [
+            {
+                "bpmis_id": "AFASA-SP",
+                "project_name": "PH AFASA ShopeePay Transaction Limit",
+                "market": "PH",
+                "priority": "SP",
+                "teams": ["Anti-fraud"],
+                "jira_tickets": [{"jira_id": "AF-1", "jira_title": "AFASA ShopeePay transaction limit"}],
+            },
+            {
+                "bpmis_id": "BANK-GENERIC",
+                "project_name": "Bank AF Generic Monitoring",
+                "market": "PH",
+                "priority": "P1",
+                "teams": ["Anti-fraud"],
+                "jira_tickets": [{"jira_id": "AF-2", "jira_title": "Bank AF dashboard cleanup"}],
+            },
+        ]
+
+        matches = match_monthly_report_highlight_topics([topic], projects)
+        self.assertEqual(matches[0]["project_ids"], ["AFASA-SP"])
+
+    def test_highlight_source_selection_gates_deep_evidence_sources(self):
+        period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
+        topics = ["AF launch", "CRMS workflow"]
+        projects = [
+            {
+                "bpmis_id": "AF-1",
+                "project_name": "AF launch",
+                "market": "SG",
+                "priority": "SP",
+                "teams": ["Anti-fraud"],
+                "jira_tickets": [{"jira_id": "AF-1", "jira_title": "AF launch", "jira_status": "Developing"}],
+            },
+            {
+                "bpmis_id": "CR-1",
+                "project_name": "CRMS workflow",
+                "market": "SG",
+                "priority": "SP",
+                "teams": ["Credit Risk"],
+                "jira_tickets": [{"jira_id": "CR-1", "jira_title": "CRMS workflow", "jira_status": "Developing"}],
+            },
+        ]
+        matches = match_monthly_report_highlight_topics(topics, projects)
+        deep = build_monthly_highlight_deep_evidence(
+            highlight_topics=topics,
+            key_projects=projects,
+            topic_project_matches=matches,
+            seatalk_history_text="=== AF launch group ===\nAF launch SeaTalk decision was aligned.\n=== CRMS workflow group ===\nCRMS workflow SeaTalk discussion continued.",
+            topic_gmail_evidence=[
+                {"topic": "AF launch", "text": "Subject: AF launch\nBody:\nAF launch Gmail approval.", "thread_count": 1, "message_count": 1},
+                {"topic": "CRMS workflow", "text": "Subject: CRMS workflow\nBody:\nCRMS workflow Gmail approval.", "thread_count": 1, "message_count": 1},
+            ],
+            prd_scope_summaries=[
+                {"jira_id": "AF-1", "scope_summary": "PRD says AF launch scope is ready."},
+                {"jira_id": "CR-1", "scope_summary": "PRD says CRMS workflow scope is ready."},
+            ],
+            report_period=period,
+            highlight_topic_sources={
+                "AF launch": ["seatalk"],
+                "CRMS workflow": ["gmail", "team_dashboard"],
+            },
+        )
+
+        self.assertEqual(deep[0]["selected_sources"], ["seatalk"])
+        self.assertTrue(deep[0]["seatalk_evidence"])
+        self.assertEqual(deep[0]["gmail_evidence"], [])
+        self.assertEqual(deep[0]["project_updates"], [])
+        self.assertEqual(deep[0]["prd_scope_summaries"], [])
+        self.assertEqual(deep[0]["matched_project_ids"], [])
+        self.assertEqual(deep[1]["seatalk_evidence"], [])
+        self.assertTrue(deep[1]["gmail_evidence"])
+        self.assertTrue(deep[1]["project_updates"])
+        self.assertTrue(deep[1]["prd_scope_summaries"])
+
     def test_highlight_topic_matching_and_deep_evidence_layers_sources(self):
         period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
         projects = [
@@ -910,6 +1100,74 @@ class MonthlyReportTests(unittest.TestCase):
         evidence_map = build_monthly_highlight_evidence_map(deep)
         self.assertEqual([item["topic"] for item in evidence_map], ["CIB Phase 2", "General Risk Narrative"])
         self.assertEqual(evidence_map[0]["confidence"], "high")
+
+    def test_issue_highlight_preserves_root_cause_and_solution_facts(self):
+        period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
+        topic = "ID anti-fraud recent issues, database capacity, system downgrade, impact and follow up actions"
+        deep = build_monthly_highlight_deep_evidence(
+            highlight_topics=[topic],
+            key_projects=[],
+            topic_project_matches=[{"topic": topic, "project_ids": []}],
+            seatalk_history_text=(
+                "Impact: intermittent login issue to SeaBank App; around 25 onboarding applications failed to call AF.\n"
+                "Root cause: high QPS directed at the Risk Database overloaded running threads and caused risk-service timeouts.\n"
+                "Short-term solution: dbp-antifraud-batch-service scaled down from 10 to 5 and UC QPS limit reduced by 50%.\n"
+                "Long-term solution: move risk identification data to Codis cache and AF rule logs to ES Index by 30 Jun.\n"
+            ),
+            topic_gmail_evidence=[],
+            prd_scope_summaries=[],
+            report_period=period,
+        )
+
+        facts = deep[0]["issue_followup_facts"]
+        self.assertTrue(any("onboarding applications" in item for item in facts["impact"]))
+        self.assertTrue(any("Risk Database" in item for item in facts["root_cause"]))
+        self.assertTrue(any("scaled down" in item for item in facts["short_term_solution"]))
+        self.assertTrue(any("Codis cache" in item for item in facts["long_term_solution"]))
+        self.assertEqual(deep[0]["evidence_map"]["topic_intent"], "issue_followup")
+        self.assertIn("issue_followup_facts", deep[0]["evidence_map"])
+
+        prompt = build_monthly_report_final_prompt(
+            template="# Template",
+            generated_at=datetime(2026, 5, 3, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            report_period=period,
+            evidence_brief="Compact brief",
+            monthly_evidence_brief=[],
+            highlight_topics=[topic],
+            highlight_deep_evidence=deep,
+            highlight_narratives=[],
+        )
+        self.assertIn("issue_followup_facts", prompt)
+        self.assertIn("root cause", prompt)
+        self.assertIn("long-term solution", prompt)
+
+    def test_issue_highlight_captures_chinese_seatalk_evidence_from_english_topic(self):
+        period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
+        topic = "ID anti-fraud recent issues, database capacity, system downgrade, impact and follow up actions"
+        deep = build_monthly_highlight_deep_evidence(
+            highlight_topics=[topic],
+            key_projects=[],
+            topic_project_matches=[{"topic": topic, "project_ids": []}],
+            seatalk_history_text=(
+                "=== ID AF group ===\n"
+                "[2026-05-05] PM: 这次数据库容量问题触发了系统降级。\n"
+                "影响：部分用户登录失败，约 25 个 onboarding application 调用 AF 失败。\n"
+                "根因：大促流量带来高并发 QPS，风险数据库读写过载，线程堆积。\n"
+                "短期方案：临时限流，关闭 dual writing，通过热修减少写入，并扩容 batch service。\n"
+                "长期方案：risk identification 数据迁移到 Codis 缓存，rule logs 迁移到 ES 索引。\n"
+                "下一步：30 Jun 完成迁移，Q4 拆分 AF database library。\n"
+            ),
+            topic_gmail_evidence=[],
+            prd_scope_summaries=[],
+            report_period=period,
+        )
+
+        facts = deep[0]["issue_followup_facts"]
+        self.assertTrue(any("登录失败" in item for item in facts["impact"]))
+        self.assertTrue(any("风险数据库读写过载" in item for item in facts["root_cause"]))
+        self.assertTrue(any("临时限流" in item for item in facts["short_term_solution"]))
+        self.assertTrue(any("ES 索引" in item for item in facts["long_term_solution"]))
+        self.assertTrue(any("30 Jun" in item for item in facts["next_action"]))
 
     def test_non_highlight_project_evidence_stays_light(self):
         period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
@@ -1132,9 +1390,23 @@ class MonthlyReportTests(unittest.TestCase):
             "| Region | Priority | Project | Target Tech Live Date |\n"
             "| SG | SP | Balance Transfer open to NTB application | Sep 2026 |\n"
             "| SG | P1 | SME RCF drawdown check | Oct 2026 |\n"
-            "Subject: PH_2026 Monthly Requirements Biweekly Update\n"
+            "Subject: PH_2026 Monthly Requirements Biweekly Update_0415\n"
+            "From: Yuanfang Zhou <yuanfang.zhou@npt.sg>\n"
+            "[Strategic Project] [PH] MariBank Card on Google Pay - On Track\n"
+            "Timeline: Tech GoLive: 2026.09.01, LV: 2026.09.02 ~ 2026.10.02, Public: 2026.10.15\n"
+            "Subject: PH_2026 Monthly Requirements Biweekly Update_0430\n"
             "From: Yuanfang Zhou <yuanfang.zhou@npt.sg>\n"
             "| PH | P0 | SPL Cash Advance disbursal to MariBank | Aug 2026 |\n"
+            "[Strategic Project] [PH] MariBank Card on Google Pay - On Track\n"
+            "Timeline: PRD: 2026.02.02 ~ 2026.03.20, DEV: 2026.03.02 ~ 2026.04.24\n"
+            ", SIT: 2026.03.16 ~ 2026.05.08, UAT: 2026.03.23 ~ 2026.05.15, REG:\n"
+            "2026.03.30 ~ 2026.05.20, Tech GoLive: 2026.05.21 -> 2026.06.09, LV:\n"
+            "2026.05.18 ~ 2026.07.17, Public: 2026.07.24\n"
+            "Dec 2025 SP [PH] MariBank Card on Google Pay - Manual Provisioning\n"
+            "Subject: SG_2026 Monthly Requirements Biweekly Update_0430\n"
+            "From: Xinni Oon <xinni.oon@npt.sg>\n"
+            "[Strategic Project] [SG] Multi Currency Account - On Track\n"
+            "Timeline: Tech Live: 260324, Public Live: 2026.05.15\n"
         )
         requirements_targets = build_monthly_requirements_target_map(requirements_text)
         brief = build_monthly_project_evidence_brief(
@@ -1170,6 +1442,21 @@ class MonthlyReportTests(unittest.TestCase):
                     ],
                 },
                 {
+                    "bpmis_id": "PH-GPAY",
+                    "project_name": "PH Google Pay in-app auth / token management",
+                    "market": "PH",
+                    "priority": "SP",
+                    "jira_tickets": [
+                        {
+                            "jira_id": "AF-2",
+                            "jira_title": "Google Pay in-app auth and token management",
+                            "jira_status": "Testing",
+                            "release_date": "2026-05-21",
+                            "version": "AF_v1_0521",
+                        }
+                    ],
+                },
+                {
                     "bpmis_id": "P1-JIRA",
                     "project_name": "SME RCF drawdown check",
                     "market": "SG",
@@ -1184,6 +1471,21 @@ class MonthlyReportTests(unittest.TestCase):
                         }
                     ],
                 },
+                {
+                    "bpmis_id": "SG-MCA",
+                    "project_name": "SG Multi Currency Account",
+                    "market": "SG",
+                    "priority": "SP",
+                    "jira_tickets": [
+                        {
+                            "jira_id": "AF-3",
+                            "jira_title": "Multi Currency Account",
+                            "jira_status": "Testing",
+                            "release_date": "2026-07-10",
+                            "version": "AF_v1_0710",
+                        }
+                    ],
+                },
             ],
             seatalk_history_text="",
             vip_gmail_text="",
@@ -1193,7 +1495,7 @@ class MonthlyReportTests(unittest.TestCase):
         )
 
         by_id = {item["project_id"]: item for item in brief}
-        self.assertEqual(len(requirements_targets), 3)
+        self.assertGreaterEqual(len(requirements_targets), 4)
         self.assertEqual(by_id["SP-EMAIL"]["target_tech_live_date"], "Sep 2026")
         self.assertEqual(by_id["SP-EMAIL"]["target_tech_live_source"], "monthly_requirements_email")
         self.assertEqual(by_id["SP-EMAIL"]["target_tech_live_source_detail"]["sender"], "xinni.oon@npt.sg")
@@ -1202,8 +1504,16 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(by_id["P0-EMAIL"]["target_tech_live_date"], "Aug 2026")
         self.assertEqual(by_id["P0-EMAIL"]["target_tech_live_source"], "monthly_requirements_email")
         self.assertEqual(by_id["P0-EMAIL"]["target_tech_live_source_detail"]["sender"], "yuanfang.zhou@npt.sg")
+        self.assertEqual(by_id["PH-GPAY"]["target_tech_live_date"], "Jun 2026")
+        self.assertEqual(by_id["PH-GPAY"]["target_tech_live_source"], "monthly_requirements_email")
+        self.assertEqual(by_id["PH-GPAY"]["target_tech_live_source_detail"]["source_date_hint"], "2026-04-30")
+        self.assertIn("Tech GoLive", by_id["PH-GPAY"]["target_tech_live_source_detail"]["matched_line"])
+        self.assertIn("google pay", by_id["PH-GPAY"]["target_tech_live_source_detail"]["matched_alias"])
         self.assertEqual(by_id["P1-JIRA"]["target_tech_live_date"], "Jul 2026")
         self.assertEqual(by_id["P1-JIRA"]["target_tech_live_source"], "jira_version")
+        self.assertEqual(by_id["SG-MCA"]["target_tech_live_date"], "Mar 2026")
+        self.assertEqual(by_id["SG-MCA"]["target_tech_live_source"], "monthly_requirements_email")
+        self.assertEqual(by_id["SG-MCA"]["target_tech_live_source_detail"]["target_label"], "tech_live")
 
     def test_vip_gmail_failure_does_not_fail_draft(self):
         class BrokenGmailService:

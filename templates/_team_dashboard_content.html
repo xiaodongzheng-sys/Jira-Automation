@@ -91,15 +91,25 @@
           <input id="team_dashboard_monthly_report_end" type="date" data-monthly-report-period-end>
         </div>
       </div>
-      <div class="field-group team-dashboard-monthly-report-topic-field">
-        <label for="team_dashboard_monthly_report_topics">Highlights Topics</label>
-        <textarea
-          id="team_dashboard_monthly_report_topics"
-          rows="4"
-          spellcheck="true"
-          placeholder="One topic per line, up to 6"
-          data-monthly-report-topics
-        ></textarea>
+      <div class="field-group team-dashboard-monthly-report-topic-field" data-monthly-report-topics>
+        <label>Highlights Topics</label>
+        <div class="team-dashboard-monthly-report-topic-grid">
+          {% for index in range(1, 7) %}
+            <div class="team-dashboard-monthly-report-topic-row" data-monthly-report-topic-row>
+              <input
+                type="text"
+                spellcheck="true"
+                placeholder="Highlight {{ index }}"
+                data-monthly-report-topic-input
+              >
+              <div class="team-dashboard-monthly-report-source-group" aria-label="Highlight {{ index }} sources">
+                <label><input type="checkbox" value="seatalk" data-monthly-report-source checked> SeaTalk</label>
+                <label><input type="checkbox" value="gmail" data-monthly-report-source checked> Gmail</label>
+                <label><input type="checkbox" value="team_dashboard" data-monthly-report-source checked> Team Dashboard</label>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
       </div>
       <div class="team-dashboard-progress team-dashboard-monthly-report-progress" data-monthly-report-progress hidden>
         <div class="team-dashboard-progress-bar" aria-hidden="true">

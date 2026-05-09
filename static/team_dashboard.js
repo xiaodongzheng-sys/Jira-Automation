@@ -50,6 +50,7 @@
   const monthlyReportPreview = root.querySelector('[data-monthly-report-preview]');
   const monthlyReportRecipient = root.querySelector('[data-monthly-report-recipient]');
   const monthlyReportTopics = root.querySelector('[data-monthly-report-topics]');
+  const monthlyReportTopicRows = Array.from(root.querySelectorAll('[data-monthly-report-topic-row]'));
   const monthlyReportPeriodStart = root.querySelector('[data-monthly-report-period-start]');
   const monthlyReportPeriodEnd = root.querySelector('[data-monthly-report-period-end]');
   const monthlyReportProgress = root.querySelector('[data-monthly-report-progress]');
@@ -201,6 +202,7 @@
         draft_markdown: String(payload?.draft_markdown || ''),
         subject: String(payload?.subject || monthlyReportSubject || 'Monthly Report'),
         highlight_topics: Array.isArray(payload?.highlight_topics) ? payload.highlight_topics : readMonthlyReportTopics({ strict: false }),
+        highlight_topic_sources: Array.isArray(payload?.highlight_topic_sources) ? payload.highlight_topic_sources : readMonthlyReportTopicSources({ strict: false }),
         period_start: String(payload?.period_start || monthlyReportPeriodStart?.value || ''),
         period_end: String(payload?.period_end || monthlyReportPeriodEnd?.value || ''),
         saved_at: payload?.saved_at || new Date().toISOString(),
@@ -212,9 +214,11 @@
   };
 
   const readMonthlyReportTopics = ({ strict = true } = {}) => {
-    const topics = String(monthlyReportTopics?.value || '')
-      .split(/\r?\n/)
-      .map((item) => item.trim())
+    const sourceNodes = monthlyReportTopicRows.length
+      ? monthlyReportTopicRows.map((row) => row.querySelector('[data-monthly-report-topic-input]'))
+      : [monthlyReportTopics];
+    const topics = sourceNodes
+      .map((node) => String(node?.value || '').trim())
       .filter(Boolean);
     const uniqueTopics = [...new Set(topics)];
     if (strict && uniqueTopics.length === 0) {
@@ -226,9 +230,50 @@
     return uniqueTopics.slice(0, 6);
   };
 
+  const readMonthlyReportTopicSources = ({ strict = true } = {}) => {
+    const items = [];
+    monthlyReportTopicRows.forEach((row) => {
+      const topic = String(row.querySelector('[data-monthly-report-topic-input]')?.value || '').trim();
+      if (!topic) return;
+      const sources = Array.from(row.querySelectorAll('[data-monthly-report-source]'))
+        .filter((input) => input.checked)
+        .map((input) => String(input.value || '').trim())
+        .filter(Boolean);
+      if (strict && sources.length === 0) {
+        throw new Error(`Select at least one source for "${topic}".`);
+      }
+      items.push({ topic, sources });
+    });
+    return items.slice(0, 6);
+  };
+
   const applyMonthlyReportInputs = (payload = {}, { onlyEmpty = false } = {}) => {
-    if (monthlyReportTopics && Array.isArray(payload.highlight_topics) && payload.highlight_topics.length && (!onlyEmpty || !monthlyReportTopics.value.trim())) {
-      monthlyReportTopics.value = payload.highlight_topics.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 6).join('\n');
+    const topics = Array.isArray(payload.highlight_topics) ? payload.highlight_topics.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 6) : [];
+    const rawSourcePayload = payload.highlight_topic_sources && typeof payload.highlight_topic_sources === 'object'
+      ? payload.highlight_topic_sources
+      : {};
+    const sourceEntries = Array.isArray(rawSourcePayload)
+      ? rawSourcePayload
+          .filter((item) => item && typeof item === 'object')
+          .map((item) => [String(item.topic || '').trim(), Array.isArray(item.sources) ? item.sources : []])
+      : Object.entries(rawSourcePayload);
+    const sourceMap = new Map(
+      sourceEntries.map(([topic, sources]) => [
+        String(topic || '').trim(),
+        Array.isArray(sources) ? sources.map((source) => String(source || '').trim()) : [],
+      ]),
+    );
+    if (monthlyReportTopicRows.length && topics.length && (!onlyEmpty || readMonthlyReportTopics({ strict: false }).length === 0)) {
+      monthlyReportTopicRows.forEach((row, index) => {
+        const input = row.querySelector('[data-monthly-report-topic-input]');
+        if (input) input.value = topics[index] || '';
+        const selected = sourceMap.get(topics[index]) || ['seatalk', 'gmail', 'team_dashboard'];
+        row.querySelectorAll('[data-monthly-report-source]').forEach((sourceInput) => {
+          sourceInput.checked = !topics[index] || selected.includes(String(sourceInput.value || '').trim());
+        });
+      });
+    } else if (monthlyReportTopics && topics.length && (!onlyEmpty || !monthlyReportTopics.value.trim())) {
+      monthlyReportTopics.value = topics.join('\n');
     }
     if (monthlyReportPeriodStart && payload.period_start && (!onlyEmpty || !monthlyReportPeriodStart.value)) {
       monthlyReportPeriodStart.value = String(payload.period_start).slice(0, 10);
@@ -250,6 +295,7 @@
     }
     return {
       highlight_topics: highlightTopics,
+      highlight_topic_sources: readMonthlyReportTopicSources(),
       period_start: periodStart,
       period_end: periodEnd,
     };
@@ -1484,6 +1530,7 @@
         draft_markdown: payload.draft_markdown,
         subject: monthlyReportSubject,
         highlight_topics: payload.highlight_topics || [],
+        highlight_topic_sources: payload.highlight_topic_sources || payload.generation_summary?.highlight_topic_sources || [],
         period_start: payload.period_start || '',
         period_end: payload.period_end || '',
         saved_at: payload.generated_at ? new Date(Number(payload.generated_at) * 1000).toISOString() : undefined,
@@ -1532,6 +1579,7 @@
         draft_markdown: monthlyReportDraft.value,
         subject: monthlyReportSubject,
         highlight_topics: payload.highlight_topics || requestPayload.highlight_topics,
+        highlight_topic_sources: payload.highlight_topic_sources || payload.generation_summary?.highlight_topic_sources || requestPayload.highlight_topic_sources,
         period_start: payload.generation_summary?.period_start || requestPayload.period_start,
         period_end: payload.generation_summary?.period_end || requestPayload.period_end,
         source: 'generate',
@@ -1971,12 +2019,21 @@
     button.addEventListener('click', saveSeaTalkNameMappings);
   });
   monthlyReportDraft?.addEventListener('input', () => updateMonthlyReportPreview({ persist: true }));
-  [monthlyReportTopics, monthlyReportPeriodStart, monthlyReportPeriodEnd].forEach((node) => {
+  [
+    monthlyReportTopics,
+    ...monthlyReportTopicRows.flatMap((row) => [
+      row.querySelector('[data-monthly-report-topic-input]'),
+      ...Array.from(row.querySelectorAll('[data-monthly-report-source]')),
+    ]),
+    monthlyReportPeriodStart,
+    monthlyReportPeriodEnd,
+  ].forEach((node) => {
     node?.addEventListener('change', () => {
       writeMonthlyReportDraftCache({
         draft_markdown: monthlyReportDraft?.value || '',
         subject: monthlyReportSubject,
         highlight_topics: readMonthlyReportTopics({ strict: false }),
+        highlight_topic_sources: readMonthlyReportTopicSources({ strict: false }),
         source: 'inputs',
       });
     });
