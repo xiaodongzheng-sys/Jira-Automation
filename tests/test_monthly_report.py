@@ -731,8 +731,60 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertIn("executive product update", prompt)
         self.assertIn("Do not expose raw evidence mechanics in Highlights", prompt)
         self.assertIn("confidence/recommended_tone", prompt)
+        self.assertIn("go_live_outcome", prompt)
         self.assertIn("no confirmed evidence", prompt)
         self.assertIn("pending confirmation", prompt)
+
+    def test_go_live_highlight_intent_does_not_promote_generic_progress(self):
+        period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
+        projects = [
+            {
+                "bpmis_id": "CCIC",
+                "project_name": "PH Credit Card Instant Checkout",
+                "market": "PH",
+                "priority": "SP",
+                "jira_tickets": [
+                    {
+                        "jira_id": "CC-1",
+                        "jira_title": "Credit Card Instant Checkout risk tier update",
+                        "jira_status": "Developing",
+                    }
+                ],
+            }
+        ]
+        matches = match_monthly_report_highlight_topics(["PH Credit Card Employee Go Live"], projects)
+        deep = build_monthly_highlight_deep_evidence(
+            highlight_topics=["PH Credit Card Employee Go Live"],
+            key_projects=projects,
+            topic_project_matches=matches,
+            seatalk_history_text="2026-05-01 PH Credit Card Instant Checkout development and testing continued.",
+            topic_gmail_evidence=[
+                {
+                    "topic": "PH Credit Card Employee Go Live",
+                    "text": "Subject: PH Credit Card Instant Checkout\nBody:\nRisk tier and tenor tier development remains in progress.",
+                }
+            ],
+            prd_scope_summaries=[
+                {
+                    "jira_id": "CC-1",
+                    "scope_summary": "PRD covers risk tier, tenor tier, whitelist and CRIF fallback scope.",
+                }
+            ],
+            report_period=period,
+        )
+
+        self.assertEqual(deep[0]["topic_intent"], "go_live_outcome")
+        self.assertEqual(deep[0]["evidence_map"]["intent_signal_count"], 0)
+        self.assertIn("go_live_outcome_evidence", deep[0]["evidence_map"]["gaps"])
+        self.assertEqual(deep[0]["confidence"], "low")
+        self.assertIn("do not substitute generic development", deep[0]["recommended_tone"])
+        prompt = build_monthly_highlight_topic_narrative_prompt(
+            generated_at=datetime(2026, 5, 8, 12, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            report_period=period,
+            topic_evidence=deep[0],
+        )
+        self.assertIn("go-live happened", prompt)
+        self.assertIn("Do not replace missing go-live outcome evidence", prompt)
 
     def test_highlight_topic_matching_and_deep_evidence_layers_sources(self):
         period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")

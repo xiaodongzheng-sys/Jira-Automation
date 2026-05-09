@@ -942,6 +942,7 @@ class MonthlyReportService:
                     {
                         "topic": topic,
                         "confidence": str(cached.get("confidence") or item.get("confidence") or "").strip(),
+                        "topic_intent": str(cached.get("topic_intent") or item.get("topic_intent") or "").strip(),
                         "narrative_markdown": str(cached.get("narrative_markdown") or "").strip()[:MONTHLY_REPORT_SUMMARY_MAX_CHARS],
                         "cache_hit": True,
                         "model_id": str(cached.get("model_id") or ""),
@@ -973,6 +974,7 @@ class MonthlyReportService:
             narrative_item = {
                 "topic": topic,
                 "confidence": str(item.get("confidence") or "").strip(),
+                "topic_intent": str(item.get("topic_intent") or "").strip(),
                 "narrative_markdown": narrative[:MONTHLY_REPORT_SUMMARY_MAX_CHARS],
                 "cache_hit": False,
                 "model_id": generated.get("model_id"),
@@ -1227,6 +1229,8 @@ def build_monthly_highlight_deep_evidence(
         match = match_by_topic.get(topic) or {"topic": topic, "project_ids": []}
         project_ids = [str(project_id or "").strip() for project_id in (match.get("project_ids") or []) if str(project_id or "").strip()]
         projects = [projects_by_id[project_id] for project_id in project_ids if project_id in projects_by_id]
+        topic_intent = _monthly_report_highlight_topic_intent(topic)
+        intent_focus = _monthly_report_highlight_intent_focus(topic_intent)
         aliases = _highlight_topic_aliases(topic)
         for project in projects:
             aliases.update(_project_aliases(project))
@@ -1275,19 +1279,34 @@ def build_monthly_highlight_deep_evidence(
         compact_gmail = _compact_report_text_list(_matched_sections_for_project(gmail_text, aliases, limit=8), limit=8, max_chars=900)
         compact_sheets = _compact_google_sheet_evidence(gmail_item.get("google_sheet_evidence"))
         compact_prd = _compact_report_text_list(prd_facts, limit=6, max_chars=700)
+        intent_signal_count = _monthly_report_intent_signal_count(
+            topic_intent,
+            [
+                *compact_seatalk,
+                *compact_gmail,
+                *[str(sheet.get("text") or "") for sheet in compact_sheets],
+                *compact_prd,
+                *[str(fact) for project in project_updates for fact in (project.get("status_facts") or [])],
+                *[str(fact) for project in project_updates for fact in (project.get("timeline_facts") or [])],
+            ],
+        )
         evidence_map = _monthly_highlight_topic_evidence_map(
             topic=topic,
             topic_type="project_update" if projects else "general_topic",
+            topic_intent=topic_intent,
             project_updates=project_updates,
             seatalk_evidence=compact_seatalk,
             gmail_evidence=compact_gmail,
             google_sheet_evidence=compact_sheets,
             prd_scope_summaries=compact_prd,
             gmail_error=str(gmail_item.get("error") or "").strip(),
+            intent_signal_count=intent_signal_count,
         )
         evidence.append(
             {
                 "topic": topic,
+                "topic_intent": topic_intent,
+                "intent_focus": intent_focus,
                 "topic_type": "project_update" if projects else "general_topic",
                 "matched_project_ids": project_ids,
                 "matched_project_names": [str(project.get("project_name") or "").strip() for project in projects if str(project.get("project_name") or "").strip()],
@@ -1318,12 +1337,14 @@ def build_monthly_highlight_evidence_map(highlight_deep_evidence: list[dict[str,
             _monthly_highlight_topic_evidence_map(
                 topic=str(item.get("topic") or "").strip(),
                 topic_type=str(item.get("topic_type") or "").strip(),
+                topic_intent=str(item.get("topic_intent") or "").strip(),
                 project_updates=[project for project in (item.get("project_updates") or []) if isinstance(project, dict)],
                 seatalk_evidence=[str(value) for value in (item.get("seatalk_evidence") or []) if str(value).strip()],
                 gmail_evidence=[str(value) for value in (item.get("gmail_evidence") or []) if str(value).strip()],
                 google_sheet_evidence=[sheet for sheet in (item.get("google_sheet_evidence") or []) if isinstance(sheet, dict)],
                 prd_scope_summaries=[str(value) for value in (item.get("prd_scope_summaries") or []) if str(value).strip()],
                 gmail_error=str(item.get("gmail_error") or "").strip(),
+                intent_signal_count=_safe_int(item.get("intent_signal_count")),
             )
         )
     return maps
@@ -1333,12 +1354,14 @@ def _monthly_highlight_topic_evidence_map(
     *,
     topic: str,
     topic_type: str,
+    topic_intent: str,
     project_updates: list[dict[str, Any]],
     seatalk_evidence: list[str],
     gmail_evidence: list[str],
     google_sheet_evidence: list[dict[str, Any]],
     prd_scope_summaries: list[str],
     gmail_error: str = "",
+    intent_signal_count: int = 0,
 ) -> dict[str, Any]:
     project_count = len(project_updates)
     source_counts = {
@@ -1363,6 +1386,9 @@ def _monthly_highlight_topic_evidence_map(
     concrete_project_progress = any(status in {"Dev", "UAT"} for status in project_statuses)
     if concrete_project_progress:
         score += 2
+    intent = topic_intent or _monthly_report_highlight_topic_intent(topic)
+    if intent != "general_progress" and intent_signal_count <= 0:
+        score = min(score, 4)
     if len(active_sources) >= 3 and score >= 8:
         confidence = "high"
     elif len(active_sources) >= 2 and score >= 5:
@@ -1380,15 +1406,24 @@ def _monthly_highlight_topic_evidence_map(
         gaps.append("prd")
     if gmail_error:
         gaps.append("gmail_error")
+    if intent != "general_progress" and intent_signal_count <= 0:
+        gaps.append(f"{intent}_evidence")
     tone_by_confidence = {
         "high": "Write as a confident executive progress update with clear business impact and next movement.",
         "medium": "Write as a cautious progress update; mention pending confirmation only if it affects management attention.",
         "low": "Write as a monitoring item, avoid over-claiming, and avoid raw phrases like no confirmed evidence.",
         "none": "Do not position as material progress; state that the item remains pending confirmation in manager-ready wording.",
     }
+    intent_focus = _monthly_report_highlight_intent_focus(intent)
+    recommended_tone = tone_by_confidence[confidence]
+    if intent_focus.get("tone_suffix"):
+        recommended_tone = f"{recommended_tone} {intent_focus['tone_suffix']}"
     return {
         "topic": topic,
         "topic_type": topic_type,
+        "topic_intent": intent,
+        "intent_signal_count": intent_signal_count,
+        "intent_focus": intent_focus,
         "confidence": confidence,
         "confidence_score": score,
         "source_counts": source_counts,
@@ -1400,7 +1435,7 @@ def _monthly_highlight_topic_evidence_map(
         ],
         "project_statuses": _dedupe_preserve_order(project_statuses),
         "gaps": gaps,
-        "recommended_tone": tone_by_confidence[confidence],
+        "recommended_tone": recommended_tone,
     }
 
 
@@ -1454,8 +1489,10 @@ def build_monthly_report_generation_diagnostics(
         "highlight_source_counts": [
             {
                 "topic": str(item.get("topic") or "").strip(),
+                "topic_intent": str(item.get("topic_intent") or "").strip(),
                 "confidence": str(item.get("confidence") or "").strip(),
                 "source_counts": item.get("source_counts") if isinstance(item.get("source_counts"), dict) else {},
+                "intent_signal_count": _safe_int(item.get("intent_signal_count")),
                 "gaps": item.get("gaps") if isinstance(item.get("gaps"), list) else [],
             }
             for item in highlight_evidence_map
@@ -1721,7 +1758,8 @@ def build_monthly_report_batch_prompt(
         "For Highlight deep evidence, preserve narrative facts for the user-provided topics. For Monthly project evidence brief, keep other Key Projects concise and do not expand them into highlights.\n"
         f"Hard scope: include only Xiaodong-owned {', '.join(MONTHLY_REPORT_PRODUCT_SCOPE)} product updates. Exclude unrelated general awareness, HR, hiring, personal chat, random live issue, and generic IT/process/material-check updates even if a VIP or priority keyword appears.\n"
         "Use concise Markdown with these headings exactly: Highlights, Decisions, Risks, Owners, Project References, Open Asks, Evidence Gaps.\n"
-        "For each highlight topic, respect its confidence/recommended_tone when present. High-confidence topics can be written as progress; low-confidence topics should remain monitoring items without over-claiming.\n"
+        "For each highlight topic, respect its topic_intent/intent_focus/confidence/recommended_tone when present. High-confidence topics can be written as progress; low-confidence topics should remain monitoring items without over-claiming.\n"
+        "For go-live outcome topics, preserve launch result, employee/pilot feedback, production issue, stabilization, and post-live next-action facts. Do not substitute generic development or PRD progress for missing go-live outcome evidence.\n"
         "Preserve concrete project names, Jira IDs, owners, markets, dates, decisions, blockers, and launch/status facts.\n"
         "If this batch has no material in-scope evidence, return only: No material update found.\n"
         "Do not include raw transcripts or long excerpts.\n\n"
@@ -1749,7 +1787,8 @@ def build_monthly_highlight_topic_narrative_prompt(
         "Write one manager-ready Monthly Report Highlight paragraph for the single topic below.\n"
         "Use only this topic's evidence. Do not use or invent facts from other topics.\n"
         "The audience is Xiaodong's manager. Write as an executive product update, not as an investigation log.\n"
-        "Use the confidence and recommended_tone fields to calibrate certainty.\n"
+        "Use the topic_intent, intent_focus, confidence, and recommended_tone fields to decide what kind of update this is.\n"
+        "If topic_intent is go_live_outcome, focus on whether go-live happened, post-go-live result, employee/pilot feedback, production issues, stabilization, and next rollout/remediation. Do not replace missing go-live outcome evidence with generic development/testing/PRD progress; use generic project progress only as brief background.\n"
         "- high: state progress, business impact, risk/decision, and next movement clearly.\n"
         "- medium: describe directional progress and pending confirmation carefully.\n"
         "- low or none: frame as a monitoring item or pending confirmation; do not imply committed delivery.\n"
@@ -1834,7 +1873,8 @@ def build_monthly_report_final_prompt(
         "Use Highlight Narrative Candidates as the primary source for the Highlights section, and use Highlight Deep Evidence only to resolve missing nuance. Use Other Key Project Updates only for the project table and concise non-highlight updates.\n"
         "The audience is Xiaodong's manager. Write Highlights as an executive product update, not as an investigation log: emphasize business impact, delivery progress, material risk, decision needed, and next action.\n"
         "Use calm, factual, ownership-oriented wording. Avoid alarmist language, raw technical incident wording, internal tool/process details, chat-style phrasing, and over-hedged phrases unless the uncertainty itself is the management point.\n"
-        "Use the confidence/recommended_tone fields inside Highlight Deep Evidence to calibrate wording: high confidence can state progress directly; medium confidence should be framed as directional progress with pending confirmation; low or none should be framed as a watch item or pending confirmation, not as a failure to find evidence.\n"
+        "Use the topic_intent/intent_focus/confidence/recommended_tone fields inside Highlight Deep Evidence to calibrate wording: high confidence can state progress directly; medium confidence should be framed as directional progress with pending confirmation; low or none should be framed as a watch item or pending confirmation, not as a failure to find evidence.\n"
+        "For go_live_outcome highlights, do not let general project development/testing progress replace launch result or feedback. If launch outcome evidence is missing, write that the go-live outcome remains pending confirmation in manager-ready language.\n"
         f"Hard scope: the final report must contain only Xiaodong-owned {', '.join(MONTHLY_REPORT_PRODUCT_SCOPE)} product updates. Do not include unrelated general awareness, HR, hiring, personal chat, random live issue, or generic IT/process/material-check updates. VIP or priority-keyword mentions are not enough unless the evidence is in-scope.\n"
         "Never include a project-table row unless it is attached to an item where include=true in Other Key Project Updates JSON. Non-project highlight topics may appear only in Highlights when supported by Highlight Deep Evidence.\n"
         "Do not write 'Evidence-limited' unless that exact wording appears in the structured status_facts for an included project.\n"
@@ -2414,6 +2454,152 @@ def _project_aliases(project: dict[str, Any]) -> set[str]:
         if "alcv12" in alias.replace(" ", ""):
             expanded.update({"alc v12", "alcv12", "alc"})
     return {item for item in expanded if item}
+
+
+def _monthly_report_highlight_topic_intent(topic: Any) -> str:
+    text = str(topic or "").strip().casefold()
+    compact = _normalize_alias_token(text)
+    if any(term in text for term in ("go live", "went live", "post live", "post-live", "post launch", "post-launch")) or "golive" in compact:
+        return "go_live_outcome"
+    if any(term in text for term in ("employee rollout", "pilot rollout", "rollout result", "launch result", "user feedback", "feedback after")):
+        return "go_live_outcome"
+    if any(term in text for term in ("issue", "incident", "capacity", "downgrade", "follow up", "follow-up", "risk", "blocker", "problem")):
+        return "issue_followup"
+    if any(term in text for term in ("release readiness", "launch readiness", "release window", "uat readiness", "sit readiness")):
+        return "release_readiness"
+    if any(term in text for term in ("decision", "confirm", "alignment", "approval", "sign off", "sign-off")):
+        return "decision_needed"
+    return "general_progress"
+
+
+def _monthly_report_highlight_intent_focus(intent: str) -> dict[str, Any]:
+    normalized = str(intent or "general_progress").strip() or "general_progress"
+    if normalized == "go_live_outcome":
+        return {
+            "label": "Go-live outcome and feedback",
+            "evidence_priority": [
+                "confirmed go-live date or rollout status",
+                "employee or pilot user feedback",
+                "post-live production issues or stability",
+                "usage, adoption, support, or blocker signals",
+                "next rollout or remediation action",
+            ],
+            "tone_suffix": "For go-live topics, do not substitute generic development or PRD progress for post-go-live outcome or feedback; if outcome evidence is missing, say the launch outcome remains pending confirmation.",
+        }
+    if normalized == "issue_followup":
+        return {
+            "label": "Issue follow-up and mitigation",
+            "evidence_priority": [
+                "impact and affected flow",
+                "containment or mitigation completed",
+                "remaining risk or decision",
+                "owner and next corrective action",
+            ],
+            "tone_suffix": "For issue topics, focus on impact, containment, residual risk, and next action instead of broad project progress.",
+        }
+    if normalized == "release_readiness":
+        return {
+            "label": "Release readiness",
+            "evidence_priority": [
+                "SIT/UAT or release readiness status",
+                "release dependency or blocker",
+                "target launch window",
+                "next readiness checkpoint",
+            ],
+            "tone_suffix": "For readiness topics, focus on whether the release is ready, blocked, or pending confirmation.",
+        }
+    if normalized == "decision_needed":
+        return {
+            "label": "Decision needed",
+            "evidence_priority": [
+                "decision required",
+                "options or tradeoff",
+                "business impact",
+                "next owner or forum",
+            ],
+            "tone_suffix": "For decision topics, emphasize the management decision and consequence, not general delivery activity.",
+        }
+    return {
+        "label": "General progress",
+        "evidence_priority": [
+            "delivery progress",
+            "business impact",
+            "risk or decision",
+            "next movement",
+        ],
+        "tone_suffix": "",
+    }
+
+
+def _monthly_report_intent_signal_count(intent: str, evidence_texts: list[str]) -> int:
+    normalized = str(intent or "general_progress").strip()
+    if normalized == "general_progress":
+        return 1
+    text = "\n".join(str(item or "") for item in evidence_texts if str(item or "").strip()).casefold()
+    compact = _normalize_alias_token(text)
+    if not text:
+        return 0
+    terms_by_intent = {
+        "go_live_outcome": [
+            "go live",
+            "went live",
+            "post live",
+            "post-live",
+            "post launch",
+            "post-launch",
+            "employee",
+            "pilot",
+            "feedback",
+            "production",
+            "prod",
+            "live issue",
+            "stability",
+            "adoption",
+            "usage",
+            "rollout",
+            "launched",
+            "launch outcome",
+        ],
+        "issue_followup": [
+            "issue",
+            "incident",
+            "capacity",
+            "downgrade",
+            "mitigation",
+            "root cause",
+            "impact",
+            "blocked",
+            "blocker",
+            "follow up",
+            "follow-up",
+        ],
+        "release_readiness": [
+            "readiness",
+            "sit",
+            "uat",
+            "release",
+            "launch",
+            "dependency",
+            "blocker",
+            "checkpoint",
+        ],
+        "decision_needed": [
+            "decision",
+            "confirm",
+            "alignment",
+            "approval",
+            "sign off",
+            "sign-off",
+            "option",
+            "tradeoff",
+        ],
+    }
+    count = 0
+    for term in terms_by_intent.get(normalized, []):
+        clean = term.casefold()
+        if clean in text or _normalize_alias_token(clean) in compact:
+            count += 1
+    return count
 
 
 def _highlight_topic_aliases(topic: Any) -> set[str]:
