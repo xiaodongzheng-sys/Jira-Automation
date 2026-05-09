@@ -450,7 +450,7 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(seatalk.calls[0]["since"].isoformat(), "2026-04-20T00:00:00+08:00")
         self.assertEqual(seatalk.calls[0]["now"].isoformat(), "2026-05-04T00:00:00+08:00")
         self.assertEqual(seatalk.calls[0]["days"], 15)
-        self.assertEqual(seatalk.calls[0]["conversation_scope"], MONTHLY_REPORT_SEATALK_HIGHLIGHT_CONVERSATION_SCOPE)
+        self.assertIsNone(seatalk.calls[0]["conversation_scope"])
         self.assertEqual(gmail.calls[0]["since"].isoformat(), "2026-04-20T00:00:00+08:00")
         self.assertEqual(gmail.calls[0]["now"].isoformat(), "2026-05-04T00:00:00+08:00")
         self.assertEqual(gmail.calls[0]["contact_emails"], ["siewghee.kunglim@shopee.com"])
@@ -842,6 +842,44 @@ class MonthlyReportTests(unittest.TestCase):
         )
         self.assertIn("go-live happened", prompt)
         self.assertIn("Do not replace missing go-live outcome evidence", prompt)
+
+    def test_employee_live_testing_topic_uses_concrete_seatalk_launch_evidence(self):
+        period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
+        topic = "PH Credit Card MVP Employee Live Testing Status"
+        deep = build_monthly_highlight_deep_evidence(
+            highlight_topics=[topic],
+            key_projects=[],
+            topic_project_matches=[{"topic": topic, "project_ids": []}],
+            seatalk_history_text=(
+                "=== group-4012584 ===\n"
+                "[2026-04-21 12:27:29] Haoshuo Liu: We will get EPFS by this week. "
+                "SEA employee LV will have 3000 users to be whitelisted. "
+                "On Jun 8 we will whitelist 50k users.\n"
+                "[2026-04-21 12:39:16] Zheng Xiaodong: Can I check if Credit Card Limit Increase has been internally tested before May 7?\n"
+                "[2026-04-21 12:58:43] PM: Positive case can be tested prior the employee live, or we can try actual employees on May 7.\n"
+                "=== group-9999999 ===\n"
+                "[2026-04-17 16:37:18] PM: ID Credit Card has a later launch and unrelated testing progress.\n"
+                "[2026-04-18 11:20:10] PM: PH GRC live testing finished last Friday, unrelated to card launch.\n"
+                "=== group-4285581 ===\n"
+                "[2026-04-21 16:34:28] Liang Chen: PH Credit Card completed EPFS. "
+                "Plan is Sea Group Employee Live Testing on May 7 and Public Launch on Jun 8. "
+                "2nd Live Testing May 7-Jun 7: Sea group employee 3000 users. "
+                "Public Launch Jun 8: Whitelist 50k users.\n"
+            ),
+            topic_gmail_evidence=[],
+            prd_scope_summaries=[],
+            report_period=period,
+            highlight_topic_sources={topic: ["seatalk"]},
+        )
+
+        self.assertEqual(deep[0]["topic_intent"], "go_live_outcome")
+        self.assertEqual(deep[0]["selected_sources"], ["seatalk"])
+        self.assertGreaterEqual(deep[0]["evidence_map"]["intent_signal_count"], 1)
+        self.assertEqual(deep[0]["confidence"], "high")
+        self.assertTrue(any("Sea Group Employee Live Testing" in item for item in deep[0]["seatalk_evidence"]))
+        self.assertTrue(any("Whitelist 50k users" in item for item in deep[0]["seatalk_evidence"]))
+        self.assertFalse(any("ID Credit Card" in item for item in deep[0]["seatalk_evidence"]))
+        self.assertFalse(any("PH GRC" in item for item in deep[0]["seatalk_evidence"]))
 
     def test_highlight_product_area_scope_keeps_credit_risk_only(self):
         period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
