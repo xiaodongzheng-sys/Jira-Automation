@@ -544,6 +544,9 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertIn("Highlight Deep Evidence", prompt)
         self.assertIn("Other Key Project Updates", prompt)
         self.assertIn('"current_status"', prompt)
+        self.assertIn("The audience is Xiaodong's manager", prompt)
+        self.assertIn("executive product update", prompt)
+        self.assertIn("Do not expose raw evidence mechanics in Highlights", prompt)
 
     def test_highlight_topic_matching_and_deep_evidence_layers_sources(self):
         period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
