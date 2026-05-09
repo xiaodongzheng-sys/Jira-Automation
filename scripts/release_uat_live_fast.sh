@@ -242,12 +242,40 @@ live_revision() {
   curl -fsS --max-time 10 "${LIVE_URL%/}/healthz" | "$PYTHON_BIN" -c 'import json, sys; print(json.load(sys.stdin).get("revision", ""))'
 }
 
+require_gcloud_noninteractive_auth() {
+  if [[ -z "$GCLOUD_BIN" ]]; then
+    echo "gcloud is not installed. Install Google Cloud SDK first." >&2
+    return 1
+  fi
+  if "$GCLOUD_BIN" auth print-access-token >/dev/null 2>&1; then
+    return 0
+  fi
+  {
+    echo "gcloud credentials are not usable non-interactively."
+    echo "Run: gcloud auth login"
+    echo "Or configure a non-interactive deploy identity before promotion."
+  } >&2
+  return 1
+}
+
 print_timing_report() {
   "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/report_deploy_timings.py" --limit "${RELEASE_UAT_LIVE_TIMING_LIMIT:-20}" || true
 }
 
 cd "$ROOT_DIR"
 SHA="$(current_sha)"
+LIVE_URL="$(resolve_live_url)"
+if [[ "$(live_revision || true)" == "$SHA" && "${RELEASE_UAT_LIVE_SKIP_GCLOUD_WHEN_LIVE_CURRENT:-1}" == "1" ]]; then
+  echo "Live already serves $SHA; skipping Cloud Run/UAT gcloud steps."
+  TEAM_STACK_HOST_ROOT="${TEAM_STACK_HOST_ROOT:-$(recommended_team_stack_root)}"
+  "$TEAM_STACK_HOST_ROOT/scripts/run_team_stack.sh" doctor
+  print_timing_report
+  FINISHED_AT="$(date +%s)"
+  echo "Fast UAT/live release confirmed Live already current in $((FINISHED_AT - STARTED_AT))s"
+  exit 0
+fi
+
+require_gcloud_noninteractive_auth
 IMAGE_URI=""
 run_gate_and_image_in_parallel "$SHA"
 
@@ -258,7 +286,6 @@ CLOUD_RUN_UAT_PARALLEL_HOST_SYNC="${CLOUD_RUN_UAT_PARALLEL_HOST_SYNC:-1}" \
 "$ROOT_DIR/scripts/deploy_cloud_run_uat.sh"
 
 UAT_URL="$(resolve_uat_url)"
-LIVE_URL="$(resolve_live_url)"
 
 if [[ "$(live_revision || true)" == "$SHA" ]]; then
   echo "Live already serves $SHA; skipping pre-promotion smoke and promote step."
