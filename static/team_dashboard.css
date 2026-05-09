@@ -8,6 +8,35 @@
   padding: 20px 22px;
 }
 
+.team-dashboard-page,
+.team-dashboard-page *,
+.team-dashboard-page *::before,
+.team-dashboard-page *::after {
+  box-sizing: border-box;
+}
+
+.team-dashboard-page {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.team-dashboard-page .team-dashboard-panel,
+.team-dashboard-page .productization-section-head,
+.team-dashboard-page .productization-section-head > div,
+.team-dashboard-page .button-row,
+.team-dashboard-page .field-group,
+.team-dashboard-monthly-report-date-grid,
+.team-dashboard-monthly-report-topic-field,
+.team-dashboard-monthly-report-topic-grid,
+.team-dashboard-monthly-report-topic-row,
+.team-dashboard-monthly-report-grid,
+.team-dashboard-monthly-report-editor,
+.team-dashboard-monthly-report-preview {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .team-dashboard-panel .panel-head {
   margin-bottom: 8px;
 }
@@ -45,6 +74,7 @@
 .team-dashboard-page .productization-inline-status {
   font-size: 12px;
   line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .team-dashboard-page .productization-inline-status {
@@ -53,6 +83,14 @@
 
 .team-dashboard-page .productization-inline-status:empty {
   display: none;
+}
+
+.team-dashboard-page .button-row .button {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: center;
 }
 
 .team-dashboard-tabs {
@@ -577,6 +615,8 @@
 }
 
 .team-dashboard-monthly-report-topic-row input[type="text"] {
+  width: 100%;
+  max-width: 100%;
   min-height: 42px;
   min-width: 0;
 }
@@ -593,6 +633,7 @@
   display: inline-flex;
   gap: 6px;
   align-items: center;
+  min-width: 0;
   min-height: 32px;
   padding: 5px 8px;
   border: 1px solid #dbe5f1;
@@ -613,11 +654,17 @@
 }
 
 .team-dashboard-monthly-report-date-grid input {
+  width: 100%;
+  max-width: 100%;
   min-height: 42px;
+  min-width: 0;
 }
 
 .team-dashboard-monthly-report-editor textarea,
 .team-dashboard-monthly-report-template-form textarea {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   line-height: 1.5;
 }
@@ -798,7 +845,23 @@
   }
 
   .team-dashboard-page .productization-section-head .button-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
     width: 100%;
+  }
+
+  .team-dashboard-page .productization-section-head .button {
+    width: 100%;
+    padding-right: 12px;
+    padding-left: 12px;
+    font-size: 0.95rem;
+    line-height: 1.2;
+  }
+
+  .team-dashboard-page .productization-inline-status {
+    width: 100%;
+    max-width: 100%;
+    font-size: 0.9rem;
   }
 
   .team-dashboard-team-actions {
@@ -836,10 +899,17 @@
 
   .team-dashboard-monthly-report-source-group label {
     justify-content: center;
+    width: 100%;
+    max-width: 100%;
     min-height: 44px;
     padding: 6px;
     text-align: center;
+    overflow-wrap: anywhere;
     white-space: normal;
+  }
+
+  .team-dashboard-monthly-report-source-group label input {
+    flex: 0 0 auto;
   }
 
   .team-dashboard-monthly-report-date-grid {
