@@ -240,6 +240,8 @@ class SourceCodeQAService:
         llm_cache_ttl_seconds: int = 1800,
         llm_timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS,
         codex_timeout_seconds: int | None = None,
+        query_deadline_seconds: int | None = None,
+        codex_repair_deadline_seconds: int | None = None,
         codex_concurrency: int = 1,
         codex_top_path_limit: int = DEFAULT_CODEX_TOP_PATH_LIMIT,
         codex_repair_enabled: bool = True,
@@ -275,6 +277,19 @@ class SourceCodeQAService:
         self.codex_timeout_seconds = max(
             10,
             int(codex_timeout_seconds if codex_timeout_seconds is not None else DEFAULT_CODEX_TIMEOUT_SECONDS),
+        )
+        self.query_deadline_seconds = max(
+            0,
+            int(query_deadline_seconds if query_deadline_seconds is not None else os.getenv("SOURCE_CODE_QA_QUERY_DEADLINE_SECONDS", "180")),
+        )
+        default_repair_deadline = self.query_deadline_seconds - 30 if self.query_deadline_seconds else 0
+        self.codex_repair_deadline_seconds = max(
+            0,
+            int(
+                codex_repair_deadline_seconds
+                if codex_repair_deadline_seconds is not None
+                else os.getenv("SOURCE_CODE_QA_CODEX_REPAIR_DEADLINE_SECONDS", str(default_repair_deadline))
+            ),
         )
         self.codex_concurrency = max(1, min(int(codex_concurrency or 1), 4))
         self.codex_top_path_limit = max(5, min(int(codex_top_path_limit or DEFAULT_CODEX_TOP_PATH_LIMIT), 80))
@@ -343,6 +358,8 @@ class SourceCodeQAService:
             llm_cache_ttl_seconds=self.llm_cache_ttl_seconds,
             llm_timeout_seconds=self.llm_timeout_seconds,
             codex_timeout_seconds=self.codex_timeout_seconds if codex_timeout_seconds is None else codex_timeout_seconds,
+            query_deadline_seconds=self.query_deadline_seconds,
+            codex_repair_deadline_seconds=self.codex_repair_deadline_seconds,
             codex_concurrency=self.codex_concurrency,
             codex_top_path_limit=self.codex_top_path_limit,
             codex_repair_enabled=self.codex_repair_enabled,
@@ -1554,6 +1571,151 @@ class SourceCodeQAService:
         except Exception:
             return
 
+    def _mark_query_phase(
+        self,
+        request_cache: dict[str, Any] | None,
+        component: str,
+        started: float,
+        *,
+        trace_id: str = "",
+        **fields: Any,
+    ) -> None:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        self._record_query_phase_timing(request_cache, component, elapsed_ms=elapsed_ms, **fields)
+        if elapsed_ms >= 500 or fields.get("force_log"):
+            _log_source_code_qa_timing(component, elapsed_ms=elapsed_ms, trace_id=trace_id, **fields)
+
+    def _query_deadline_hit(self, started_at: float, *, reserve_seconds: int = 0) -> bool:
+        if int(self.query_deadline_seconds or 0) <= 0:
+            return False
+        return (time.time() - started_at + max(0, reserve_seconds)) >= int(self.query_deadline_seconds)
+
+    @staticmethod
+    def _query_deadline_fallback_answer(matches: list[dict[str, Any]], summary: str) -> str:
+        lines = [
+            "Query deadline reached before model synthesis completed. Returning grounded retrieval evidence instead.",
+            "",
+            str(summary or "").strip() or "Relevant code references were found.",
+        ]
+        if matches:
+            lines.append("")
+            lines.append("Top evidence:")
+            for match in matches[:5]:
+                lines.append(
+                    f"- {match.get('repo') or 'repo'}:{match.get('path') or 'unknown'}:"
+                    f"{match.get('line_start') or 1}-{match.get('line_end') or match.get('line_start') or 1}"
+                )
+        return "\n".join(lines).strip()
+
+    def _apply_query_deadline_fallback(
+        self,
+        payload: dict[str, Any],
+        *,
+        matches: list[dict[str, Any]],
+        reason: str,
+        retrieval_latency_ms: int,
+        report: Any | None = None,
+    ) -> None:
+        if report:
+            report("deadline_fallback", "Query deadline reached; returning retrieval evidence now.", 0, 0)
+        payload["deadline_seconds"] = int(self.query_deadline_seconds or 0)
+        payload["deadline_hit"] = True
+        payload["deadline_fallback_reason"] = reason
+        payload["fallback_used"] = True
+        payload["fallback_answer_quality"] = "retrieval_only"
+        payload["fallback_evidence_count"] = len(matches)
+        payload["fallback_claim_count"] = 0
+        payload["llm_provider"] = self.llm_provider.name
+        payload["llm_cached"] = False
+        payload["llm_attempts"] = 0
+        payload["llm_latency_ms"] = 0
+        payload["llm_attempt_log"] = []
+        payload["llm_finish_reason"] = "deadline_fallback"
+        payload["llm_timing"] = {}
+        payload["retrieval_latency_ms"] = retrieval_latency_ms
+        payload["codex_latency_ms"] = 0
+        payload["llm_answer"] = self._query_deadline_fallback_answer(matches, str(payload.get("summary") or ""))
+        payload["structured_answer"] = {
+            "answer": payload["llm_answer"],
+            "confidence": "low",
+            "limitations": ["Model synthesis was skipped because the query reached its deadline."],
+        }
+        payload["answer_claim_check"] = {"status": "skipped", "reason": "deadline_fallback"}
+        payload["answer_judge"] = {"status": "skipped", "reason": "deadline_fallback"}
+        payload["answer_contract"] = {
+            "status": "deadline_fallback",
+            "confirmed_sources": [
+                f"{match.get('repo') or 'repo'}:{match.get('path') or 'unknown'}:{match.get('line_start') or 1}-{match.get('line_end') or match.get('line_start') or 1}"
+                for match in matches[:8]
+            ],
+            "missing_links": ["Model synthesis did not run before the configured deadline."],
+            "policies": [{"name": "deadline", "status": "fallback", "reason": reason}],
+        }
+        payload["fallback_notice"] = {
+            "title": "Deadline fallback",
+            "message": "The query returned retrieval-backed evidence before spending more time on model synthesis.",
+            "reason": reason,
+        }
+        payload["llm_route"] = {
+            "mode": "deadline_fallback",
+            "deadline_seconds": int(self.query_deadline_seconds or 0),
+            "deadline_hit": True,
+            "reason": reason,
+            "retrieval_hints_ms": retrieval_latency_ms,
+        }
+        payload["codex_cli_summary"] = {
+            "deadline_fallback": True,
+            "repair_attempted": False,
+            "repair_skipped_reason": reason,
+            "retrieval_hints_ms": retrieval_latency_ms,
+        }
+
+    def _build_slow_query_attribution(self, payload: dict[str, Any], *, latency_ms: int) -> dict[str, Any]:
+        components: dict[str, int] = {}
+        query_timing = payload.get("query_timing") if isinstance(payload.get("query_timing"), dict) else {}
+        for key, value in (query_timing.get("components") or {}).items():
+            try:
+                components[f"query.{key}"] = int(value or 0)
+            except (TypeError, ValueError):
+                continue
+        for key, value in (payload.get("llm_timing") or {}).items():
+            try:
+                components[f"llm.{key}"] = int(value or 0)
+            except (TypeError, ValueError):
+                continue
+        retrieval_latency_ms = int(payload.get("retrieval_latency_ms") or 0)
+        codex_latency_ms = int(payload.get("codex_latency_ms") or payload.get("llm_latency_ms") or 0)
+        if retrieval_latency_ms:
+            components["retrieval.total"] = retrieval_latency_ms
+        if codex_latency_ms:
+            components["answer_generation.codex"] = codex_latency_ms
+        slow_component = ""
+        slow_component_ms = 0
+        if components:
+            slow_component, slow_component_ms = max(components.items(), key=lambda item: item[1])
+        threshold_ms = 30_000
+        status = "slow" if latency_ms >= threshold_ms else "ok"
+        reason = ""
+        if bool(payload.get("deadline_hit")):
+            reason = str(payload.get("deadline_fallback_reason") or "deadline_hit")
+        elif bool(payload.get("llm_cached")):
+            reason = "cache_hit"
+        elif slow_component:
+            reason = slow_component
+        return {
+            "status": status,
+            "threshold_ms": threshold_ms,
+            "total_latency_ms": max(0, int(latency_ms or 0)),
+            "slow_component": slow_component,
+            "slow_component_ms": slow_component_ms,
+            "components": dict(sorted(components.items(), key=lambda item: item[1], reverse=True)[:12]),
+            "deadline_hit": bool(payload.get("deadline_hit")),
+            "fallback_used": bool(payload.get("fallback_used")),
+            "llm_cached": bool(payload.get("llm_cached")),
+            "cache_preload_recommended": bool(status == "slow" and not payload.get("llm_cached") and payload.get("status") == "ok"),
+            "reason": reason,
+        }
+
     def _query_success_payload(
         self,
         *,
@@ -1604,6 +1766,7 @@ class SourceCodeQAService:
             },
             "tool_trace": tool_trace,
             "retrieval_runtime": self._retrieval_cache_stats(request_cache),
+            "query_timing": self._query_phase_timing_stats(request_cache),
             "followup_context": followup_context,
             "repository_scope": repository_scope,
             "original_question": original_question,
@@ -1673,6 +1836,7 @@ class SourceCodeQAService:
         question = str(question or "").strip()
         query_mode = self.normalize_query_mode(query_mode)
         started_at = time.time()
+        query_setup_started = time.perf_counter()
         trace_id = uuid.uuid4().hex
         report = functools.partial(self._report_query_progress, progress_callback)
 
@@ -1717,6 +1881,14 @@ class SourceCodeQAService:
         tool_trace: list[dict[str, Any]] = []
         matches: list[dict[str, Any]] = []
         request_cache = self._new_retrieval_request_cache()
+        self._mark_query_phase(
+            request_cache,
+            "query_setup",
+            query_setup_started,
+            trace_id=trace_id,
+            repository_count=len(query_entries),
+            scoped=bool(repository_scope.get("active")),
+        )
         result_limit = self._query_result_limit(limit)
         cross_repo_context = self._requires_cross_repo_context(question)
         if cross_repo_context and repository_scope.get("active"):
@@ -1728,8 +1900,10 @@ class SourceCodeQAService:
                 "selected_repositories": [entry.display_name for entry in entries],
             }
             query_entries = entries
+        phase_started = time.perf_counter()
         repo_status = self.repo_status(key)
         index_freshness = self._index_freshness_payload(repo_status)
+        self._mark_query_phase(request_cache, "repo_status_index_freshness", phase_started, trace_id=trace_id)
         exact_lookup_terms, question_specific_terms = self._query_exact_lookup_terms(question)
         exact_matches: list[dict[str, Any]] = []
         latency_guarded_query_expansion = False
@@ -1780,6 +1954,7 @@ class SourceCodeQAService:
             )
         intent = query_plan.get("intent") if isinstance(query_plan.get("intent"), dict) else {}
         simple_quality_trace = self._query_uses_simple_quality_trace(intent)
+        phase_started = time.perf_counter()
         if exact_lookup_terms:
             report(
                 "exact_lookup",
@@ -1799,6 +1974,14 @@ class SourceCodeQAService:
                     )
                 )
                 report("exact_lookup", f"Checked exact references in {entry.display_name}.", index, len(synced_entries))
+        self._mark_query_phase(
+            request_cache,
+            "exact_lookup",
+            phase_started,
+            trace_id=trace_id,
+            term_count=len(exact_lookup_terms),
+            match_count=len(exact_matches),
+        )
         exact_lookup_matched_terms = sorted(
             {
                 str((match.get("exact_lookup") or {}).get("term") or "").lower()
@@ -1830,6 +2013,7 @@ class SourceCodeQAService:
         elif exact_lookup_terms:
             self._increment_retrieval_stat(request_cache, "exact_lookup_soft_misses")
             report("exact_lookup", "Exact dotted references were not found; falling back to broader token retrieval.", 0, 0)
+        phase_started = time.perf_counter()
         if question_specific_terms and not exact_lookup_sufficient:
             specific_tokens: list[str] = []
             for term in question_specific_terms:
@@ -1852,6 +2036,15 @@ class SourceCodeQAService:
                     )
                 )
                 report("focused_search", f"Checked domain-specific symbols in {entry.display_name}.", index, len(synced_entries))
+        self._mark_query_phase(
+            request_cache,
+            "focused_search",
+            phase_started,
+            trace_id=trace_id,
+            focus_term_count=len(question_specific_terms),
+            match_count=len(matches),
+        )
+        phase_started = time.perf_counter()
         if not exact_lookup_sufficient:
             direct_context = self._query_direct_and_decomposed_matches(
                 question=question,
@@ -1868,6 +2061,15 @@ class SourceCodeQAService:
             )
             matches = direct_context["matches"]
             latency_guarded_query_expansion = direct_context["latency_guarded_query_expansion"]
+        self._mark_query_phase(
+            request_cache,
+            "direct_search_and_decomposition",
+            phase_started,
+            trace_id=trace_id,
+            match_count=len(matches),
+            latency_guarded=latency_guarded_query_expansion,
+        )
+        phase_started = time.perf_counter()
         top_matches, should_expand_matches = self._rank_and_expand_query_matches(
             question=question,
             matches=matches,
@@ -1885,6 +2087,14 @@ class SourceCodeQAService:
             tool_trace=tool_trace,
             request_cache=request_cache,
             report=report,
+        )
+        self._mark_query_phase(
+            request_cache,
+            "rank_and_expand",
+            phase_started,
+            trace_id=trace_id,
+            match_count=len(top_matches),
+            should_expand=should_expand_matches,
         )
         if index_freshness.get("status") != "fresh":
             repo_status = self.repo_status(key)
@@ -1912,6 +2122,7 @@ class SourceCodeQAService:
             0,
             0,
         )
+        phase_started = time.perf_counter()
         evidence_summary, quality_gate, trace_paths, repo_graph, evidence_pack = self._build_query_answer_context(
             question=question,
             matches=top_matches,
@@ -1920,6 +2131,14 @@ class SourceCodeQAService:
             exact_lookup_sufficient=exact_lookup_sufficient,
             should_expand_matches=should_expand_matches,
             request_cache=request_cache,
+        )
+        self._mark_query_phase(
+            request_cache,
+            "evidence_context",
+            phase_started,
+            trace_id=trace_id,
+            match_count=len(top_matches),
+            trace_path_count=len(trace_paths),
         )
         payload = self._query_success_payload(
             question=question,
@@ -1947,31 +2166,51 @@ class SourceCodeQAService:
             retrieval_latency_ms=retrieval_latency_ms,
         )
         if self._answer_mode_requests_llm(normalized_answer_mode):
-            self._augment_query_payload_with_llm_answer(
-                payload=payload,
-                entries=query_entries,
-                key=key,
-                pm_team=pm_team,
-                country=country,
-                question=question,
-                matches=top_matches,
-                llm_budget_mode=llm_budget_mode,
-                query_mode=query_mode,
+            phase_started = time.perf_counter()
+            if self._query_deadline_hit(started_at, reserve_seconds=10):
+                self._apply_query_deadline_fallback(
+                    payload,
+                    matches=top_matches,
+                    reason="retrieval_exceeded_deadline",
+                    retrieval_latency_ms=retrieval_latency_ms,
+                    report=report,
+                )
+                report("completed", "Deadline fallback returned retrieval evidence.", 0, 0)
+            else:
+                self._augment_query_payload_with_llm_answer(
+                    payload=payload,
+                    entries=query_entries,
+                    key=key,
+                    pm_team=pm_team,
+                    country=country,
+                    question=question,
+                    matches=top_matches,
+                    llm_budget_mode=llm_budget_mode,
+                    query_mode=query_mode,
+                    trace_id=trace_id,
+                    followup_context=followup_context,
+                    normalized_answer_mode=normalized_answer_mode,
+                    request_cache=request_cache,
+                    progress_callback=progress_callback,
+                    attachments=attachments,
+                    runtime_evidence=runtime_evidence,
+                    effort_assessment=effort_assessment,
+                    retrieval_latency_ms=retrieval_latency_ms,
+                    evidence_pack=evidence_pack,
+                    report=report,
+                )
+                report("completed", "LLM answer generated.", 0, 0)
+            self._mark_query_phase(
+                request_cache,
+                "answer_generation",
+                phase_started,
                 trace_id=trace_id,
-                followup_context=followup_context,
-                normalized_answer_mode=normalized_answer_mode,
-                request_cache=request_cache,
-                progress_callback=progress_callback,
-                attachments=attachments,
-                runtime_evidence=runtime_evidence,
-                effort_assessment=effort_assessment,
-                retrieval_latency_ms=retrieval_latency_ms,
-                evidence_pack=evidence_pack,
-                report=report,
+                deadline_hit=bool(payload.get("deadline_hit")),
+                llm_cached=bool(payload.get("llm_cached")),
             )
-            report("completed", "LLM answer generated.", 0, 0)
         if not (self._answer_mode_requests_llm(normalized_answer_mode) and payload.get("llm_answer")):
             report("completed", "Code evidence retrieval completed.", 0, 0)
+        payload["query_timing"] = self._query_phase_timing_stats(request_cache)
         return self._record_query_payload(
             key=key,
             question=question,
@@ -2558,7 +2797,8 @@ class SourceCodeQAService:
         payload.update(llm_payload)
         payload["query_mode"] = query_mode
         payload["requested_query_mode"] = payload.get("requested_query_mode") or ""
-        payload["deadline_seconds"] = 0
+        payload["deadline_seconds"] = int(self.query_deadline_seconds or 0)
+        payload["deadline_hit"] = bool(payload.get("deadline_hit"))
         payload["retrieval_latency_ms"] = retrieval_latency_ms
         payload["codex_latency_ms"] = payload.get("llm_latency_ms") if llm_service.llm_provider.name == LLM_PROVIDER_CODEX_CLI_BRIDGE else 0
         if isinstance(payload.get("llm_route"), dict):
@@ -2600,6 +2840,18 @@ class SourceCodeQAService:
         started_at: float,
         query_mode: str = QUERY_MODE_DEEP,
     ) -> dict[str, Any]:
+        latency_ms = int((time.time() - started_at) * 1000)
+        payload["elapsed_seconds"] = round(max(0.0, time.time() - started_at), 3)
+        payload["latency_ms"] = latency_ms
+        payload["deadline_seconds"] = payload.get("deadline_seconds") or int(self.query_deadline_seconds or 0)
+        attribution = self._build_slow_query_attribution(payload, latency_ms=latency_ms)
+        payload["slow_query_attribution"] = attribution
+        payload["cache_preload"] = {
+            "recommended": bool(attribution.get("cache_preload_recommended")),
+            "reason": "slow_uncached_query" if attribution.get("cache_preload_recommended") else "",
+            "min_latency_ms": int(attribution.get("threshold_ms") or 30_000),
+            "command": "./scripts/source_code_qa_warm_answer_cache.py --from-recent-slow --limit 5",
+        }
         self._record_query_telemetry(
             key=key,
             question=question,
@@ -5706,6 +5958,7 @@ class SourceCodeQAService:
     ) -> dict[str, Any]:
         query_mode = self.normalize_query_mode(query_mode)
         timing: dict[str, int] = {}
+        codex_started_at = time.time()
 
         candidate_context = self._codex_initial_candidate_context(
             entries=entries,
@@ -5846,6 +6099,24 @@ class SourceCodeQAService:
         repair_issue_count = repair_decision["repair_issue_count"]
         repair_will_run = repair_decision["repair_will_run"]
         repair_decision_ms = repair_decision["repair_decision_ms"]
+        if repair_will_run and int(self.codex_repair_deadline_seconds or 0) > 0:
+            elapsed_seconds = time.time() - codex_started_at
+            if elapsed_seconds >= int(self.codex_repair_deadline_seconds):
+                repair_will_run = False
+                repair_skipped_reason = "codex_repair_deadline_after_initial_answer"
+                _log_source_code_qa_timing(
+                    "codex_repair_skip",
+                    elapsed_ms=0,
+                    trace_id=trace_id,
+                    provider=self.llm_provider.name,
+                    model=selected_model,
+                    query_mode=query_mode,
+                    reason=repair_skipped_reason,
+                    phase="repair",
+                    deadline_seconds=int(self.codex_repair_deadline_seconds),
+                    elapsed_seconds=round(elapsed_seconds, 3),
+                    codex_initial_ms=codex_initial_ms,
+                )
         if repair_will_run:
             repair_attempted = True
             repair_reason = "; ".join(severe_repair_reasons[:6])
@@ -7288,7 +7559,8 @@ class SourceCodeQAService:
             "codex_repair_policy": "severe_only",
             "codex_repair_skipped_reason": "",
             "query_mode": query_mode,
-            "deadline_seconds": 0,
+            "deadline_seconds": int(self.query_deadline_seconds or 0),
+            "codex_repair_deadline_seconds": int(self.codex_repair_deadline_seconds or 0),
             "codex_session_mode": self.codex_session_mode,
             "codex_session_max_turns": self.codex_session_max_turns,
             "codex_cache_followups": self.codex_cache_followups,

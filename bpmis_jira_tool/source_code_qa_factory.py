@@ -30,6 +30,8 @@ def build_source_code_qa_service_from_settings(settings: Settings) -> SourceCode
         llm_cache_ttl_seconds=settings.source_code_qa_llm_cache_ttl_seconds,
         llm_timeout_seconds=settings.source_code_qa_llm_timeout_seconds,
         codex_timeout_seconds=settings.source_code_qa_codex_timeout_seconds,
+        query_deadline_seconds=settings.source_code_qa_query_deadline_seconds,
+        codex_repair_deadline_seconds=settings.source_code_qa_codex_repair_deadline_seconds,
         codex_concurrency=settings.source_code_qa_codex_concurrency,
         codex_top_path_limit=settings.source_code_qa_codex_top_path_limit,
         codex_repair_enabled=settings.source_code_qa_codex_repair_enabled,

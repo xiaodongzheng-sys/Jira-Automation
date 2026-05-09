@@ -96,6 +96,8 @@ class Settings:
     source_code_qa_llm_timeout_seconds: int = 90
     source_code_qa_codex_timeout_seconds: int = 240
     source_code_qa_effort_codex_timeout_seconds: int = 600
+    source_code_qa_query_deadline_seconds: int = 180
+    source_code_qa_codex_repair_deadline_seconds: int = 150
     source_code_qa_codex_concurrency: int = 2
     source_code_qa_codex_top_path_limit: int = 30
     source_code_qa_codex_repair_enabled: bool = True
@@ -201,6 +203,8 @@ class Settings:
             source_code_qa_llm_timeout_seconds=int(_env_str("SOURCE_CODE_QA_LLM_TIMEOUT_SECONDS", "90")),
             source_code_qa_codex_timeout_seconds=int(_env_str("SOURCE_CODE_QA_CODEX_TIMEOUT_SECONDS", "240")),
             source_code_qa_effort_codex_timeout_seconds=int(_env_str("SOURCE_CODE_QA_EFFORT_CODEX_TIMEOUT_SECONDS", "600")),
+            source_code_qa_query_deadline_seconds=int(_env_str("SOURCE_CODE_QA_QUERY_DEADLINE_SECONDS", "180")),
+            source_code_qa_codex_repair_deadline_seconds=int(_env_str("SOURCE_CODE_QA_CODEX_REPAIR_DEADLINE_SECONDS", "150")),
             source_code_qa_codex_concurrency=int(_env_str("SOURCE_CODE_QA_CODEX_CONCURRENCY", "2")),
             source_code_qa_codex_top_path_limit=int(_env_str("SOURCE_CODE_QA_CODEX_TOP_PATH_LIMIT", "30")),
             source_code_qa_codex_repair_enabled=_env_bool("SOURCE_CODE_QA_CODEX_REPAIR_ENABLED", True),

@@ -92,6 +92,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.source_code_qa_llm_timeout_seconds, 90)
         self.assertEqual(settings.source_code_qa_codex_timeout_seconds, 240)
         self.assertEqual(settings.source_code_qa_effort_codex_timeout_seconds, 600)
+        self.assertEqual(settings.source_code_qa_query_deadline_seconds, 180)
+        self.assertEqual(settings.source_code_qa_codex_repair_deadline_seconds, 150)
         self.assertEqual(settings.source_code_qa_codex_concurrency, 2)
         self.assertEqual(settings.source_code_qa_codex_top_path_limit, 30)
         self.assertTrue(settings.source_code_qa_codex_repair_enabled)
@@ -197,6 +199,8 @@ class ConfigTests(unittest.TestCase):
             "SOURCE_CODE_QA_ANSWER_MODEL": "answer-balanced",
             "SOURCE_CODE_QA_REPAIR_MODEL": "repair-deep",
             "SOURCE_CODE_QA_LLM_TIMEOUT_SECONDS": "45",
+            "SOURCE_CODE_QA_QUERY_DEADLINE_SECONDS": "120",
+            "SOURCE_CODE_QA_CODEX_REPAIR_DEADLINE_SECONDS": "90",
         }
         with patch.dict(os.environ, env, clear=True):
             settings = Settings.from_env()
@@ -206,6 +210,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.source_code_qa_answer_model, "answer-balanced")
         self.assertEqual(settings.source_code_qa_repair_model, "repair-deep")
         self.assertEqual(settings.source_code_qa_llm_timeout_seconds, 45)
+        self.assertEqual(settings.source_code_qa_query_deadline_seconds, 120)
+        self.assertEqual(settings.source_code_qa_codex_repair_deadline_seconds, 90)
 
 
 if __name__ == "__main__":

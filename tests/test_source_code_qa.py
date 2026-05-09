@@ -3118,6 +3118,49 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(payload["answer_mode"], "retrieval_only")
         self.assertEqual(payload["matches"][0]["path"], "bpmis/jira_client.py")
         self.assertIn("batchCreateJiraIssue", payload["matches"][0]["snippet"])
+        self.assertIn("query_timing", payload)
+        self.assertIn("rank_and_expand", payload["query_timing"]["components"])
+        self.assertIn("slow_query_attribution", payload)
+        self.assertIn("cache_preload", payload)
+
+    def test_deadline_fallback_skips_llm_when_retrieval_uses_deadline_budget(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"}],
+        )
+        entry = self.service.load_config()["mappings"]["AF:All"][0]
+        repo_path = self.service._repo_path("AF:All", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        source_file = repo_path / "bpmis" / "jira_client.py"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text(
+            "class BPMISClient:\n"
+            "    def batchCreateJiraIssue(self):\n"
+            "        return self.post('/api/v1/issues/batchCreateJiraIssue')\n",
+            encoding="utf-8",
+        )
+        self._build_index_for_entry("AF:All", entry)
+
+        self.service.query_deadline_seconds = 1
+        with patch.object(self.service, "_query_deadline_hit", return_value=True), patch.object(
+            self.service,
+            "_build_llm_answer",
+            side_effect=AssertionError("deadline fallback should skip LLM generation"),
+        ):
+            payload = self.service.query(
+                pm_team="AF",
+                country="All",
+                question="batchCreateJiraIssue BPMIS API",
+                answer_mode="auto",
+            )
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["deadline_hit"])
+        self.assertTrue(payload["fallback_used"])
+        self.assertEqual(payload["answer_contract"]["status"], "deadline_fallback")
+        self.assertEqual(payload["llm_finish_reason"], "deadline_fallback")
+        self.assertEqual(payload["slow_query_attribution"]["reason"], "retrieval_exceeded_deadline")
 
     def test_chinese_business_intent_detection(self):
         intent = self.service._question_intent("IssueService 改了会影响哪些下游，测试有没有覆盖，事务缓存边界是什么")
@@ -4170,6 +4213,15 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                     json.dumps({"key": "AF:All", "question_preview": "fast cached", "latency_ms": 1000, "llm_cached": False}),
                     json.dumps({"key": "AF:All", "question_preview": "slow cached", "latency_ms": 90000, "llm_cached": True}),
                     json.dumps({"key": "GRC:All", "question_preview": "slow uncached", "latency_ms": 91000, "llm_cached": False}),
+                    json.dumps(
+                        {
+                            "key": "CRMS:SG",
+                            "question_preview": "attributed slow uncached",
+                            "latency_ms": 1000,
+                            "llm_cached": False,
+                            "slow_query_attribution": {"status": "slow", "cache_preload_recommended": True},
+                        }
+                    ),
                 ]
             )
             + "\n",
@@ -4178,7 +4230,13 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         questions = _recent_slow_questions(data_root, limit=5, min_latency_ms=30000)
 
-        self.assertEqual(questions, [{"pm_team": "GRC", "country": "All", "question": "slow uncached"}])
+        self.assertEqual(
+            questions,
+            [
+                {"pm_team": "GRC", "country": "All", "question": "slow uncached"},
+                {"pm_team": "CRMS", "country": "SG", "question": "attributed slow uncached"},
+            ],
+        )
 
     def test_ops_summary_flags_fixture_repo_config_in_strict_mode(self):
         from scripts.source_code_qa_ops_summary import build_summary

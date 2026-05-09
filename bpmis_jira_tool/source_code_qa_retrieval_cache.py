@@ -73,6 +73,61 @@ def _increment_retrieval_stat(request_cache: dict[str, Any] | None, key: str) ->
     stats = request_cache.setdefault("stats", {})
     stats[key] = int(stats.get(key) or 0) + 1
 
+def _record_query_phase_timing(
+    request_cache: dict[str, Any] | None,
+    component: str,
+    *,
+    elapsed_ms: int,
+    **fields: Any,
+) -> None:
+    if request_cache is None:
+        return
+    component = str(component or "").strip() or "unknown"
+    elapsed_ms = max(0, int(elapsed_ms or 0))
+    timing = request_cache.setdefault("timing", {})
+    timing[component] = int(timing.get(component) or 0) + elapsed_ms
+    events = request_cache.setdefault("timing_events", [])
+    event = {"component": component, "elapsed_ms": elapsed_ms}
+    for key, value in fields.items():
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            event[key] = value
+        elif isinstance(value, (list, tuple, set)):
+            event[key] = [str(item) for item in list(value)[:20]]
+        elif isinstance(value, dict):
+            event[key] = {
+                str(item_key): item_value
+                for item_key, item_value in value.items()
+                if isinstance(item_value, (str, int, float, bool))
+            }
+    events.append(event)
+    if len(events) > 120:
+        del events[:-120]
+
+def _query_phase_timing_stats(request_cache: dict[str, Any] | None) -> dict[str, Any]:
+    if request_cache is None:
+        return {"components": {}, "events": [], "slowest_component": "", "slowest_component_ms": 0}
+    components = {
+        str(key): max(0, int(value or 0))
+        for key, value in (request_cache.get("timing") or {}).items()
+    }
+    events = [
+        dict(item)
+        for item in (request_cache.get("timing_events") or [])
+        if isinstance(item, dict)
+    ]
+    slowest_component = ""
+    slowest_component_ms = 0
+    if components:
+        slowest_component, slowest_component_ms = max(components.items(), key=lambda item: item[1])
+    return {
+        "components": components,
+        "events": events,
+        "slowest_component": slowest_component,
+        "slowest_component_ms": slowest_component_ms,
+    }
+
 def _retrieval_cache_stats(request_cache: dict[str, Any]) -> dict[str, Any]:
     stats = dict(request_cache.get("stats") or {})
     started_at = float(request_cache.get("started_at") or 0)
@@ -110,5 +165,7 @@ def _clone_jsonish(payload: Any) -> Any:
 def attach_retrieval_cache_helpers(cls: type) -> None:
     cls._new_retrieval_request_cache = staticmethod(_new_retrieval_request_cache)
     cls._increment_retrieval_stat = staticmethod(_increment_retrieval_stat)
+    cls._record_query_phase_timing = staticmethod(_record_query_phase_timing)
+    cls._query_phase_timing_stats = staticmethod(_query_phase_timing_stats)
     cls._retrieval_cache_stats = staticmethod(_retrieval_cache_stats)
     cls._clone_jsonish = staticmethod(_clone_jsonish)

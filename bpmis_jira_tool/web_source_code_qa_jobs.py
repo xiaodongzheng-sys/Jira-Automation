@@ -157,12 +157,14 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
             started_at = float((job_store.snapshot(job_id) or {}).get("started_at") or time.time())
             elapsed_seconds = max(0.0, time.time() - started_at)
             if elapsed_seconds > 120:
+                attribution = result.get("slow_query_attribution") if isinstance(result.get("slow_query_attribution"), dict) else {}
                 current_app.logger.warning(
-                    "source_code_qa_slow_query job_id=%s owner=%s elapsed_seconds=%.1f stage=%s",
+                    "source_code_qa_slow_query job_id=%s owner=%s elapsed_seconds=%.1f stage=%s attribution=%s",
                     job_id,
                     owner_email,
                     elapsed_seconds,
                     str((job_store.snapshot(job_id) or {}).get("stage") or ""),
+                    json.dumps(attribution, ensure_ascii=False, sort_keys=True),
                 )
             _record_source_code_qa_work_memory(
                 owner_email=owner_email,
@@ -180,7 +182,22 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                     "title": "Source Code Q&A",
                     "tone": "success" if status == "ok" else "warning",
                     "summary": result.get("summary") or "Source Code Q&A completed.",
-                    "details": [f"Status: {status}", f"Trace: {result.get('trace_id') or 'n/a'}"],
+                    "details": [
+                        f"Status: {status}",
+                        f"Trace: {result.get('trace_id') or 'n/a'}",
+                        *(
+                            [
+                                "Slowest: "
+                                + str((result.get("slow_query_attribution") or {}).get("slow_component") or "unknown")
+                                + " "
+                                + str((result.get("slow_query_attribution") or {}).get("slow_component_ms") or 0)
+                                + "ms"
+                            ]
+                            if isinstance(result.get("slow_query_attribution"), dict)
+                            and (result.get("slow_query_attribution") or {}).get("status") == "slow"
+                            else []
+                        ),
+                    ],
                 },
             )
         except ToolError as error:

@@ -61,7 +61,11 @@ def _recent_slow_questions(data_root: Path, *, limit: int, min_latency_ms: int) 
             latency = int(row.get("latency_ms") or row.get("total_latency_ms") or 0)
         except (TypeError, ValueError):
             latency = 0
-        if latency < min_latency_ms or bool(row.get("llm_cached")):
+        attribution = row.get("slow_query_attribution") if isinstance(row.get("slow_query_attribution"), dict) else {}
+        attributed_slow = str(attribution.get("status") or "").lower() == "slow"
+        preload = row.get("cache_preload") if isinstance(row.get("cache_preload"), dict) else {}
+        recommended = bool(preload.get("recommended") or attribution.get("cache_preload_recommended"))
+        if (latency < min_latency_ms and not attributed_slow and not recommended) or bool(row.get("llm_cached")):
             continue
         key = str(row.get("key") or "")
         pm_team, _, country = key.partition(":")
