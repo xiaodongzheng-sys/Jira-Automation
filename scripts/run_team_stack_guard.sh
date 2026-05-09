@@ -42,6 +42,8 @@ USE_CAFFEINATE="${TEAM_STACK_USE_CAFFEINATE:-auto}"
 RESTART_WINDOW_SECONDS="${TEAM_STACK_RESTART_WINDOW_SECONDS:-60}"
 MAX_RESTART_BACKOFF_SECONDS="${TEAM_STACK_MAX_RESTART_BACKOFF_SECONDS:-30}"
 RESTART_ALERT_THRESHOLD="${TEAM_STACK_RESTART_ALERT_THRESHOLD:-3}"
+STORAGE_MAINTENANCE_INTERVAL_SECONDS="${TEAM_PORTAL_STORAGE_MAINTENANCE_INTERVAL_SECONDS:-86400}"
+STORAGE_MAINTENANCE_ENABLED="${TEAM_PORTAL_STORAGE_MAINTENANCE_ENABLED:-1}"
 
 cd "$ROOT_DIR"
 echo $$ >"$PID_FILE"
@@ -52,6 +54,7 @@ portal_last_start_at=0
 ngrok_last_start_at=0
 portal_unhealthy_count=0
 ngrok_unhealthy_count=0
+last_storage_maintenance_at=0
 
 case "$TUNNEL_PROVIDER" in
   cloudflare)
@@ -149,6 +152,54 @@ clear_alert_marker_if_stable() {
   if [[ -f "$ALERT_FILE" ]] && (( portal_restart_count < RESTART_ALERT_THRESHOLD )) && (( ngrok_restart_count < RESTART_ALERT_THRESHOLD )); then
     rm -f "$ALERT_FILE"
   fi
+}
+
+storage_maintenance_running() {
+  local pid_file="$DATA_DIR/run/team_portal_storage_maintenance.pid"
+  if [[ ! -f "$pid_file" ]]; then
+    return 1
+  fi
+  local pid
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  if [[ -z "${pid:-}" ]]; then
+    rm -f "$pid_file"
+    return 1
+  fi
+  if kill -0 "$pid" >/dev/null 2>&1; then
+    return 0
+  fi
+  rm -f "$pid_file"
+  return 1
+}
+
+run_storage_maintenance_if_due() {
+  if [[ "$STORAGE_MAINTENANCE_ENABLED" == "0" || "$STORAGE_MAINTENANCE_ENABLED" == "false" ]]; then
+    return 0
+  fi
+  if [[ ! -x "$PYTHON_BIN" || ! -f "$ROOT_DIR/scripts/team_portal_storage_maintenance.py" ]]; then
+    return 0
+  fi
+  local now
+  now="$(date +%s)"
+  if (( now - last_storage_maintenance_at < STORAGE_MAINTENANCE_INTERVAL_SECONDS )); then
+    return 0
+  fi
+  if storage_maintenance_running; then
+    last_storage_maintenance_at="$now"
+    return 0
+  fi
+  last_storage_maintenance_at="$now"
+  local pid_file="$DATA_DIR/run/team_portal_storage_maintenance.pid"
+  local log_file="$DATA_DIR/logs/team_portal_storage_maintenance.log"
+  log "Starting storage maintenance in background."
+  (
+    set +e
+    PYTHONPATH="$ROOT_DIR" TEAM_PORTAL_DATA_DIR="$DATA_DIR" "$PYTHON_BIN" "$ROOT_DIR/scripts/team_portal_storage_maintenance.py" --apply --json
+    local status=$?
+    rm -f "$pid_file"
+    exit "$status"
+  ) >>"$log_file" 2>&1 &
+  echo $! >"$pid_file"
 }
 
 compute_backoff() {
@@ -412,6 +463,7 @@ while true; do
   ensure_portal_running
   if portal_is_healthy; then
     ensure_tunnel_running
+    run_storage_maintenance_if_due
   fi
   write_status_summary
 
