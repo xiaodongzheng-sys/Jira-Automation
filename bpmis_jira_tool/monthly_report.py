@@ -2679,8 +2679,8 @@ def _monthly_report_highlight_qualifier_marker_groups(topic: Any) -> list[tuple[
             marker_groups.append(("sg", "singapore", "seabank sg"))
         if re.search(r"\bid\b", text) or "indonesia" in text:
             marker_groups.append(("id", "indonesia", "seabank id"))
-    if "credit card" in text or "creditcard" in compact or re.search(r"\bcc\b", text):
-        marker_groups.append(("credit card", "creditcard", "mcc whitelisted", "sea group mcc"))
+    if "credit card" in text or "creditcard" in compact or re.search(r"\bcc\b", text) or re.search(r"\bmcc\b", text):
+        marker_groups.append(("credit card", "creditcard", "mari credit card", "mcc", "mcc whitelisted", "sea group mcc"))
     if anti_fraud_signal and re.search(r"\bbank\b", text):
         marker_groups.append(("bank", "maribank", "seabank"))
     return marker_groups
@@ -2703,6 +2703,26 @@ def _monthly_report_text_matches_qualifier_marker(lowered_text: str, compact_tex
         return False
     if normalized_marker in {"ph", "sg", "id"}:
         return bool(re.search(rf"\b{re.escape(normalized_marker)}\b", lowered_text))
+    if normalized_marker == "mcc":
+        if not re.search(r"\bmcc\b", lowered_text):
+            return False
+        if "merchant category" in lowered_text or "merchant-category" in lowered_text:
+            return False
+        return any(
+            term in lowered_text
+            for term in (
+                "mari",
+                "maribank",
+                "credit card",
+                "card launch",
+                "employee",
+                "whitelist",
+                "whitelisted",
+                "live testing",
+                "public launch",
+                "sea group",
+            )
+        )
     if normalized_marker == "bank":
         return bool(re.search(r"\bbank\b", lowered_text))
     if normalized_marker == "cc":
@@ -3510,6 +3530,7 @@ def _monthly_report_qualified_conversation_score(conversation_text: str, selecte
         ("public launch", 24),
         ("whitelist 50k", 24),
         ("employee whitelist", 18),
+        ("mari credit card", 42),
         ("mcc whitelisted", 120),
         ("sea group mcc", 120),
         ("sea employee lv", 18),

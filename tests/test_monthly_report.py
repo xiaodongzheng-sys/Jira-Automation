@@ -18,6 +18,8 @@ from bpmis_jira_tool.monthly_report import (
     MonthlyReportService,
     _estimate_token_count,
     _highlight_topic_aliases,
+    _monthly_report_highlight_qualifier_marker_groups,
+    _monthly_report_text_matches_qualifier_marker_groups,
     build_monthly_highlight_deep_evidence,
     build_monthly_highlight_evidence_map,
     build_monthly_highlight_topic_narrative_prompt,
@@ -880,6 +882,29 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertTrue(any("Whitelist 50k users" in item for item in deep[0]["seatalk_evidence"]))
         self.assertFalse(any("ID Credit Card" in item for item in deep[0]["seatalk_evidence"]))
         self.assertFalse(any("PH GRC" in item for item in deep[0]["seatalk_evidence"]))
+
+    def test_mcc_qualifier_disambiguates_mari_credit_card_from_merchant_category_code(self):
+        topic = "PH MCC Employee Live Testing Status"
+        marker_groups = _monthly_report_highlight_qualifier_marker_groups(topic)
+
+        self.assertTrue(
+            _monthly_report_text_matches_qualifier_marker_groups(
+                "=== Maribank [Temp] SEA Group MCC Whitelisted (group-4417575) ===",
+                marker_groups,
+            )
+        )
+        self.assertTrue(
+            _monthly_report_text_matches_qualifier_marker_groups(
+                "PH Mari Credit Card employee live testing has optional income doc users.",
+                marker_groups,
+            )
+        )
+        self.assertFalse(
+            _monthly_report_text_matches_qualifier_marker_groups(
+                "PH risk rule updated the merchant category code MCC mapping for payments.",
+                marker_groups,
+            )
+        )
 
     def test_highlight_product_area_scope_keeps_credit_risk_only(self):
         period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
