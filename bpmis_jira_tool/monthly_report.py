@@ -228,14 +228,6 @@ class MonthlyReportService:
         effective_template = normalize_monthly_report_template(template)
         _emit_monthly_report_progress(progress_callback, "preparing_sources", "Preparing Key Projects, Jira, PRD, and SeaTalk sources.", 0, 0)
         key_projects = self._key_projects(team_payloads)
-        step_started = time.monotonic()
-        _emit_monthly_report_progress(progress_callback, "collecting_seatalk", "Exporting SeaTalk history for the report period.", 0, 0)
-        history_text, product_scope_filtered_count = self._seatalk_history(evidence_period)
-        _record_monthly_report_timing(timings, "seatalk_export", step_started)
-        step_started = time.monotonic()
-        _emit_monthly_report_progress(progress_callback, "searching_vip_gmail", "Searching VIP Gmail evidence for the report period.", 0, 0)
-        vip_gmail_text, vip_gmail_summary = self._vip_gmail_history(evidence_period)
-        _record_monthly_report_timing(timings, "vip_gmail", step_started)
         highlight_project_matches = match_monthly_report_highlight_topics(normalized_highlight_topics, key_projects)
         highlight_project_ids = {
             str(project_id).strip()
@@ -243,6 +235,22 @@ class MonthlyReportService:
             for project_id in (match.get("project_ids") or [])
             if str(project_id).strip()
         }
+        highlight_seatalk_aliases = _highlight_seatalk_aliases(
+            normalized_highlight_topics,
+            key_projects=key_projects,
+            topic_project_matches=highlight_project_matches,
+        )
+        step_started = time.monotonic()
+        _emit_monthly_report_progress(progress_callback, "collecting_seatalk", "Exporting SeaTalk history for the report period.", 0, 0)
+        history_text, product_scope_filtered_count, seatalk_highlight_raw_match_count = self._seatalk_history(
+            evidence_period,
+            highlight_aliases=highlight_seatalk_aliases,
+        )
+        _record_monthly_report_timing(timings, "seatalk_export", step_started)
+        step_started = time.monotonic()
+        _emit_monthly_report_progress(progress_callback, "searching_vip_gmail", "Searching VIP Gmail evidence for the report period.", 0, 0)
+        vip_gmail_text, vip_gmail_summary = self._vip_gmail_history(evidence_period)
+        _record_monthly_report_timing(timings, "vip_gmail", step_started)
         step_started = time.monotonic()
         highlight_gmail_evidence, highlight_gmail_summary = self._highlight_gmail_history(
             evidence_period,
@@ -429,6 +437,12 @@ class MonthlyReportService:
                 "report_intelligence_evidence_count": len(evidence_sidecar),
                 "highlight_topic_count": len(normalized_highlight_topics),
                 "highlight_project_topic_count": len([item for item in highlight_project_matches if item.get("project_ids")]),
+                "highlight_seatalk_line_match_count": sum(
+                    len(item.get("seatalk_evidence") or [])
+                    for item in highlight_deep_evidence
+                    if isinstance(item, dict)
+                ),
+                "highlight_seatalk_raw_match_count": seatalk_highlight_raw_match_count,
                 "highlight_gmail_thread_count": int(highlight_gmail_summary.get("thread_count") or 0),
                 "highlight_gmail_message_count": int(highlight_gmail_summary.get("message_count") or 0),
                 "highlight_gmail_cache_hit_count": int(highlight_gmail_summary.get("cache_hit_count") or 0),
@@ -619,7 +633,7 @@ class MonthlyReportService:
             progress_callback=progress_callback,
         )
 
-    def _seatalk_history(self, report_period: MonthlyReportPeriod) -> tuple[str, int]:
+    def _seatalk_history(self, report_period: MonthlyReportPeriod, *, highlight_aliases: set[str] | None = None) -> tuple[str, int, int]:
         history = self.seatalk_service.export_history_since(
             since=report_period.start,
             now=report_period.end_exclusive,
@@ -628,14 +642,17 @@ class MonthlyReportService:
         )
         history = self.seatalk_service._filter_system_generated_history(history)
         history = filter_text_by_noise(history, config=self.report_intelligence_config, source="seatalk")
-        history, filtered_count = _filter_text_by_product_scope(history)
+        history, filtered_count, highlight_match_count = _filter_text_by_product_scope_or_highlight_aliases(
+            history,
+            highlight_aliases or set(),
+        )
         compacted = self.seatalk_service._compact_history_for_insights(
             history,
             max_chars=MONTHLY_REPORT_MAX_SEATALK_CHARS,
             signal_max_chars=420_000,
             recent_max_chars=220_000,
         )
-        return compacted, filtered_count
+        return compacted, filtered_count, highlight_match_count
 
     def _vip_gmail_history(self, report_period: MonthlyReportPeriod) -> tuple[str, dict[str, int]]:
         vip_emails = _vip_emails(self.report_intelligence_config)
@@ -1932,6 +1949,61 @@ def _highlight_topic_aliases(topic: Any) -> set[str]:
     return {alias for alias in aliases if alias}
 
 
+def _highlight_seatalk_aliases(
+    highlight_topics: list[str],
+    *,
+    key_projects: list[dict[str, Any]],
+    topic_project_matches: list[dict[str, Any]],
+) -> set[str]:
+    projects_by_id = {
+        str(project.get("bpmis_id") or "").strip(): project
+        for project in key_projects
+        if str(project.get("bpmis_id") or "").strip()
+    }
+    aliases: set[str] = set()
+    for topic in highlight_topics:
+        aliases.update(_highlight_topic_aliases(topic))
+    for match in topic_project_matches:
+        for project_id in match.get("project_ids") or []:
+            project = projects_by_id.get(str(project_id or "").strip())
+            if project:
+                aliases.update(_project_aliases(project))
+    return {
+        alias
+        for alias in aliases
+        if _is_useful_seatalk_highlight_alias(alias)
+    }
+
+
+def _is_useful_seatalk_highlight_alias(alias: str) -> bool:
+    text = str(alias or "").strip().casefold()
+    if not text:
+        return False
+    compact = _normalize_alias_token(text)
+    if not compact or compact.isdigit():
+        return False
+    if any(character.isdigit() for character in compact):
+        return True
+    if len(compact) < 8:
+        return False
+    if compact in {
+        "business",
+        "delivery",
+        "followup",
+        "progress",
+        "project",
+        "release",
+        "actions",
+        "impact",
+        "issues",
+        "recent",
+        "status",
+        "update",
+    }:
+        return False
+    return True
+
+
 def _highlight_topic_matches_project(topic_aliases: set[str], project: dict[str, Any]) -> bool:
     if not topic_aliases:
         return False
@@ -2257,6 +2329,52 @@ def _filter_text_by_product_scope(text: str) -> tuple[str, int]:
         else:
             filtered += 1
     return "\n".join(kept).strip(), filtered
+
+
+def _filter_text_by_product_scope_or_highlight_aliases(text: str, highlight_aliases: set[str]) -> tuple[str, int, int]:
+    lines = str(text or "").splitlines()
+    if not highlight_aliases:
+        filtered_text, filtered_count = _filter_text_by_product_scope(text)
+        return filtered_text, filtered_count, 0
+
+    keep = [False] * len(lines)
+    highlight_match_count = 0
+    for index, line in enumerate(lines):
+        clean = line.strip()
+        if not clean:
+            continue
+        if _is_product_scope_text(clean):
+            keep[index] = True
+        if _text_matches_aliases(clean, highlight_aliases):
+            highlight_match_count += 1
+            start = max(0, index - 2)
+            end = min(len(lines), index + 4)
+            for nearby_index in range(start, end):
+                keep[nearby_index] = True
+            for header_index in range(index, -1, -1):
+                header = lines[header_index].strip()
+                if header.startswith("==="):
+                    keep[header_index] = True
+                    break
+                if header_index != index and header.startswith("["):
+                    break
+
+    kept: list[str] = []
+    filtered = 0
+    last_kept_blank = False
+    for index, line in enumerate(lines):
+        clean = line.strip()
+        if keep[index]:
+            kept.append(line)
+            last_kept_blank = False
+            continue
+        if not clean:
+            if kept and not last_kept_blank:
+                kept.append(line)
+                last_kept_blank = True
+            continue
+        filtered += 1
+    return "\n".join(kept).strip(), filtered, highlight_match_count
 
 
 def _filter_thread_export_by_product_scope(text: str) -> tuple[str, int]:

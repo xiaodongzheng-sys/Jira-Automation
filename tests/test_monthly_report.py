@@ -429,6 +429,43 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(seatalk_batch_calls, [])
         self.assertGreaterEqual(result["generation_summary"]["total_batches"], 1)
 
+    def test_generate_draft_preserves_highlight_seatalk_topic_matches_outside_product_scope(self):
+        seatalk = _FakeSeaTalkService()
+        seatalk.export_history_since = lambda **_kwargs: "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== ID Ops Room ===",
+                "[2026-04-25 10:01:00] Alice: generic implementation note should not matter.",
+                "[2026-04-25 10:02:00] Bob: database capacity issue triggered system downgrade last night.",
+                "[2026-04-25 10:03:00] Xiaodong Zheng: confirm impact and follow up actions by today.",
+                "[2026-04-25 10:04:00] Alice: unrelated office move update.",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temp_dir, patch("bpmis_jira_tool.monthly_report.generate_monthly_report_with_codex") as mock_generate:
+            mock_generate.return_value = {"result_markdown": "# Draft", "model_id": "codex-cli", "trace": {}}
+            service = MonthlyReportService(
+                settings=_settings(temp_dir),
+                workspace_root=Path(temp_dir),
+                seatalk_service=seatalk,
+                confluence=_FakeConfluence(),
+                gmail_service=_FakeGmailService(),
+                now=datetime(2026, 5, 9, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            )
+
+            result = service.generate_draft(
+                template="# Template",
+                team_payloads=[],
+                highlight_topics=["ID database capacity issue impact and follow up actions"],
+                period_start="2026-04-13",
+                period_end="2026-05-08",
+            )
+
+        joined_prompts = "\n".join(call.kwargs["prompt"] for call in mock_generate.call_args_list)
+        self.assertIn("database capacity issue triggered system downgrade", joined_prompts)
+        self.assertIn("confirm impact and follow up actions", joined_prompts)
+        self.assertGreater(result["evidence_summary"]["highlight_seatalk_raw_match_count"], 0)
+        self.assertGreater(result["evidence_summary"]["highlight_seatalk_line_match_count"], 0)
+
     def test_generate_draft_splits_large_project_evidence_brief_batches(self):
         seatalk = _FakeSeaTalkService()
         projects = []
