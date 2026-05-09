@@ -70,9 +70,11 @@ class _FakeConfluence:
 
 
 class _FakeGmailService:
-    def __init__(self, text: str = ""):
+    def __init__(self, text: str = "", drive_links: list[str] | None = None, google_sheet_evidence: list[dict[str, str]] | None = None):
         self.calls = []
         self.text = text
+        self.drive_links = drive_links or []
+        self.google_sheet_evidence = google_sheet_evidence or []
 
     def export_contact_thread_history_since(self, *, since, now, contact_emails, max_threads):
         self.calls.append(
@@ -89,6 +91,10 @@ class _FakeGmailService:
             "message_count": 1 if self.text else 0,
         }
 
+    def export_google_sheet_link_texts(self, links, *, max_links=4):
+        self.calls.append({"google_sheet_links": list(links), "max_links": max_links})
+        return self.google_sheet_evidence
+
     def export_topic_thread_history_since(self, *, since, now, topic, max_threads):
         self.calls.append(
             {
@@ -102,6 +108,7 @@ class _FakeGmailService:
             "text": self.text,
             "thread_count": 1 if self.text else 0,
             "message_count": 1 if self.text else 0,
+            "drive_links": self.drive_links,
         }
 
 
@@ -225,7 +232,16 @@ class MonthlyReportTests(unittest.TestCase):
             "================================================================================\n"
             "Thread 1\nSubject: AF launch approval\nBody:\nSiew Ghee approved Anti-fraud launch scope.\n"
             "================================================================================\n"
-            "Thread 2\nSubject: Hiring\nBody:\nSiew Ghee discussed hiring plan.\n"
+            "Thread 2\nSubject: Hiring\nBody:\nSiew Ghee discussed hiring plan.\n",
+            drive_links=["https://docs.google.com/spreadsheets/d/sheet123/edit"],
+            google_sheet_evidence=[
+                {
+                    "title": "AF Launch Sheet",
+                    "text": "Sheet confirms Anti-fraud launch dependency and management status.",
+                    "access_status": "ok",
+                    "url": "https://docs.google.com/spreadsheets/d/sheet123/edit",
+                }
+            ],
         )
         now = datetime(2026, 5, 3, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
         team_payloads = [
@@ -316,8 +332,8 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(gmail.calls[0]["since"].isoformat(), "2026-04-20T00:00:00+08:00")
         self.assertEqual(gmail.calls[0]["now"].isoformat(), "2026-05-04T00:00:00+08:00")
         self.assertEqual(gmail.calls[0]["contact_emails"], ["siewghee.kunglim@shopee.com"])
-        self.assertEqual(gmail.calls[1]["topic"], "Key Fraud Project")
-        self.assertEqual(gmail.calls[2]["topic"], "GRC Phase 1")
+        topic_calls = [call for call in gmail.calls if "topic" in call]
+        self.assertEqual([call["topic"] for call in topic_calls], ["Key Fraud Project", "GRC Phase 1"])
         self.assertEqual(confluence.urls, [("https://confluence/prd", "monthly-report")])
         prompts = [call.kwargs["prompt"] for call in mock_generate.call_args_list]
         prompt_modes = [call.kwargs.get("prompt_mode", "") for call in mock_generate.call_args_list]
@@ -331,6 +347,8 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertNotIn("Hiring Plan", joined_prompts)
         self.assertNotIn("Subject: Hiring", joined_prompts)
         self.assertTrue(any("PRD says rollout needs approval" in prompt for prompt in prompts))
+        self.assertTrue(any("google_sheet_links" in call for call in gmail.calls))
+        self.assertTrue(any("Sheet confirms Anti-fraud launch dependency" in prompt for prompt in prompts))
         self.assertTrue(any("_prd_scope_summary" in mode for mode in prompt_modes))
         batch_prompts = [
             call.kwargs["prompt"]
@@ -345,6 +363,7 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(result["evidence_summary"]["jira_ticket_count"], 1)
         self.assertEqual(result["evidence_summary"]["vip_gmail_thread_count"], 1)
         self.assertEqual(result["evidence_summary"]["vip_gmail_message_count"], 1)
+        self.assertEqual(result["evidence_summary"]["highlight_google_sheet_count"], 2)
         self.assertEqual(result["evidence_summary"]["gmail_error_count"], 0)
         self.assertEqual(result["evidence_summary"]["prd_scope_summary_count"], 1)
         self.assertGreater(result["evidence_summary"]["product_scope_filtered_count"], 0)

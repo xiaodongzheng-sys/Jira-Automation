@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from email.utils import getaddresses
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 import html
 import os
 from threading import Lock
@@ -33,6 +33,8 @@ GMAIL_METADATA_FAILURE_RATIO_THRESHOLD = 0.4
 GMAIL_EXPORT_BATCH_SIZE = 50
 GMAIL_EXPORT_MAX_TOTAL_MESSAGES = 200
 GMAIL_EXPORT_MAX_BODY_CHARS = 4000
+GMAIL_TOPIC_MAX_GOOGLE_SHEET_LINKS = 4
+GMAIL_TOPIC_MAX_GOOGLE_SHEET_CHARS = 8000
 GMAIL_EXPORT_FETCH_WORKERS = 1
 GMAIL_REQUEST_RETRY_DELAYS_SECONDS = (1.0, 3.0)
 GMAIL_HTTP_TIMEOUT_SECONDS = 20
@@ -140,6 +142,33 @@ def build_gmail_api_service(credentials, *, cache_discovery: bool = False):
     http = httplib2.Http(timeout=_gmail_http_timeout_seconds())
     authed_http = google_auth_httplib2.AuthorizedHttp(credentials, http=http)
     return build("gmail", "v1", http=authed_http, cache_discovery=cache_discovery)
+
+
+def build_drive_api_service(credentials, *, cache_discovery: bool = False):
+    http = httplib2.Http(timeout=_gmail_http_timeout_seconds())
+    authed_http = google_auth_httplib2.AuthorizedHttp(credentials, http=http)
+    return build("drive", "v3", http=authed_http, cache_discovery=cache_discovery)
+
+
+def _bytes_to_text(content: Any) -> str:
+    if isinstance(content, bytes):
+        return content.decode("utf-8", errors="replace")
+    return str(content or "")
+
+
+def _google_drive_file_id_from_url(url: str) -> str:
+    parsed = urlparse(str(url or ""))
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if "d" in path_parts:
+        index = path_parts.index("d")
+        if index + 1 < len(path_parts):
+            return path_parts[index + 1]
+    query = parse_qs(parsed.query)
+    for key in ("id", "file"):
+        values = query.get(key) or []
+        if values:
+            return str(values[0] or "").strip()
+    return ""
 
 
 def _normalize_header_map(headers: list[dict[str, str]] | None) -> dict[str, str]:
@@ -980,12 +1009,17 @@ class GmailDashboardService:
         separator = "=" * 80
         included_threads = 0
         included_messages = 0
+        drive_links: list[str] = []
         for thread_id in ordered_thread_ids:
             messages = self._fetch_thread_messages(thread_id=thread_id, since=local_since, now=local_now)
             if not messages or not _thread_matches_topic(messages, clean_topic):
                 continue
             included_threads += 1
             included_messages += len([message for message in messages if not message.context_only])
+            for message in messages:
+                for link in message.drive_links:
+                    if link not in drive_links:
+                        drive_links.append(link)
             subject_message = next((message for message in messages if not message.context_only), messages[0])
             subject = subject_message.headers.get("subject") or "[no subject]"
             participants = self._thread_participant_labels(messages)
@@ -1030,7 +1064,62 @@ class GmailDashboardService:
             "thread_count": included_threads,
             "message_count": included_messages,
             "query": query,
+            "drive_links": drive_links[:GMAIL_TOPIC_MAX_GOOGLE_SHEET_LINKS],
         }
+
+    def export_google_sheet_link_texts(self, links: list[str], *, max_links: int = GMAIL_TOPIC_MAX_GOOGLE_SHEET_LINKS) -> list[dict[str, str]]:
+        unique_links = []
+        for link in links or []:
+            normalized = str(link or "").strip()
+            if normalized and normalized not in unique_links:
+                unique_links.append(normalized)
+        if not unique_links:
+            return []
+        service = build_drive_api_service(self.credentials)
+        items: list[dict[str, str]] = []
+        for link in unique_links[:max(0, int(max_links or 0))]:
+            file_id = _google_drive_file_id_from_url(link)
+            if not file_id:
+                continue
+            try:
+                metadata = service.files().get(fileId=file_id, fields="id,name,mimeType").execute()
+                mime_type = str(metadata.get("mimeType") or "")
+                title = str(metadata.get("name") or file_id)
+                if mime_type != "application/vnd.google-apps.spreadsheet" and "/spreadsheets/" not in link:
+                    continue
+                content = service.files().export_media(fileId=file_id, mimeType="text/csv").execute()
+                text = _bytes_to_text(content).strip()
+                items.append(
+                    {
+                        "url": link,
+                        "title": title,
+                        "mime_type": mime_type,
+                        "text": text[:GMAIL_TOPIC_MAX_GOOGLE_SHEET_CHARS],
+                        "access_status": "ok" if text else "empty",
+                    }
+                )
+            except HttpError as error:
+                status = int(getattr(getattr(error, "resp", None), "status", 0) or 0)
+                items.append(
+                    {
+                        "url": link,
+                        "title": "",
+                        "mime_type": "",
+                        "text": "",
+                        "access_status": "permission_denied" if status in {401, 403, 404} else "unavailable",
+                    }
+                )
+            except Exception:
+                items.append(
+                    {
+                        "url": link,
+                        "title": "",
+                        "mime_type": "",
+                        "text": "",
+                        "access_status": "unavailable",
+                    }
+                )
+        return items
 
     def get_cached_export_history_text(
         self,

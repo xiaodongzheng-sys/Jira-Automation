@@ -61,7 +61,7 @@ MONTHLY_REPORT_MAX_VIP_GMAIL_THREADS = 60
 MONTHLY_REPORT_MAX_HIGHLIGHT_GMAIL_THREADS_PER_TOPIC = 8
 MONTHLY_REPORT_HIGHLIGHT_EVIDENCE_MAX_LINES = 24
 MONTHLY_REPORT_EVIDENCE_WORKERS = 2
-MONTHLY_REPORT_GMAIL_TOPIC_CACHE_VERSION = "v2"
+MONTHLY_REPORT_GMAIL_TOPIC_CACHE_VERSION = "v3"
 MONTHLY_REPORT_GMAIL_TOPIC_CACHE_TTL_SECONDS = 6 * 60 * 60
 MONTHLY_REPORT_PRD_SCOPE_CACHE_VERSION = "v1"
 MONTHLY_REPORT_PRODUCT_SCOPE_TERMS = (
@@ -432,6 +432,7 @@ class MonthlyReportService:
                 "highlight_gmail_thread_count": int(highlight_gmail_summary.get("thread_count") or 0),
                 "highlight_gmail_message_count": int(highlight_gmail_summary.get("message_count") or 0),
                 "highlight_gmail_cache_hit_count": int(highlight_gmail_summary.get("cache_hit_count") or 0),
+                "highlight_google_sheet_count": int(highlight_gmail_summary.get("google_sheet_count") or 0),
                 "vip_gmail_thread_count": int(vip_gmail_summary.get("thread_count") or 0),
                 "vip_gmail_message_count": int(vip_gmail_summary.get("message_count") or 0),
                 "gmail_error_count": int(vip_gmail_summary.get("error_count") or 0) + int(highlight_gmail_summary.get("error_count") or 0),
@@ -699,6 +700,8 @@ class MonthlyReportService:
                     "thread_count": _safe_int(cached.get("thread_count")),
                     "message_count": _safe_int(cached.get("message_count")),
                     "query": str(cached.get("query") or ""),
+                    "drive_links": _compact_text_list(cached.get("drive_links"), limit=8, max_chars=500),
+                    "google_sheet_evidence": _normalize_google_sheet_evidence(cached.get("google_sheet_evidence")),
                     "cache_hit": True,
                 }
             try:
@@ -712,12 +715,20 @@ class MonthlyReportService:
                 text = str((payload or {}).get("text") or "").strip()
                 item_thread_count = int((payload or {}).get("thread_count") or 0)
                 item_message_count = int((payload or {}).get("message_count") or 0)
+                drive_links = _compact_text_list((payload or {}).get("drive_links"), limit=8, max_chars=500)
+                google_sheet_evidence = []
+                if item_thread_count > 0 and drive_links and hasattr(gmail_service, "export_google_sheet_link_texts"):
+                    google_sheet_evidence = _normalize_google_sheet_evidence(
+                        gmail_service.export_google_sheet_link_texts(drive_links)
+                    )
                 item = {
                     "topic": topic,
                     "text": text,
                     "thread_count": item_thread_count,
                     "message_count": item_message_count,
                     "query": str((payload or {}).get("query") or ""),
+                    "drive_links": drive_links,
+                    "google_sheet_evidence": google_sheet_evidence,
                     "cache_hit": False,
                 }
                 _write_monthly_report_json_cache(cache_path, item)
@@ -756,6 +767,7 @@ class MonthlyReportService:
             "message_count": sum(_safe_int(item.get("message_count")) for item in items),
             "error_count": len([item for item in items if item.get("error")]),
             "cache_hit_count": len([item for item in items if item.get("cache_hit")]),
+            "google_sheet_count": sum(len(item.get("google_sheet_evidence") or []) for item in items),
         }
 
     def _build_gmail_service(self) -> GmailDashboardService:
@@ -1047,6 +1059,7 @@ def build_monthly_highlight_deep_evidence(
                 "project_updates": project_updates,
                 "seatalk_evidence": _compact_report_text_list(matched_seatalk, limit=16, max_chars=600),
                 "gmail_evidence": _compact_report_text_list(_matched_sections_for_project(gmail_text, aliases, limit=8), limit=8, max_chars=900),
+                "google_sheet_evidence": _compact_google_sheet_evidence(gmail_item.get("google_sheet_evidence")),
                 "gmail_error": str(gmail_item.get("error") or "").strip(),
                 "prd_scope_summaries": _compact_report_text_list(prd_facts, limit=6, max_chars=700),
             }
@@ -1458,6 +1471,35 @@ def _compact_report_text_list(value: Any, *, limit: int, max_chars: int) -> list
     return [_strip_jira_issue_keys_for_report(item) for item in _compact_text_list(value, limit=limit, max_chars=max_chars)]
 
 
+def _normalize_google_sheet_evidence(value: Any) -> list[dict[str, str]]:
+    items = value if isinstance(value, list) else []
+    normalized: list[dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()[:240]
+        text = str(item.get("text") or "").strip()[:2_000]
+        status = str(item.get("access_status") or "").strip()[:80]
+        url = str(item.get("url") or "").strip()[:500]
+        if not (title or text or status or url):
+            continue
+        normalized.append({"title": title, "text": text, "access_status": status, "url": url})
+        if len(normalized) >= 4:
+            break
+    return normalized
+
+
+def _compact_google_sheet_evidence(value: Any) -> list[dict[str, str]]:
+    return [
+        {
+            "title": item.get("title", ""),
+            "text": _strip_jira_issue_keys_for_report(item.get("text", ""))[:1_200],
+            "access_status": item.get("access_status", ""),
+        }
+        for item in _normalize_google_sheet_evidence(value)
+    ]
+
+
 def _safe_int(value: Any) -> int:
     try:
         return int(value or 0)
@@ -1824,9 +1866,16 @@ def _highlight_deep_evidence_text(items: list[dict[str, Any]]) -> str:
         topic = str(item.get("topic") or "").strip()
         if topic:
             lines.append(f"Highlight topic: {topic}")
-        for key in ("seatalk_evidence", "gmail_evidence", "prd_scope_summaries"):
+        for key in ("seatalk_evidence", "gmail_evidence", "google_sheet_evidence", "prd_scope_summaries"):
             for value in item.get(key) or []:
-                text = str(value or "").strip()
+                if isinstance(value, dict):
+                    text = "\n".join(
+                        str(part or "").strip()
+                        for part in (value.get("title"), value.get("text"), value.get("access_status"))
+                        if str(part or "").strip()
+                    )
+                else:
+                    text = str(value or "").strip()
                 if text:
                     lines.append(text)
     return "\n".join(lines)
