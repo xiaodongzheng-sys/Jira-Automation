@@ -821,6 +821,13 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertIn("<td", table_html)
         self.assertIn("Multi-Currency Account", table_html)
         self.assertIn("Support Reject: May 2026", table_html)
+        self.assertIn("table-layout:fixed", table_html)
+        self.assertIn('<col style="width:12%;">', table_html)
+        self.assertIn('<col style="width:11%;">', table_html)
+        self.assertIn('<col style="width:39%;">', table_html)
+        self.assertIn('<col style="width:16%;">', table_html)
+        self.assertIn('<col style="width:22%;">', table_html)
+        self.assertIn('style="border:1px solid #111827;padding:6px 8px;text-align:left;vertical-align:top;white-space:normal;word-break:normal;overflow-wrap:anywhere;font-weight:700;background:#f8fafc;width:39%;"', table_html)
 
 
 if __name__ == "__main__":

@@ -1593,23 +1593,54 @@ def _is_markdown_table_separator(line: str) -> bool:
 
 def _render_markdown_table_html(headers: list[str], rows: list[list[str]]) -> str:
     column_count = max([len(headers), *(len(row) for row in rows), 1])
-    table_style = "border-collapse:collapse;width:100%;margin:12px 0;"
-    cell_style = "border:1px solid #111827;padding:6px 8px;text-align:left;vertical-align:top;"
+    table_style = "border-collapse:collapse;width:100%;table-layout:fixed;margin:12px 0;"
+    cell_style = (
+        "border:1px solid #111827;padding:6px 8px;text-align:left;vertical-align:top;"
+        "white-space:normal;word-break:normal;overflow-wrap:anywhere;"
+    )
+    column_widths = _monthly_report_table_column_widths(headers, column_count)
 
     def render_cells(cells: list[str], tag: str) -> str:
-        style = cell_style + ("font-weight:700;background:#f8fafc;" if tag == "th" else "")
+        base_style = cell_style + ("font-weight:700;background:#f8fafc;" if tag == "th" else "")
         return "".join(
-            f'<{tag} style="{style}">{_inline_markdown(cells[index] if index < len(cells) else "")}</{tag}>'
+            f'<{tag} style="{base_style}width:{column_widths[index]};">{_inline_markdown(cells[index] if index < len(cells) else "")}</{tag}>'
             for index in range(column_count)
         )
 
+    colgroup = "".join(f'<col style="width:{width};">' for width in column_widths)
     body = "".join(f"<tr>{render_cells(row, 'td')}</tr>" for row in rows)
     return (
         f'<table style="{table_style}">'
+        f"<colgroup>{colgroup}</colgroup>"
         f"<thead><tr>{render_cells(headers, 'th')}</tr></thead>"
         f"<tbody>{body}</tbody>"
         "</table>"
     )
+
+
+def _monthly_report_table_column_widths(headers: list[str], column_count: int) -> list[str]:
+    normalized_headers = [_normalize_monthly_report_table_header(header) for header in headers]
+    project_update_headers = [
+        "region",
+        "priority",
+        "project",
+        "current status",
+        "target tech live date",
+    ]
+    if normalized_headers[:5] == project_update_headers:
+        return ["12%", "11%", "39%", "16%", "22%"] + _equal_widths(max(0, column_count - 5))
+    return _equal_widths(column_count)
+
+
+def _normalize_monthly_report_table_header(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().casefold())
+
+
+def _equal_widths(column_count: int) -> list[str]:
+    if column_count <= 0:
+        return []
+    width = f"{100 / column_count:.4f}%"
+    return [width] * column_count
 
 
 def _monthly_report_data_root(settings: Settings) -> Path:
