@@ -33,6 +33,11 @@
     return `https://${text}`;
   };
 
+  const isIgnoredSeatalkMappingId = (id) => {
+    const value = String(id || '').trim();
+    return value === '0' || /^UID\s+0$/i.test(value) || value === 'buddy-0';
+  };
+
   const taskStatus = root.querySelector('[data-team-dashboard-task-status]');
   const taskSummary = root.querySelector('[data-team-dashboard-task-summary]');
   const taskList = root.querySelector('[data-team-dashboard-task-list]');
@@ -1800,7 +1805,7 @@
     const canonicalMappingId = (id) => String(id || '').startsWith('buddy-') ? `UID ${String(id).slice('buddy-'.length)}` : String(id || '');
     const mappingValueFor = (id) => mappings[id] || mappings[personAlias(id)] || '';
     unknownRows.forEach((row) => {
-      if (!row?.id) return;
+      if (!row?.id || isIgnoredSeatalkMappingId(row.id)) return;
       const canonicalId = canonicalMappingId(row.id);
       const existing = rowsById.get(canonicalId);
       if (existing) {
@@ -1814,17 +1819,6 @@
         count: Number(row.count || 0),
         example: row.example || '',
         priorityReason: row.priority_reason || 'Frequent unknown ID',
-      });
-    });
-    Object.keys(mappings).sort().forEach((id) => {
-      const canonicalId = canonicalMappingId(id);
-      if (rowsById.has(canonicalId)) return;
-      rowsById.set(id, {
-        id,
-        type: id.startsWith('group-') ? 'group' : id.startsWith('buddy-') ? 'buddy' : 'uid',
-        count: 0,
-        example: '',
-        priorityReason: 'Saved mapping',
       });
     });
     const rows = Array.from(rowsById.values());
@@ -1881,7 +1875,7 @@
     const mappings = {};
     Object.entries(state.mappings || {}).forEach(([id, value]) => {
       const trimmed = String(value || '').trim();
-      if (id && trimmed) mappings[id] = trimmed;
+      if (id && trimmed && !isIgnoredSeatalkMappingId(id)) mappings[id] = trimmed;
     });
     return mappings;
   };

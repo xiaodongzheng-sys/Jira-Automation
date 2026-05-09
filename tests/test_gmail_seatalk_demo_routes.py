@@ -753,21 +753,23 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
                 loaded = client.get("/api/team-dashboard/report-intelligence/seatalk/name-mappings")
                 updated = client.post(
                     "/api/team-dashboard/report-intelligence/seatalk/name-mappings",
-                    json={"mappings": {"UID 888": "Alice"}},
+                    json={"mappings": {"UID 0": "Missing User", "buddy-0": "Missing User", "UID 888": "Alice"}},
                 )
                 legacy_loaded = client.get("/api/gmail-sea-talk-demo/seatalk/name-mappings")
 
         self.assertEqual(saved.status_code, 200)
         self.assertEqual(loaded.status_code, 200)
         payload = loaded.get_json()
-        self.assertEqual(payload["mappings"]["group-123"], "Risk Project Group")
-        self.assertEqual(payload["mappings"]["UID 456"], "Important DM")
-        self.assertEqual(payload["mappings"]["buddy-456"], "Important DM")
+        self.assertEqual(payload["mappings"], {})
         self.assertEqual(payload["unknown_ids"], [])
         self.assertNotIn("candidates", payload)
         self.assertEqual(updated.status_code, 200)
+        updated_mappings = updated.get_json()["mappings"]
+        self.assertNotIn("UID 0", updated_mappings)
+        self.assertNotIn("buddy-0", updated_mappings)
+        self.assertEqual(updated_mappings["UID 888"], "Alice")
         self.assertEqual(legacy_loaded.status_code, 200)
-        self.assertEqual(legacy_loaded.get_json()["mappings"]["UID 888"], "Alice")
+        self.assertEqual(legacy_loaded.get_json()["mappings"], {})
 
     def test_seatalk_name_mapping_script_paginates_candidates(self):
         source = Path("static/gmail_seatalk_demo.js").read_text(encoding="utf-8")
@@ -802,6 +804,20 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
                             "count": 13,
                             "example": "2026-04-29: direct chat",
                             "priority_reason": "Private chat",
+                        },
+                        {
+                            "id": "UID 0",
+                            "type": "uid",
+                            "count": 10,
+                            "example": "2026-05-04: [custom.missing]",
+                            "priority_reason": "Frequent unknown ID",
+                        },
+                        {
+                            "id": "buddy-0",
+                            "type": "buddy",
+                            "count": 1,
+                            "example": "2026-05-04: [custom.missing]",
+                            "priority_reason": "Frequent unknown ID",
                         },
                     ],
                     "generated_at": "2026-04-30T08:30:00+08:00",

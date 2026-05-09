@@ -326,6 +326,11 @@ class SeaTalkDashboardService:
         daily_cached = None if force_refresh else self._load_daily_cache(kind="name_mappings", days=days, now=now)
         if daily_cached is not None:
             payload = json.loads(json.dumps(daily_cached))
+            unknown_ids = payload.get("unknown_ids") if isinstance(payload.get("unknown_ids"), list) else []
+            payload["unknown_ids"] = [
+                row for row in unknown_ids
+                if isinstance(row, dict) and not self._is_ignored_unknown_id(row.get("id"))
+            ]
             payload["cache"] = {"hit": True, "expires_at": self._insights_cache_expiry(now).isoformat()}
             return payload
         self._validate_local_environment()
@@ -348,8 +353,15 @@ class SeaTalkDashboardService:
         if not isinstance(payload, dict):
             raise ToolError("SeaTalk name mapping candidates returned an invalid payload.")
         unknown_ids = payload.get("unknown_ids") if isinstance(payload.get("unknown_ids"), list) else []
+        normalized_unknown_ids = [
+            self._normalize_unknown_id(row) for row in unknown_ids
+            if isinstance(row, dict)
+        ]
         payload = {
-            "unknown_ids": [self._normalize_unknown_id(row) for row in unknown_ids if isinstance(row, dict)],
+            "unknown_ids": [
+                row for row in normalized_unknown_ids
+                if not self._is_ignored_unknown_id(row.get("id"))
+            ],
             "generated_at": self._clean_text(payload.get("generated_at"), now.isoformat()),
             "period_days": int(payload.get("period_days") or days),
             "cache": {"hit": False, "expires_at": self._insights_cache_expiry(now).isoformat()},
@@ -1043,6 +1055,11 @@ class SeaTalkDashboardService:
     def _clean_text(value: Any, fallback: str) -> str:
         text = " ".join(str(value or "").split())
         return (text or fallback)[:900]
+
+    @staticmethod
+    def _is_ignored_unknown_id(value: Any) -> bool:
+        text = " ".join(str(value or "").split()).lower()
+        return text in {"0", "uid 0", "buddy-0"}
 
     @classmethod
     def _normalize_unknown_id(cls, row: dict[str, Any]) -> dict[str, Any]:

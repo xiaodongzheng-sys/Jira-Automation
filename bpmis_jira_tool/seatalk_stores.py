@@ -254,6 +254,12 @@ class SeaTalkNameMappingStore:
             return f"UID {uid_match.group(1).strip()}"
         return ""
 
+    @classmethod
+    def is_ignored_key(cls, value: Any) -> bool:
+        raw = str(value or "").strip().lower()
+        key = cls.normalize_key(value)
+        return raw == "0" or key in {"UID 0", "buddy-0"}
+
     @staticmethod
     def person_aliases(key: str) -> set[str]:
         if key.startswith("buddy-"):
@@ -285,7 +291,7 @@ class SeaTalkNameMappingStore:
         for raw_key, raw_name in value.items():
             key = cls.normalize_key(raw_key)
             name = " ".join(str(raw_name or "").split())
-            if key and name:
+            if key and name and not cls.is_ignored_key(key):
                 mappings[key] = name[:180]
                 for alias in cls.person_aliases(key):
                     mappings[alias] = name[:180]

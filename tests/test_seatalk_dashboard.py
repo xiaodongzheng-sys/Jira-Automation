@@ -225,6 +225,7 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
                                 "example": "2026-04-21: Please review",
                                 "priority_reason": "@mentioned me",
                             },
+                            {"id": "UID 0", "type": "uid", "count": 10, "example": "2026-05-04: [custom.missing]"},
                             {"id": "UID 888", "type": "uid", "count": "4", "example": "2026-04-21: hello"},
                         ],
                         "generated_at": "2026-04-21T21:00:00+08:00",
@@ -247,6 +248,7 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertEqual(result["unknown_ids"][0]["count"], 9)
         self.assertEqual(result["unknown_ids"][0]["priority_reason"], "@mentioned me")
         self.assertEqual(result["unknown_ids"][1]["id"], "UID 888")
+        self.assertNotIn("UID 0", [row["id"] for row in result["unknown_ids"]])
         self.assertTrue(any("--unknown-ids-json" in command for command in calls))
 
     def test_build_name_mappings_reuses_daily_disk_cache(self):
@@ -259,7 +261,10 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
                 returncode=0,
                 stdout=json.dumps(
                     {
-                        "unknown_ids": [{"id": "group-123", "type": "group", "count": 9, "example": "2026-04-21: Please review"}],
+                        "unknown_ids": [
+                            {"id": "group-123", "type": "group", "count": 9, "example": "2026-04-21: Please review"},
+                            {"id": "buddy-0", "type": "buddy", "count": 2, "example": "2026-05-04: [custom.missing]"},
+                        ],
                         "generated_at": "2026-04-21T21:00:00+08:00",
                         "period_days": 7,
                     }
@@ -283,6 +288,7 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertFalse(first["cache"]["hit"])
         self.assertTrue(second["cache"]["hit"])
         self.assertEqual(second["unknown_ids"][0]["id"], "group-123")
+        self.assertNotIn("buddy-0", [row["id"] for row in second["unknown_ids"]])
 
     def test_build_insights_uses_codex_read_only_ephemeral_command(self):
         def local_runner(command: list[str]):

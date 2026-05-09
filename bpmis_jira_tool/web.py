@@ -327,6 +327,8 @@ def _dedupe_seatalk_name_mapping_candidates(rows: Any) -> list[dict[str, Any]]:
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict):
             continue
+        if SeaTalkNameMappingStore.is_ignored_key(row.get("id")):
+            continue
         canonical_id = SeaTalkNameMappingStore.canonical_display_key(row.get("id"))
         if not canonical_id:
             continue

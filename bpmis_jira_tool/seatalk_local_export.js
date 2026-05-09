@@ -143,7 +143,7 @@ function loadNameOverrides(filePath) {
   for (const [rawKey, rawName] of Object.entries(source)) {
     const key = normalizeMappingKey(rawKey);
     const name = String(rawName || '').trim();
-    if (key && name) {
+    if (key && name && !isIgnoredMappingKey(key)) {
       mappings.set(key, name);
       for (const alias of personMappingAliases(key)) mappings.set(alias, name);
     }
@@ -157,6 +157,12 @@ function normalizeMappingKey(value) {
   const uidMatch = key.match(/^UID\s+(.+)$/i);
   if (uidMatch && uidMatch[1].trim()) return `UID ${uidMatch[1].trim()}`;
   return '';
+}
+
+function isIgnoredMappingKey(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  const key = normalizeMappingKey(value);
+  return raw === '0' || key === 'UID 0' || key === 'buddy-0';
 }
 
 function personMappingAliases(key) {
@@ -445,6 +451,7 @@ function collectUnknownIds(rows, selfUid, db, overrides, periodEndEpoch) {
     frequent: 'Frequent unknown ID',
   };
   const remember = (id, type, row, text, reason) => {
+    if (isIgnoredMappingKey(id)) return;
     const current = unknowns.get(id) || {
       id,
       type,
