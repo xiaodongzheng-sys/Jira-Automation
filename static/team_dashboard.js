@@ -371,14 +371,27 @@
       const cells = splitTableRow(line);
       return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s+/g, '')));
     };
+    const tableColumnWidths = (headers, columnCount) => {
+      const normalizedHeaders = headers.map((header) => String(header || '').trim().toLowerCase().replace(/\s+/g, ' '));
+      const projectHeaders = ['region', 'priority', 'project', 'current status', 'target tech live date'];
+      if (projectHeaders.every((header, index) => normalizedHeaders[index] === header)) {
+        const widths = ['12%', '11%', '39%', '16%', '22%'];
+        const extraCount = Math.max(0, columnCount - widths.length);
+        return widths.concat(Array.from({ length: extraCount }, () => `${100 / Math.max(1, extraCount)}%`));
+      }
+      return Array.from({ length: columnCount }, () => `${100 / Math.max(1, columnCount)}%`);
+    };
     const renderTable = () => {
       if (!table) return;
       const columnCount = Math.max(table.headers.length, ...table.rows.map((row) => row.length), 1);
+      const columnWidths = tableColumnWidths(table.headers, columnCount);
       const renderCells = (cells, tag) => Array.from({ length: columnCount }, (_, index) => (
-        `<${tag}>${inline(cells[index] || '')}</${tag}>`
+        `<${tag} style="width:${columnWidths[index]};">${inline(cells[index] || '')}</${tag}>`
       )).join('');
+      const colgroup = columnWidths.map((width) => `<col style="width:${width};">`).join('');
       html.push(
         '<div class="team-dashboard-markdown-table-wrap"><table class="team-dashboard-markdown-table">'
+        + `<colgroup>${colgroup}</colgroup>`
         + `<thead><tr>${renderCells(table.headers, 'th')}</tr></thead>`
         + `<tbody>${table.rows.map((row) => `<tr>${renderCells(row, 'td')}</tr>`).join('')}</tbody>`
         + '</table></div>',

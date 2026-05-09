@@ -810,7 +810,7 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(by_id["UAT"], "UAT")
         self.assertEqual(by_id["RELEASED"], "UAT")
         target = next(item for item in brief if item["project_id"] == "TARGET")
-        self.assertEqual(target["target_tech_live_date"], "2026-06-20")
+        self.assertEqual(target["target_tech_live_date"], "Jun 2026")
         self.assertEqual(target["target_tech_live_version"], "AF_v1.1_0620")
         self.assertFalse(any("Planning_26Q4" in fact for fact in target["timeline_facts"]))
 
@@ -845,13 +845,14 @@ class MonthlyReportTests(unittest.TestCase):
             "## Updates\n"
             "| Region | Priority | Project | Current Status | Target Tech Live Date |\n"
             "| --- | --- | --- | --- | --- |\n"
-            "| SG | SP | Multi-Currency Account | Dev | July 2026 |\n"
+            "| SG | SP | Multi-Currency Account | Dev | Jul 2026 |\n"
             "| PH | P0 | Incoming Transaction Hold | Dev | Support Reject: May 2026 |\n"
         )
         self.assertIn("<table", table_html)
         self.assertIn("<th", table_html)
         self.assertIn("<td", table_html)
         self.assertIn("Multi-Currency Account", table_html)
+        self.assertIn("Jul 2026", table_html)
         self.assertIn("Support Reject: May 2026", table_html)
         self.assertIn("table-layout:fixed", table_html)
         self.assertIn('<col style="width:12%;">', table_html)

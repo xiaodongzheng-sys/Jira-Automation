@@ -230,17 +230,44 @@ def _gmail_topic_query_terms(topic: str) -> list[str]:
         return []
     terms = [f'"{clean[:120]}"']
     seen = {clean.casefold()}
-    for token in re.split(r"[\s/_:()[\],.-]+", clean):
-        text = token.strip()
+    for text in _gmail_topic_match_terms(clean):
         key = text.casefold()
-        if len(text) < 3 or key in seen:
-            continue
-        if key in {"the", "and", "for", "with", "phase", "project", "update", "status"}:
-            continue
-        seen.add(key)
-        terms.append(text[:80])
+        if key not in seen:
+            seen.add(key)
+            terms.append(text[:80])
         if len(terms) >= 8:
             break
+    return terms
+
+
+def _gmail_topic_match_terms(topic: str) -> list[str]:
+    stopwords = {
+        "the",
+        "and",
+        "for",
+        "with",
+        "phase",
+        "project",
+        "update",
+        "status",
+        "issue",
+        "issues",
+        "impact",
+        "follow",
+        "actions",
+        "action",
+    }
+    country_codes = {"id", "sg", "ph"}
+    terms: list[str] = []
+    seen: set[str] = set()
+    for token in re.split(r"[\s/_:()[\],.-]+", str(topic or "")):
+        text = token.strip()
+        key = text.casefold()
+        if key in stopwords or key in seen:
+            continue
+        if len(text) >= 3 or key in country_codes:
+            terms.append(text)
+            seen.add(key)
     return terms
 
 
@@ -368,13 +395,11 @@ def _thread_matches_topic(messages: list["GmailExportRecord"], topic: str) -> bo
     clean_topic = " ".join(str(topic or "").split())
     if not clean_topic:
         return False
-    terms = [
-        term.casefold()
-        for term in [clean_topic, *re.split(r"[\s/_:()[\],.-]+", clean_topic)]
-        if len(str(term or "").strip()) >= 3
-    ]
+    terms = [term.casefold() for term in _gmail_topic_match_terms(clean_topic)]
     if not terms:
         return False
+    compact_topic = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", clean_topic.casefold())
+    required_matches = 1 if len(terms) == 1 else 2
     for message in messages:
         if message.context_only:
             continue
@@ -389,9 +414,14 @@ def _thread_matches_topic(messages: list["GmailExportRecord"], topic: str) -> bo
             ]
         ).casefold()
         compact = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", text)
+        if compact_topic and compact_topic in compact:
+            return True
+        matched_terms = 0
         for term in terms:
             normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", term)
             if term in text or (normalized and normalized in compact):
+                matched_terms += 1
+            if matched_terms >= required_matches:
                 return True
     return False
 

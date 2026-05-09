@@ -698,6 +698,66 @@ class GmailDashboardServiceTests(unittest.TestCase):
         self.assertIn("Gmail topic thread history export", payload["text"])
         self.assertIn("CIB Phase 2 release owner confirmed.", payload["text"])
 
+    def test_topic_thread_export_requires_multiple_meaningful_topic_terms(self):
+        now = datetime(2026, 5, 9, 0, 0).astimezone()
+        since = now - timedelta(days=26)
+        topic = "ID database capacity issue, impact and follow up actions"
+        query = _build_topic_thread_export_query(since, now, topic)
+        in_window = datetime(2026, 5, 8, 18, 0, tzinfo=now.tzinfo)
+        list_payloads = {
+            (query, None): {
+                "messages": [
+                    {"id": "m-noise", "threadId": "t-noise"},
+                    {"id": "m-match", "threadId": "t-match"},
+                ],
+            },
+        }
+        thread_payloads = {
+            "t-noise": {
+                "id": "t-noise",
+                "messages": [
+                    {
+                        "id": "m-noise",
+                        "threadId": "t-noise",
+                        "internalDate": str(int(in_window.timestamp() * 1000)),
+                        "labelIds": ["INBOX"],
+                        "payload": {
+                            "headers": [{"name": "Subject", "value": "General follow-up issue"}],
+                            "body": {"data": base64.urlsafe_b64encode(b"Please follow up this open issue.").decode("utf-8")},
+                        },
+                    }
+                ],
+            },
+            "t-match": {
+                "id": "t-match",
+                "messages": [
+                    {
+                        "id": "m-match",
+                        "threadId": "t-match",
+                        "internalDate": str(int(in_window.timestamp() * 1000)),
+                        "labelIds": ["INBOX"],
+                        "payload": {
+                            "headers": [{"name": "Subject", "value": "ID database capacity"}],
+                            "body": {"data": base64.urlsafe_b64encode(b"ID database capacity issue impact and action owner confirmed.").decode("utf-8")},
+                        },
+                    }
+                ],
+            },
+        }
+        service = GmailDashboardService(
+            credentials=object(),
+            gmail_service=_FakeGmailService(list_payloads, {}, thread_payloads),
+        )
+
+        payload = service.export_topic_thread_history_since(since=since, now=now, topic=topic, max_threads=3)
+
+        self.assertIn("ID", query)
+        self.assertIn("database", query)
+        self.assertIn("capacity", query)
+        self.assertEqual(payload["thread_count"], 1)
+        self.assertIn("ID database capacity issue impact", payload["text"])
+        self.assertNotIn("Please follow up this open issue.", payload["text"])
+
     def test_export_history_text_marks_truncated_bodies(self):
         now = datetime(2026, 4, 21, 16, 0).astimezone()
         period_start = datetime.combine(now.date() - timedelta(days=6), datetime.min.time(), tzinfo=now.tzinfo)

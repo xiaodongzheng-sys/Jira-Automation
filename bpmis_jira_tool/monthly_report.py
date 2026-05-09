@@ -59,7 +59,7 @@ MONTHLY_REPORT_MAX_VIP_GMAIL_THREADS = 60
 MONTHLY_REPORT_MAX_HIGHLIGHT_GMAIL_THREADS_PER_TOPIC = 8
 MONTHLY_REPORT_HIGHLIGHT_EVIDENCE_MAX_LINES = 24
 MONTHLY_REPORT_EVIDENCE_WORKERS = 2
-MONTHLY_REPORT_GMAIL_TOPIC_CACHE_VERSION = "v1"
+MONTHLY_REPORT_GMAIL_TOPIC_CACHE_VERSION = "v2"
 MONTHLY_REPORT_GMAIL_TOPIC_CACHE_TTL_SECONDS = 6 * 60 * 60
 MONTHLY_REPORT_PRD_SCOPE_CACHE_VERSION = "v1"
 MONTHLY_REPORT_PRODUCT_SCOPE_TERMS = (
@@ -691,6 +691,7 @@ class MonthlyReportService:
                     "text": str(cached.get("text") or "").strip(),
                     "thread_count": _safe_int(cached.get("thread_count")),
                     "message_count": _safe_int(cached.get("message_count")),
+                    "query": str(cached.get("query") or ""),
                     "cache_hit": True,
                 }
             try:
@@ -709,6 +710,7 @@ class MonthlyReportService:
                     "text": text,
                     "thread_count": item_thread_count,
                     "message_count": item_message_count,
+                    "query": str((payload or {}).get("query") or ""),
                     "cache_hit": False,
                 }
                 _write_monthly_report_json_cache(cache_path, item)
@@ -1358,7 +1360,7 @@ def build_monthly_report_final_prompt(
         "Never include a project-table row unless it is attached to an item where include=true in Other Key Project Updates JSON. Non-project highlight topics may appear only in Highlights when supported by Highlight Deep Evidence.\n"
         "Do not write 'Evidence-limited' unless that exact wording appears in the structured status_facts for an included project.\n"
         "Do not write 'prioritization pressure', capacity pressure, or resource pressure unless that exact project has a direct risk entry containing capacity, resource, or prioritization evidence.\n"
-        "Exclude random live incidents, DB instability, local registration monitoring, Shopee acquisition, and onboarding health unless they are explicitly tied to an included project and a Xiaodong decision/action.\n"
+        "Exclude random live incidents, DB instability, local registration monitoring, Shopee acquisition, and onboarding health unless they are explicitly tied to an included project and a Xiaodong decision/action, or they are one of the user-provided highlight topics with direct Highlight Deep Evidence.\n"
         "Do not write 'No material update found' as a project status. Use BRD in the Current Status column when a project has no material update.\n"
         "Do not include raw transcripts, long PRD excerpts, tool logs, or confidential implementation chatter that is not needed for a monthly business report.\n\n"
         "# Output Rules\n"
@@ -1370,7 +1372,7 @@ def build_monthly_report_final_prompt(
         "- Do not include Jira ticket IDs, Jira links, or issue-key references in the report.\n"
         "- Do not include a Key Follow-Ups section.\n"
         "- Current Status must be exactly one of: BRD, PRD, Dev, UAT. Do not add explanations in that cell.\n\n"
-        "- Target Tech Live Date must use target_tech_live_date from Other Key Project Updates exactly. If it is TBD, write TBD. Do not infer a target date from timeline_facts or any version starting with Planning.\n\n"
+        "- Target Tech Live Date must use target_tech_live_date from Other Key Project Updates exactly. It must be MMM YYYY, such as May 2026, or TBD. Do not infer a target date from timeline_facts or any version starting with Planning.\n\n"
         f"# Generated At\n{generated_at.isoformat()}\n\n"
         f"# Report Period\n{report_period.start_date} to {report_period.end_date}\n\n"
         f"# User-Provided Highlight Topics\n{_json_block(highlight_topics)}\n\n"
@@ -1401,7 +1403,7 @@ def _compact_monthly_evidence_for_final(monthly_evidence_brief: list[dict[str, A
                 "seatalk_group_ids": _compact_text_list(item.get("seatalk_group_ids"), limit=8, max_chars=80),
                 "material_update_score": _safe_int(item.get("material_update_score")),
                 "current_status": _monthly_report_status_label(item.get("current_status")),
-                "target_tech_live_date": str(item.get("target_tech_live_date") or "TBD").strip() or "TBD",
+                "target_tech_live_date": _monthly_report_month_label(item.get("target_tech_live_date")),
                 "target_tech_live_version": str(item.get("target_tech_live_version") or "").strip(),
                 "status_facts": _compact_report_text_list(item.get("status_facts"), limit=6, max_chars=320),
                 "timeline_facts": _compact_report_text_list(item.get("timeline_facts"), limit=5, max_chars=240),
@@ -2016,7 +2018,25 @@ def _monthly_report_target_tech_live_date(jira_tickets: list[dict[str, Any]]) ->
             latest = (parsed, version)
     if latest is None:
         return "TBD", ""
-    return latest[0].isoformat(), latest[1]
+    return _monthly_report_month_label(latest[0]), latest[1]
+
+
+def _monthly_report_month_label(value: Any) -> str:
+    if isinstance(value, date):
+        return value.strftime("%b %Y")
+    text = str(value or "").strip()
+    if not text or text.upper() == "TBD":
+        return "TBD"
+    for candidate in (text[:10], text):
+        try:
+            return date.fromisoformat(candidate).strftime("%b %Y")
+        except ValueError:
+            continue
+    month_match = re.fullmatch(r"([A-Za-z]{3,9})\s+(\d{4})", text)
+    if month_match:
+        month = month_match.group(1)[:3].title()
+        return f"{month} {month_match.group(2)}"
+    return "TBD"
 
 
 def _is_monthly_report_planning_version(value: Any) -> bool:
