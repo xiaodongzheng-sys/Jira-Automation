@@ -356,7 +356,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         mapping_store = _get_seatalk_name_mapping_store(settings)
         if request.method == "POST":
             payload = request.get_json(silent=True) or {}
-            mappings = mapping_store.merge_mappings(payload.get("mappings") or {})
+            mappings = mapping_store.replace_mappings(payload.get("mappings") or {})
             SeaTalkDashboardService.clear_cache()
             return jsonify({"status": "ok", "mappings": mappings})
         force_refresh = str(request.args.get("refresh") or "").strip().lower() in {"1", "true", "yes"}
