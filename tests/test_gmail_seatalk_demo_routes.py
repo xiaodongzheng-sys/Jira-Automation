@@ -769,7 +769,9 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertNotIn("buddy-0", updated_mappings)
         self.assertEqual(updated_mappings["UID 888"], "Alice")
         self.assertEqual(legacy_loaded.status_code, 200)
-        self.assertEqual(legacy_loaded.get_json()["mappings"], {})
+        legacy_payload = legacy_loaded.get_json()
+        self.assertEqual(legacy_payload["mappings"], {})
+        self.assertEqual([row["id"] for row in legacy_payload["unknown_ids"]], ["group-123", "UID 456"])
 
     def test_seatalk_name_mapping_script_paginates_candidates(self):
         source = Path("static/gmail_seatalk_demo.js").read_text(encoding="utf-8")
