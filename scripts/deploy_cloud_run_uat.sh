@@ -316,7 +316,7 @@ uat_local_agent_sync_requires_file() {
     static/*|templates/*|tests/*|docs/*|README.md|.dockerignore|.github/*)
       return 1
       ;;
-    app.py|bpmis_jira_tool/web.py)
+    app.py|bpmis_jira_tool/web.py|bpmis_jira_tool/web_*.py)
       return 1
       ;;
     *)

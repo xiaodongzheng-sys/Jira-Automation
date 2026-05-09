@@ -544,8 +544,20 @@ exit 0
 
         self.assertIn("uat_local_agent_sync_requires_file", contents)
         self.assertIn("static/*|templates/*|tests/*|docs/*|README.md|.dockerignore|.github/*", contents)
+        self.assertIn("app.py|bpmis_jira_tool/web.py|bpmis_jira_tool/web_*.py", contents)
         self.assertIn('if uat_local_agent_sync_requires_file "$changed_file"; then', contents)
         self.assertIn("Skipping UAT Mac local-agent sync/restart", contents)
+
+    def test_live_promotion_skips_local_agent_restart_for_cloud_run_web_ui_changes(self):
+        promote_script = PROJECT_ROOT / "scripts/promote_uat_to_live.sh"
+        contents = promote_script.read_text(encoding="utf-8")
+
+        self.assertIn("classify_live_restart_mode", contents)
+        self.assertIn("classify_live_local_agent_restart_mode", contents)
+        self.assertIn("app.py|bpmis_jira_tool/web.py|bpmis_jira_tool/web_*.py|static/*|templates/*", contents)
+        self.assertIn("live_local_agent_restart_requires_file", contents)
+        self.assertIn("Skipping live local-agent restart", contents)
+        self.assertIn("PROMOTE_UAT_LOCAL_AGENT_RESTART_MODE", contents)
 
     def test_release_checklist_documents_full_gate_and_read_only_smoke(self):
         checklist = (PROJECT_ROOT / "docs/release-checklist.md").read_text(encoding="utf-8")

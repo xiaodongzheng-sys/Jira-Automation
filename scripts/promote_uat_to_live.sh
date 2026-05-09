@@ -91,7 +91,7 @@ classify_live_restart_mode() {
   while IFS= read -r changed_file; do
     [[ -n "$changed_file" ]] || continue
     case "$changed_file" in
-      app.py|bpmis_jira_tool/web.py|static/*|templates/*|tests/*|docs/*|README.md)
+      app.py|bpmis_jira_tool/web.py|bpmis_jira_tool/web_*.py|static/*|templates/*|tests/*|docs/*|README.md)
         ;;
       *)
         printf 'full\n'

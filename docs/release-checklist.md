@@ -227,7 +227,7 @@ CLOUD_RUN_UAT_PREBUILT_IMAGE_TAG=TAG \
 
 The deploy scripts read `GOOGLE_CLOUD_PROJECT` and `CLOUD_RUN_DEPLOY_ACCOUNT` from `.env`, so routine UAT deploys do not depend on a personal interactive `gcloud auth login` session.
 
-- After Cloud Run UAT deploy succeeds, the script syncs the isolated UAT Mac host workspace to the same Git commit, installs host dependencies only when `requirements.txt` changed, initializes the PRD Briefing SQLite schema under the UAT data root, restarts the UAT Mac local-agent on port `7008`, and verifies public UAT local-agent health through the fixed live portal `/uat-local-agent` proxy. This keeps UAT's Cloud Run frontend and UAT local-agent-backed backend/cache code aligned without restarting the live local-agent.
+- After Cloud Run UAT deploy succeeds, the script syncs the isolated UAT Mac host workspace to the same Git commit, installs host dependencies only when `requirements.txt` changed, initializes the PRD Briefing SQLite schema under the UAT data root, restarts the UAT Mac local-agent on port `7008`, and verifies public UAT local-agent health through the fixed live portal `/uat-local-agent` proxy. This keeps UAT's Cloud Run frontend and UAT local-agent-backed backend/cache code aligned without restarting the live local-agent. The UAT local-agent sync is change-aware: static assets, templates, docs/tests, `app.py`, `bpmis_jira_tool/web.py`, and split Flask web route modules (`bpmis_jira_tool/web_*.py`) skip the UAT local-agent sync/restart because they do not change local-agent-backed runtime code.
 
 For faster UAT releases, use the one-command orchestrator. It runs the release gate, builds or reuses an image, deploys UAT with the unchanged-deploy skip enabled, overlaps UAT host sync with Cloud Run deploy, and prints recent timing records:
 
@@ -240,6 +240,8 @@ For routine UAT plus live promotion, use the full one-command orchestrator. It r
 ```bash
 ./scripts/release_uat_live_fast.sh
 ```
+
+Live promotion also uses a change-aware local-agent restart. If the promoted commit only changes Cloud Run web/UI files such as `app.py`, `bpmis_jira_tool/web.py`, `bpmis_jira_tool/web_*.py`, `static/*`, or `templates/*`, `promote_uat_to_live.sh` skips `run_local_agent.sh restart` and only restarts/verifies the portal path. This saves roughly 3-8 seconds on those releases and reduces live local-agent disruption. Force the old behavior with `PROMOTE_UAT_LOCAL_AGENT_RESTART_MODE=restart` when a local-agent-backed workflow must be refreshed anyway.
 
 The image reuse check scans recent first-parent commits for the newest existing Artifact Registry SHA image. If `git diff <image-sha>..HEAD` contains no Cloud Run runtime inputs, the release uses that older image while still stamping `TEAM_PORTAL_RELEASE_REVISION` with the current commit. Disable this conservative reuse path with:
 
@@ -395,7 +397,7 @@ CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceac
 
 The script does not change Cloud Run live traffic. The Cloudflare Tunnel URL remains the primary Live portal.
 
-The default `PROMOTE_UAT_RESTART_MODE=auto` still classifies the portal change shape, while `PROMOTE_UAT_LOCAL_AGENT_RESTART_MODE=auto` separately decides whether the live local-agent needs a restart. Static/template/docs/release-script-only changes skip the live local-agent restart. Source Code QA, local-agent, requirements, and PRD briefing backend changes restart it.
+The default `PROMOTE_UAT_RESTART_MODE=auto` still classifies the portal change shape, while `PROMOTE_UAT_LOCAL_AGENT_RESTART_MODE=auto` separately decides whether the live local-agent needs a restart. Static/template/docs/release-script-only changes and Flask web route module changes (`bpmis_jira_tool/web_*.py`) skip the live local-agent restart. Source Code QA, local-agent, requirements, and PRD briefing backend changes restart it.
 
 Before switching public live, `PROMOTE_UAT_BLUE_GREEN_VALIDATE=1` starts an inactive candidate portal slot on `PROMOTE_UAT_BLUE_GREEN_PORT` (`5001` by default) and checks its `/healthz` revision. This catches bad portal starts before touching the current public slot.
 
