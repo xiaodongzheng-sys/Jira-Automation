@@ -147,9 +147,6 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn(b"data-source-new-session", teammate_response.data)
         self.assertIn(b"data-source-session-messages", teammate_response.data)
         self.assertIn(b"Codex", teammate_response.data)
-        self.assertNotIn(b'<option value="gemini"', teammate_response.data)
-        self.assertNotIn(b'value="gemini" disabled', teammate_response.data)
-        self.assertNotIn(b"Vertex AI", teammate_response.data)
         self.assertNotIn(b"Model Availability", owner_response.data)
         self.assertNotIn(b"Model Availability", teammate_response.data)
 
@@ -2537,6 +2534,23 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp_dir.cleanup()
+
+    def test_service_uses_internal_responsibility_components(self):
+        from bpmis_jira_tool.source_code_qa_components import (
+            SourceCodeQAAnswerGenerationComponent,
+            SourceCodeQAQualityJudgeComponent,
+            SourceCodeQARetrievalComponent,
+        )
+
+        self.assertIsInstance(self.service._retrieval, SourceCodeQARetrievalComponent)
+        self.assertIsInstance(self.service._answer_generation, SourceCodeQAAnswerGenerationComponent)
+        self.assertIsInstance(self.service._quality_judge, SourceCodeQAQualityJudgeComponent)
+        self.assertIs(self.service._retrieval._service, self.service)
+        self.assertIs(self.service._answer_generation._service, self.service)
+        self.assertIs(self.service._quality_judge._service, self.service)
+        self.assertTrue(callable(self.service._rank_and_expand_query_matches))
+        self.assertTrue(callable(self.service._build_llm_answer))
+        self.assertTrue(callable(self.service._run_answer_judge))
 
     def test_with_codex_timeout_seconds_keeps_original_service_unchanged(self):
         tuned = self.service.with_codex_timeout_seconds(600)

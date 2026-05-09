@@ -627,6 +627,19 @@ class TeamPortalAccessTests(unittest.TestCase):
             }
             self.assertEqual(related_rules - expected_endpoints, set())
 
+            extracted_route_modules = {
+                "save_mapping_config": "bpmis_jira_tool.web_bpmis_routes",
+                "create_sync_bpmis_projects_job": "bpmis_jira_tool.web_bpmis_routes",
+                "meeting_recorder_page": "bpmis_jira_tool.web_meeting_recorder_routes",
+                "meeting_translation_start_api": "bpmis_jira_tool.web_meeting_recorder_routes",
+                "team_dashboard_page": "bpmis_jira_tool.web_team_dashboard_routes",
+                "team_dashboard_tasks": "bpmis_jira_tool.web_team_dashboard_routes",
+                "team_dashboard_monthly_report_draft": "bpmis_jira_tool.web_team_dashboard_routes",
+            }
+            for endpoint, module_name in extracted_route_modules.items():
+                self.assertIn(endpoint, app.view_functions)
+                self.assertEqual(app.view_functions[endpoint].__module__, module_name)
+
             with app.test_client() as client:
                 self._login_non_admin(client)
                 route_expectations = [

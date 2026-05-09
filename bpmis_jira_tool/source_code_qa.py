@@ -43,6 +43,11 @@ from bpmis_jira_tool.source_code_qa_evidence_policy import (
     TOOL_LOOP_TRACE_PREFIX,
 )
 from bpmis_jira_tool.source_code_qa_cache_telemetry import attach_cache_telemetry_helpers
+from bpmis_jira_tool.source_code_qa_components import (
+    SourceCodeQAAnswerGenerationComponent,
+    SourceCodeQAQualityJudgeComponent,
+    SourceCodeQARetrievalComponent,
+)
 from bpmis_jira_tool.source_code_qa_indexing import attach_indexing_helpers
 from bpmis_jira_tool.source_code_qa_structure import attach_structure_helpers
 from bpmis_jira_tool.source_code_qa_retrieval_tools import attach_retrieval_tool_helpers
@@ -298,6 +303,9 @@ class SourceCodeQAService:
         self.llm_cache_ttl_seconds = max(60, int(llm_cache_ttl_seconds or 1800))
         self.git_timeout_seconds = max(5, int(git_timeout_seconds or 90))
         self.max_file_bytes = max(20_000, int(max_file_bytes or 500_000))
+        self._retrieval = SourceCodeQARetrievalComponent(self)
+        self._answer_generation = SourceCodeQAAnswerGenerationComponent(self)
+        self._quality_judge = SourceCodeQAQualityJudgeComponent(self)
 
     def with_llm_provider(self, llm_provider: str) -> "SourceCodeQAService":
         normalized = self.normalize_query_llm_provider(llm_provider)
@@ -2029,6 +2037,45 @@ class SourceCodeQAService:
         request_cache: dict[str, Any],
         report: Any,
     ) -> tuple[list[dict[str, Any]], bool]:
+        return self._retrieval.rank_and_expand_query_matches(
+            question=question,
+            matches=matches,
+            exact_matches=exact_matches,
+            result_limit=result_limit,
+            exact_lookup_sufficient=exact_lookup_sufficient,
+            simple_quality_trace=simple_quality_trace,
+            synced_entries=synced_entries,
+            started_at=started_at,
+            latency_guarded_query_expansion=latency_guarded_query_expansion,
+            query_entries=query_entries,
+            key=key,
+            limit=limit,
+            query_plan=query_plan,
+            tool_trace=tool_trace,
+            request_cache=request_cache,
+            report=report,
+        )
+
+    def _rank_and_expand_query_matches_impl(
+        self,
+        *,
+        question: str,
+        matches: list[dict[str, Any]],
+        exact_matches: list[dict[str, Any]],
+        result_limit: int,
+        exact_lookup_sufficient: bool,
+        simple_quality_trace: bool,
+        synced_entries: list[tuple[RepositoryEntry, Path]],
+        started_at: float,
+        latency_guarded_query_expansion: bool,
+        query_entries: list[RepositoryEntry],
+        key: str,
+        limit: int,
+        query_plan: dict[str, Any],
+        tool_trace: list[dict[str, Any]],
+        request_cache: dict[str, Any],
+        report: Any,
+    ) -> tuple[list[dict[str, Any]], bool]:
         report("ranking", "Ranking matched files and snippets.", 0, 0)
         matches = self._rank_matches(question, matches, request_cache=request_cache)
         top_matches = (
@@ -2192,6 +2239,35 @@ class SourceCodeQAService:
         request_cache: dict[str, Any],
         report: Any,
     ) -> dict[str, Any]:
+        return self._retrieval.query_direct_and_decomposed_matches(
+            question=question,
+            matches=matches,
+            tokens=tokens,
+            synced_entries=synced_entries,
+            simple_quality_trace=simple_quality_trace,
+            started_at=started_at,
+            result_limit=result_limit,
+            limit=limit,
+            query_plan=query_plan,
+            request_cache=request_cache,
+            report=report,
+        )
+
+    def _query_direct_and_decomposed_matches_impl(
+        self,
+        *,
+        question: str,
+        matches: list[dict[str, Any]],
+        tokens: list[str],
+        synced_entries: list[tuple[RepositoryEntry, Path]],
+        simple_quality_trace: bool,
+        started_at: float,
+        result_limit: int,
+        limit: int,
+        query_plan: dict[str, Any],
+        request_cache: dict[str, Any],
+        report: Any,
+    ) -> dict[str, Any]:
         latency_guarded_query_expansion = False
         report("direct_search", f"Searching direct matches across {len(synced_entries)} repos.", 0, len(synced_entries))
         skip_broad_query_decomposition = False
@@ -2329,6 +2405,27 @@ class SourceCodeQAService:
         should_expand_matches: bool,
         request_cache: dict[str, Any],
     ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+        return self._retrieval.build_query_answer_context(
+            question=question,
+            matches=matches,
+            entries=entries,
+            key=key,
+            exact_lookup_sufficient=exact_lookup_sufficient,
+            should_expand_matches=should_expand_matches,
+            request_cache=request_cache,
+        )
+
+    def _build_query_answer_context_impl(
+        self,
+        *,
+        question: str,
+        matches: list[dict[str, Any]],
+        entries: list[RepositoryEntry],
+        key: str,
+        exact_lookup_sufficient: bool,
+        should_expand_matches: bool,
+        request_cache: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
         evidence_summary = self._compress_evidence_cached(question, matches, request_cache=request_cache)
         quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
         trace_paths = (
@@ -2364,6 +2461,53 @@ class SourceCodeQAService:
         return evidence_summary, quality_gate, trace_paths, repo_graph, evidence_pack
 
     def _augment_query_payload_with_llm_answer(
+        self,
+        *,
+        payload: dict[str, Any],
+        entries: list[RepositoryEntry],
+        key: str,
+        pm_team: str,
+        country: str,
+        question: str,
+        matches: list[dict[str, Any]],
+        llm_budget_mode: str,
+        query_mode: str,
+        trace_id: str,
+        followup_context: dict[str, Any] | None,
+        normalized_answer_mode: str,
+        request_cache: dict[str, Any],
+        progress_callback: Any | None,
+        attachments: list[dict[str, Any]] | None,
+        runtime_evidence: list[dict[str, Any]] | None,
+        effort_assessment: bool,
+        retrieval_latency_ms: int,
+        evidence_pack: dict[str, Any],
+        report: Any,
+    ) -> None:
+        self._answer_generation.augment_query_payload_with_llm_answer(
+            payload=payload,
+            entries=entries,
+            key=key,
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            matches=matches,
+            llm_budget_mode=llm_budget_mode,
+            query_mode=query_mode,
+            trace_id=trace_id,
+            followup_context=followup_context,
+            normalized_answer_mode=normalized_answer_mode,
+            request_cache=request_cache,
+            progress_callback=progress_callback,
+            attachments=attachments,
+            runtime_evidence=runtime_evidence,
+            effort_assessment=effort_assessment,
+            retrieval_latency_ms=retrieval_latency_ms,
+            evidence_pack=evidence_pack,
+            report=report,
+        )
+
+    def _augment_query_payload_with_llm_answer_impl(
         self,
         *,
         payload: dict[str, Any],
@@ -4749,6 +4893,19 @@ class SourceCodeQAService:
         *,
         request_cache: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        return self._quality_judge.quality_gate_cached(
+            question,
+            evidence_summary,
+            request_cache=request_cache,
+        )
+
+    def _quality_gate_cached_impl(
+        self,
+        question: str,
+        evidence_summary: dict[str, Any],
+        *,
+        request_cache: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if request_cache is None:
             return self._quality_gate(question, evidence_summary)
         cache_key = hashlib.sha1(
@@ -4769,6 +4926,9 @@ class SourceCodeQAService:
         return quality
 
     def _quality_gate(self, question: str, evidence_summary: dict[str, Any]) -> dict[str, Any]:
+        return self._quality_judge.quality_gate(question, evidence_summary)
+
+    def _quality_gate_impl(self, question: str, evidence_summary: dict[str, Any]) -> dict[str, Any]:
         intent = evidence_summary.get("intent") or self._question_intent(question)
         policy_evaluation = self._evaluate_answer_policies(evidence_summary, intent)
         missing: list[str] = []
@@ -4847,6 +5007,15 @@ class SourceCodeQAService:
         return bool(tiers & PRODUCTION_EVIDENCE_TIERS)
 
     def _quality_gate_trace_terms(
+        self,
+        question: str,
+        evidence_summary: dict[str, Any],
+        quality_gate: dict[str, Any],
+        matches: list[dict[str, Any]],
+    ) -> list[str]:
+        return self._quality_judge.quality_gate_trace_terms(question, evidence_summary, quality_gate, matches)
+
+    def _quality_gate_trace_terms_impl(
         self,
         question: str,
         evidence_summary: dict[str, Any],
@@ -5283,6 +5452,29 @@ class SourceCodeQAService:
         match_limit: int,
         request_cache: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        return self._answer_generation.llm_answer_evidence_context(
+            entries=entries,
+            key=key,
+            question=question,
+            pm_team=pm_team,
+            country=country,
+            matches=matches,
+            match_limit=match_limit,
+            request_cache=request_cache,
+        )
+
+    def _llm_answer_evidence_context_impl(
+        self,
+        *,
+        entries: list[RepositoryEntry],
+        key: str,
+        question: str,
+        pm_team: str,
+        country: str,
+        matches: list[dict[str, Any]],
+        match_limit: int,
+        request_cache: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         selected_matches = self._select_llm_matches(matches, match_limit, question=question)
         evidence_summary = self._compress_evidence_cached(question, selected_matches, request_cache=request_cache)
         trace_paths = self._build_trace_paths(
@@ -5318,6 +5510,45 @@ class SourceCodeQAService:
         }
 
     def _build_llm_answer(
+        self,
+        *,
+        entries: list[RepositoryEntry],
+        key: str,
+        pm_team: str,
+        country: str,
+        question: str,
+        matches: list[dict[str, Any]],
+        llm_budget_mode: str,
+        query_mode: str = QUERY_MODE_DEEP,
+        trace_id: str = "",
+        followup_context: dict[str, Any] | None = None,
+        requested_answer_mode: str = ANSWER_MODE_AUTO,
+        request_cache: dict[str, Any] | None = None,
+        progress_callback: Any | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+        runtime_evidence: list[dict[str, Any]] | None = None,
+        effort_assessment: bool = False,
+    ) -> dict[str, Any]:
+        return self._answer_generation.build_llm_answer(
+            entries=entries,
+            key=key,
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            matches=matches,
+            llm_budget_mode=llm_budget_mode,
+            query_mode=query_mode,
+            trace_id=trace_id,
+            followup_context=followup_context,
+            requested_answer_mode=requested_answer_mode,
+            request_cache=request_cache,
+            progress_callback=progress_callback,
+            attachments=attachments,
+            runtime_evidence=runtime_evidence,
+            effort_assessment=effort_assessment,
+        )
+
+    def _build_llm_answer_impl(
         self,
         *,
         entries: list[RepositoryEntry],
@@ -5391,6 +5622,61 @@ class SourceCodeQAService:
         )
 
     def _build_codex_llm_answer(
+        self,
+        *,
+        entries: list[RepositoryEntry],
+        key: str,
+        pm_team: str,
+        country: str,
+        question: str,
+        matches: list[dict[str, Any]],
+        selected_matches: list[dict[str, Any]],
+        evidence_summary: dict[str, Any],
+        quality_gate: dict[str, Any],
+        evidence_pack: dict[str, Any],
+        llm_budget_mode: str,
+        routed_budget_mode: str,
+        budget: dict[str, Any],
+        llm_route: dict[str, Any],
+        selected_model: str,
+        followup_context: dict[str, Any] | None,
+        requested_answer_mode: str,
+        query_mode: str = QUERY_MODE_DEEP,
+        trace_id: str = "",
+        request_cache: dict[str, Any] | None = None,
+        progress_callback: Any | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+        runtime_evidence: list[dict[str, Any]] | None = None,
+        effort_assessment: bool = False,
+    ) -> dict[str, Any]:
+        return self._answer_generation.build_codex_llm_answer(
+            entries=entries,
+            key=key,
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            matches=matches,
+            selected_matches=selected_matches,
+            evidence_summary=evidence_summary,
+            quality_gate=quality_gate,
+            evidence_pack=evidence_pack,
+            llm_budget_mode=llm_budget_mode,
+            routed_budget_mode=routed_budget_mode,
+            budget=budget,
+            llm_route=llm_route,
+            selected_model=selected_model,
+            followup_context=followup_context,
+            requested_answer_mode=requested_answer_mode,
+            query_mode=query_mode,
+            trace_id=trace_id,
+            request_cache=request_cache,
+            progress_callback=progress_callback,
+            attachments=attachments,
+            runtime_evidence=runtime_evidence,
+            effort_assessment=effort_assessment,
+        )
+
+    def _build_codex_llm_answer_impl(
         self,
         *,
         entries: list[RepositoryEntry],
@@ -8233,6 +8519,15 @@ class SourceCodeQAService:
         evidence_pack: dict[str, Any],
         claim_check: dict[str, Any],
     ) -> dict[str, Any]:
+        return self._quality_judge.judge_answer(question, answer, evidence_pack, claim_check)
+
+    def _judge_answer_impl(
+        self,
+        question: str,
+        answer: str,
+        evidence_pack: dict[str, Any],
+        claim_check: dict[str, Any],
+    ) -> dict[str, Any]:
         intent = evidence_pack.get("intent") or self._question_intent(question)
         answer_text = str(answer or "").strip()
         lowered_answer = answer_text.lower()
@@ -8307,7 +8602,7 @@ class SourceCodeQAService:
         evidence_pack: dict[str, Any],
         claim_check: dict[str, Any],
     ) -> dict[str, Any]:
-        return self._judge_answer(question, answer, evidence_pack, claim_check)
+        return self._quality_judge.run_answer_judge(question, answer, evidence_pack, claim_check)
 
     def _expand_answer_retry_matches(
         self,
