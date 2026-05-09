@@ -72,11 +72,18 @@ class _FakeConfluence:
 
 
 class _FakeGmailService:
-    def __init__(self, text: str = "", drive_links: list[str] | None = None, google_sheet_evidence: list[dict[str, str]] | None = None):
+    def __init__(
+        self,
+        text: str = "",
+        drive_links: list[str] | None = None,
+        google_sheet_evidence: list[dict[str, str]] | None = None,
+        monthly_requirements_text: str = "",
+    ):
         self.calls = []
         self.text = text
         self.drive_links = drive_links or []
         self.google_sheet_evidence = google_sheet_evidence or []
+        self.monthly_requirements_text = monthly_requirements_text
 
     def export_contact_thread_history_since(self, *, since, now, contact_emails, max_threads):
         self.calls.append(
@@ -91,6 +98,21 @@ class _FakeGmailService:
             "text": self.text,
             "thread_count": 1 if self.text else 0,
             "message_count": 1 if self.text else 0,
+        }
+
+    def export_monthly_requirements_thread_history_since(self, *, since, now, configs, max_threads):
+        self.calls.append(
+            {
+                "since": since,
+                "now": now,
+                "monthly_requirements_configs": configs,
+                "max_threads": max_threads,
+            }
+        )
+        return {
+            "text": self.monthly_requirements_text,
+            "thread_count": 1 if self.monthly_requirements_text else 0,
+            "message_count": 1 if self.monthly_requirements_text else 0,
         }
 
     def export_google_sheet_link_texts(self, links, *, max_links=4):
@@ -428,6 +450,7 @@ class MonthlyReportTests(unittest.TestCase):
             "preparing_sources",
             "collecting_seatalk",
             "searching_vip_gmail",
+            "searching_requirements_gmail",
             "searching_topic_gmail",
             "ingesting_prd",
             "summarizing_prd_scope",
@@ -450,7 +473,7 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertTrue(result["generation_summary"]["batch_mode"])
         self.assertGreaterEqual(result["generation_summary"]["total_batches"], 3)
         self.assertIn("elapsed_seconds", result["generation_summary"])
-        for key in ("seatalk_export", "vip_gmail", "topic_gmail", "prd_ingest", "prd_summary", "batch_summary", "merge", "final", "total"):
+        for key in ("seatalk_export", "vip_gmail", "requirements_gmail", "topic_gmail", "prd_ingest", "prd_summary", "batch_summary", "merge", "final", "total"):
             self.assertIn(key, result["generation_summary"]["timings"])
 
     def test_generate_draft_does_not_batch_full_seatalk_history_for_non_project_highlight(self):
@@ -936,6 +959,67 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(target["target_tech_live_date"], "Jun 2026")
         self.assertEqual(target["target_tech_live_version"], "AF_v1.1_0620")
         self.assertFalse(any("Planning_26Q4" in fact for fact in target["timeline_facts"]))
+
+    def test_sp_p0_target_tech_live_date_prefers_monthly_requirements_email(self):
+        period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
+        requirements_text = (
+            "Monthly Requirements Gmail thread history export\n"
+            "================================================================================\n"
+            "Thread 1\n"
+            "Market: SG\n"
+            "Subject: SG_2026 Monthly Requirements Biweekly Update\n"
+            "Message 1\n"
+            "From: Xinni Oon <xinni.oon@npt.sg>\n"
+            "Body:\n"
+            "| Region | Priority | Project | Target Tech Live Date |\n"
+            "| SG | SP | Balance Transfer open to NTB application | Sep 2026 |\n"
+            "| SG | P1 | SME RCF drawdown check | Oct 2026 |\n"
+        )
+        brief = build_monthly_project_evidence_brief(
+            key_projects=[
+                {
+                    "bpmis_id": "SP-EMAIL",
+                    "project_name": "Balance Transfer open to NTB application",
+                    "market": "SG",
+                    "priority": "SP",
+                    "jira_tickets": [
+                        {
+                            "jira_id": "CR-1",
+                            "jira_title": "Balance Transfer open to NTB application",
+                            "jira_status": "Testing",
+                            "release_date": "2026-06-15",
+                            "version": "CR_v1_0615",
+                        }
+                    ],
+                },
+                {
+                    "bpmis_id": "P1-JIRA",
+                    "project_name": "SME RCF drawdown check",
+                    "market": "SG",
+                    "priority": "P1",
+                    "jira_tickets": [
+                        {
+                            "jira_id": "CR-2",
+                            "jira_title": "SME RCF drawdown check",
+                            "jira_status": "Testing",
+                            "release_date": "2026-07-20",
+                            "version": "CR_v2_0720",
+                        }
+                    ],
+                },
+            ],
+            seatalk_history_text="",
+            vip_gmail_text="",
+            monthly_requirements_text=requirements_text,
+            prd_scope_summaries=[],
+            report_period=period,
+        )
+
+        by_id = {item["project_id"]: item for item in brief}
+        self.assertEqual(by_id["SP-EMAIL"]["target_tech_live_date"], "Sep 2026")
+        self.assertEqual(by_id["SP-EMAIL"]["target_tech_live_source"], "monthly_requirements_email")
+        self.assertEqual(by_id["P1-JIRA"]["target_tech_live_date"], "Jul 2026")
+        self.assertEqual(by_id["P1-JIRA"]["target_tech_live_source"], "jira_version")
 
     def test_vip_gmail_failure_does_not_fail_draft(self):
         class BrokenGmailService:

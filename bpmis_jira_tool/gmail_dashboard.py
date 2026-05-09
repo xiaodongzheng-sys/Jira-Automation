@@ -253,6 +253,18 @@ def _build_topic_thread_export_query(period_start: datetime, period_end: datetim
     return f"{base_query} {{{' '.join(topic_terms)}}}".strip()
 
 
+def _build_monthly_requirements_thread_export_query(period_start: datetime, period_end: datetime, *, sender: str, subject: str) -> str:
+    base_query = _build_thread_export_query(period_start, period_end)
+    clean_sender = str(sender or "").strip().lower()
+    clean_subject = " ".join(str(subject or "").replace('"', " ").split())
+    terms = []
+    if clean_sender:
+        terms.append(f"from:{clean_sender}")
+    if clean_subject:
+        terms.append(f'subject:"{clean_subject[:120]}"')
+    return " ".join([base_query, *terms]).strip()
+
+
 def _gmail_topic_query_terms(topic: str) -> list[str]:
     clean = " ".join(str(topic or "").replace('"', " ").split())
     if not clean:
@@ -453,6 +465,22 @@ def _thread_matches_topic(messages: list["GmailExportRecord"], topic: str) -> bo
             if matched_terms >= required_matches:
                 return True
     return False
+
+
+def _thread_monthly_requirements_market(messages: list["GmailExportRecord"], configs: list[dict[str, str]]) -> str:
+    for message in messages:
+        headers = message.headers or {}
+        sender = _first_contact_address(headers.get("from", "")).lower()
+        subject = str(headers.get("subject") or "").casefold()
+        for config in configs:
+            expected_sender = str(config.get("sender") or "").strip().lower()
+            expected_subject = str(config.get("subject") or "").strip().casefold()
+            if expected_sender and sender != expected_sender:
+                continue
+            if expected_subject and expected_subject not in subject:
+                continue
+            return str(config.get("market") or "").strip().upper()
+    return ""
 
 
 def _trim_preview_text(value: str, *, max_chars: int = GMAIL_EXPORT_MAX_BODY_CHARS * 2) -> str:
@@ -1065,6 +1093,123 @@ class GmailDashboardService:
             "message_count": included_messages,
             "query": query,
             "drive_links": drive_links[:GMAIL_TOPIC_MAX_GOOGLE_SHEET_LINKS],
+        }
+
+    def export_monthly_requirements_thread_history_since(
+        self,
+        *,
+        since: datetime,
+        now: datetime,
+        configs: dict[str, dict[str, str]],
+        max_threads: int = 12,
+    ) -> dict[str, Any]:
+        local_since = since.astimezone(now.tzinfo)
+        local_now = now.astimezone(now.tzinfo)
+        normalized_configs = []
+        for market, config in (configs or {}).items():
+            sender = str((config or {}).get("sender") or "").strip().lower()
+            subject = " ".join(str((config or {}).get("subject") or "").split())
+            if sender and subject:
+                normalized_configs.append({"market": str(market or "").strip().upper(), "sender": sender, "subject": subject})
+        if not normalized_configs:
+            return {"text": "", "thread_count": 0, "message_count": 0}
+
+        ordered_thread_ids: list[str] = []
+        query_parts: list[str] = []
+        for config in normalized_configs:
+            query = _build_monthly_requirements_thread_export_query(
+                local_since,
+                local_now,
+                sender=config["sender"],
+                subject=config["subject"],
+            )
+            query_parts.append(f"{config['market']}: {query}")
+            message_refs = self._list_message_refs(query=query, max_messages=GMAIL_EXPORT_MAX_TOTAL_MESSAGES)
+            fallback_message_ids: list[str] = []
+            for message_ref in message_refs:
+                thread_id = str(message_ref.get("threadId") or "").strip()
+                if thread_id and thread_id not in ordered_thread_ids:
+                    ordered_thread_ids.append(thread_id)
+                elif message_ref.get("id"):
+                    fallback_message_ids.append(str(message_ref["id"]))
+            if fallback_message_ids:
+                for record in self._fetch_message_metadata_many(fallback_message_ids):
+                    if record.thread_id and record.thread_id not in ordered_thread_ids:
+                        ordered_thread_ids.append(record.thread_id)
+        if max_threads > 0:
+            ordered_thread_ids = ordered_thread_ids[:max_threads]
+
+        lines = [
+            "Monthly Requirements Gmail thread history export",
+            f"Generated at: {local_now.isoformat()}",
+            f"Window: {local_since.isoformat()} to {local_now.isoformat()}",
+            "Scope: monthly requirements biweekly update emails from configured country owners",
+            "Configured sources:",
+            *[
+                f"- {config['market']}: from:{config['sender']} subject:{config['subject']}"
+                for config in normalized_configs
+            ],
+            "Queries:",
+            *[f"- {query}" for query in query_parts],
+            f"Max body length per message: {GMAIL_EXPORT_MAX_BODY_CHARS} characters",
+            "",
+        ]
+        separator = "=" * 80
+        included_threads = 0
+        included_messages = 0
+        for thread_id in ordered_thread_ids:
+            messages = self._fetch_thread_messages(thread_id=thread_id, since=local_since, now=local_now)
+            if not messages:
+                continue
+            matched_market = _thread_monthly_requirements_market(messages, normalized_configs)
+            if not matched_market:
+                continue
+            included_threads += 1
+            included_messages += len([message for message in messages if not message.context_only])
+            subject_message = next((message for message in messages if not message.context_only), messages[0])
+            subject = subject_message.headers.get("subject") or "[no subject]"
+            participants = self._thread_participant_labels(messages)
+            lines.extend(
+                [
+                    f"{separator}",
+                    f"Thread {included_threads}",
+                    f"Market: {matched_market}",
+                    f"Thread ID: {thread_id}",
+                    f"Gmail Thread Link: {_gmail_thread_link(thread_id)}",
+                    f"Subject: {subject}",
+                    f"Participants: {participants or '[unknown participants]'}",
+                    "",
+                ]
+            )
+            for message_index, message in enumerate(messages, start=1):
+                headers = message.headers
+                labels = ",".join(sorted(message.label_ids)) if message.label_ids else "[no labels]"
+                context_label = " (context only)" if message.context_only else ""
+                lines.extend(
+                    [
+                        f"Message {message_index}{context_label}",
+                        f"Date: {message.internal_date.isoformat()}",
+                        f"Labels: {labels}",
+                        f"From: {headers.get('from') or '[unknown sender]'}",
+                        f"To: {headers.get('to') or '[no recipients listed]'}",
+                        f"Cc: {headers.get('cc') or '[no cc listed]'}",
+                        f"Message-ID: {headers.get('message-id') or '[no message-id]'}",
+                        f"Use: {'context only; do not summarize as a new item' if message.context_only else 'in-window monthly requirements evidence'}",
+                        "",
+                        "Body:",
+                        message.body_text or "[body unavailable]",
+                    ]
+                )
+                if message.body_truncated:
+                    lines.extend(["", "[body truncated]"])
+                lines.append("")
+        if included_threads == 0:
+            lines.append("No Monthly Requirements Gmail threads were found in this window.")
+            lines.append("")
+        return {
+            "text": "\n".join(lines).strip() + "\n",
+            "thread_count": included_threads,
+            "message_count": included_messages,
         }
 
     def export_google_sheet_link_texts(self, links: list[str], *, max_links: int = GMAIL_TOPIC_MAX_GOOGLE_SHEET_LINKS) -> list[dict[str, str]]:

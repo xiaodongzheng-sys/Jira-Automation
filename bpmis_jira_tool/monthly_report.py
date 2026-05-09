@@ -58,6 +58,7 @@ MONTHLY_REPORT_FINAL_MAX_TOKENS = 80_000
 MONTHLY_REPORT_SUMMARY_MAX_CHARS = 14_000
 MONTHLY_REPORT_BRIEF_MAX_CHARS = 64_000
 MONTHLY_REPORT_MAX_VIP_GMAIL_THREADS = 60
+MONTHLY_REPORT_MAX_REQUIREMENTS_GMAIL_THREADS = 12
 MONTHLY_REPORT_MAX_HIGHLIGHT_GMAIL_THREADS_PER_TOPIC = 8
 MONTHLY_REPORT_HIGHLIGHT_EVIDENCE_MAX_LINES = 24
 MONTHLY_REPORT_EVIDENCE_WORKERS = 2
@@ -65,6 +66,20 @@ MONTHLY_REPORT_GMAIL_TOPIC_CACHE_VERSION = "v3"
 MONTHLY_REPORT_GMAIL_TOPIC_CACHE_TTL_SECONDS = 6 * 60 * 60
 MONTHLY_REPORT_PRD_SCOPE_CACHE_VERSION = "v1"
 MONTHLY_REPORT_BATCH_SUMMARY_CACHE_VERSION = "v1"
+MONTHLY_REPORT_REQUIREMENTS_EMAILS = {
+    "SG": {
+        "subject": "SG_2026 Monthly Requirements Biweekly Update",
+        "sender": "xinni.oon@npt.sg",
+    },
+    "ID": {
+        "subject": "ID_Monthly Requirements Biweekly Update",
+        "sender": "sisi.liang@npt.sg",
+    },
+    "PH": {
+        "subject": "PH_2026 Monthly Requirements Biweekly Update",
+        "sender": "yuanfang.zhou@npt.sg",
+    },
+}
 MONTHLY_REPORT_PRODUCT_SCOPE_TERMS = (
     "anti-fraud",
     "antifraud",
@@ -253,6 +268,10 @@ class MonthlyReportService:
         vip_gmail_text, vip_gmail_summary = self._vip_gmail_history(evidence_period)
         _record_monthly_report_timing(timings, "vip_gmail", step_started)
         step_started = time.monotonic()
+        _emit_monthly_report_progress(progress_callback, "searching_requirements_gmail", "Searching Monthly Requirements Gmail evidence for target dates.", 0, 0)
+        requirements_gmail_text, requirements_gmail_summary = self._requirements_gmail_history(evidence_period)
+        _record_monthly_report_timing(timings, "requirements_gmail", step_started)
+        step_started = time.monotonic()
         highlight_gmail_evidence, highlight_gmail_summary = self._highlight_gmail_history(
             evidence_period,
             normalized_highlight_topics,
@@ -283,6 +302,7 @@ class MonthlyReportService:
             key_projects=key_projects,
             seatalk_history_text=history_text,
             vip_gmail_text=vip_gmail_text,
+            monthly_requirements_text=requirements_gmail_text,
             prd_scope_summaries=prd_scope_summaries,
             report_period=evidence_period,
             highlight_project_ids=highlight_project_ids,
@@ -293,6 +313,7 @@ class MonthlyReportService:
             topic_project_matches=highlight_project_matches,
             seatalk_history_text=history_text,
             topic_gmail_evidence=highlight_gmail_evidence,
+            monthly_requirements_text=requirements_gmail_text,
             prd_scope_summaries=prd_scope_summaries,
             report_period=evidence_period,
         )
@@ -456,7 +477,13 @@ class MonthlyReportService:
                 "highlight_google_sheet_count": int(highlight_gmail_summary.get("google_sheet_count") or 0),
                 "vip_gmail_thread_count": int(vip_gmail_summary.get("thread_count") or 0),
                 "vip_gmail_message_count": int(vip_gmail_summary.get("message_count") or 0),
-                "gmail_error_count": int(vip_gmail_summary.get("error_count") or 0) + int(highlight_gmail_summary.get("error_count") or 0),
+                "monthly_requirements_gmail_thread_count": int(requirements_gmail_summary.get("thread_count") or 0),
+                "monthly_requirements_gmail_message_count": int(requirements_gmail_summary.get("message_count") or 0),
+                "monthly_requirements_target_date_count": len([
+                    item for item in monthly_evidence_brief
+                    if item.get("target_tech_live_source") == "monthly_requirements_email"
+                ]),
+                "gmail_error_count": int(vip_gmail_summary.get("error_count") or 0) + int(highlight_gmail_summary.get("error_count") or 0) + int(requirements_gmail_summary.get("error_count") or 0),
                 "product_scope_filtered_count": product_scope_filtered_count + int(vip_gmail_summary.get("product_scope_filtered_count") or 0),
                 "prd_scope_cache_hit_count": len([item for item in prd_scope_summaries if item.get("cache_hit")]),
             },
@@ -722,6 +749,33 @@ class MonthlyReportService:
             "message_count": int((payload or {}).get("message_count") or 0),
             "error_count": 0,
             "product_scope_filtered_count": filtered_count,
+        }
+
+    def _requirements_gmail_history(self, report_period: MonthlyReportPeriod) -> tuple[str, dict[str, int]]:
+        try:
+            gmail_service = self.gmail_service or self._build_gmail_service()
+            if not hasattr(gmail_service, "export_monthly_requirements_thread_history_since"):
+                return "", {"thread_count": 0, "message_count": 0, "error_count": 0}
+            payload = gmail_service.export_monthly_requirements_thread_history_since(
+                since=report_period.start,
+                now=report_period.end_exclusive,
+                configs=MONTHLY_REPORT_REQUIREMENTS_EMAILS,
+                max_threads=MONTHLY_REPORT_MAX_REQUIREMENTS_GMAIL_THREADS,
+            )
+        except Exception as error:  # noqa: BLE001 - target date email evidence should not block report generation.
+            return (
+                "\n".join(
+                    [
+                        "Monthly Requirements Gmail evidence gap",
+                        f"Monthly Requirements evidence could not be loaded for {report_period.start_date} to {report_period.end_date}: {error}",
+                    ]
+                ),
+                {"thread_count": 0, "message_count": 0, "error_count": 1},
+            )
+        return str((payload or {}).get("text") or "").strip(), {
+            "thread_count": int((payload or {}).get("thread_count") or 0),
+            "message_count": int((payload or {}).get("message_count") or 0),
+            "error_count": 0,
         }
 
     def _highlight_gmail_history(
@@ -1060,6 +1114,7 @@ def build_monthly_highlight_deep_evidence(
     topic_gmail_evidence: list[dict[str, Any]],
     prd_scope_summaries: list[dict[str, Any]],
     report_period: MonthlyReportPeriod,
+    monthly_requirements_text: str = "",
 ) -> list[dict[str, Any]]:
     projects_by_id = {str(project.get("bpmis_id") or "").strip(): project for project in key_projects if str(project.get("bpmis_id") or "").strip()}
     prd_by_jira = _index_prd_summaries_by_jira(prd_scope_summaries)
@@ -1086,7 +1141,11 @@ def build_monthly_highlight_deep_evidence(
                 if str(item.get("scope_summary") or "").strip()
             ]
             prd_facts.extend(project_prd_facts)
-            target_tech_live_date, target_tech_live_version = _monthly_report_target_tech_live_date(jira_tickets)
+            target_tech_live_date, target_tech_live_version, target_tech_live_source = _monthly_report_target_tech_live_date(
+                jira_tickets,
+                project=project,
+                monthly_requirements_text=monthly_requirements_text,
+            )
             project_updates.append(
                 {
                     "bpmis_id": str(project.get("bpmis_id") or "").strip(),
@@ -1095,6 +1154,7 @@ def build_monthly_highlight_deep_evidence(
                     "priority": str(project.get("priority") or "").strip(),
                     "target_tech_live_date": target_tech_live_date,
                     "target_tech_live_version": target_tech_live_version,
+                    "target_tech_live_source": target_tech_live_source,
                     "current_status": _monthly_report_current_status(
                         jira_tickets,
                         report_period=report_period,
@@ -1257,6 +1317,7 @@ def build_monthly_project_evidence_brief(
     vip_gmail_text: str,
     prd_scope_summaries: list[dict[str, Any]],
     report_period: MonthlyReportPeriod,
+    monthly_requirements_text: str = "",
     highlight_project_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     prd_by_jira = _index_prd_summaries_by_jira(prd_scope_summaries)
@@ -1285,13 +1346,18 @@ def build_monthly_project_evidence_brief(
         decisions_needed = _direct_project_decisions(matched_seatalk + matched_gmail)
         score = jira_score + len(matched_seatalk) * 3 + len(matched_gmail) * 3 + len(matched_prd) * 2
         current_status = _monthly_report_current_status(jira_tickets, report_period=report_period, material_update_score=score)
-        target_tech_live_date, target_tech_live_version = _monthly_report_target_tech_live_date(jira_tickets)
+        target_tech_live_date, target_tech_live_version, target_tech_live_source = _monthly_report_target_tech_live_date(
+            jira_tickets,
+            project=project,
+            monthly_requirements_text=monthly_requirements_text,
+        )
         include = True
         evidence_sources = {
             "jira": jira_sources,
             "seatalk": matched_seatalk,
             "vip_gmail": matched_gmail,
             "prd_scope_summary": prd_facts,
+            "monthly_requirements": _monthly_requirements_sections_for_project(project, monthly_requirements_text, limit=3),
         }
         items.append(
             {
@@ -1313,6 +1379,7 @@ def build_monthly_project_evidence_brief(
                 "current_status": current_status,
                 "target_tech_live_date": target_tech_live_date,
                 "target_tech_live_version": target_tech_live_version,
+                "target_tech_live_source": target_tech_live_source,
                 "status_facts": _dedupe_preserve_order(status_facts)[:10],
                 "timeline_facts": _dedupe_preserve_order(timeline_facts)[:8],
                 "risks": risks[:6],
@@ -1631,6 +1698,7 @@ def _compact_monthly_evidence_for_final(monthly_evidence_brief: list[dict[str, A
                 "current_status": _monthly_report_status_label(item.get("current_status")),
                 "target_tech_live_date": _monthly_report_month_label(item.get("target_tech_live_date")),
                 "target_tech_live_version": str(item.get("target_tech_live_version") or "").strip(),
+                "target_tech_live_source": str(item.get("target_tech_live_source") or "").strip(),
                 "status_facts": _compact_report_text_list(item.get("status_facts"), limit=6, max_chars=320),
                 "timeline_facts": _compact_report_text_list(item.get("timeline_facts"), limit=5, max_chars=240),
                 "risks": _compact_report_text_list(item.get("risks"), limit=4, max_chars=320),
@@ -2341,7 +2409,15 @@ def _jira_evidence_facts(jira_tickets: list[dict[str, Any]]) -> tuple[list[str],
     return status_facts, timeline_facts, sources, score
 
 
-def _monthly_report_target_tech_live_date(jira_tickets: list[dict[str, Any]]) -> tuple[str, str]:
+def _monthly_report_target_tech_live_date(
+    jira_tickets: list[dict[str, Any]],
+    *,
+    project: dict[str, Any] | None = None,
+    monthly_requirements_text: str = "",
+) -> tuple[str, str, str]:
+    email_target = _monthly_requirements_target_tech_live_date(project or {}, monthly_requirements_text)
+    if email_target:
+        return email_target[0], email_target[1], "monthly_requirements_email"
     latest: tuple[date, str] | None = None
     for ticket in jira_tickets:
         version = str(
@@ -2363,8 +2439,127 @@ def _monthly_report_target_tech_live_date(jira_tickets: list[dict[str, Any]]) ->
         if latest is None or parsed > latest[0]:
             latest = (parsed, version)
     if latest is None:
-        return "TBD", ""
+        return "TBD", "", ""
+    return _monthly_report_month_label(latest[0]), latest[1], "jira_version"
+
+
+def _monthly_requirements_target_tech_live_date(project: dict[str, Any], monthly_requirements_text: str) -> tuple[str, str] | None:
+    if not monthly_requirements_text.strip():
+        return None
+    priority = str(project.get("priority") or "").strip().upper()
+    if priority not in {"SP", "P0"}:
+        return None
+    sections = _monthly_requirements_sections_for_project(project, monthly_requirements_text, limit=5)
+    latest: tuple[date, str] | None = None
+    for section in sections:
+        for parsed in _monthly_requirements_month_candidates(section):
+            if latest is None or parsed > latest[0]:
+                latest = (parsed, "Monthly Requirements Biweekly Update")
+    if latest is None:
+        return None
     return _monthly_report_month_label(latest[0]), latest[1]
+
+
+def _monthly_requirements_sections_for_project(project: dict[str, Any], monthly_requirements_text: str, *, limit: int = 5) -> list[str]:
+    raw = str(monthly_requirements_text or "").strip()
+    if not raw:
+        return []
+    aliases = _project_aliases(project)
+    if not aliases:
+        return []
+    sections = _matched_sections_for_project(raw, aliases, limit=max(limit * 3, limit))
+    if not sections:
+        return []
+    market = _monthly_requirements_market_for_project(project)
+    if not market:
+        return _compact_report_text_list(sections, limit=limit, max_chars=1_200)
+    config = MONTHLY_REPORT_REQUIREMENTS_EMAILS.get(market) or {}
+    subject = str(config.get("subject") or "").casefold()
+    sender = str(config.get("sender") or "").casefold()
+    scoped = [
+        section
+        for section in sections
+        if (not subject or subject in section.casefold())
+        and (not sender or sender in section.casefold())
+    ]
+    focused: list[str] = []
+    for section in scoped or sections:
+        matched_lines = [
+            line.strip()
+            for line in section.splitlines()
+            if line.strip() and _text_matches_aliases(line, aliases)
+        ]
+        if matched_lines:
+            focused.extend(matched_lines)
+        else:
+            focused.append(section)
+    return _compact_report_text_list(focused, limit=limit, max_chars=1_200)
+
+
+def _monthly_requirements_market_for_project(project: dict[str, Any]) -> str:
+    text = " ".join(
+        [
+            str(project.get("market") or ""),
+            str(project.get("region") or ""),
+            str(project.get("country") or ""),
+            str(project.get("project_name") or ""),
+        ]
+    ).casefold()
+    for market in ("SG", "ID", "PH"):
+        if re.search(rf"\b{re.escape(market.casefold())}\b", text):
+            return market
+    return ""
+
+
+def _monthly_requirements_month_candidates(text: str) -> list[date]:
+    if re.search(r"\bplanning\b", text, flags=re.IGNORECASE):
+        # Planning rows do not carry a committed tech-live window.
+        text = "\n".join(line for line in text.splitlines() if "planning" not in line.casefold())
+    month_numbers = {
+        "jan": 1,
+        "january": 1,
+        "feb": 2,
+        "february": 2,
+        "mar": 3,
+        "march": 3,
+        "apr": 4,
+        "april": 4,
+        "may": 5,
+        "jun": 6,
+        "june": 6,
+        "jul": 7,
+        "july": 7,
+        "aug": 8,
+        "august": 8,
+        "sep": 9,
+        "sept": 9,
+        "september": 9,
+        "oct": 10,
+        "october": 10,
+        "nov": 11,
+        "november": 11,
+        "dec": 12,
+        "december": 12,
+    }
+    candidates: list[date] = []
+    for match in re.finditer(
+        r"\b(?:\d{1,2}\s*)?([A-Za-z]{3,9})(?:\s*[-/–—]\s*(?:\d{1,2}\s*)?([A-Za-z]{3,9}))?\s+(\d{4})\b",
+        text,
+    ):
+        month_text = (match.group(2) or match.group(1) or "").casefold()
+        month = month_numbers.get(month_text)
+        if not month:
+            continue
+        try:
+            candidates.append(date(int(match.group(3)), month, 1))
+        except ValueError:
+            continue
+    for match in re.finditer(r"\b(\d{4})[-/](\d{1,2})(?:[-/]\d{1,2})?\b", text):
+        try:
+            candidates.append(date(int(match.group(1)), int(match.group(2)), 1))
+        except ValueError:
+            continue
+    return candidates
 
 
 def _monthly_report_month_label(value: Any) -> str:
