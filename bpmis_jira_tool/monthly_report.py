@@ -31,7 +31,7 @@ from prd_briefing.reviewer import _build_prd_source
 
 DEFAULT_MONTHLY_REPORT_RECIPIENT = "xiaodong.zheng@npt.sg"
 MONTHLY_REPORT_PROMPT_VERSION = "v1_team_dashboard_monthly_report"
-MONTHLY_REPORT_GENERATION_VERSION = "v4_target_live_date"
+MONTHLY_REPORT_GENERATION_VERSION = "v5_evidence_confidence"
 MONTHLY_REPORT_PERIOD_ANCHOR_START = date(2026, 4, 13)
 MONTHLY_REPORT_PERIOD_ANCHOR_END = date(2026, 5, 8)
 MONTHLY_REPORT_PERIOD_DAYS = 28
@@ -64,6 +64,7 @@ MONTHLY_REPORT_EVIDENCE_WORKERS = 2
 MONTHLY_REPORT_GMAIL_TOPIC_CACHE_VERSION = "v3"
 MONTHLY_REPORT_GMAIL_TOPIC_CACHE_TTL_SECONDS = 6 * 60 * 60
 MONTHLY_REPORT_PRD_SCOPE_CACHE_VERSION = "v1"
+MONTHLY_REPORT_BATCH_SUMMARY_CACHE_VERSION = "v1"
 MONTHLY_REPORT_PRODUCT_SCOPE_TERMS = (
     "anti-fraud",
     "antifraud",
@@ -295,6 +296,7 @@ class MonthlyReportService:
             prd_scope_summaries=prd_scope_summaries,
             report_period=evidence_period,
         )
+        highlight_evidence_map = build_monthly_highlight_evidence_map(highlight_deep_evidence)
         included_project_briefs = [
             item for item in monthly_evidence_brief if item.get("include")
         ]
@@ -391,6 +393,7 @@ class MonthlyReportService:
             for item in batch_summaries
             if isinstance(item, dict)
         ]
+        confidence_counts = _monthly_report_confidence_counts(highlight_evidence_map)
         return {
             "status": "ok",
             "draft_markdown": draft_markdown,
@@ -400,6 +403,7 @@ class MonthlyReportService:
             "generation_version": MONTHLY_REPORT_GENERATION_VERSION,
             "model_id": generated["model_id"],
             "trace": generated["trace"],
+            "highlight_evidence_map": highlight_evidence_map,
             "generation_summary": {
                 "generation_version": MONTHLY_REPORT_GENERATION_VERSION,
                 "period_start": report_period.start_date,
@@ -420,6 +424,7 @@ class MonthlyReportService:
                 "seatalk_conversation_scope": MONTHLY_REPORT_SEATALK_HIGHLIGHT_CONVERSATION_SCOPE,
                 "max_seatalk_chars": MONTHLY_REPORT_MAX_SEATALK_CHARS,
                 "total_batches": len(batch_summaries),
+                "batch_summary_cache_hit_count": len([item for item in batch_summaries if item.get("cache_hit")]),
                 "max_batch_estimated_tokens": max(batch_token_counts) if batch_token_counts else 0,
                 "final_estimated_tokens": final_estimated_tokens,
                 "batch_mode": True,
@@ -437,6 +442,8 @@ class MonthlyReportService:
                 "report_intelligence_evidence_count": len(evidence_sidecar),
                 "highlight_topic_count": len(normalized_highlight_topics),
                 "highlight_project_topic_count": len([item for item in highlight_project_matches if item.get("project_ids")]),
+                "highlight_confidence_counts": confidence_counts,
+                "highlight_low_confidence_count": int(confidence_counts.get("low") or 0),
                 "highlight_seatalk_line_match_count": sum(
                     len(item.get("seatalk_evidence") or [])
                     for item in highlight_deep_evidence
@@ -492,6 +499,38 @@ class MonthlyReportService:
             )
             estimated_tokens = _estimate_token_count(prompt)
             source_label = _monthly_report_source_label(str(batch.get("source") or ""))
+            cache_path = _monthly_report_batch_summary_cache_path(
+                self.settings,
+                report_period=report_period,
+                source=str(batch.get("source") or ""),
+                index=_safe_int(batch.get("index")),
+                highlight_topics=highlight_topics,
+                template=template,
+                payload=batch.get("payload"),
+                prd_errors=prd_errors,
+            )
+            cached = _read_monthly_report_json_cache(cache_path)
+            if isinstance(cached, dict) and str(cached.get("summary_markdown") or "").strip():
+                _emit_monthly_report_progress(
+                    progress_callback,
+                    f"summarizing_{batch.get('source')}",
+                    f"Using cached {source_label} batch {current}/{total}.",
+                    current,
+                    total,
+                    estimated_prompt_tokens=estimated_tokens,
+                )
+                summaries.append(
+                    {
+                        "source": batch.get("source"),
+                        "index": batch.get("index"),
+                        "summary_markdown": str(cached.get("summary_markdown") or "").strip()[:MONTHLY_REPORT_SUMMARY_MAX_CHARS],
+                        "estimated_prompt_tokens": estimated_tokens,
+                        "model_id": str(cached.get("model_id") or ""),
+                        "trace": cached.get("trace") if isinstance(cached.get("trace"), dict) else {},
+                        "cache_hit": True,
+                    }
+                )
+                continue
             _emit_monthly_report_progress(
                 progress_callback,
                 f"summarizing_{batch.get('source')}",
@@ -507,16 +546,17 @@ class MonthlyReportService:
                 progress_callback=progress_callback,
             )
             summary = str(generated.get("result_markdown") or "").strip()
-            summaries.append(
-                {
-                    "source": batch.get("source"),
-                    "index": batch.get("index"),
-                    "summary_markdown": summary[:MONTHLY_REPORT_SUMMARY_MAX_CHARS],
-                    "estimated_prompt_tokens": estimated_tokens,
-                    "model_id": generated.get("model_id"),
-                    "trace": generated.get("trace") or {},
-                }
-            )
+            item = {
+                "source": batch.get("source"),
+                "index": batch.get("index"),
+                "summary_markdown": summary[:MONTHLY_REPORT_SUMMARY_MAX_CHARS],
+                "estimated_prompt_tokens": estimated_tokens,
+                "model_id": generated.get("model_id"),
+                "trace": generated.get("trace") or {},
+                "cache_hit": False,
+            }
+            _write_monthly_report_json_cache(cache_path, item)
+            summaries.append(item)
         return summaries
 
     def _merge_batch_summaries(
@@ -1067,6 +1107,20 @@ def build_monthly_highlight_deep_evidence(
             )
         gmail_item = gmail_by_topic.get(topic) or {}
         gmail_text = str(gmail_item.get("text") or "").strip()
+        compact_seatalk = _compact_report_text_list(matched_seatalk, limit=16, max_chars=600)
+        compact_gmail = _compact_report_text_list(_matched_sections_for_project(gmail_text, aliases, limit=8), limit=8, max_chars=900)
+        compact_sheets = _compact_google_sheet_evidence(gmail_item.get("google_sheet_evidence"))
+        compact_prd = _compact_report_text_list(prd_facts, limit=6, max_chars=700)
+        evidence_map = _monthly_highlight_topic_evidence_map(
+            topic=topic,
+            topic_type="project_update" if projects else "general_topic",
+            project_updates=project_updates,
+            seatalk_evidence=compact_seatalk,
+            gmail_evidence=compact_gmail,
+            google_sheet_evidence=compact_sheets,
+            prd_scope_summaries=compact_prd,
+            gmail_error=str(gmail_item.get("error") or "").strip(),
+        )
         evidence.append(
             {
                 "topic": topic,
@@ -1074,14 +1128,126 @@ def build_monthly_highlight_deep_evidence(
                 "matched_project_ids": project_ids,
                 "matched_project_names": [str(project.get("project_name") or "").strip() for project in projects if str(project.get("project_name") or "").strip()],
                 "project_updates": project_updates,
-                "seatalk_evidence": _compact_report_text_list(matched_seatalk, limit=16, max_chars=600),
-                "gmail_evidence": _compact_report_text_list(_matched_sections_for_project(gmail_text, aliases, limit=8), limit=8, max_chars=900),
-                "google_sheet_evidence": _compact_google_sheet_evidence(gmail_item.get("google_sheet_evidence")),
+                "seatalk_evidence": compact_seatalk,
+                "gmail_evidence": compact_gmail,
+                "google_sheet_evidence": compact_sheets,
                 "gmail_error": str(gmail_item.get("error") or "").strip(),
-                "prd_scope_summaries": _compact_report_text_list(prd_facts, limit=6, max_chars=700),
+                "prd_scope_summaries": compact_prd,
+                "evidence_map": evidence_map,
+                "confidence": evidence_map["confidence"],
+                "recommended_tone": evidence_map["recommended_tone"],
             }
         )
     return evidence
+
+
+def build_monthly_highlight_evidence_map(highlight_deep_evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    maps: list[dict[str, Any]] = []
+    for item in highlight_deep_evidence:
+        if not isinstance(item, dict):
+            continue
+        evidence_map = item.get("evidence_map")
+        if isinstance(evidence_map, dict):
+            maps.append(evidence_map)
+            continue
+        maps.append(
+            _monthly_highlight_topic_evidence_map(
+                topic=str(item.get("topic") or "").strip(),
+                topic_type=str(item.get("topic_type") or "").strip(),
+                project_updates=[project for project in (item.get("project_updates") or []) if isinstance(project, dict)],
+                seatalk_evidence=[str(value) for value in (item.get("seatalk_evidence") or []) if str(value).strip()],
+                gmail_evidence=[str(value) for value in (item.get("gmail_evidence") or []) if str(value).strip()],
+                google_sheet_evidence=[sheet for sheet in (item.get("google_sheet_evidence") or []) if isinstance(sheet, dict)],
+                prd_scope_summaries=[str(value) for value in (item.get("prd_scope_summaries") or []) if str(value).strip()],
+                gmail_error=str(item.get("gmail_error") or "").strip(),
+            )
+        )
+    return maps
+
+
+def _monthly_highlight_topic_evidence_map(
+    *,
+    topic: str,
+    topic_type: str,
+    project_updates: list[dict[str, Any]],
+    seatalk_evidence: list[str],
+    gmail_evidence: list[str],
+    google_sheet_evidence: list[dict[str, Any]],
+    prd_scope_summaries: list[str],
+    gmail_error: str = "",
+) -> dict[str, Any]:
+    project_count = len(project_updates)
+    source_counts = {
+        "project": project_count,
+        "seatalk": len(seatalk_evidence),
+        "gmail": len(gmail_evidence),
+        "google_sheet": len(google_sheet_evidence),
+        "prd": len(prd_scope_summaries),
+    }
+    active_sources = [source for source, count in source_counts.items() if count > 0]
+    score = 0
+    score += min(3, source_counts["project"]) * 2
+    score += min(5, source_counts["seatalk"]) * 2
+    score += min(4, source_counts["gmail"]) * 2
+    score += min(3, source_counts["google_sheet"]) * 2
+    score += min(3, source_counts["prd"])
+    project_statuses = [
+        str(project.get("current_status") or "").strip()
+        for project in project_updates
+        if str(project.get("current_status") or "").strip()
+    ]
+    concrete_project_progress = any(status in {"Dev", "UAT"} for status in project_statuses)
+    if concrete_project_progress:
+        score += 2
+    if len(active_sources) >= 3 and score >= 8:
+        confidence = "high"
+    elif len(active_sources) >= 2 and score >= 5:
+        confidence = "medium"
+    elif score > 0:
+        confidence = "low"
+    else:
+        confidence = "none"
+    gaps: list[str] = []
+    if not seatalk_evidence:
+        gaps.append("seatalk")
+    if not gmail_evidence and not google_sheet_evidence:
+        gaps.append("email_or_sheet")
+    if topic_type == "project_update" and not prd_scope_summaries:
+        gaps.append("prd")
+    if gmail_error:
+        gaps.append("gmail_error")
+    tone_by_confidence = {
+        "high": "Write as a confident executive progress update with clear business impact and next movement.",
+        "medium": "Write as a cautious progress update; mention pending confirmation only if it affects management attention.",
+        "low": "Write as a monitoring item, avoid over-claiming, and avoid raw phrases like no confirmed evidence.",
+        "none": "Do not position as material progress; state that the item remains pending confirmation in manager-ready wording.",
+    }
+    return {
+        "topic": topic,
+        "topic_type": topic_type,
+        "confidence": confidence,
+        "confidence_score": score,
+        "source_counts": source_counts,
+        "active_sources": active_sources,
+        "matched_project_names": [
+            str(project.get("project_name") or "").strip()
+            for project in project_updates
+            if str(project.get("project_name") or "").strip()
+        ],
+        "project_statuses": _dedupe_preserve_order(project_statuses),
+        "gaps": gaps,
+        "recommended_tone": tone_by_confidence[confidence],
+    }
+
+
+def _monthly_report_confidence_counts(highlight_evidence_map: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"high": 0, "medium": 0, "low": 0, "none": 0}
+    for item in highlight_evidence_map:
+        confidence = str(item.get("confidence") or "none").strip().lower()
+        if confidence not in counts:
+            confidence = "none"
+        counts[confidence] += 1
+    return counts
 
 
 def build_monthly_project_evidence_brief(
@@ -1326,6 +1492,7 @@ def build_monthly_report_batch_prompt(
         "For Highlight deep evidence, preserve narrative facts for the user-provided topics. For Monthly project evidence brief, keep other Key Projects concise and do not expand them into highlights.\n"
         f"Hard scope: include only Xiaodong-owned {', '.join(MONTHLY_REPORT_PRODUCT_SCOPE)} product updates. Exclude unrelated general awareness, HR, hiring, personal chat, random live issue, and generic IT/process/material-check updates even if a VIP or priority keyword appears.\n"
         "Use concise Markdown with these headings exactly: Highlights, Decisions, Risks, Owners, Project References, Open Asks, Evidence Gaps.\n"
+        "For each highlight topic, respect its confidence/recommended_tone when present. High-confidence topics can be written as progress; low-confidence topics should remain monitoring items without over-claiming.\n"
         "Preserve concrete project names, Jira IDs, owners, markets, dates, decisions, blockers, and launch/status facts.\n"
         "If this batch has no material in-scope evidence, return only: No material update found.\n"
         "Do not include raw transcripts or long excerpts.\n\n"
@@ -1356,6 +1523,7 @@ def build_monthly_report_merge_prompt(
         "Keep Highlight deep evidence separate from Other Key Project Updates. Do not let non-highlight project updates become highlight narrative.\n"
         f"Hard scope: keep only Xiaodong-owned {', '.join(MONTHLY_REPORT_PRODUCT_SCOPE)} product updates. Drop unrelated updates even if they mention VIPs, approval, risk, launch, urgent, BSP, or OJK.\n"
         "Use these headings exactly: Executive Themes, Key Project Progress, Delivery Evidence, Risks And Blockers, Decisions Needed, Evidence Gaps.\n"
+        "Carry forward highlight confidence and evidence-map gaps as drafting guidance, but do not turn source mechanics into report wording.\n"
         "Keep the user-provided highlight topics visible as the final draft's required Highlights scope.\n"
         "Keep the brief concise enough for one final model call.\n\n"
         f"# Generated At\n{generated_at.isoformat()}\n\n"
@@ -1410,6 +1578,7 @@ def build_monthly_report_final_prompt(
         "Use Highlight Deep Evidence as the primary source for the Highlights narrative. Use Other Key Project Updates only for the project table and concise non-highlight updates.\n"
         "The audience is Xiaodong's manager. Write Highlights as an executive product update, not as an investigation log: emphasize business impact, delivery progress, material risk, decision needed, and next action.\n"
         "Use calm, factual, ownership-oriented wording. Avoid alarmist language, raw technical incident wording, internal tool/process details, chat-style phrasing, and over-hedged phrases unless the uncertainty itself is the management point.\n"
+        "Use the confidence/recommended_tone fields inside Highlight Deep Evidence to calibrate wording: high confidence can state progress directly; medium confidence should be framed as directional progress with pending confirmation; low or none should be framed as a watch item or pending confirmation, not as a failure to find evidence.\n"
         f"Hard scope: the final report must contain only Xiaodong-owned {', '.join(MONTHLY_REPORT_PRODUCT_SCOPE)} product updates. Do not include unrelated general awareness, HR, hiring, personal chat, random live issue, or generic IT/process/material-check updates. VIP or priority-keyword mentions are not enough unless the evidence is in-scope.\n"
         "Never include a project-table row unless it is attached to an item where include=true in Other Key Project Updates JSON. Non-project highlight topics may appear only in Highlights when supported by Highlight Deep Evidence.\n"
         "Do not write 'Evidence-limited' unless that exact wording appears in the structured status_facts for an included project.\n"
@@ -1424,7 +1593,8 @@ def build_monthly_report_final_prompt(
         "- If the configured template contains Markdown tables, preserve those table structures and fill rows from evidence; use TBD for missing cells instead of converting the table to bullets.\n"
         "- Highlights must cover only the user-provided highlight topics below; do not add unrelated highlight topics.\n"
         "- Each Highlight should be manager-ready: one compact paragraph per topic, focused on what changed, why it matters, current risk or decision, and the expected next movement.\n"
-        "- Do not expose raw evidence mechanics in Highlights. Do not say 'SeaTalk says', 'Gmail says', 'evidence gap', 'query', 'thread', 'ticket', or similar source/tool terms.\n"
+        "- Do not expose raw evidence mechanics in Highlights. Do not say 'SeaTalk says', 'Gmail says', 'evidence gap', 'no confirmed evidence', 'query', 'thread', 'ticket', or similar source/tool terms.\n"
+        "- For weakly supported topics, prefer manager-ready wording such as 'This remains pending confirmation before it can be positioned as material progress' instead of tool-facing wording.\n"
         "- Do not include Jira ticket IDs, Jira links, or issue-key references in the report.\n"
         "- Do not include a Key Follow-Ups section.\n"
         "- Current Status must be exactly one of: BRD, PRD, Dev, UAT. Do not add explanations in that cell.\n\n"
@@ -1826,6 +1996,35 @@ def _monthly_report_prd_scope_cache_path(
         }
     )
     return _monthly_report_cache_root(settings) / "prd_scope" / f"{digest}.json"
+
+
+def _monthly_report_batch_summary_cache_path(
+    settings: Settings,
+    *,
+    report_period: MonthlyReportPeriod,
+    source: str,
+    index: int,
+    highlight_topics: list[str],
+    template: str,
+    payload: Any,
+    prd_errors: list[str],
+) -> Path:
+    digest = _monthly_report_cache_digest(
+        {
+            "version": MONTHLY_REPORT_BATCH_SUMMARY_CACHE_VERSION,
+            "prompt_version": MONTHLY_REPORT_PROMPT_VERSION,
+            "period_start": report_period.start_date,
+            "period_end": report_period.end_date,
+            "period_end_exclusive": report_period.end_exclusive.isoformat(),
+            "source": str(source or "").strip(),
+            "index": int(index or 0),
+            "highlight_topics": [str(topic or "").strip() for topic in highlight_topics],
+            "template_digest": _monthly_report_cache_digest({"template": normalize_monthly_report_template(template)}),
+            "payload_digest": _monthly_report_cache_digest({"payload": payload}),
+            "prd_errors": [str(error or "").strip() for error in prd_errors if str(error or "").strip()],
+        }
+    )
+    return _monthly_report_cache_root(settings) / "batch_summary" / f"{digest}.json"
 
 
 def _read_monthly_report_json_cache(path: Path, *, max_age_seconds: int | None = None) -> dict[str, Any] | None:
@@ -2454,6 +2653,12 @@ def _sanitize_monthly_report_output(value: str) -> str:
         r"No material update found",
         "BRD",
         _strip_jira_issue_keys_for_report(value),
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"No confirmed(?:\s+\w+){0,5}\s+evidence is available(?:\s+for [^.]+)?\.",
+        "This item remains pending confirmation before it can be positioned as material progress.",
+        text,
         flags=re.IGNORECASE,
     )
     lines = text.splitlines()

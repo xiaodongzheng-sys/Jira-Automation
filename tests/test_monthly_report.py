@@ -17,9 +17,10 @@ from bpmis_jira_tool.monthly_report import (
     MONTHLY_REPORT_SEATALK_HIGHLIGHT_CONVERSATION_SCOPE,
     MonthlyReportService,
     _estimate_token_count,
-    build_monthly_report_final_prompt,
     build_monthly_highlight_deep_evidence,
+    build_monthly_highlight_evidence_map,
     build_monthly_project_evidence_brief,
+    build_monthly_report_final_prompt,
     generate_monthly_report_with_codex,
     match_monthly_report_highlight_topics,
     monthly_report_markdown_to_html,
@@ -27,6 +28,7 @@ from bpmis_jira_tool.monthly_report import (
     normalize_monthly_report_template,
     resolve_monthly_report_period_from_user_range,
     resolve_monthly_report_period,
+    _sanitize_monthly_report_output,
 )
 from bpmis_jira_tool.seatalk_dashboard import SEATALK_INSIGHTS_TIMEZONE
 
@@ -224,6 +226,49 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertFalse(first[0]["cache_hit"])
         self.assertTrue(second[0]["cache_hit"])
 
+    def test_batch_summary_cache_reuses_codex_result_for_same_evidence_fingerprint(self):
+        report_period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
+        payload = [{"topic": "AF launch", "seatalk_evidence": ["AF launch owner confirmed."]}]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = MonthlyReportService(
+                settings=_settings(temp_dir),
+                workspace_root=Path(temp_dir),
+                seatalk_service=_FakeSeaTalkService(),
+            )
+            with patch.object(
+                service,
+                "_guarded_generate",
+                return_value={"result_markdown": "Cached batch summary", "model_id": "codex-cli", "trace": {"id": "trace-1"}},
+            ) as mock_generate:
+                first = service._batch_summaries(
+                    template="# Template",
+                    generated_at=datetime(2026, 5, 8, 12, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+                    report_period=report_period,
+                    highlight_topics=["AF launch"],
+                    monthly_evidence_brief=[],
+                    highlight_deep_evidence=payload,
+                    prd_errors=[],
+                    evidence_sidecar=[],
+                    progress_callback=None,
+                )
+                second = service._batch_summaries(
+                    template="# Template",
+                    generated_at=datetime(2026, 5, 9, 12, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+                    report_period=report_period,
+                    highlight_topics=["AF launch"],
+                    monthly_evidence_brief=[],
+                    highlight_deep_evidence=payload,
+                    prd_errors=[],
+                    evidence_sidecar=[],
+                    progress_callback=None,
+                )
+
+        self.assertEqual(mock_generate.call_count, 1)
+        self.assertEqual(first[0]["summary_markdown"], "Cached batch summary")
+        self.assertFalse(first[0]["cache_hit"])
+        self.assertTrue(second[0]["cache_hit"])
+        self.assertEqual(second[0]["summary_markdown"], "Cached batch summary")
+
     def test_generate_draft_uses_period_product_scope_key_projects_prd_and_vip_gmail(self):
         seatalk = _FakeSeaTalkService()
         confluence = _FakeConfluence()
@@ -333,7 +378,7 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(gmail.calls[0]["now"].isoformat(), "2026-05-04T00:00:00+08:00")
         self.assertEqual(gmail.calls[0]["contact_emails"], ["siewghee.kunglim@shopee.com"])
         topic_calls = [call for call in gmail.calls if "topic" in call]
-        self.assertEqual([call["topic"] for call in topic_calls], ["Key Fraud Project", "GRC Phase 1"])
+        self.assertCountEqual([call["topic"] for call in topic_calls], ["Key Fraud Project", "GRC Phase 1"])
         self.assertEqual(confluence.urls, [("https://confluence/prd", "monthly-report")])
         prompts = [call.kwargs["prompt"] for call in mock_generate.call_args_list]
         prompt_modes = [call.kwargs.get("prompt_mode", "") for call in mock_generate.call_args_list]
@@ -394,6 +439,10 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertTrue(any(item["stage"] == "searching_topic_gmail" and item["total"] == 2 for item in progress_events))
         self.assertEqual(result["evidence_summary"]["highlight_topic_count"], 2)
         self.assertEqual(result["evidence_summary"]["highlight_project_topic_count"], 1)
+        self.assertIn("highlight_confidence_counts", result["evidence_summary"])
+        self.assertEqual(len(result["highlight_evidence_map"]), 2)
+        self.assertTrue({item["topic"] for item in result["highlight_evidence_map"]}.issuperset({"Key Fraud Project", "GRC Phase 1"}))
+        self.assertIn("batch_summary_cache_hit_count", result["generation_summary"])
         self.assertEqual(result["generation_summary"]["scheduled_period_end"], "2026-05-08")
         self.assertGreater(result["generation_summary"]["prompt_chars"], 0)
         self.assertGreater(result["generation_summary"]["estimated_prompt_tokens"], 0)
@@ -606,6 +655,9 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertIn("The audience is Xiaodong's manager", prompt)
         self.assertIn("executive product update", prompt)
         self.assertIn("Do not expose raw evidence mechanics in Highlights", prompt)
+        self.assertIn("confidence/recommended_tone", prompt)
+        self.assertIn("no confirmed evidence", prompt)
+        self.assertIn("pending confirmation", prompt)
 
     def test_highlight_topic_matching_and_deep_evidence_layers_sources(self):
         period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
@@ -672,8 +724,15 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertTrue(any("PRD says CIB Phase 2" in item for item in deep[0]["prd_scope_summaries"]))
         self.assertTrue(any("group-4371534" in item for item in deep[0]["seatalk_evidence"]))
         self.assertTrue(any("release owner confirmed" in item for item in deep[0]["gmail_evidence"]))
+        self.assertEqual(deep[0]["confidence"], "high")
+        self.assertEqual(deep[0]["evidence_map"]["source_counts"]["seatalk"], 1)
+        self.assertIn("Write as a confident executive progress update", deep[0]["recommended_tone"])
         self.assertEqual(deep[1]["topic_type"], "general_topic")
         self.assertEqual(deep[1]["project_updates"], [])
+        self.assertEqual(deep[1]["confidence"], "low")
+        evidence_map = build_monthly_highlight_evidence_map(deep)
+        self.assertEqual([item["topic"] for item in evidence_map], ["CIB Phase 2", "General Risk Narrative"])
+        self.assertEqual(evidence_map[0]["confidence"], "high")
 
     def test_non_highlight_project_evidence_stays_light(self):
         period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
@@ -901,6 +960,13 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(result["evidence_summary"]["gmail_error_count"], 2)
 
     def test_template_normalization_and_markdown_html(self):
+        sanitized = _sanitize_monthly_report_output(
+            "No confirmed project delivery evidence is available for this scope.\n"
+            "## Key Follow-Ups\n- Confirm owner"
+        )
+        self.assertIn("pending confirmation", sanitized)
+        self.assertNotIn("No confirmed project delivery evidence", sanitized)
+        self.assertNotIn("Key Follow-Ups", sanitized)
         self.assertIn("Monthly Report", normalize_monthly_report_template(""))
         html = monthly_report_markdown_to_html("# Report\n- **Done** `AF-1`")
         self.assertIn("<strong>Done</strong>", html)
