@@ -558,7 +558,26 @@
   align-items: start;
 }
 
+.team-dashboard-monthly-report-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.45fr);
+  gap: 16px;
+  margin: 12px 0 16px;
+  align-items: end;
+}
+
+.team-dashboard-monthly-report-date-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.team-dashboard-monthly-report-date-grid input {
+  min-height: 42px;
+}
+
 .team-dashboard-monthly-report-editor textarea,
+.team-dashboard-monthly-report-topic-field textarea,
 .team-dashboard-monthly-report-template-form textarea {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   line-height: 1.5;
@@ -683,6 +702,7 @@
   }
 }
 @media (max-width: 980px) {
+  .team-dashboard-monthly-report-controls,
   .team-dashboard-monthly-report-grid {
     grid-template-columns: 1fr;
   }

@@ -40,6 +40,7 @@ MONTHLY_REPORT_MAX_TICKETS_PER_PROJECT = 18
 MONTHLY_REPORT_MAX_PRD_PAGES = 10
 MONTHLY_REPORT_MAX_PRD_CHARS_PER_PAGE = 8_000
 MONTHLY_REPORT_MAX_DESCRIPTION_CHARS = 4_000
+MONTHLY_REPORT_MAX_HIGHLIGHT_TOPICS = 5
 MONTHLY_REPORT_TOKEN_CHARS_PER_TOKEN = 4
 MONTHLY_REPORT_TOKEN_RISK_WARNING = 120_000
 MONTHLY_REPORT_TOKEN_RISK_HIGH = 180_000
@@ -113,20 +114,20 @@ MONTHLY_REPORT_DECISION_TERMS = (
 
 DEFAULT_MONTHLY_REPORT_TEMPLATE = """# Monthly Report
 
-## Executive Summary
-- Summarize the most important delivery progress, decisions, and risks across Anti-fraud, Credit Risk, and Ops Risk.
+## Highlights
+- Cover only the user-provided highlight topics. Keep each highlight concise and evidence-backed.
 
 ## Key Project Progress
-- For each Key Project, include Biz Project ID, project name, market, current stage, Jira progress, and notable PRD/business changes.
+- Use this table structure:
+
+| Region | Priority | Project | Current Status | Target Tech Live Date |
+| --- | --- | --- | --- | --- |
 
 ## Blockers / Risks
 - Highlight unresolved blockers, cross-team dependencies, delayed decisions, production or compliance risks, and owners where clear.
 
 ## Delivery Outlook
 - Explain expected next steps and upcoming milestones for the next month.
-
-## Asks / Decisions Needed
-- List decisions, approvals, or follow-ups needed from Xiaodong or stakeholders.
 """
 
 
@@ -197,12 +198,14 @@ class MonthlyReportService:
         period_start: str | None = None,
         period_end: str | None = None,
         period_end_exclusive: str | None = None,
+        highlight_topics: list[str] | str | None = None,
         product_scope: list[str] | None = None,
         progress_callback: Any | None = None,
     ) -> dict[str, Any]:
         started_at = time.monotonic()
         if report_intelligence_config is not None:
             self.report_intelligence_config = normalize_report_intelligence_config(report_intelligence_config)
+        normalized_highlight_topics = normalize_monthly_report_highlight_topics(highlight_topics)
         report_period = _monthly_report_period_from_payload(
             period_start=period_start,
             period_end=period_end,
@@ -241,6 +244,7 @@ class MonthlyReportService:
             template=effective_template,
             generated_at=self.now,
             report_period=report_period,
+            highlight_topics=normalized_highlight_topics,
             seatalk_history_text=history_text,
             vip_gmail_text=vip_gmail_text,
             monthly_evidence_brief=included_project_briefs,
@@ -252,6 +256,7 @@ class MonthlyReportService:
         evidence_brief = self._merge_batch_summaries(
             generated_at=self.now,
             report_period=report_period,
+            highlight_topics=normalized_highlight_topics,
             batch_summaries=batch_summaries,
             prd_errors=prd_errors,
             progress_callback=progress_callback,
@@ -260,6 +265,7 @@ class MonthlyReportService:
             template=effective_template,
             generated_at=self.now,
             report_period=report_period,
+            highlight_topics=normalized_highlight_topics,
             evidence_brief=evidence_brief,
             monthly_evidence_brief=monthly_evidence_brief,
         )
@@ -274,6 +280,7 @@ class MonthlyReportService:
                 template=effective_template,
                 generated_at=self.now,
                 report_period=report_period,
+                highlight_topics=normalized_highlight_topics,
                 evidence_brief=evidence_brief,
                 monthly_evidence_brief=monthly_evidence_brief,
             )
@@ -297,6 +304,7 @@ class MonthlyReportService:
             max_tokens=MONTHLY_REPORT_FINAL_MAX_TOKENS,
             progress_callback=progress_callback,
         )
+        draft_markdown = _sanitize_monthly_report_output(str(generated.get("result_markdown") or ""))
         elapsed_seconds = round(time.monotonic() - started_at, 1)
         prompt_chars = len(prompt)
         estimated_prompt_tokens = final_estimated_tokens
@@ -307,9 +315,10 @@ class MonthlyReportService:
         ]
         return {
             "status": "ok",
-            "draft_markdown": generated["result_markdown"],
+            "draft_markdown": draft_markdown,
             "generated_at": self.now.isoformat(),
             "subject": monthly_report_subject(period=report_period),
+            "highlight_topics": normalized_highlight_topics,
             "generation_version": MONTHLY_REPORT_GENERATION_VERSION,
             "model_id": generated["model_id"],
             "trace": generated["trace"],
@@ -318,6 +327,7 @@ class MonthlyReportService:
                 "period_start": report_period.start_date,
                 "period_end": report_period.end_date,
                 "period_end_exclusive": report_period.end_exclusive.isoformat(),
+                "highlight_topics": normalized_highlight_topics,
                 "scheduled_period_start": report_period.scheduled_start_date,
                 "scheduled_period_end": report_period.scheduled_end_date,
                 "effective_period_start": report_period.start_date,
@@ -356,6 +366,7 @@ class MonthlyReportService:
         template: str,
         generated_at: datetime,
         report_period: MonthlyReportPeriod,
+        highlight_topics: list[str],
         seatalk_history_text: str,
         vip_gmail_text: str,
         monthly_evidence_brief: list[dict[str, Any]],
@@ -385,6 +396,7 @@ class MonthlyReportService:
                 template=template,
                 generated_at=generated_at,
                 report_period=report_period,
+                highlight_topics=highlight_topics,
                 source=str(batch.get("source") or ""),
                 payload=batch.get("payload"),
                 prd_errors=prd_errors,
@@ -423,6 +435,7 @@ class MonthlyReportService:
         *,
         generated_at: datetime,
         report_period: MonthlyReportPeriod,
+        highlight_topics: list[str],
         batch_summaries: list[dict[str, Any]],
         prd_errors: list[str],
         progress_callback: Any | None,
@@ -430,6 +443,7 @@ class MonthlyReportService:
         prompt = build_monthly_report_merge_prompt(
             generated_at=generated_at,
             report_period=report_period,
+            highlight_topics=highlight_topics,
             batch_summaries=batch_summaries,
             prd_errors=prd_errors,
         )
@@ -446,6 +460,7 @@ class MonthlyReportService:
             prompt = build_monthly_report_merge_prompt(
                 generated_at=generated_at,
                 report_period=report_period,
+                highlight_topics=highlight_topics,
                 batch_summaries=compacted,
                 prd_errors=prd_errors,
             )
@@ -740,6 +755,21 @@ def normalize_monthly_report_template(value: Any) -> str:
     return template or DEFAULT_MONTHLY_REPORT_TEMPLATE
 
 
+def normalize_monthly_report_highlight_topics(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw_items = re.split(r"[\n\r]+", value)
+    elif isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = []
+    topics = _dedupe_preserve_order([str(item or "").strip() for item in raw_items if str(item or "").strip()])
+    if not topics:
+        raise ToolError("Monthly Report highlight topics are required. Add 1 to 5 topics before generating.")
+    if len(topics) > MONTHLY_REPORT_MAX_HIGHLIGHT_TOPICS:
+        raise ToolError(f"Monthly Report supports at most {MONTHLY_REPORT_MAX_HIGHLIGHT_TOPICS} highlight topics.")
+    return topics
+
+
 def build_monthly_project_evidence_brief(
     *,
     key_projects: list[dict[str, Any]],
@@ -766,18 +796,18 @@ def build_monthly_project_evidence_brief(
         risks = _direct_project_risks(matched_seatalk + matched_gmail)
         decisions_needed = _direct_project_decisions(matched_seatalk + matched_gmail)
         score = jira_score + len(matched_seatalk) * 3 + len(matched_gmail) * 3 + len(matched_prd) * 2
-        include = score > 0
+        current_status = _monthly_report_current_status(jira_tickets, report_period=report_period, material_update_score=score)
+        include = True
         evidence_sources = {
             "jira": jira_sources,
             "seatalk": matched_seatalk,
             "vip_gmail": matched_gmail,
             "prd_scope_summary": prd_facts,
         }
-        exclude_reason = "" if include else "No material in-period project evidence found."
         items.append(
             {
                 "include": include,
-                "exclude_reason": exclude_reason,
+                "exclude_reason": "",
                 "product_area": _project_product_area(project),
                 "project_id": str(project.get("bpmis_id") or "").strip(),
                 "bpmis_id": str(project.get("bpmis_id") or "").strip(),
@@ -791,6 +821,7 @@ def build_monthly_project_evidence_brief(
                 "matched_vip_gmail_threads": matched_gmail,
                 "matched_prd_summaries": prd_facts,
                 "material_update_score": score,
+                "current_status": current_status,
                 "status_facts": _dedupe_preserve_order(status_facts)[:10],
                 "timeline_facts": _dedupe_preserve_order(timeline_facts)[:8],
                 "risks": risks[:6],
@@ -827,6 +858,37 @@ def resolve_monthly_report_period(moment: datetime | None = None) -> MonthlyRepo
     )
 
 
+def resolve_monthly_report_period_from_user_range(
+    *,
+    period_start: str | None,
+    period_end: str | None,
+    fallback: datetime | None = None,
+) -> MonthlyReportPeriod:
+    start_text = str(period_start or "").strip()
+    end_text = str(period_end or "").strip()
+    if not start_text and not end_text:
+        return resolve_monthly_report_period(fallback)
+    if not start_text or not end_text:
+        raise ToolError("Monthly Report start date and end date are both required.")
+    try:
+        start = _parse_monthly_report_datetime(start_text).astimezone(SEATALK_INSIGHTS_TIMEZONE)
+        end_date = date.fromisoformat(end_text[:10])
+    except (TypeError, ValueError) as error:
+        raise ToolError("Monthly Report date range must use YYYY-MM-DD dates.") from error
+    end = datetime.combine(end_date, datetime_time.min, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+    end_exclusive = end + timedelta(days=1)
+    if start.date() > end.date():
+        raise ToolError("Monthly Report start date cannot be later than end date.")
+    return MonthlyReportPeriod(
+        start=start,
+        end=end,
+        end_exclusive=end_exclusive,
+        scheduled_start=start,
+        scheduled_end=end,
+        scheduled_end_exclusive=end_exclusive,
+    )
+
+
 def _monthly_report_period_from_payload(
     *,
     period_start: str | None,
@@ -834,23 +896,29 @@ def _monthly_report_period_from_payload(
     period_end_exclusive: str | None,
     fallback: datetime,
 ) -> MonthlyReportPeriod:
-    try:
-        if period_start and period_end and period_end_exclusive:
-            start = _parse_monthly_report_datetime(period_start)
-            end_exclusive = _parse_monthly_report_datetime(period_end_exclusive)
-            end_date = date.fromisoformat(str(period_end)[:10])
-            end = datetime.combine(end_date, datetime_time.min, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
-            if start < end_exclusive:
-                return MonthlyReportPeriod(
-                    start=start.astimezone(SEATALK_INSIGHTS_TIMEZONE),
-                    end=end.astimezone(SEATALK_INSIGHTS_TIMEZONE),
-                    end_exclusive=end_exclusive.astimezone(SEATALK_INSIGHTS_TIMEZONE),
-                    scheduled_start=start.astimezone(SEATALK_INSIGHTS_TIMEZONE),
-                    scheduled_end=end.astimezone(SEATALK_INSIGHTS_TIMEZONE),
-                    scheduled_end_exclusive=end_exclusive.astimezone(SEATALK_INSIGHTS_TIMEZONE),
-                )
-    except (TypeError, ValueError):
-        pass
+    if period_start or period_end or period_end_exclusive:
+        if not (period_start and period_end):
+            raise ToolError("Monthly Report start date and end date are both required.")
+        if period_start and period_end and not period_end_exclusive:
+            return resolve_monthly_report_period_from_user_range(period_start=period_start, period_end=period_end, fallback=fallback)
+        try:
+            if period_start and period_end and period_end_exclusive:
+                start = _parse_monthly_report_datetime(period_start)
+                end_exclusive = _parse_monthly_report_datetime(period_end_exclusive)
+                end_date = date.fromisoformat(str(period_end)[:10])
+                end = datetime.combine(end_date, datetime_time.min, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+                if start < end_exclusive:
+                    return MonthlyReportPeriod(
+                        start=start.astimezone(SEATALK_INSIGHTS_TIMEZONE),
+                        end=end.astimezone(SEATALK_INSIGHTS_TIMEZONE),
+                        end_exclusive=end_exclusive.astimezone(SEATALK_INSIGHTS_TIMEZONE),
+                        scheduled_start=start.astimezone(SEATALK_INSIGHTS_TIMEZONE),
+                        scheduled_end=end.astimezone(SEATALK_INSIGHTS_TIMEZONE),
+                        scheduled_end_exclusive=end_exclusive.astimezone(SEATALK_INSIGHTS_TIMEZONE),
+                    )
+        except (TypeError, ValueError) as error:
+            raise ToolError("Monthly Report date range must use valid dates.") from error
+        raise ToolError("Monthly Report start date cannot be later than end date.")
     return resolve_monthly_report_period(fallback)
 
 
@@ -879,14 +947,14 @@ def build_monthly_report_prompt(
         "# Task\n"
         "Generate Xiaodong Zheng's monthly team report as concise, business-ready Markdown.\n"
         "Use the configured template as the required structure. Do not invent facts; when evidence is weak, state the gap or mark as TBD.\n"
-        "Synthesize the configured report-period SeaTalk history with Key Project Biz Project and Jira evidence. Prefer concrete project names, Jira IDs, decisions, risks, owners, and dates.\n"
+        "Synthesize the configured report-period SeaTalk history with Key Project Biz Project and Jira evidence. Prefer concrete project names, decisions, risks, owners, and dates.\n"
         "Do not include raw transcripts, long PRD excerpts, tool logs, or confidential implementation chatter that is not needed for a monthly business report.\n\n"
         "# Output Rules\n"
         "- Return only the final Markdown draft.\n"
         "- Keep it suitable to send by email after light PM editing.\n"
         "- Follow the template headings unless the evidence clearly requires a small additional subsection.\n"
         "- If the configured template contains Markdown tables, preserve those table structures and fill rows from evidence; use TBD for missing cells instead of converting the table to bullets.\n"
-        "- Include Jira IDs in parentheses when referencing concrete delivery items.\n\n"
+        "- Do not include Jira ticket IDs or Jira links in the final report.\n\n"
         f"# Generated At\n{generated_at.isoformat()}\n\n"
         f"# Monthly Report Template\n{normalize_monthly_report_template(template)}\n\n"
         "# Key Project / Jira Evidence\n"
@@ -905,6 +973,7 @@ def build_monthly_report_batch_prompt(
     template: str,
     generated_at: datetime,
     report_period: MonthlyReportPeriod,
+    highlight_topics: list[str],
     source: str,
     payload: Any,
     prd_errors: list[str],
@@ -921,6 +990,7 @@ def build_monthly_report_batch_prompt(
         "Do not include raw transcripts or long excerpts.\n\n"
         f"# Generated At\n{generated_at.isoformat()}\n\n"
         f"# Report Period\n{report_period.start_date} to {report_period.end_date}\n\n"
+        f"# User-Provided Highlight Topics\n{_json_block(highlight_topics)}\n\n"
         f"# Monthly Report Template For Orientation\n{normalize_monthly_report_template(template)}\n\n"
         f"# Evidence Source\n{source_label}\n\n"
         "# PRD Enrichment Gaps\n"
@@ -934,6 +1004,7 @@ def build_monthly_report_merge_prompt(
     *,
     generated_at: datetime,
     report_period: MonthlyReportPeriod,
+    highlight_topics: list[str],
     batch_summaries: list[dict[str, Any]],
     prd_errors: list[str],
 ) -> str:
@@ -943,9 +1014,11 @@ def build_monthly_report_merge_prompt(
         "Do not write the final report. Deduplicate repeated facts and keep the strongest concrete evidence.\n"
         f"Hard scope: keep only Xiaodong-owned {', '.join(MONTHLY_REPORT_PRODUCT_SCOPE)} product updates. Drop unrelated updates even if they mention VIPs, approval, risk, launch, urgent, BSP, or OJK.\n"
         "Use these headings exactly: Executive Themes, Key Project Progress, Delivery Evidence, Risks And Blockers, Decisions Needed, Evidence Gaps.\n"
+        "Keep the user-provided highlight topics visible as the final draft's required Highlights scope.\n"
         "Keep the brief concise enough for one final model call.\n\n"
         f"# Generated At\n{generated_at.isoformat()}\n\n"
         f"# Report Period\n{report_period.start_date} to {report_period.end_date}\n\n"
+        f"# User-Provided Highlight Topics\n{_json_block(highlight_topics)}\n\n"
         "# PRD Enrichment Gaps\n"
         f"{_json_block(prd_errors)}\n\n"
         "# Batch Summaries\n"
@@ -961,7 +1034,7 @@ def build_monthly_report_compress_prompt(
     return (
         "# Task\n"
         "Compress this Monthly Report evidence brief before final drafting.\n"
-        "Do not write the final report. Preserve concrete project names, Jira IDs, owners, dates, decisions, risks, and asks.\n"
+        "Do not write the final report. Preserve concrete project names, owners, dates, decisions, risks, and asks.\n"
         "Remove repetition and low-value detail. Return concise Markdown only.\n\n"
         f"# Generated At\n{generated_at.isoformat()}\n\n"
         "# Evidence Brief\n"
@@ -974,10 +1047,17 @@ def build_monthly_report_final_prompt(
     template: str,
     generated_at: datetime,
     report_period: MonthlyReportPeriod,
+    highlight_topics: list[str],
     evidence_brief: str,
     monthly_evidence_brief: list[dict[str, Any]],
 ) -> str:
     included_project_evidence = _compact_monthly_evidence_for_final(monthly_evidence_brief)
+    safe_evidence_brief = re.sub(
+        r"No material update found",
+        "No material update; use BRD status",
+        _strip_jira_issue_keys_for_report(evidence_brief),
+        flags=re.IGNORECASE,
+    )
     return (
         "# Task\n"
         "Generate Xiaodong Zheng's monthly team report as concise, business-ready Markdown.\n"
@@ -988,21 +1068,25 @@ def build_monthly_report_final_prompt(
         "Do not write 'Evidence-limited' unless that exact wording appears in the structured status_facts for an included project.\n"
         "Do not write 'prioritization pressure', capacity pressure, or resource pressure unless that exact project has a direct risk entry containing capacity, resource, or prioritization evidence.\n"
         "Exclude random live incidents, DB instability, local registration monitoring, Shopee acquisition, and onboarding health unless they are explicitly tied to an included project and a Xiaodong decision/action.\n"
-        "If a section has no material in-scope evidence, write No material update found instead of filling it with unrelated updates.\n"
+        "Do not write 'No material update found' as a project status. Use BRD in the Current Status column when a project has no material update.\n"
         "Do not include raw transcripts, long PRD excerpts, tool logs, or confidential implementation chatter that is not needed for a monthly business report.\n\n"
         "# Output Rules\n"
         "- Return only the final Markdown draft.\n"
         "- Keep it suitable to send by email after light PM editing.\n"
         "- Follow the template headings unless the evidence clearly requires a small additional subsection.\n"
         "- If the configured template contains Markdown tables, preserve those table structures and fill rows from evidence; use TBD for missing cells instead of converting the table to bullets.\n"
-        "- Include Jira IDs in parentheses when referencing concrete delivery items.\n\n"
+        "- Highlights must cover only the user-provided highlight topics below; do not add unrelated highlight topics.\n"
+        "- Do not include Jira ticket IDs, Jira links, or issue-key references in the report.\n"
+        "- Do not include a Key Follow-Ups section.\n"
+        "- Current Status must be exactly one of: BRD, PRD, Dev, UAT. Do not add explanations in that cell.\n\n"
         f"# Generated At\n{generated_at.isoformat()}\n\n"
         f"# Report Period\n{report_period.start_date} to {report_period.end_date}\n\n"
+        f"# User-Provided Highlight Topics\n{_json_block(highlight_topics)}\n\n"
         f"# Monthly Report Template\n{normalize_monthly_report_template(template)}\n\n"
         "# Included Project Evidence JSON\n"
         f"{_json_block(included_project_evidence)}\n\n"
         "# Compact Evidence Brief\n"
-        f"{evidence_brief or 'No readable evidence was found for this monthly report.'}"
+        f"{safe_evidence_brief or 'No readable evidence was found for this monthly report.'}"
     )
 
 
@@ -1020,14 +1104,14 @@ def _compact_monthly_evidence_for_final(monthly_evidence_brief: list[dict[str, A
                 "product_area": str(item.get("product_area") or "").strip(),
                 "market": str(item.get("market") or "").strip(),
                 "priority": str(item.get("priority") or "").strip(),
-                "jira_ids": _compact_text_list(item.get("jira_ids"), limit=24, max_chars=80),
                 "seatalk_group_ids": _compact_text_list(item.get("seatalk_group_ids"), limit=8, max_chars=80),
                 "material_update_score": _safe_int(item.get("material_update_score")),
-                "status_facts": _compact_text_list(item.get("status_facts"), limit=6, max_chars=320),
-                "timeline_facts": _compact_text_list(item.get("timeline_facts"), limit=5, max_chars=240),
-                "risks": _compact_text_list(item.get("risks"), limit=4, max_chars=320),
-                "decisions_needed": _compact_text_list(item.get("decisions_needed"), limit=4, max_chars=320),
-                "matched_prd_summaries": _compact_text_list(item.get("matched_prd_summaries"), limit=3, max_chars=500),
+                "current_status": _monthly_report_status_label(item.get("current_status")),
+                "status_facts": _compact_report_text_list(item.get("status_facts"), limit=6, max_chars=320),
+                "timeline_facts": _compact_report_text_list(item.get("timeline_facts"), limit=5, max_chars=240),
+                "risks": _compact_report_text_list(item.get("risks"), limit=4, max_chars=320),
+                "decisions_needed": _compact_report_text_list(item.get("decisions_needed"), limit=4, max_chars=320),
+                "matched_prd_summaries": _compact_report_text_list(item.get("matched_prd_summaries"), limit=3, max_chars=500),
             }
         )
     return compacted
@@ -1044,6 +1128,10 @@ def _compact_text_list(value: Any, *, limit: int, max_chars: int) -> list[str]:
         if len(compacted) >= limit:
             break
     return compacted
+
+
+def _compact_report_text_list(value: Any, *, limit: int, max_chars: int) -> list[str]:
+    return [_strip_jira_issue_keys_for_report(item) for item in _compact_text_list(value, limit=limit, max_chars=max_chars)]
 
 
 def _safe_int(value: Any) -> int:
@@ -1440,6 +1528,48 @@ def _jira_evidence_facts(jira_tickets: list[dict[str, Any]]) -> tuple[list[str],
     return status_facts, timeline_facts, sources, score
 
 
+def _monthly_report_current_status(
+    jira_tickets: list[dict[str, Any]],
+    *,
+    report_period: MonthlyReportPeriod,
+    material_update_score: int,
+) -> str:
+    if material_update_score <= 0:
+        return "BRD"
+    statuses = [str(ticket.get("jira_status") or "").strip().casefold() for ticket in jira_tickets if str(ticket.get("jira_status") or "").strip()]
+    version_text = " ".join(
+        str(ticket.get(field) or "")
+        for ticket in jira_tickets
+        for field in ("version", "fix_version_name", "version_status", "fix_version_status", "release_phase")
+    ).casefold()
+    if "uat" in version_text or any(_release_date_reached(ticket, report_period) for ticket in jira_tickets):
+        return "UAT"
+    if any(term in version_text for term in ("dev", "qa testing", "qa-testing", "qatesting")):
+        return "Dev"
+    if any(any(term in status for term in ("tech design", "developing", "development", "testing")) for status in statuses):
+        return "Dev"
+    if statuses and all("waiting" in status for status in statuses):
+        return "BRD"
+    if any(any(term in status for term in ("prd reviewed", "prd in progress")) for status in statuses):
+        return "PRD"
+    return "BRD"
+
+
+def _monthly_report_status_label(value: Any) -> str:
+    text = str(value or "").strip()
+    return text if text in {"BRD", "PRD", "Dev", "UAT"} else "BRD"
+
+
+def _release_date_reached(ticket: dict[str, Any], report_period: MonthlyReportPeriod) -> bool:
+    release_date = str(ticket.get("release_date") or "").strip()
+    if not release_date:
+        return False
+    try:
+        return date.fromisoformat(release_date[:10]) <= report_period.end.date()
+    except ValueError:
+        return False
+
+
 def _message_status_facts(messages: list[str]) -> list[str]:
     facts: list[str] = []
     for message in messages:
@@ -1563,6 +1693,8 @@ def _compact_ticket(ticket: dict[str, Any]) -> dict[str, Any]:
         "jira_status": str(ticket.get("jira_status") or "").strip(),
         "release_date": str(ticket.get("release_date") or "").strip(),
         "version": str(ticket.get("version") or "").strip(),
+        "fix_version_name": str(ticket.get("fix_version_name") or "").strip(),
+        "version_status": str(ticket.get("version_status") or ticket.get("fix_version_status") or ticket.get("release_phase") or "").strip(),
         "description": str(ticket.get("description") or "").strip()[:MONTHLY_REPORT_MAX_DESCRIPTION_CHARS],
         "prd_links": [
             {"label": str(item.get("label") or item.get("url") or "").strip(), "url": str(item.get("url") or "").strip()}
@@ -1592,6 +1724,35 @@ def _payload_block(value: Any) -> str:
     if isinstance(value, str):
         return value
     return _json_block(value)
+
+
+def _strip_jira_issue_keys_for_report(value: Any) -> str:
+    text = str(value or "")
+    return re.sub(r"\b(?!BPMIS\b)[A-Z][A-Z0-9]{1,15}-\d+\b", "[ticket]", text)
+
+
+def _sanitize_monthly_report_output(value: str) -> str:
+    text = re.sub(
+        r"No material update found",
+        "BRD",
+        _strip_jira_issue_keys_for_report(value),
+        flags=re.IGNORECASE,
+    )
+    lines = text.splitlines()
+    cleaned: list[str] = []
+    skipping_followups = False
+    for line in lines:
+        heading = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+        if heading:
+            title = heading.group(2).strip().casefold()
+            if title in {"key follow-ups", "key follow ups", "follow-ups", "follow ups"}:
+                skipping_followups = True
+                continue
+            if skipping_followups:
+                skipping_followups = False
+        if not skipping_followups:
+            cleaned.append(line)
+    return "\n".join(cleaned).strip()
 
 
 def _estimate_token_count(text: str) -> int:

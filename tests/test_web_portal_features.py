@@ -214,11 +214,13 @@ class _FakeMonthlyReportService:
                 "period_start": "2026-04-13",
                 "period_end": "2026-05-03",
                 "period_end_exclusive": "2026-05-04T00:00:00+08:00",
+                "highlight_topics": ["CIB Phase 2"],
                 "total_batches": 1,
                 "max_batch_estimated_tokens": 1200,
                 "final_estimated_tokens": 800,
                 "elapsed_seconds": 1.0,
             },
+            "highlight_topics": ["CIB Phase 2"],
             "evidence_summary": {
                 "key_project_count": 1,
                 "jira_ticket_count": 1,
@@ -254,11 +256,13 @@ class _FakeMonthlyReportLocalAgentClient(_FakePRDReviewLocalAgentClient):
                 "period_start": "2026-04-13",
                 "period_end": "2026-05-03",
                 "period_end_exclusive": "2026-05-04T00:00:00+08:00",
+                "highlight_topics": ["CIB Phase 2"],
                 "total_batches": 1,
                 "max_batch_estimated_tokens": 1400,
                 "final_estimated_tokens": 900,
                 "elapsed_seconds": 1.0,
             },
+            "highlight_topics": ["CIB Phase 2"],
             "evidence_summary": {"key_project_count": 1, "jira_ticket_count": 1},
         }
 
@@ -283,6 +287,9 @@ class _FakeMonthlyReportLocalAgentClient(_FakePRDReviewLocalAgentClient):
             "subject": "Monthly Report - 2026-04-13 to 2026-05-08",
             "job_id": "remote-job-1",
             "generated_at": 1770000000,
+            "period_start": "2026-04-13",
+            "period_end": "2026-05-03",
+            "highlight_topics": ["CIB Phase 2"],
         }
 
     def team_dashboard_monthly_report_send(self, payload):
@@ -4814,7 +4821,10 @@ class WebPortalFeatureTests(unittest.TestCase):
                 with client.session_transaction() as session:
                     session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
                     session["google_credentials"] = {"token": "x"}
-                response = client.post("/api/team-dashboard/monthly-report/draft", json={})
+                response = client.post(
+                    "/api/team-dashboard/monthly-report/draft",
+                    json={"highlight_topics": ["CIB Phase 2"], "period_start": "2026-04-13", "period_end": "2026-05-03"},
+                )
                 self.assertEqual(response.status_code, 200)
                 payload = response.get_json()
                 self.assertEqual(payload["status"], "queued")
@@ -4835,6 +4845,32 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(latest_payload["status"], "ok")
         self.assertEqual(latest_payload["draft_markdown"], result["draft_markdown"])
         self.assertEqual(latest_payload["job_id"], payload["job_id"])
+        self.assertEqual(latest_payload["highlight_topics"], ["CIB Phase 2"])
+
+    @patch("bpmis_jira_tool.web._load_all_team_dashboard_task_payloads", return_value=[{"team_key": "AF"}])
+    @patch("bpmis_jira_tool.web._build_monthly_report_service", return_value=_FakeMonthlyReportService())
+    def test_team_dashboard_monthly_report_draft_requires_highlight_topics(self, _mock_service, _mock_payloads):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "ENV_FILE": os.devnull,
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.post("/api/team-dashboard/monthly-report/draft", json={})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("highlight topics", response.get_json()["message"])
 
     @patch("bpmis_jira_tool.web.send_monthly_report_email")
     def test_team_dashboard_monthly_report_send_sends_edited_draft(self, mock_send):
@@ -5003,7 +5039,10 @@ class WebPortalFeatureTests(unittest.TestCase):
                 with client.session_transaction() as session:
                     session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
                     session["google_credentials"] = {"token": "x"}
-                response = client.post("/api/team-dashboard/monthly-report/draft", json={})
+                response = client.post(
+                    "/api/team-dashboard/monthly-report/draft",
+                    json={"highlight_topics": ["CIB Phase 2"], "period_start": "2026-04-13", "period_end": "2026-05-03"},
+                )
                 self.assertEqual(response.status_code, 200)
                 payload = response.get_json()
                 self.assertEqual(payload["status"], "queued")
@@ -5020,6 +5059,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(fake_client.draft_payload["period_start"], "2026-04-13T00:00:00+08:00")
         self.assertEqual(fake_client.draft_payload["period_end"], "2026-05-03")
         self.assertEqual(fake_client.draft_payload["period_end_exclusive"], "2026-05-04T00:00:00+08:00")
+        self.assertEqual(fake_client.draft_payload["highlight_topics"], ["CIB Phase 2"])
         self.assertEqual(fake_client.draft_payload["product_scope"], ["Anti-fraud", "Credit Risk", "Ops Risk"])
 
     @patch("bpmis_jira_tool.web._load_all_team_dashboard_task_payloads", return_value=[{"team_key": "AF"}])
@@ -5050,7 +5090,10 @@ class WebPortalFeatureTests(unittest.TestCase):
                 with client.session_transaction() as session:
                     session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
                     session["google_credentials"] = {"token": "x"}
-                response = client.post("/api/team-dashboard/monthly-report/draft", json={})
+                response = client.post(
+                    "/api/team-dashboard/monthly-report/draft",
+                    json={"highlight_topics": ["CIB Phase 2"], "period_start": "2026-04-13", "period_end": "2026-05-03"},
+                )
                 job_payload = client.get("/api/jobs/remote-job-1").get_json()
                 latest_payload = client.get("/api/team-dashboard/monthly-report/latest-draft").get_json()
 
@@ -5068,6 +5111,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(fake_client.started_payload["period_start"], "2026-04-13T00:00:00+08:00")
         self.assertEqual(fake_client.started_payload["period_end"], "2026-05-03")
         self.assertEqual(fake_client.started_payload["period_end_exclusive"], "2026-05-04T00:00:00+08:00")
+        self.assertEqual(fake_client.started_payload["highlight_topics"], ["CIB Phase 2"])
         self.assertEqual(fake_client.started_payload["product_scope"], ["Anti-fraud", "Credit Risk", "Ops Risk"])
 
     @patch("bpmis_jira_tool.web._build_prd_review_service", return_value=_FakePRDReviewService())

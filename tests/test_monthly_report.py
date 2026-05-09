@@ -21,7 +21,9 @@ from bpmis_jira_tool.monthly_report import (
     build_monthly_project_evidence_brief,
     generate_monthly_report_with_codex,
     monthly_report_markdown_to_html,
+    normalize_monthly_report_highlight_topics,
     normalize_monthly_report_template,
+    resolve_monthly_report_period_from_user_range,
     resolve_monthly_report_period,
 )
 from bpmis_jira_tool.seatalk_dashboard import SEATALK_INSIGHTS_TIMEZONE
@@ -115,6 +117,20 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual((third.scheduled_start_date, third.scheduled_end_date), ("2026-06-08", "2026-07-03"))
         self.assertEqual(first.end_exclusive.isoformat(), "2026-05-04T00:00:00+08:00")
 
+    def test_highlight_topics_and_user_date_range_are_validated(self):
+        self.assertEqual(normalize_monthly_report_highlight_topics([" AF ", "", "CRMS", "AF"]), ["AF", "CRMS"])
+        with self.assertRaises(ToolError):
+            normalize_monthly_report_highlight_topics([])
+        with self.assertRaises(ToolError):
+            normalize_monthly_report_highlight_topics(["one", "two", "three", "four", "five", "six"])
+
+        period = resolve_monthly_report_period_from_user_range(period_start="2026-04-01", period_end="2026-04-30")
+        self.assertEqual(period.start.isoformat(), "2026-04-01T00:00:00+08:00")
+        self.assertEqual(period.end_date, "2026-04-30")
+        self.assertEqual(period.end_exclusive.isoformat(), "2026-05-01T00:00:00+08:00")
+        with self.assertRaises(ToolError):
+            resolve_monthly_report_period_from_user_range(period_start="2026-05-01", period_end="2026-04-30")
+
     def test_generate_draft_uses_period_product_scope_key_projects_prd_and_vip_gmail(self):
         seatalk = _FakeSeaTalkService()
         confluence = _FakeConfluence()
@@ -190,7 +206,7 @@ class MonthlyReportTests(unittest.TestCase):
                     "priority_keywords": ["approval"],
                 },
             )
-            result = service.generate_draft(template="# Template", team_payloads=team_payloads)
+            result = service.generate_draft(template="# Template", team_payloads=team_payloads, highlight_topics=["CIB Phase 2", "GRC Phase 1"])
 
         self.assertEqual(result["draft_markdown"], "# Draft")
         self.assertEqual(seatalk.calls[0]["since"].isoformat(), "2026-04-13T00:00:00+08:00")
@@ -236,6 +252,7 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(result["generation_summary"]["period_start"], "2026-04-13")
         self.assertEqual(result["generation_summary"]["period_end"], "2026-05-03")
         self.assertEqual(result["generation_summary"]["period_end_exclusive"], "2026-05-04T00:00:00+08:00")
+        self.assertEqual(result["generation_summary"]["highlight_topics"], ["CIB Phase 2", "GRC Phase 1"])
         self.assertEqual(result["generation_summary"]["scheduled_period_end"], "2026-05-08")
         self.assertGreater(result["generation_summary"]["prompt_chars"], 0)
         self.assertGreater(result["generation_summary"]["estimated_prompt_tokens"], 0)
@@ -260,7 +277,7 @@ class MonthlyReportTests(unittest.TestCase):
                 confluence=None,
                 now=now,
             )
-            result = service.generate_draft(template="# Template", team_payloads=[])
+            result = service.generate_draft(template="# Template", team_payloads=[], highlight_topics=["AF launch"])
 
         seatalk_batch_calls = [
             call for call in mock_generate.call_args_list
@@ -306,7 +323,7 @@ class MonthlyReportTests(unittest.TestCase):
                 confluence=None,
                 now=now,
             )
-            result = service.generate_draft(template="# Template", team_payloads=team_payloads)
+            result = service.generate_draft(template="# Template", team_payloads=team_payloads, highlight_topics=["AF launch"])
 
         evidence_batch_calls = [
             call for call in mock_generate.call_args_list
@@ -336,7 +353,7 @@ class MonthlyReportTests(unittest.TestCase):
                 now=now,
                 report_intelligence_config={"vip_people": [{"display_name": "Boss", "emails": ["boss@npt.sg"]}]},
             )
-            service.generate_draft(template="# Template", team_payloads=[])
+            service.generate_draft(template="# Template", team_payloads=[], highlight_topics=["AF launch"])
 
         gmail_batch_calls = [
             call for call in mock_generate.call_args_list
@@ -390,6 +407,7 @@ class MonthlyReportTests(unittest.TestCase):
             report_period=period,
             evidence_brief="Compact brief",
             monthly_evidence_brief=evidence,
+            highlight_topics=["CIB Phase 2"],
         )
 
         self.assertLessEqual(_estimate_token_count(prompt), MONTHLY_REPORT_FINAL_MAX_TOKENS)
@@ -400,6 +418,8 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertNotIn("matched_seatalk_messages", prompt)
         self.assertNotIn("matched_vip_gmail_threads", prompt)
         self.assertNotIn("evidence_sources", prompt)
+        self.assertNotIn("AF-00-00", prompt)
+        self.assertIn('"current_status"', prompt)
 
     def test_key_project_cap_allows_thirty_and_excludes_thirty_first(self):
         seatalk = _FakeSeaTalkService()
@@ -424,7 +444,7 @@ class MonthlyReportTests(unittest.TestCase):
                 confluence=None,
                 now=now,
             )
-            result = service.generate_draft(template="# Template", team_payloads=team_payloads)
+            result = service.generate_draft(template="# Template", team_payloads=team_payloads, highlight_topics=["AF launch"])
 
         joined_prompts = "\n".join(call.kwargs["prompt"] for call in mock_generate.call_args_list)
         self.assertEqual(result["evidence_summary"]["key_project_count"], 30)
@@ -471,7 +491,8 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertTrue(alc["include"])
         self.assertIn("group-4371534", alc["seatalk_group_ids"])
         self.assertGreater(alc["material_update_score"], 0)
-        self.assertFalse(shadow["include"])
+        self.assertTrue(shadow["include"])
+        self.assertEqual(shadow["current_status"], "BRD")
         self.assertEqual(shadow["risks"], [])
 
     def test_project_evidence_brief_excludes_project_with_name_only_jira(self):
@@ -491,8 +512,56 @@ class MonthlyReportTests(unittest.TestCase):
             report_period=period,
         )
 
-        self.assertFalse(brief[0]["include"])
-        self.assertEqual(brief[0]["exclude_reason"], "No material in-period project evidence found.")
+        self.assertTrue(brief[0]["include"])
+        self.assertEqual(brief[0]["current_status"], "BRD")
+
+    def test_project_evidence_brief_normalizes_current_status(self):
+        period = resolve_monthly_report_period_from_user_range(period_start="2026-04-01", period_end="2026-04-30")
+        brief = build_monthly_project_evidence_brief(
+            key_projects=[
+                {
+                    "bpmis_id": "WAITING",
+                    "project_name": "Anti-fraud Waiting",
+                    "teams": ["Anti-fraud"],
+                    "jira_tickets": [{"jira_id": "AF-1", "jira_title": "Waiting item", "jira_status": "Waiting"}],
+                },
+                {
+                    "bpmis_id": "PRD",
+                    "project_name": "Anti-fraud PRD",
+                    "teams": ["Anti-fraud"],
+                    "jira_tickets": [{"jira_id": "AF-2", "jira_title": "PRD item", "jira_status": "PRD Reviewed"}],
+                },
+                {
+                    "bpmis_id": "DEV",
+                    "project_name": "Anti-fraud Dev",
+                    "teams": ["Anti-fraud"],
+                    "jira_tickets": [{"jira_id": "AF-3", "jira_title": "Dev item", "jira_status": "Tech Design"}],
+                },
+                {
+                    "bpmis_id": "UAT",
+                    "project_name": "Anti-fraud UAT",
+                    "teams": ["Anti-fraud"],
+                    "jira_tickets": [{"jira_id": "AF-4", "jira_title": "UAT item", "jira_status": "Pen Test", "version": "AF UAT wave"}],
+                },
+                {
+                    "bpmis_id": "RELEASED",
+                    "project_name": "Anti-fraud Released",
+                    "teams": ["Anti-fraud"],
+                    "jira_tickets": [{"jira_id": "AF-5", "jira_title": "Released item", "jira_status": "Waiting", "release_date": "2026-04-15"}],
+                },
+            ],
+            seatalk_history_text="",
+            vip_gmail_text="",
+            prd_scope_summaries=[],
+            report_period=period,
+        )
+
+        by_id = {item["project_id"]: item["current_status"] for item in brief}
+        self.assertEqual(by_id["WAITING"], "BRD")
+        self.assertEqual(by_id["PRD"], "PRD")
+        self.assertEqual(by_id["DEV"], "Dev")
+        self.assertEqual(by_id["UAT"], "UAT")
+        self.assertEqual(by_id["RELEASED"], "UAT")
 
     def test_vip_gmail_failure_does_not_fail_draft(self):
         class BrokenGmailService:
@@ -511,7 +580,7 @@ class MonthlyReportTests(unittest.TestCase):
                 now=now,
                 report_intelligence_config={"vip_people": [{"display_name": "Boss", "emails": ["boss@npt.sg"]}]},
             )
-            result = service.generate_draft(template="# Template", team_payloads=[])
+            result = service.generate_draft(template="# Template", team_payloads=[], highlight_topics=["AF launch"])
 
         self.assertEqual(result["draft_markdown"], "# Summary")
         self.assertEqual(result["evidence_summary"]["gmail_error_count"], 1)

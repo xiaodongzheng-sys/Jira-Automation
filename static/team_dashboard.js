@@ -44,6 +44,9 @@
   const monthlyReportDraft = root.querySelector('[data-monthly-report-draft]');
   const monthlyReportPreview = root.querySelector('[data-monthly-report-preview]');
   const monthlyReportRecipient = root.querySelector('[data-monthly-report-recipient]');
+  const monthlyReportTopics = root.querySelector('[data-monthly-report-topics]');
+  const monthlyReportPeriodStart = root.querySelector('[data-monthly-report-period-start]');
+  const monthlyReportPeriodEnd = root.querySelector('[data-monthly-report-period-end]');
   const monthlyReportProgress = root.querySelector('[data-monthly-report-progress]');
   const monthlyReportProgressFill = root.querySelector('[data-monthly-report-progress-fill]');
   const monthlyReportProgressMessage = root.querySelector('[data-monthly-report-progress-message]');
@@ -73,7 +76,7 @@
   const teamOrder = ['AF', 'CRMS', 'GRC'];
   const jiraPageSize = 10;
   const taskCacheKey = 'team-dashboard:jira-tasks:v7';
-  const monthlyReportDraftCacheKey = 'team-dashboard:monthly-report-draft:v1';
+  const monthlyReportDraftCacheKey = 'team-dashboard:monthly-report-draft:v2';
   const seatalkNameMappingDefaultPageSize = 20;
   const seatalkNameMappingPageSizeOptions = [20, 50, 100, 200];
 
@@ -192,12 +195,59 @@
       window.localStorage.setItem(monthlyReportDraftCacheKey, JSON.stringify({
         draft_markdown: String(payload?.draft_markdown || ''),
         subject: String(payload?.subject || monthlyReportSubject || 'Monthly Report'),
+        highlight_topics: Array.isArray(payload?.highlight_topics) ? payload.highlight_topics : readMonthlyReportTopics({ strict: false }),
+        period_start: String(payload?.period_start || monthlyReportPeriodStart?.value || ''),
+        period_end: String(payload?.period_end || monthlyReportPeriodEnd?.value || ''),
         saved_at: payload?.saved_at || new Date().toISOString(),
         source: String(payload?.source || 'browser'),
       }));
     } catch (error) {
       // Browser storage can be disabled or full; draft editing should still work.
     }
+  };
+
+  const readMonthlyReportTopics = ({ strict = true } = {}) => {
+    const topics = String(monthlyReportTopics?.value || '')
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const uniqueTopics = [...new Set(topics)];
+    if (strict && uniqueTopics.length === 0) {
+      throw new Error('Add 1 to 5 highlight topics before generating the Monthly Report.');
+    }
+    if (strict && uniqueTopics.length > 5) {
+      throw new Error('Monthly Report supports at most 5 highlight topics.');
+    }
+    return uniqueTopics.slice(0, 5);
+  };
+
+  const applyMonthlyReportInputs = (payload = {}, { onlyEmpty = false } = {}) => {
+    if (monthlyReportTopics && Array.isArray(payload.highlight_topics) && payload.highlight_topics.length && (!onlyEmpty || !monthlyReportTopics.value.trim())) {
+      monthlyReportTopics.value = payload.highlight_topics.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 5).join('\n');
+    }
+    if (monthlyReportPeriodStart && payload.period_start && (!onlyEmpty || !monthlyReportPeriodStart.value)) {
+      monthlyReportPeriodStart.value = String(payload.period_start).slice(0, 10);
+    }
+    if (monthlyReportPeriodEnd && payload.period_end && (!onlyEmpty || !monthlyReportPeriodEnd.value)) {
+      monthlyReportPeriodEnd.value = String(payload.period_end).slice(0, 10);
+    }
+  };
+
+  const monthlyReportRequestPayload = () => {
+    const highlightTopics = readMonthlyReportTopics();
+    const periodStart = String(monthlyReportPeriodStart?.value || '').trim();
+    const periodEnd = String(monthlyReportPeriodEnd?.value || '').trim();
+    if (!periodStart || !periodEnd) {
+      throw new Error('Monthly Report start date and end date are required.');
+    }
+    if (periodStart > periodEnd) {
+      throw new Error('Monthly Report start date cannot be later than end date.');
+    }
+    return {
+      highlight_topics: highlightTopics,
+      period_start: periodStart,
+      period_end: periodEnd,
+    };
   };
 
   const cachedTeamFor = (teamKey, memberEmails, sourceCache = null) => {
@@ -1217,6 +1267,7 @@
       writeMonthlyReportDraftCache({
         draft_markdown: value,
         subject: monthlyReportSubject,
+        highlight_topics: readMonthlyReportTopics({ strict: false }),
         source: 'browser',
       });
     }
@@ -1350,6 +1401,7 @@
       if (monthlyReportRecipient) {
         monthlyReportRecipient.textContent = payload.recipient || 'xiaodong.zheng@npt.sg';
       }
+      applyMonthlyReportInputs(payload, { onlyEmpty: true });
     } catch (error) {
       setStatus(monthlyReportStatus, error.message || 'Could not load Monthly Report template.', 'error');
     }
@@ -1362,6 +1414,7 @@
     const cachedSavedAt = Date.parse(cached.saved_at || '') || 0;
     if (String(cached.draft_markdown || '').trim()) {
       monthlyReportSubject = cached.subject || monthlyReportSubject;
+      applyMonthlyReportInputs(cached);
       monthlyReportDraft.value = cached.draft_markdown || '';
       updateMonthlyReportPreview();
       setStatus(monthlyReportStatus, 'Restored the last Monthly Report draft from this browser.', 'neutral');
@@ -1376,10 +1429,14 @@
       const serverGeneratedAt = Number(payload.generated_at || 0) * 1000;
       if (cachedDraft && cachedSavedAt >= serverGeneratedAt) return;
       monthlyReportSubject = payload.subject || monthlyReportSubject;
+      applyMonthlyReportInputs(payload);
       monthlyReportDraft.value = payload.draft_markdown || '';
       writeMonthlyReportDraftCache({
         draft_markdown: payload.draft_markdown,
         subject: monthlyReportSubject,
+        highlight_topics: payload.highlight_topics || [],
+        period_start: payload.period_start || '',
+        period_end: payload.period_end || '',
         saved_at: payload.generated_at ? new Date(Number(payload.generated_at) * 1000).toISOString() : undefined,
         source: 'server',
       });
@@ -1392,6 +1449,13 @@
 
   const generateMonthlyReport = async () => {
     if (!monthlyReportGenerateButton || !monthlyReportDraft) return;
+    let requestPayload = {};
+    try {
+      requestPayload = monthlyReportRequestPayload();
+    } catch (error) {
+      setStatus(monthlyReportStatus, error.message || 'Monthly Report input is invalid.', 'error');
+      return;
+    }
     monthlyReportGenerateButton.disabled = true;
     monthlyReportGenerateButton.textContent = 'Generating...';
     const previousDraft = monthlyReportDraft.value.trim();
@@ -1408,7 +1472,7 @@
         method: 'POST',
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
         credentials: 'same-origin',
-        body: JSON.stringify({}),
+        body: JSON.stringify(requestPayload),
       });
       const initialPayload = await readJson(response, 'Could not generate Monthly Report draft.');
       const payload = initialPayload.status === 'queued' && initialPayload.job_id
@@ -1418,6 +1482,9 @@
       writeMonthlyReportDraftCache({
         draft_markdown: monthlyReportDraft.value,
         subject: monthlyReportSubject,
+        highlight_topics: payload.highlight_topics || requestPayload.highlight_topics,
+        period_start: payload.generation_summary?.period_start || requestPayload.period_start,
+        period_end: payload.generation_summary?.period_end || requestPayload.period_end,
         source: 'generate',
       });
       updateMonthlyReportPreview();
@@ -1866,6 +1933,16 @@
     button.addEventListener('click', saveSeaTalkNameMappings);
   });
   monthlyReportDraft?.addEventListener('input', () => updateMonthlyReportPreview({ persist: true }));
+  [monthlyReportTopics, monthlyReportPeriodStart, monthlyReportPeriodEnd].forEach((node) => {
+    node?.addEventListener('change', () => {
+      writeMonthlyReportDraftCache({
+        draft_markdown: monthlyReportDraft?.value || '',
+        subject: monthlyReportSubject,
+        highlight_topics: readMonthlyReportTopics({ strict: false }),
+        source: 'inputs',
+      });
+    });
+  });
   monthlyReportGenerateButton?.addEventListener('click', generateMonthlyReport);
   monthlyReportSendButton?.addEventListener('click', sendMonthlyReport);
   monthlyReportTemplateForm?.addEventListener('submit', saveMonthlyReportTemplate);

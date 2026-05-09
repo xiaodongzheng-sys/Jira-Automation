@@ -73,7 +73,7 @@
       <div class="productization-section-head">
         <div>
           <h3>Monthly Report</h3>
-          <span data-team-dashboard-monthly-report-summary>Generate a draft from Key Projects, Jira, PRD, and the previous 30 days of SeaTalk history.</span>
+          <span data-team-dashboard-monthly-report-summary>Generate a draft from selected highlights, Key Projects, Jira, PRD, and the chosen SeaTalk history window.</span>
         </div>
         <div class="button-row">
           <button class="button button-primary" type="button" data-monthly-report-generate>Generate Monthly Report Draft</button>
@@ -81,6 +81,28 @@
         </div>
       </div>
       <p class="productization-inline-status" data-monthly-report-status></p>
+      <div class="team-dashboard-monthly-report-controls">
+        <div class="field-group team-dashboard-monthly-report-topic-field">
+          <label for="team_dashboard_monthly_report_topics">Highlights Topics</label>
+          <textarea
+            id="team_dashboard_monthly_report_topics"
+            rows="4"
+            spellcheck="true"
+            placeholder="One topic per line, up to 5"
+            data-monthly-report-topics
+          ></textarea>
+        </div>
+        <div class="team-dashboard-monthly-report-date-grid">
+          <div class="field-group">
+            <label for="team_dashboard_monthly_report_start">Start Date</label>
+            <input id="team_dashboard_monthly_report_start" type="date" data-monthly-report-period-start>
+          </div>
+          <div class="field-group">
+            <label for="team_dashboard_monthly_report_end">End Date</label>
+            <input id="team_dashboard_monthly_report_end" type="date" data-monthly-report-period-end>
+          </div>
+        </div>
+      </div>
       <div class="team-dashboard-progress team-dashboard-monthly-report-progress" data-monthly-report-progress hidden>
         <div class="team-dashboard-progress-bar" aria-hidden="true">
           <span data-monthly-report-progress-fill style="width: 0%"></span>
