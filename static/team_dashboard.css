@@ -637,6 +637,37 @@
   margin-top: 20px;
 }
 
+.team-dashboard-monthly-report-template-panel {
+  padding: 0;
+}
+
+.team-dashboard-monthly-report-template-panel summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 20px;
+  cursor: pointer;
+  color: #14213d;
+  font-weight: 800;
+  list-style: none;
+}
+
+.team-dashboard-monthly-report-template-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.team-dashboard-monthly-report-template-panel .card-help,
+.team-dashboard-monthly-report-template-panel .field-group,
+.team-dashboard-monthly-report-template-panel .button-row {
+  margin-left: 20px;
+  margin-right: 20px;
+}
+
+.team-dashboard-monthly-report-template-panel .button-row {
+  margin-bottom: 20px;
+}
+
 .team-dashboard-report-intelligence-form {
   margin-bottom: 24px;
 }

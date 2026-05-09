@@ -1187,6 +1187,9 @@ class WebPortalFeatureTests(unittest.TestCase):
             ["Monthly Report", "Daily Brief", "Report Intelligence", "SeaTalk Name Mapping"],
         )
         self.assertIsNotNone(reports_soup.select_one("[data-monthly-report-template-form]"))
+        template_panel = reports_soup.select_one(".team-dashboard-monthly-report-template-panel")
+        self.assertIsNotNone(template_panel)
+        self.assertFalse(template_panel.has_attr("open"))
         self.assertIn(b"<h2>Reports</h2>", reports_response.data)
         self.assertIn(b'data-team-dashboard-tab="monthly-report"', reports_response.data)
         self.assertIn(b'data-team-dashboard-tab="daily-brief"', reports_response.data)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -901,6 +901,7 @@ class MonthlyReportTests(unittest.TestCase):
             vip_gmail_text="",
             prd_scope_summaries=[],
             report_period=period,
+            fallback_reference_date=date(2026, 5, 9),
         )
 
         alc = next(item for item in brief if item["project_id"] == "180213")
@@ -1007,6 +1008,9 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(by_id["DEV"], "Dev")
         self.assertEqual(by_id["UAT"], "UAT")
         self.assertEqual(by_id["RELEASED"], "UAT")
+        fallback = next(item for item in brief if item["project_id"] == "WAITING")
+        self.assertEqual(fallback["target_tech_live_date"], "Q3 2026")
+        self.assertEqual(fallback["target_tech_live_source"], "next_quarter_fallback")
         target = next(item for item in brief if item["project_id"] == "TARGET")
         self.assertEqual(target["target_tech_live_date"], "Jun 2026")
         self.assertEqual(target["target_tech_live_version"], "AF_v1.1_0620")

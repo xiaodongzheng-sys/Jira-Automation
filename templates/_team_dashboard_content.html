@@ -138,11 +138,11 @@
       </div>
       {% if can_manage_team_dashboard %}
         <form method="post" action="{{ url_for('save_team_dashboard_monthly_report_template') }}" class="stack team-dashboard-monthly-report-template-form" data-monthly-report-template-form>
-          <div class="config-card config-card-wide">
-            <div class="field-label-row">
-              <h3>Monthly Report Template</h3>
+          <details class="config-card config-card-wide team-dashboard-monthly-report-template-panel">
+            <summary>
+              <span>Monthly Report Template</span>
               <span class="field-badge">Monthly Report</span>
-            </div>
+            </summary>
             <p class="card-help">The generator follows this Markdown template when drafting the Monthly Report.</p>
             <div class="field-group">
               <label for="team_dashboard_monthly_report_template">Template</label>
@@ -154,10 +154,10 @@
                 data-monthly-report-template
               >{{ team_dashboard_config.monthly_report_template }}</textarea>
             </div>
-          </div>
-          <div class="button-row">
-            <button class="button" type="submit">Save Monthly Report Template</button>
-          </div>
+            <div class="button-row">
+              <button class="button" type="submit">Save Monthly Report Template</button>
+            </div>
+          </details>
           <p class="productization-inline-status" data-monthly-report-template-status></p>
         </form>
       {% endif %}

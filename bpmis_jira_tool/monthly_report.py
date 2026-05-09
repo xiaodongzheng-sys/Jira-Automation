@@ -309,6 +309,7 @@ class MonthlyReportService:
             prd_scope_summaries=prd_scope_summaries,
             report_period=evidence_period,
             highlight_project_ids=highlight_project_ids,
+            fallback_reference_date=self.now.date(),
         )
         highlight_deep_evidence = build_monthly_highlight_deep_evidence(
             highlight_topics=normalized_highlight_topics,
@@ -319,6 +320,7 @@ class MonthlyReportService:
             monthly_requirements_targets=monthly_requirements_targets,
             prd_scope_summaries=prd_scope_summaries,
             report_period=evidence_period,
+            fallback_reference_date=self.now.date(),
         )
         highlight_evidence_map = build_monthly_highlight_evidence_map(highlight_deep_evidence)
         step_started = time.monotonic()
@@ -1214,6 +1216,7 @@ def build_monthly_highlight_deep_evidence(
     prd_scope_summaries: list[dict[str, Any]],
     report_period: MonthlyReportPeriod,
     monthly_requirements_targets: list[dict[str, Any]] | None = None,
+    fallback_reference_date: date | None = None,
 ) -> list[dict[str, Any]]:
     projects_by_id = {str(project.get("bpmis_id") or "").strip(): project for project in key_projects if str(project.get("bpmis_id") or "").strip()}
     prd_by_jira = _index_prd_summaries_by_jira(prd_scope_summaries)
@@ -1244,6 +1247,7 @@ def build_monthly_highlight_deep_evidence(
                 jira_tickets,
                 project=project,
                 monthly_requirements_targets=monthly_requirements_targets or [],
+                fallback_reference_date=fallback_reference_date or report_period.end.date(),
             )
             project_updates.append(
                 {
@@ -1474,6 +1478,7 @@ def build_monthly_project_evidence_brief(
     report_period: MonthlyReportPeriod,
     monthly_requirements_targets: list[dict[str, Any]] | None = None,
     highlight_project_ids: set[str] | None = None,
+    fallback_reference_date: date | None = None,
 ) -> list[dict[str, Any]]:
     prd_by_jira = _index_prd_summaries_by_jira(prd_scope_summaries)
     deep_project_ids = {str(item or "").strip() for item in highlight_project_ids if str(item or "").strip()} if highlight_project_ids is not None else None
@@ -1505,6 +1510,7 @@ def build_monthly_project_evidence_brief(
             jira_tickets,
             project=project,
             monthly_requirements_targets=monthly_requirements_targets or [],
+            fallback_reference_date=fallback_reference_date or report_period.end.date(),
         )
         include = True
         evidence_sources = {
@@ -1848,7 +1854,7 @@ def build_monthly_report_final_prompt(
         "- Do not include Jira ticket IDs, Jira links, or issue-key references in the report.\n"
         "- Do not include a Key Follow-Ups section.\n"
         "- Current Status must be exactly one of: BRD, PRD, Dev, UAT. Do not add explanations in that cell.\n\n"
-        "- Target Tech Live Date must use target_tech_live_date from Other Key Project Updates exactly. It must be MMM YYYY, such as May 2026, or TBD. Do not infer a target date from timeline_facts or any version starting with Planning.\n\n"
+        "- Target Tech Live Date must use target_tech_live_date from Other Key Project Updates exactly. It must be MMM YYYY, such as May 2026, or the backend fallback quarter, such as Q3 2026. Do not infer a target date from timeline_facts or any version starting with Planning.\n\n"
         f"# Generated At\n{generated_at.isoformat()}\n\n"
         f"# Report Period\n{report_period.start_date} to {report_period.end_date}\n\n"
         f"# User-Provided Highlight Topics\n{_json_block(highlight_topics)}\n\n"
@@ -2621,6 +2627,7 @@ def _monthly_report_target_tech_live_date(
     *,
     project: dict[str, Any] | None = None,
     monthly_requirements_targets: list[dict[str, Any]] | None = None,
+    fallback_reference_date: date | None = None,
 ) -> tuple[str, str, str, dict[str, Any]]:
     email_target = _monthly_requirements_target_tech_live_date(project or {}, monthly_requirements_targets or [])
     if email_target:
@@ -2646,8 +2653,20 @@ def _monthly_report_target_tech_live_date(
         if latest is None or parsed > latest[0]:
             latest = (parsed, version)
     if latest is None:
-        return "TBD", "", "", {}
+        reference = fallback_reference_date or date.today()
+        return _monthly_report_next_quarter_label(reference), "", "next_quarter_fallback", {"reference_date": reference.isoformat()}
     return _monthly_report_month_label(latest[0]), latest[1], "jira_version", {"version": latest[1]}
+
+
+def _monthly_report_next_quarter_label(reference: date) -> str:
+    month = int(reference.month)
+    quarter = ((month - 1) // 3) + 1
+    next_quarter = quarter + 1
+    year = int(reference.year)
+    if next_quarter > 4:
+        next_quarter = 1
+        year += 1
+    return f"Q{next_quarter} {year}"
 
 
 def _monthly_requirements_target_tech_live_date(project: dict[str, Any], monthly_requirements_targets: list[dict[str, Any]]) -> tuple[str, str, dict[str, Any]] | None:
@@ -2851,6 +2870,9 @@ def _monthly_report_month_label(value: Any) -> str:
     text = str(value or "").strip()
     if not text or text.upper() == "TBD":
         return "TBD"
+    quarter_match = re.fullmatch(r"Q([1-4])\s+(\d{4})", text, flags=re.IGNORECASE)
+    if quarter_match:
+        return f"Q{quarter_match.group(1)} {quarter_match.group(2)}"
     for candidate in (text[:10], text):
         try:
             return date.fromisoformat(candidate).strftime("%b %Y")
