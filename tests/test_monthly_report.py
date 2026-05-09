@@ -1030,6 +1030,9 @@ class MonthlyReportTests(unittest.TestCase):
             "| Region | Priority | Project | Target Tech Live Date |\n"
             "| SG | SP | Balance Transfer open to NTB application | Sep 2026 |\n"
             "| SG | P1 | SME RCF drawdown check | Oct 2026 |\n"
+            "Subject: PH_2026 Monthly Requirements Biweekly Update\n"
+            "From: Yuanfang Zhou <yuanfang.zhou@npt.sg>\n"
+            "| PH | P0 | SPL Cash Advance disbursal to MariBank | Aug 2026 |\n"
         )
         requirements_targets = build_monthly_requirements_target_map(requirements_text)
         brief = build_monthly_project_evidence_brief(
@@ -1046,6 +1049,21 @@ class MonthlyReportTests(unittest.TestCase):
                             "jira_status": "Testing",
                             "release_date": "2026-06-15",
                             "version": "CR_v1_0615",
+                        }
+                    ],
+                },
+                {
+                    "bpmis_id": "P0-EMAIL",
+                    "project_name": "[PH] SPL Cash Advance disbursal to MariBank",
+                    "market": "PH",
+                    "priority": "P0",
+                    "jira_tickets": [
+                        {
+                            "jira_id": "AF-1",
+                            "jira_title": "SPL Cash Advance disbursal to MariBank",
+                            "jira_status": "Testing",
+                            "release_date": "2026-05-15",
+                            "version": "AF_v1_0515",
                         }
                     ],
                 },
@@ -1073,12 +1091,15 @@ class MonthlyReportTests(unittest.TestCase):
         )
 
         by_id = {item["project_id"]: item for item in brief}
-        self.assertEqual(len(requirements_targets), 2)
+        self.assertEqual(len(requirements_targets), 3)
         self.assertEqual(by_id["SP-EMAIL"]["target_tech_live_date"], "Sep 2026")
         self.assertEqual(by_id["SP-EMAIL"]["target_tech_live_source"], "monthly_requirements_email")
         self.assertEqual(by_id["SP-EMAIL"]["target_tech_live_source_detail"]["sender"], "xinni.oon@npt.sg")
         self.assertIn("Balance Transfer", by_id["SP-EMAIL"]["target_tech_live_source_detail"]["matched_line"])
         self.assertTrue(by_id["SP-EMAIL"]["target_tech_live_source_detail"]["matched_alias"])
+        self.assertEqual(by_id["P0-EMAIL"]["target_tech_live_date"], "Aug 2026")
+        self.assertEqual(by_id["P0-EMAIL"]["target_tech_live_source"], "monthly_requirements_email")
+        self.assertEqual(by_id["P0-EMAIL"]["target_tech_live_source_detail"]["sender"], "yuanfang.zhou@npt.sg")
         self.assertEqual(by_id["P1-JIRA"]["target_tech_live_date"], "Jul 2026")
         self.assertEqual(by_id["P1-JIRA"]["target_tech_live_source"], "jira_version")
 
