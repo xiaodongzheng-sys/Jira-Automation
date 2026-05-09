@@ -108,7 +108,7 @@ def create_local_agent_app() -> Flask:
     app.config["SOURCE_CODE_QA_SERVICE"] = _build_source_code_qa_service(settings)
     app.config["SOURCE_CODE_QA_QUERY_JOBS"] = {}
     app.config["SOURCE_CODE_QA_QUERY_JOBS_LOCK"] = threading.Lock()
-    app.config["TEAM_DASHBOARD_JOB_STORE"] = JobStore(_data_root(settings) / "run" / "jobs.json")
+    app.config["TEAM_DASHBOARD_JOB_STORE"] = JobStore(_data_root(settings) / "run" / "team_dashboard_jobs.json")
     app.config["WORK_MEMORY_STORE"] = WorkMemoryStore(_data_root(settings) / "work_memory" / "memory.db")
     app.config["MEETING_RECORDER_JOB_STORE"] = JobStore(_data_root(settings) / "run" / "meeting_recorder_jobs.json")
     meeting_store = MeetingRecordStore(_data_root(settings) / "meeting_records")

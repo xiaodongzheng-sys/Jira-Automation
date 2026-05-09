@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 
 from bpmis_jira_tool.daily_brief_archive import DailyBriefArchiveStore, daily_brief_archive_path
 from bpmis_jira_tool.errors import ToolError
+from bpmis_jira_tool.job_store import JobStore
 from bpmis_jira_tool.local_agent_client import LocalAgentClient
 from bpmis_jira_tool.local_agent_protocol import sign_headers, verify_signature
 from bpmis_jira_tool.local_agent_server import create_local_agent_app
@@ -81,6 +82,17 @@ class LocalAgentServerTests(unittest.TestCase):
         self.dotenv_patch.stop()
         self.env_patch.stop()
         self.temp_dir.cleanup()
+
+    def test_team_dashboard_jobs_are_isolated_from_portal_jobs_file(self):
+        job_store = self.app.config["TEAM_DASHBOARD_JOB_STORE"]
+        self.assertEqual(Path(job_store.storage_path).name, "team_dashboard_jobs.json")
+
+        job = job_store.create("monthly-report", "Monthly Report")
+        job_store.update(job.job_id, state="running", stage="generating", message="Running")
+        portal_store = JobStore(Path(self.temp_dir.name) / "run" / "jobs.json")
+
+        self.assertIsNone(portal_store.get(job.job_id))
+        self.assertEqual(job_store.get(job.job_id).state, "running")
 
     def _post_signed(self, path, payload):
         body = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")

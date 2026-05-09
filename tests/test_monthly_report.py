@@ -147,6 +147,71 @@ class MonthlyReportTests(unittest.TestCase):
         with self.assertRaises(ToolError):
             resolve_monthly_report_period_from_user_range(period_start="2026-05-01", period_end="2026-04-30")
 
+    def test_highlight_gmail_topic_cache_reuses_results_and_preserves_topic_order(self):
+        report_period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
+        gmail = _FakeGmailService("Thread\nBody: AF and GRC update.")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = MonthlyReportService(
+                settings=_settings(temp_dir),
+                workspace_root=Path(temp_dir),
+                seatalk_service=_FakeSeaTalkService(),
+                gmail_service=gmail,
+            )
+
+            first_items, first_summary = service._highlight_gmail_history(report_period, ["GRC Phase 1", "AF CIB"])
+            second_items, second_summary = service._highlight_gmail_history(report_period, ["GRC Phase 1", "AF CIB"])
+
+        self.assertEqual([item["topic"] for item in first_items], ["GRC Phase 1", "AF CIB"])
+        self.assertEqual([item["topic"] for item in second_items], ["GRC Phase 1", "AF CIB"])
+        self.assertEqual(len([call for call in gmail.calls if "topic" in call]), 2)
+        self.assertEqual(first_summary["cache_hit_count"], 0)
+        self.assertEqual(second_summary["cache_hit_count"], 2)
+
+    def test_prd_scope_summary_cache_reuses_codex_result_and_invalidates_on_updated_at(self):
+        report_period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
+        source = {
+            "jira_id": "AF-1",
+            "title": "AF PRD",
+            "url": "https://confluence/prd",
+            "updated_at": "2026-04-10T00:00:00Z",
+            "content": "PRD scope",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = MonthlyReportService(
+                settings=_settings(temp_dir),
+                workspace_root=Path(temp_dir),
+                seatalk_service=_FakeSeaTalkService(),
+            )
+            with patch.object(
+                service,
+                "_guarded_generate",
+                return_value={"result_markdown": "Cached PRD summary"},
+            ) as mock_generate:
+                first = service._prd_scope_summaries(
+                    prd_sources=[source],
+                    generated_at=datetime(2026, 5, 8, 12, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+                    report_period=report_period,
+                    progress_callback=None,
+                )
+                second = service._prd_scope_summaries(
+                    prd_sources=[source],
+                    generated_at=datetime(2026, 5, 8, 12, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+                    report_period=report_period,
+                    progress_callback=None,
+                )
+                changed = dict(source, updated_at="2026-04-11T00:00:00Z")
+                service._prd_scope_summaries(
+                    prd_sources=[changed],
+                    generated_at=datetime(2026, 5, 8, 12, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+                    report_period=report_period,
+                    progress_callback=None,
+                )
+
+        self.assertEqual(mock_generate.call_count, 2)
+        self.assertEqual(first[0]["scope_summary"], "Cached PRD summary")
+        self.assertFalse(first[0]["cache_hit"])
+        self.assertTrue(second[0]["cache_hit"])
+
     def test_generate_draft_uses_period_product_scope_key_projects_prd_and_vip_gmail(self):
         seatalk = _FakeSeaTalkService()
         confluence = _FakeConfluence()
@@ -280,6 +345,8 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertTrue(result["generation_summary"]["batch_mode"])
         self.assertGreaterEqual(result["generation_summary"]["total_batches"], 3)
         self.assertIn("elapsed_seconds", result["generation_summary"])
+        for key in ("seatalk_export", "vip_gmail", "topic_gmail", "prd_ingest", "prd_summary", "batch_summary", "merge", "final", "total"):
+            self.assertIn(key, result["generation_summary"]["timings"])
 
     def test_generate_draft_does_not_batch_full_seatalk_history_for_non_project_highlight(self):
         seatalk = _FakeSeaTalkService()

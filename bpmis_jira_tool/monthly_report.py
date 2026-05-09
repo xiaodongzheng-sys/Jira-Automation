@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import hashlib
 import html
+import json
 import os
 import re
 import time
@@ -55,6 +58,10 @@ MONTHLY_REPORT_BRIEF_MAX_CHARS = 64_000
 MONTHLY_REPORT_MAX_VIP_GMAIL_THREADS = 60
 MONTHLY_REPORT_MAX_HIGHLIGHT_GMAIL_THREADS_PER_TOPIC = 8
 MONTHLY_REPORT_HIGHLIGHT_EVIDENCE_MAX_LINES = 24
+MONTHLY_REPORT_EVIDENCE_WORKERS = 2
+MONTHLY_REPORT_GMAIL_TOPIC_CACHE_VERSION = "v1"
+MONTHLY_REPORT_GMAIL_TOPIC_CACHE_TTL_SECONDS = 6 * 60 * 60
+MONTHLY_REPORT_PRD_SCOPE_CACHE_VERSION = "v1"
 MONTHLY_REPORT_PRODUCT_SCOPE_TERMS = (
     "anti-fraud",
     "antifraud",
@@ -205,6 +212,7 @@ class MonthlyReportService:
         progress_callback: Any | None = None,
     ) -> dict[str, Any]:
         started_at = time.monotonic()
+        timings: dict[str, float] = {}
         if report_intelligence_config is not None:
             self.report_intelligence_config = normalize_report_intelligence_config(report_intelligence_config)
         normalized_highlight_topics = normalize_monthly_report_highlight_topics(highlight_topics)
@@ -217,8 +225,12 @@ class MonthlyReportService:
         effective_template = normalize_monthly_report_template(template)
         _emit_monthly_report_progress(progress_callback, "preparing_sources", "Preparing Key Projects, Jira, PRD, and SeaTalk sources.", 0, 0)
         key_projects = self._key_projects(team_payloads)
+        step_started = time.monotonic()
         history_text, product_scope_filtered_count = self._seatalk_history(report_period)
+        _record_monthly_report_timing(timings, "seatalk_export", step_started)
+        step_started = time.monotonic()
         vip_gmail_text, vip_gmail_summary = self._vip_gmail_history(report_period)
+        _record_monthly_report_timing(timings, "vip_gmail", step_started)
         highlight_project_matches = match_monthly_report_highlight_topics(normalized_highlight_topics, key_projects)
         highlight_project_ids = {
             str(project_id).strip()
@@ -226,17 +238,23 @@ class MonthlyReportService:
             for project_id in (match.get("project_ids") or [])
             if str(project_id).strip()
         }
+        step_started = time.monotonic()
         highlight_gmail_evidence, highlight_gmail_summary = self._highlight_gmail_history(
             report_period,
             normalized_highlight_topics,
         )
+        _record_monthly_report_timing(timings, "topic_gmail", step_started)
+        step_started = time.monotonic()
         prd_sources, prd_errors = self._prd_sources(key_projects, project_ids=highlight_project_ids)
+        _record_monthly_report_timing(timings, "prd_ingest", step_started)
+        step_started = time.monotonic()
         prd_scope_summaries = self._prd_scope_summaries(
             prd_sources=prd_sources,
             generated_at=self.now,
             report_period=report_period,
             progress_callback=progress_callback,
         )
+        _record_monthly_report_timing(timings, "prd_summary", step_started)
         monthly_evidence_brief = build_monthly_project_evidence_brief(
             key_projects=key_projects,
             seatalk_history_text=history_text,
@@ -270,6 +288,7 @@ class MonthlyReportService:
             prd_sources=prd_scope_summaries,
             config=self.report_intelligence_config,
         )
+        step_started = time.monotonic()
         batch_summaries = self._batch_summaries(
             template=effective_template,
             generated_at=self.now,
@@ -281,6 +300,8 @@ class MonthlyReportService:
             evidence_sidecar=evidence_sidecar,
             progress_callback=progress_callback,
         )
+        _record_monthly_report_timing(timings, "batch_summary", step_started)
+        step_started = time.monotonic()
         evidence_brief = self._merge_batch_summaries(
             generated_at=self.now,
             report_period=report_period,
@@ -289,6 +310,7 @@ class MonthlyReportService:
             prd_errors=prd_errors,
             progress_callback=progress_callback,
         )
+        _record_monthly_report_timing(timings, "merge", step_started)
         prompt = build_monthly_report_final_prompt(
             template=effective_template,
             generated_at=self.now,
@@ -328,14 +350,17 @@ class MonthlyReportService:
             1,
             estimated_prompt_tokens=final_estimated_tokens,
         )
+        step_started = time.monotonic()
         generated = self._guarded_generate(
             prompt=prompt,
             prompt_mode=f"{MONTHLY_REPORT_PROMPT_VERSION}_final",
             max_tokens=MONTHLY_REPORT_FINAL_MAX_TOKENS,
             progress_callback=progress_callback,
         )
+        _record_monthly_report_timing(timings, "final", step_started)
         draft_markdown = _sanitize_monthly_report_output(str(generated.get("result_markdown") or ""))
         elapsed_seconds = round(time.monotonic() - started_at, 1)
+        timings["total"] = elapsed_seconds
         prompt_chars = len(prompt)
         estimated_prompt_tokens = final_estimated_tokens
         batch_token_counts = [
@@ -372,6 +397,7 @@ class MonthlyReportService:
                 "max_batch_estimated_tokens": max(batch_token_counts) if batch_token_counts else 0,
                 "final_estimated_tokens": final_estimated_tokens,
                 "batch_mode": True,
+                "timings": timings,
             },
             "evidence_summary": {
                 "seatalk_days": report_period.days,
@@ -387,10 +413,12 @@ class MonthlyReportService:
                 "highlight_project_topic_count": len([item for item in highlight_project_matches if item.get("project_ids")]),
                 "highlight_gmail_thread_count": int(highlight_gmail_summary.get("thread_count") or 0),
                 "highlight_gmail_message_count": int(highlight_gmail_summary.get("message_count") or 0),
+                "highlight_gmail_cache_hit_count": int(highlight_gmail_summary.get("cache_hit_count") or 0),
                 "vip_gmail_thread_count": int(vip_gmail_summary.get("thread_count") or 0),
                 "vip_gmail_message_count": int(vip_gmail_summary.get("message_count") or 0),
                 "gmail_error_count": int(vip_gmail_summary.get("error_count") or 0) + int(highlight_gmail_summary.get("error_count") or 0),
                 "product_scope_filtered_count": product_scope_filtered_count + int(vip_gmail_summary.get("product_scope_filtered_count") or 0),
+                "prd_scope_cache_hit_count": len([item for item in prd_scope_summaries if item.get("cache_hit")]),
             },
         }
 
@@ -621,29 +649,26 @@ class MonthlyReportService:
 
     def _highlight_gmail_history(self, report_period: MonthlyReportPeriod, highlight_topics: list[str]) -> tuple[list[dict[str, Any]], dict[str, int]]:
         if not highlight_topics:
-            return [], {"thread_count": 0, "message_count": 0, "error_count": 0}
-        try:
-            gmail_service = self.gmail_service or self._build_gmail_service()
-        except Exception as error:  # noqa: BLE001 - Gmail evidence should not block monthly report generation.
-            return (
-                [
-                    {
-                        "topic": topic,
-                        "text": "",
-                        "thread_count": 0,
-                        "message_count": 0,
-                        "error": f"Gmail topic evidence could not be loaded: {error}",
-                    }
-                    for topic in highlight_topics
-                ],
-                {"thread_count": 0, "message_count": 0, "error_count": len(highlight_topics)},
+            return [], {"thread_count": 0, "message_count": 0, "error_count": 0, "cache_hit_count": 0}
+
+        def load_topic(index: int, topic: str) -> tuple[int, dict[str, Any]]:
+            cache_path = _monthly_report_gmail_topic_cache_path(
+                self.settings,
+                owner_email=_monthly_report_gmail_owner_email(self.settings),
+                report_period=report_period,
+                topic=topic,
             )
-        items: list[dict[str, Any]] = []
-        thread_count = 0
-        message_count = 0
-        error_count = 0
-        for topic in highlight_topics:
+            cached = _read_monthly_report_json_cache(cache_path, max_age_seconds=MONTHLY_REPORT_GMAIL_TOPIC_CACHE_TTL_SECONDS)
+            if isinstance(cached, dict):
+                return index, {
+                    "topic": topic,
+                    "text": str(cached.get("text") or "").strip(),
+                    "thread_count": _safe_int(cached.get("thread_count")),
+                    "message_count": _safe_int(cached.get("message_count")),
+                    "cache_hit": True,
+                }
             try:
+                gmail_service = self.gmail_service or self._build_gmail_service()
                 payload = gmail_service.export_topic_thread_history_since(
                     since=report_period.start,
                     now=report_period.end_exclusive,
@@ -653,28 +678,42 @@ class MonthlyReportService:
                 text = str((payload or {}).get("text") or "").strip()
                 item_thread_count = int((payload or {}).get("thread_count") or 0)
                 item_message_count = int((payload or {}).get("message_count") or 0)
-                thread_count += item_thread_count
-                message_count += item_message_count
-                items.append(
-                    {
-                        "topic": topic,
-                        "text": text,
-                        "thread_count": item_thread_count,
-                        "message_count": item_message_count,
-                    }
-                )
+                item = {
+                    "topic": topic,
+                    "text": text,
+                    "thread_count": item_thread_count,
+                    "message_count": item_message_count,
+                    "cache_hit": False,
+                }
+                _write_monthly_report_json_cache(cache_path, item)
+                return index, item
             except Exception as error:  # noqa: BLE001 - per-topic Gmail failures should not block report generation.
-                error_count += 1
-                items.append(
-                    {
-                        "topic": topic,
-                        "text": "",
-                        "thread_count": 0,
-                        "message_count": 0,
-                        "error": f"Gmail topic evidence could not be loaded: {error}",
-                    }
-                )
-        return items, {"thread_count": thread_count, "message_count": message_count, "error_count": error_count}
+                return index, {
+                    "topic": topic,
+                    "text": "",
+                    "thread_count": 0,
+                    "message_count": 0,
+                    "cache_hit": False,
+                    "error": f"Gmail topic evidence could not be loaded: {error}",
+                }
+
+        ordered: list[dict[str, Any] | None] = [None] * len(highlight_topics)
+        workers = min(MONTHLY_REPORT_EVIDENCE_WORKERS, len(highlight_topics))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [
+                executor.submit(load_topic, index, topic)
+                for index, topic in enumerate(highlight_topics)
+            ]
+            for future in as_completed(futures):
+                index, item = future.result()
+                ordered[index] = item
+        items = [item for item in ordered if item is not None]
+        return items, {
+            "thread_count": sum(_safe_int(item.get("thread_count")) for item in items),
+            "message_count": sum(_safe_int(item.get("message_count")) for item in items),
+            "error_count": len([item for item in items if item.get("error")]),
+            "cache_hit_count": len([item for item in items if item.get("cache_hit")]),
+        }
 
     def _build_gmail_service(self) -> GmailDashboardService:
         data_root = _monthly_report_data_root(self.settings)
@@ -764,14 +803,27 @@ class MonthlyReportService:
         report_period: MonthlyReportPeriod,
         progress_callback: Any | None,
     ) -> list[dict[str, str]]:
-        summaries: list[dict[str, str]] = []
         total = len(prd_sources)
-        for index, source in enumerate(prd_sources, start=1):
+        if not total:
+            return []
+
+        def summarize_source(index: int, source: dict[str, str]) -> tuple[int, dict[str, str]]:
+            cache_path = _monthly_report_prd_scope_cache_path(self.settings, report_period=report_period, prd_source=source)
+            cached = _read_monthly_report_json_cache(cache_path)
+            if isinstance(cached, dict):
+                return index, {
+                    "jira_id": str(source.get("jira_id") or cached.get("jira_id") or ""),
+                    "title": str(source.get("title") or cached.get("title") or ""),
+                    "url": str(source.get("url") or cached.get("url") or ""),
+                    "updated_at": str(source.get("updated_at") or cached.get("updated_at") or ""),
+                    "scope_summary": str(cached.get("scope_summary") or "").strip()[:MONTHLY_REPORT_SUMMARY_MAX_CHARS],
+                    "cache_hit": True,
+                }
             _emit_monthly_report_progress(
                 progress_callback,
                 "summarizing_prd_scope",
-                f"Summarizing PRD scope changes {index}/{total}.",
-                index,
+                f"Summarizing PRD scope changes {index + 1}/{total}.",
+                index + 1,
                 total,
             )
             prompt = build_monthly_report_prd_scope_prompt(
@@ -785,16 +837,28 @@ class MonthlyReportService:
                 max_tokens=MONTHLY_REPORT_BATCH_MAX_TOKENS,
                 progress_callback=progress_callback,
             )
-            summaries.append(
-                {
-                    "jira_id": str(source.get("jira_id") or ""),
-                    "title": str(source.get("title") or ""),
-                    "url": str(source.get("url") or ""),
-                    "updated_at": str(source.get("updated_at") or ""),
-                    "scope_summary": str(generated.get("result_markdown") or "").strip()[:MONTHLY_REPORT_SUMMARY_MAX_CHARS],
-                }
-            )
-        return summaries
+            item = {
+                "jira_id": str(source.get("jira_id") or ""),
+                "title": str(source.get("title") or ""),
+                "url": str(source.get("url") or ""),
+                "updated_at": str(source.get("updated_at") or ""),
+                "scope_summary": str(generated.get("result_markdown") or "").strip()[:MONTHLY_REPORT_SUMMARY_MAX_CHARS],
+                "cache_hit": False,
+            }
+            _write_monthly_report_json_cache(cache_path, item)
+            return index, item
+
+        ordered: list[dict[str, str] | None] = [None] * total
+        workers = min(MONTHLY_REPORT_EVIDENCE_WORKERS, total)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [
+                executor.submit(summarize_source, index, source)
+                for index, source in enumerate(prd_sources)
+            ]
+            for future in as_completed(futures):
+                index, item = future.result()
+                ordered[index] = item
+        return [item for item in ordered if item is not None]
 
     @staticmethod
     def _merge_project_fields(project: dict[str, Any], raw_project: dict[str, Any]) -> None:
@@ -1330,6 +1394,10 @@ def _safe_int(value: Any) -> int:
         return 0
 
 
+def _record_monthly_report_timing(timings: dict[str, float], key: str, started_at: float) -> None:
+    timings[key] = round(max(0.0, time.monotonic() - started_at), 3)
+
+
 def build_monthly_report_prd_scope_prompt(
     *,
     generated_at: datetime,
@@ -1543,6 +1611,86 @@ def _monthly_report_data_root(settings: Settings) -> Path:
     if local_agent_data_dir:
         return Path(local_agent_data_dir).expanduser()
     return data_root.expanduser()
+
+
+def _monthly_report_cache_root(settings: Settings) -> Path:
+    return _monthly_report_data_root(settings) / "monthly_report" / "cache"
+
+
+def _monthly_report_gmail_owner_email(settings: Settings) -> str:
+    return str(settings.gmail_seatalk_demo_owner_email or settings.seatalk_owner_email or "").strip().lower()
+
+
+def _monthly_report_cache_digest(payload: dict[str, Any]) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _monthly_report_gmail_topic_cache_path(
+    settings: Settings,
+    *,
+    owner_email: str,
+    report_period: MonthlyReportPeriod,
+    topic: str,
+) -> Path:
+    digest = _monthly_report_cache_digest(
+        {
+            "version": MONTHLY_REPORT_GMAIL_TOPIC_CACHE_VERSION,
+            "owner_email": owner_email,
+            "period_start": report_period.start_date,
+            "period_end": report_period.end_date,
+            "period_end_exclusive": report_period.end_exclusive.isoformat(),
+            "topic": str(topic or "").strip(),
+            "max_threads": MONTHLY_REPORT_MAX_HIGHLIGHT_GMAIL_THREADS_PER_TOPIC,
+        }
+    )
+    return _monthly_report_cache_root(settings) / "gmail_topic" / f"{digest}.json"
+
+
+def _monthly_report_prd_scope_cache_path(
+    settings: Settings,
+    *,
+    report_period: MonthlyReportPeriod,
+    prd_source: dict[str, str],
+) -> Path:
+    digest = _monthly_report_cache_digest(
+        {
+            "version": MONTHLY_REPORT_PRD_SCOPE_CACHE_VERSION,
+            "prompt_version": MONTHLY_REPORT_PROMPT_VERSION,
+            "period_start": report_period.start_date,
+            "period_end": report_period.end_date,
+            "period_end_exclusive": report_period.end_exclusive.isoformat(),
+            "prd_url": str(prd_source.get("url") or "").strip(),
+            "updated_at": str(prd_source.get("updated_at") or "").strip(),
+        }
+    )
+    return _monthly_report_cache_root(settings) / "prd_scope" / f"{digest}.json"
+
+
+def _read_monthly_report_json_cache(path: Path, *, max_age_seconds: int | None = None) -> dict[str, Any] | None:
+    try:
+        if not path.exists():
+            return None
+        if max_age_seconds is not None and max_age_seconds > 0:
+            age_seconds = max(0.0, time.time() - path.stat().st_mtime)
+            if age_seconds > max_age_seconds:
+                return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            return payload
+    except (OSError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def _write_monthly_report_json_cache(path: Path, payload: dict[str, Any]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temp_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        os.replace(temp_path, path)
+    except OSError:
+        return
 
 
 def _vip_emails(config: dict[str, Any]) -> list[str]:
