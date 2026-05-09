@@ -29,6 +29,14 @@ python3 scripts/source_code_qa_feedback_to_eval.py --output evals/source_code_qa
 python3 scripts/source_code_qa_feedback_to_eval.py --include-useful --json --output evals/source_code_qa/feedback_candidates.jsonl
 ```
 
+Build automatic broad-quality candidates from live telemetry and feedback without asking users for more input:
+
+```bash
+PYTHONPATH=. ./.venv/bin/python scripts/source_code_qa_auto_eval_candidates.py --runnable-only --json
+```
+
+This selects useful feedback, repeated questions, slow queries, deadline fallbacks, no-match records, and answer-contract risks. Positive/useful and successful telemetry cases become runnable smoke/regression candidates with observed paths and terms. Negative feedback remains review-only so an incorrect observed answer is not frozen as expected behavior.
+
 Review the generated candidates before promoting them into `golden.jsonl`. Negative feedback is included by default; add `--include-useful` if you also want positive smoke-test cases.
 
 Feedback candidates preserve replay context from the original answer: trace id, answer mode, LLM route/model, answer contract status, observed answer preview, evidence count, and observed paths. Negative feedback is intentionally marked `draft_status=needs_human_expected_evidence`; do not promote it as a blocking golden eval until a reviewer adds the corrected `expected_paths`, `required_terms`, `forbidden_terms`, or policy expectations. Positive `useful` feedback can be used as `ready_positive_smoke` coverage because the observed paths are expected to remain present.
@@ -49,10 +57,10 @@ Use this before and after retrieval, prompt, model, or indexing changes. The goa
 For a repeatable local quality check, run:
 
 ```bash
-PYTHONPATH=. ./.venv/bin/python scripts/run_source_code_qa_nightly_eval.py --include-useful-feedback
+PYTHONPATH=. ./.venv/bin/python scripts/run_source_code_qa_broad_eval.py --json
 ```
 
-The job writes timestamped reports under `TEAM_PORTAL_DATA_DIR/source_code_qa/eval_runs/` plus `latest.json`. It runs the deterministic fixture evals, runs a deterministic mock-LLM answer smoke eval, regenerates feedback candidates, and writes a local review queue, so it can be launched manually or scheduled by the host without adding a new portal workflow.
+The broad eval writes timestamped reports under `TEAM_PORTAL_DATA_DIR/source_code_qa/eval_runs/`, `broad_latest.json`, and `TEAM_PORTAL_DATA_DIR/run/source_code_qa_broad_eval.json`. It runs `release_gate.jsonl` plus `scenario_matrix.jsonl` on deterministic fixtures, runs the mock-LLM answer smoke eval, generates automatic candidates from live telemetry/feedback, and evaluates runnable candidates against the synced repo data. Auto-candidate failures are reported as broad-quality warnings and do not block the release gate.
 
 Before publishing Source Code Q&A retrieval, prompt, or index changes, run the release gate:
 
@@ -60,7 +68,7 @@ Before publishing Source Code Q&A retrieval, prompt, or index changes, run the r
 PYTHONPATH=. ./.venv/bin/python scripts/run_source_code_qa_release_gate.py --include-useful-feedback
 ```
 
-The release gate wraps the nightly eval, enforces minimum coverage and zero-failure thresholds, and writes `TEAM_PORTAL_DATA_DIR/run/source_code_qa_release_gate.json` plus the shared eval status file consumed by the portal readiness panel. By default it uses the deterministic local LLM provider for the main eval so release checks do not depend on the local Codex CLI login/path environment. Pass `--live-llm` only when you intentionally want to validate the configured live provider.
+The release gate remains the stable blocking layer. It enforces minimum coverage and zero-failure thresholds on `release_gate.jsonl`, writes `TEAM_PORTAL_DATA_DIR/run/source_code_qa_release_gate.json`, and uses the deterministic local LLM provider by default so release checks do not depend on the local Codex CLI login/path environment. Pass `--live-llm` only when you intentionally want to validate the configured live provider.
 
 Build the review queue directly when triaging misses:
 
@@ -84,7 +92,7 @@ Use `--fixture` when you want a deterministic miniature repo set for regression 
 
 The JSON output includes LLM routing and quality metadata (`llm_provider`, `llm_model`, `llm_route`, `llm_budget_mode`, `answer_claim_check`, and `answer_contract`) so regressions can be grouped by provider, budget, and evidence policy rather than inspected case by case.
 
-Eval summaries also include `failure_buckets` (`retrieval`, `answer_policy`, `answer_content`, `query_status`, or `other`), `coverage_buckets`, and per-case `answer_policies`. Use these buckets to decide whether a failure needs retrieval/index work, policy tuning, answer rendering changes, or broader scenario coverage.
+Eval summaries also include `failure_buckets` (`retrieval`, `answer_policy`, `answer_content`, `query_status`, or `other`), `coverage_buckets`, `answer_mode_buckets`, `fallback_buckets`, `cache_buckets`, `slow_query_buckets`, and per-case `answer_policies`. Use these buckets to decide whether a failure needs retrieval/index work, policy tuning, answer rendering changes, latency/cache tuning, or broader scenario coverage.
 
 Source Code Q&A now runs on the Codex bridge only. Historical Gemini, Vertex, OpenAI-compatible, and remote embedding profiles have been retired; semantic retrieval uses the local token-hybrid index and does not require an external embedding provider.
 

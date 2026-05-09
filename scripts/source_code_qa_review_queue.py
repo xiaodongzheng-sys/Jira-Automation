@@ -103,7 +103,7 @@ def build_review_queue(data_root: Path, *, limit: int = 500) -> list[dict[str, A
         status = str(record.get("status") or "").strip().lower()
         contract_status = str((record.get("answer_contract") or {}).get("status") or "").strip().lower()
         stale = str((record.get("index_freshness") or {}).get("status") or "").startswith("stale")
-        fallback = bool(record.get("fallback"))
+        fallback = bool(record.get("fallback") or record.get("fallback_used") or record.get("deadline_hit"))
         needs_review = status in TELEMETRY_REVIEW_STATUSES or contract_status in {"blocked_missing_source", "needs_more_trace"} or stale or fallback
         if not needs_review:
             continue

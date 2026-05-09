@@ -991,6 +991,8 @@ def _evaluate_case(service: SourceCodeQAService, case: dict[str, Any]) -> dict[s
     return {
         "id": case["id"],
         "category": _coverage_key(case),
+        "pm_team": str(case.get("pm_team") or "").upper(),
+        "country": str(case.get("country") or "All").strip() or "All",
         "status": "pass" if not failures else "fail",
         "failures": failures,
         "failure_buckets": failure_buckets,
@@ -1009,7 +1011,12 @@ def _evaluate_case(service: SourceCodeQAService, case: dict[str, Any]) -> dict[s
         "llm_model": payload.get("llm_model"),
         "llm_route": payload.get("llm_route") or {},
         "llm_budget_mode": payload.get("llm_budget_mode"),
+        "answer_mode": payload.get("answer_mode"),
+        "requested_answer_mode": str(case.get("answer_mode") or ANSWER_MODE),
         "llm_cached": bool(payload.get("llm_cached")),
+        "fallback_used": bool(payload.get("fallback_used")),
+        "deadline_hit": bool(payload.get("deadline_hit")),
+        "slow_query_attribution": payload.get("slow_query_attribution") or {},
         "citations": payload.get("citations") or [],
     }
 
@@ -1111,17 +1118,35 @@ def _summarize_results(results: list[dict[str, Any]]) -> dict[str, Any]:
     coverage_buckets: dict[str, dict[str, int]] = {}
     team_buckets: dict[str, dict[str, int]] = {}
     segment_buckets: dict[str, dict[str, int]] = {}
+    answer_mode_buckets: dict[str, dict[str, int]] = {}
+    fallback_buckets: dict[str, dict[str, int]] = {}
+    cache_buckets: dict[str, dict[str, int]] = {}
+    slow_query_buckets: dict[str, dict[str, int]] = {}
+
+    def add_status_bucket(bucket: dict[str, dict[str, int]], key: str, failed_case: bool) -> None:
+        item = bucket.setdefault(str(key or "unknown"), {"total": 0, "failed": 0})
+        item["total"] += 1
+        if failed_case:
+            item["failed"] += 1
+
     for result in results:
+        failed_case = result["status"] != "pass"
         for bucket, count in (result.get("failure_buckets") or {}).items():
             failure_buckets[str(bucket)] = failure_buckets.get(str(bucket), 0) + int(count)
         route = result.get("llm_route") or {}
         route_key = str(route.get("selected") or result.get("llm_budget_mode") or "retrieval_only")
         route_buckets[route_key] = route_buckets.get(route_key, 0) + 1
-        category = str(result.get("category") or "uncategorized")
-        coverage = coverage_buckets.setdefault(category, {"total": 0, "failed": 0})
-        coverage["total"] += 1
-        if result["status"] != "pass":
-            coverage["failed"] += 1
+        add_status_bucket(coverage_buckets, str(result.get("category") or "uncategorized"), failed_case)
+        add_status_bucket(answer_mode_buckets, str(result.get("answer_mode") or "unknown"), failed_case)
+        add_status_bucket(fallback_buckets, "fallback" if result.get("fallback_used") else "no_fallback", failed_case)
+        add_status_bucket(cache_buckets, "cache_hit" if result.get("llm_cached") else "cache_miss_or_retrieval", failed_case)
+        add_status_bucket(slow_query_buckets, str((result.get("slow_query_attribution") or {}).get("status") or "unknown"), failed_case)
+        team = str(result.get("pm_team") or "unknown").upper()
+        add_status_bucket(team_buckets, team, failed_case)
+        country = str(result.get("country") or "All").strip().upper()
+        if team != "CRMS":
+            country = "ALL"
+        add_status_bucket(segment_buckets, f"{team}:{country}", failed_case)
     return {
         "status": "pass" if not failed else "fail",
         "total": len(results),
@@ -1131,6 +1156,10 @@ def _summarize_results(results: list[dict[str, Any]]) -> dict[str, Any]:
         "coverage_buckets": coverage_buckets,
         "team_buckets": team_buckets,
         "segment_buckets": segment_buckets,
+        "answer_mode_buckets": answer_mode_buckets,
+        "fallback_buckets": fallback_buckets,
+        "cache_buckets": cache_buckets,
+        "slow_query_buckets": slow_query_buckets,
         "results": results,
     }
 
@@ -1195,47 +1224,11 @@ def main() -> int:
         _build_fixture_repositories(service)
     results = [_evaluate_case(service, case) for case in cases]
     failed = [result for result in results if result["status"] != "pass"]
-    failure_buckets: dict[str, int] = {}
-    route_buckets: dict[str, int] = {}
-    coverage_buckets: dict[str, dict[str, int]] = {}
-    team_buckets: dict[str, dict[str, int]] = {}
-    segment_buckets: dict[str, dict[str, int]] = {}
-    for result in results:
-        for bucket, count in (result.get("failure_buckets") or {}).items():
-            failure_buckets[str(bucket)] = failure_buckets.get(str(bucket), 0) + int(count)
-        route = result.get("llm_route") or {}
-        route_key = str(route.get("selected") or result.get("llm_budget_mode") or "retrieval_only")
-        route_buckets[route_key] = route_buckets.get(route_key, 0) + 1
-        category = str(result.get("category") or "uncategorized")
-        coverage = coverage_buckets.setdefault(category, {"total": 0, "failed": 0})
-        coverage["total"] += 1
-        if result["status"] != "pass":
-            coverage["failed"] += 1
-    for case, result in zip(cases, results):
-        team = str(case.get("pm_team") or "unknown").upper()
-        team_bucket = team_buckets.setdefault(team, {"total": 0, "failed": 0})
-        team_bucket["total"] += 1
-        if result["status"] != "pass":
-            team_bucket["failed"] += 1
-        country = str(case.get("country") or "All").strip().upper()
-        if team != "CRMS":
-            country = "ALL"
-        segment = f"{team}:{country}"
-        segment_bucket = segment_buckets.setdefault(segment, {"total": 0, "failed": 0})
-        segment_bucket["total"] += 1
-        if result["status"] != "pass":
-            segment_bucket["failed"] += 1
-    summary = {
-        "status": "pass" if not failed else "fail",
-        "total": len(results),
-        "failed": len(failed),
-        "failure_buckets": failure_buckets,
-        "route_buckets": route_buckets,
-        "coverage_buckets": coverage_buckets,
-        "team_buckets": team_buckets,
-        "segment_buckets": segment_buckets,
-        "results": results,
-    }
+    summary = _summarize_results(results)
+    failure_buckets = summary["failure_buckets"]
+    coverage_buckets = summary["coverage_buckets"]
+    team_buckets = summary["team_buckets"]
+    segment_buckets = summary["segment_buckets"]
 
     if args.json:
         print(json.dumps(summary, indent=2, ensure_ascii=False))

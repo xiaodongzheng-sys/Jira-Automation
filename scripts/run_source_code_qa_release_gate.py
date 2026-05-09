@@ -214,6 +214,10 @@ def run_release_eval_report(
             "team_buckets": eval_payload.get("team_buckets") or {},
             "segment_buckets": eval_payload.get("segment_buckets") or {},
             "route_buckets": eval_payload.get("route_buckets") or {},
+            "answer_mode_buckets": eval_payload.get("answer_mode_buckets") or {},
+            "fallback_buckets": eval_payload.get("fallback_buckets") or {},
+            "cache_buckets": eval_payload.get("cache_buckets") or {},
+            "slow_query_buckets": eval_payload.get("slow_query_buckets") or {},
         },
         "feedback_candidates": {
             "returncode": feedback_returncode,
@@ -229,6 +233,10 @@ def run_release_eval_report(
             "total": llm_smoke_payload.get("total"),
             "failed": llm_smoke_payload.get("failed"),
             "route_buckets": llm_smoke_payload.get("route_buckets") or {},
+            "answer_mode_buckets": llm_smoke_payload.get("answer_mode_buckets") or {},
+            "fallback_buckets": llm_smoke_payload.get("fallback_buckets") or {},
+            "cache_buckets": llm_smoke_payload.get("cache_buckets") or {},
+            "slow_query_buckets": llm_smoke_payload.get("slow_query_buckets") or {},
         },
         "review_queue": {
             "returncode": review_returncode,

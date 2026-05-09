@@ -40,7 +40,8 @@ from bpmis_jira_tool.web import (
     create_app,
 )
 from scripts.promote_source_code_qa_eval_candidates import promote_candidates
-from scripts.run_source_code_qa_evals import _build_fixture_repositories, _evaluate_case, _guard_fixture_data_root
+from scripts.run_source_code_qa_evals import _build_fixture_repositories, _evaluate_case, _guard_fixture_data_root, _summarize_results
+from scripts.source_code_qa_auto_eval_candidates import build_auto_eval_candidates
 from scripts.source_code_qa_feedback_to_eval import build_eval_candidates
 
 
@@ -2524,6 +2525,110 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(summary["promoted"], 1)
         self.assertEqual(merged[0]["id"], "feedback-useful-def1234567")
 
+    def test_auto_eval_candidates_collect_telemetry_feedback_and_dedupe(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_root = Path(temp_dir)
+            source_root = data_root / "source_code_qa"
+            source_root.mkdir(parents=True)
+            (source_root / "feedback.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "rating": "useful",
+                                "pm_team": "AF",
+                                "country": "All",
+                                "question_preview": "where is createIssue",
+                                "question_sha1": "useful123456",
+                                "replay_context": {"matches_snapshot": [{"path": "controller/IssueController.java"}]},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "rating": "wrong_file",
+                                "pm_team": "AF",
+                                "country": "All",
+                                "question_preview": "where is broken answer",
+                                "question_sha1": "wrong123456",
+                                "replay_context": {"matches_snapshot": [{"path": "wrong/File.java"}]},
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (source_root / "telemetry.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "key": "GRC:All",
+                                "question_preview": "where is globallock config",
+                                "question_sha1": "slow111",
+                                "status": "ok",
+                                "answer_mode": "retrieval_only",
+                                "latency_ms": 45000,
+                                "top_paths": ["config/GlobalLockConfig.java"],
+                                "slow_query_attribution": {"status": "slow"},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "key": "CRMS:SG",
+                                "question_preview": "which SG API runs precheck",
+                                "question_sha1": "fallback222",
+                                "status": "ok",
+                                "answer_mode": "auto",
+                                "deadline_hit": True,
+                                "fallback_used": True,
+                                "top_paths": ["controller/SgCreditApplicationController.java"],
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "key": "CRMS:PH",
+                                "question_preview": "where is missing PH flow",
+                                "question_sha1": "nomatch333",
+                                "status": "no_match",
+                                "top_paths": [],
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "key": "GRC:All",
+                                "question_preview": "where is globallock config",
+                                "question_sha1": "slow111",
+                                "status": "ok",
+                                "answer_mode": "retrieval_only",
+                                "latency_ms": 46000,
+                                "top_paths": ["config/GlobalLockConfig.java"],
+                                "slow_query_attribution": {"status": "slow"},
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            candidates, summary = build_auto_eval_candidates(data_root, limit=20)
+            runnable_candidates, runnable_summary = build_auto_eval_candidates(data_root, limit=20, runnable_only=True)
+
+        categories = {candidate["category"] for candidate in candidates}
+        self.assertIn("feedback_useful", categories)
+        self.assertIn("feedback_wrong_file", categories)
+        self.assertIn("telemetry_slow_query", categories)
+        self.assertIn("telemetry_deadline_fallback", categories)
+        self.assertIn("telemetry_no_match", categories)
+        self.assertEqual(summary["review_only_candidates"], 1)
+        self.assertGreaterEqual(runnable_summary["runnable_candidates"], 4)
+        self.assertNotIn("feedback_wrong_file", {candidate["category"] for candidate in runnable_candidates})
+        self.assertEqual(
+            len({(candidate["pm_team"], candidate["country"], candidate["question"], candidate["answer_mode"]) for candidate in runnable_candidates}),
+            len(runnable_candidates),
+        )
+
 
 class SourceCodeQAServiceTests(unittest.TestCase):
     def setUp(self):
@@ -4665,6 +4770,88 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertTrue(report["mock_llm"])
         self.assertIn("--mock-llm", calls[0])
+
+    def test_eval_summary_groups_latency_cache_fallback_and_answer_mode_buckets(self):
+        summary = _summarize_results(
+            [
+                {
+                    "status": "pass",
+                    "category": "telemetry_slow_query",
+                    "pm_team": "GRC",
+                    "country": "All",
+                    "answer_mode": "retrieval_only",
+                    "fallback_used": False,
+                    "llm_cached": False,
+                    "slow_query_attribution": {"status": "slow"},
+                    "failure_buckets": {},
+                    "llm_route": {},
+                },
+                {
+                    "status": "fail",
+                    "category": "telemetry_deadline_fallback",
+                    "pm_team": "CRMS",
+                    "country": "SG",
+                    "answer_mode": "auto",
+                    "fallback_used": True,
+                    "llm_cached": True,
+                    "slow_query_attribution": {"status": "ok"},
+                    "failure_buckets": {"answer_policy": 1},
+                    "llm_route": {"selected": "auto"},
+                },
+            ]
+        )
+
+        self.assertEqual(summary["answer_mode_buckets"]["retrieval_only"]["total"], 1)
+        self.assertEqual(summary["fallback_buckets"]["fallback"]["failed"], 1)
+        self.assertEqual(summary["cache_buckets"]["cache_hit"]["total"], 1)
+        self.assertEqual(summary["slow_query_buckets"]["slow"]["total"], 1)
+        self.assertEqual(summary["segment_buckets"]["CRMS:SG"]["failed"], 1)
+
+    def test_broad_eval_records_auto_candidate_failures_without_blocking_stable_layer(self):
+        from scripts.run_source_code_qa_broad_eval import run_broad_eval
+
+        data_root = Path(self.temp_dir.name)
+        source_root = data_root / "source_code_qa"
+        source_root.mkdir(parents=True, exist_ok=True)
+        (source_root / "telemetry.jsonl").write_text(
+            json.dumps(
+                {
+                    "key": "AF:All",
+                    "question_preview": "where is slow flow",
+                    "question_sha1": "slow-flow",
+                    "status": "ok",
+                    "latency_ms": 40000,
+                    "top_paths": ["service/IssueService.java"],
+                    "slow_query_attribution": {"status": "slow"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        calls = []
+
+        def fake_run(args):
+            calls.append(args)
+            if any("auto_eval_candidates" in str(arg) for arg in args):
+                return {"status": "fail", "total": 1, "failed": 1, "failure_buckets": {"retrieval": 1}}, "{}", "", 1
+            return {
+                "status": "pass",
+                "total": 2,
+                "failed": 0,
+                "team_buckets": {"AF": {"total": 2, "failed": 0}},
+                "segment_buckets": {"AF:ALL": {"total": 2, "failed": 0}},
+                "answer_mode_buckets": {"retrieval_only": {"total": 2, "failed": 0}},
+            }, "{}", "", 0
+
+        with patch("scripts.run_source_code_qa_broad_eval._run_json_command", side_effect=fake_run):
+            report = run_broad_eval(data_root=data_root, output_dir=data_root / "source_code_qa" / "eval_runs")
+
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["broad_quality_status"], "warn")
+        self.assertEqual(report["auto_candidates"]["runnable_candidates"], 1)
+        self.assertEqual(report["auto_eval"]["status"], "fail")
+        self.assertTrue((data_root / "run" / "source_code_qa_broad_eval.json").exists())
 
     def test_fixture_eval_requires_isolated_data_root(self):
         data_root = Path(self.temp_dir.name)
