@@ -1486,6 +1486,7 @@ exit 0
         self.assertIn("DOCKER_BUILDKIT=1", config)
         self.assertIn("BUILDKIT_INLINE_CACHE=1", config)
         self.assertIn("${_IMAGE_NAME}:buildcache", config)
+        self.assertIn("CLOUD_LOGGING_ONLY", config)
 
     def test_team_env_helper_reads_multiple_values(self):
         helper_path = PROJECT_ROOT / "scripts/lib/team_env.sh"
