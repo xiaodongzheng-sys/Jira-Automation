@@ -56,6 +56,8 @@
   const monthlyReportProgress = root.querySelector('[data-monthly-report-progress]');
   const monthlyReportProgressFill = root.querySelector('[data-monthly-report-progress-fill]');
   const monthlyReportProgressMessage = root.querySelector('[data-monthly-report-progress-message]');
+  const monthlyReportEvidenceReview = root.querySelector('[data-monthly-report-evidence-review]');
+  const monthlyReportEvidenceReviewBody = root.querySelector('[data-monthly-report-evidence-review-body]');
   const monthlyReportEvidenceDebug = root.querySelector('[data-monthly-report-evidence-debug]');
   const monthlyReportEvidenceDebugBody = root.querySelector('[data-monthly-report-evidence-debug-body]');
   const monthlyReportTemplateForm = root.querySelector('[data-monthly-report-template-form]');
@@ -205,6 +207,7 @@
         subject: String(payload?.subject || monthlyReportSubject || 'Monthly Report'),
         highlight_topics: Array.isArray(payload?.highlight_topics) ? payload.highlight_topics : readMonthlyReportTopics({ strict: false }),
         highlight_topic_sources: Array.isArray(payload?.highlight_topic_sources) ? payload.highlight_topic_sources : readMonthlyReportTopicSources({ strict: false }),
+        evidence_review: Array.isArray(payload?.evidence_review) ? payload.evidence_review : [],
         evidence_debug: Array.isArray(payload?.evidence_debug) ? payload.evidence_debug : [],
         period_start: String(payload?.period_start || monthlyReportPeriodStart?.value || ''),
         period_end: String(payload?.period_end || monthlyReportPeriodEnd?.value || ''),
@@ -1387,6 +1390,48 @@
     }).join('');
   };
 
+  const renderMonthlyReportEvidenceReview = (items) => {
+    if (!monthlyReportEvidenceReview || !monthlyReportEvidenceReviewBody) return;
+    const rows = Array.isArray(items) ? items.filter((item) => item && typeof item === 'object') : [];
+    monthlyReportEvidenceReview.hidden = rows.length === 0;
+    if (!rows.length) {
+      monthlyReportEvidenceReviewBody.innerHTML = '';
+      return;
+    }
+    monthlyReportEvidenceReviewBody.innerHTML = rows.map((item) => {
+      const counts = item.source_counts || {};
+      const sourceText = [
+        `SeaTalk ${Number(counts.seatalk || 0)}`,
+        `Gmail ${Number(counts.gmail || 0)}`,
+        `Sheet ${Number(counts.google_sheet || 0)}`,
+        `Projects ${Number(counts.project || 0)}`,
+        `PRD ${Number(counts.prd || 0)}`,
+      ].join(' · ');
+      const groups = Array.isArray(item.seatalk_conversation_labels) ? item.seatalk_conversation_labels : [];
+      const gaps = Array.isArray(item.gaps) ? item.gaps : [];
+      const glossary = Array.isArray(item.glossary_matches) ? item.glossary_matches : [];
+      const glossaryText = glossary.length
+        ? glossary.map((entry) => [entry.domain, entry.canonical || entry.id].filter(Boolean).join(': ')).join(' | ')
+        : '-';
+      return `
+        <article class="team-dashboard-monthly-report-review-card" data-status="${escapeHtml(item.status || 'ready')}">
+          <div class="team-dashboard-monthly-report-review-head">
+            <strong>${escapeHtml(item.topic || 'Highlight')}</strong>
+            <span>${escapeHtml(`${item.status || 'ready'} · ${item.confidence || 'none'}`)}</span>
+          </div>
+          <dl>
+            <div><dt>Primary Topic</dt><dd>${escapeHtml(item.primary_topic || item.topic || '-')}</dd></div>
+            <div><dt>Intent</dt><dd>${escapeHtml(item.intent || '-')}</dd></div>
+            <div><dt>Evidence</dt><dd>${escapeHtml(sourceText)}</dd></div>
+            <div><dt>SeaTalk Groups</dt><dd>${escapeHtml(groups.join(' | ') || '-')}</dd></div>
+            <div><dt>Glossary</dt><dd>${escapeHtml(glossaryText)}</dd></div>
+            <div><dt>Gaps</dt><dd>${escapeHtml(gaps.join(' | ') || '-')}</dd></div>
+          </dl>
+        </article>
+      `;
+    }).join('');
+  };
+
   const setMonthlyReportProgressStep = (activeStep, percent, message) => {
     if (!monthlyReportProgress) return;
     monthlyReportProgress.hidden = false;
@@ -1562,6 +1607,7 @@
       applyMonthlyReportInputs(cached);
       monthlyReportDraft.value = cached.draft_markdown || '';
       updateMonthlyReportPreview();
+      renderMonthlyReportEvidenceReview(cached.evidence_review || []);
       renderMonthlyReportEvidenceDebug(cached.evidence_debug || []);
       setStatus(monthlyReportStatus, 'Restored the last Monthly Report draft from this browser.', 'neutral');
     }
@@ -1582,6 +1628,7 @@
         subject: monthlyReportSubject,
         highlight_topics: payload.highlight_topics || [],
         highlight_topic_sources: payload.highlight_topic_sources || payload.generation_summary?.highlight_topic_sources || [],
+        evidence_review: payload.evidence_review || [],
         evidence_debug: payload.evidence_debug || payload.highlight_evidence_debug || [],
         period_start: payload.period_start || '',
         period_end: payload.period_end || '',
@@ -1589,6 +1636,7 @@
         source: 'server',
       });
       updateMonthlyReportPreview();
+      renderMonthlyReportEvidenceReview(payload.evidence_review || []);
       renderMonthlyReportEvidenceDebug(payload.evidence_debug || payload.highlight_evidence_debug || []);
       setStatus(monthlyReportStatus, 'Restored the latest generated Monthly Report draft.', 'neutral');
     } catch (error) {
@@ -1633,12 +1681,14 @@
         subject: monthlyReportSubject,
         highlight_topics: payload.highlight_topics || requestPayload.highlight_topics,
         highlight_topic_sources: payload.highlight_topic_sources || payload.generation_summary?.highlight_topic_sources || requestPayload.highlight_topic_sources,
+        evidence_review: payload.evidence_review || [],
         evidence_debug: payload.evidence_debug || payload.highlight_evidence_debug || [],
         period_start: payload.generation_summary?.period_start || requestPayload.period_start,
         period_end: payload.generation_summary?.period_end || requestPayload.period_end,
         source: 'generate',
       });
       updateMonthlyReportPreview();
+      renderMonthlyReportEvidenceReview(payload.evidence_review || []);
       renderMonthlyReportEvidenceDebug(payload.evidence_debug || payload.highlight_evidence_debug || []);
       const evidence = payload.evidence_summary || {};
       const projectCount = Number(evidence.key_project_count || 0);

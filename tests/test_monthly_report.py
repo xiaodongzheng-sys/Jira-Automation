@@ -20,12 +20,14 @@ from bpmis_jira_tool.monthly_report import (
     _highlight_topic_aliases,
     _monthly_report_highlight_qualifier_marker_groups,
     _monthly_report_text_matches_qualifier_marker_groups,
+    build_monthly_report_evidence_review,
     build_monthly_highlight_deep_evidence,
     build_monthly_highlight_evidence_map,
     build_monthly_highlight_topic_narrative_prompt,
     build_monthly_requirements_target_map,
     build_monthly_project_evidence_brief,
     build_monthly_report_final_prompt,
+    build_monthly_report_query_plan,
     generate_monthly_report_with_codex,
     match_monthly_report_highlight_topics,
     monthly_report_business_glossary_summary,
@@ -886,6 +888,10 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(deep[0]["evidence_debug"]["source_counts"]["seatalk"], len(deep[0]["seatalk_evidence"]))
         self.assertIn("mari_credit_card", [item["id"] for item in deep[0]["evidence_debug"]["glossary_matches"]])
         self.assertTrue(any("group-4285581" in item for item in deep[0]["evidence_debug"]["seatalk_conversation_labels"]))
+        review = build_monthly_report_evidence_review(deep)
+        self.assertEqual(review[0]["status"], "ready")
+        self.assertEqual(review[0]["source_policy"], {"seatalk": "conversation_level"})
+        self.assertTrue(any("group-4285581" in item for item in review[0]["seatalk_conversation_labels"]))
 
     def test_mcc_qualifier_disambiguates_mari_credit_card_from_merchant_category_code(self):
         topic = "PH MCC Employee Live Testing Status"
@@ -919,6 +925,25 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertIn("GRC", summary["domains"])
         self.assertGreater(summary["derived_source_counts"].get("source_code_qa_domain_profiles.json", 0), 0)
         self.assertIn("mari credit card", _highlight_topic_aliases("PH MCC Employee Live Testing Status"))
+
+    def test_query_plan_keeps_context_only_terms_out_of_primary_search(self):
+        plan = build_monthly_report_query_plan("PH afasa ShopeePay Transaction limit Bank AF")
+
+        self.assertEqual(plan["intent"], "general_progress")
+        self.assertEqual(plan["product_area_scope"], "Anti-fraud")
+        self.assertIn(["bank", "maribank", "seabank"], plan["qualifier_marker_groups"])
+        self.assertIn("bank", plan["qualifiers"]["context_only_terms"])
+        self.assertNotIn("Bank AF", plan["primary_topic"])
+        self.assertNotIn("bank af", plan["aliases"])
+
+    def test_query_plan_disambiguates_mcc_for_mari_credit_card(self):
+        plan = build_monthly_report_query_plan("PH MCC Employee Live Testing Status", selected_sources=["seatalk"])
+
+        self.assertEqual(plan["source_policy"], {"seatalk": "conversation_level"})
+        self.assertEqual(plan["product_area_scope"], "Credit Risk")
+        self.assertIn("merchant category", plan["forbidden_meanings"])
+        self.assertIn("mari_credit_card", [item["id"] for item in plan["glossary_matches"]])
+        self.assertIn("mari credit card", plan["aliases"])
 
     def test_highlight_product_area_scope_keeps_credit_risk_only(self):
         period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")

@@ -33,6 +33,7 @@
 .team-dashboard-monthly-report-grid,
 .team-dashboard-monthly-report-editor,
 .team-dashboard-monthly-report-preview,
+.team-dashboard-monthly-report-review,
 .team-dashboard-monthly-report-debug {
   min-width: 0;
   max-width: 100%;
@@ -680,6 +681,7 @@
 }
 
 .team-dashboard-monthly-report-preview,
+.team-dashboard-monthly-report-review,
 .team-dashboard-monthly-report-debug {
   min-height: 28rem;
   padding: 16px;
@@ -688,12 +690,14 @@
   background: #ffffff;
 }
 
+.team-dashboard-monthly-report-review,
 .team-dashboard-monthly-report-debug {
   min-height: 0;
   margin-top: 16px;
 }
 
 .team-dashboard-monthly-report-preview summary,
+.team-dashboard-monthly-report-review summary,
 .team-dashboard-monthly-report-debug summary {
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr) minmax(0, auto);
@@ -706,17 +710,20 @@
 }
 
 .team-dashboard-monthly-report-preview summary span,
+.team-dashboard-monthly-report-review summary span,
 .team-dashboard-monthly-report-debug summary span {
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
 .team-dashboard-monthly-report-preview summary::-webkit-details-marker,
+.team-dashboard-monthly-report-review summary::-webkit-details-marker,
 .team-dashboard-monthly-report-debug summary::-webkit-details-marker {
   display: none;
 }
 
 .team-dashboard-monthly-report-preview summary::before,
+.team-dashboard-monthly-report-review summary::before,
 .team-dashboard-monthly-report-debug summary::before {
   content: "";
   display: inline-block;
@@ -728,16 +735,19 @@
 }
 
 .team-dashboard-monthly-report-preview:not([open]),
+.team-dashboard-monthly-report-review:not([open]),
 .team-dashboard-monthly-report-debug:not([open]) {
   min-height: 0;
 }
 
 .team-dashboard-monthly-report-preview:not([open]) summary::before,
+.team-dashboard-monthly-report-review:not([open]) summary::before,
 .team-dashboard-monthly-report-debug:not([open]) summary::before {
   transform: rotate(-45deg);
 }
 
 .team-dashboard-monthly-report-preview[open] summary::before,
+.team-dashboard-monthly-report-review[open] summary::before,
 .team-dashboard-monthly-report-debug[open] summary::before {
   transform: rotate(45deg);
 }
@@ -787,12 +797,75 @@
   text-transform: uppercase;
 }
 
+.team-dashboard-monthly-report-review-body {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.team-dashboard-monthly-report-review-card {
+  padding: 12px;
+  border: 1px solid #dbe5f1;
+  border-radius: 8px;
+  background: #ffffff;
+  min-width: 0;
+}
+
+.team-dashboard-monthly-report-review-card[data-status="needs_review"] {
+  border-color: #fed7aa;
+  background: #fffaf2;
+}
+
+.team-dashboard-monthly-report-review-card[data-status="blocked"] {
+  border-color: #fecaca;
+  background: #fff5f5;
+}
+
+.team-dashboard-monthly-report-review-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+}
+
+.team-dashboard-monthly-report-review-head strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.team-dashboard-monthly-report-review-head span {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.team-dashboard-monthly-report-review-card[data-status="needs_review"] .team-dashboard-monthly-report-review-head span {
+  border-color: #fdba74;
+  background: #ffedd5;
+  color: #c2410c;
+}
+
+.team-dashboard-monthly-report-review-card[data-status="blocked"] .team-dashboard-monthly-report-review-head span {
+  border-color: #fca5a5;
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.team-dashboard-monthly-report-review-card dl,
 .team-dashboard-monthly-report-debug-card dl {
   display: grid;
   gap: 8px;
   margin: 10px 0 0;
 }
 
+.team-dashboard-monthly-report-review-card dl > div,
 .team-dashboard-monthly-report-debug-card dl > div {
   display: grid;
   grid-template-columns: minmax(90px, 140px) minmax(0, 1fr);
@@ -800,6 +873,7 @@
   min-width: 0;
 }
 
+.team-dashboard-monthly-report-review-card dt,
 .team-dashboard-monthly-report-debug-card dt {
   color: #667085;
   font-size: 12px;
@@ -807,6 +881,7 @@
   text-transform: uppercase;
 }
 
+.team-dashboard-monthly-report-review-card dd,
 .team-dashboard-monthly-report-debug-card dd {
   margin: 0;
   color: #334155;
@@ -1016,6 +1091,7 @@
   .team-dashboard-monthly-report-date-grid .field-group,
   .team-dashboard-monthly-report-topic-field,
   .team-dashboard-monthly-report-editor,
+  .team-dashboard-monthly-report-review,
   .team-dashboard-monthly-report-debug {
     padding: 10px;
     border-radius: 10px;
@@ -1027,6 +1103,7 @@
   }
 
   .team-dashboard-monthly-report-preview,
+  .team-dashboard-monthly-report-review,
   .team-dashboard-monthly-report-debug {
     min-height: 0;
     padding: 12px;
@@ -1034,11 +1111,13 @@
   }
 
   .team-dashboard-monthly-report-preview summary,
+  .team-dashboard-monthly-report-review summary,
   .team-dashboard-monthly-report-debug summary {
     grid-template-columns: 14px minmax(0, 1fr);
   }
 
   .team-dashboard-monthly-report-preview summary span:last-child,
+  .team-dashboard-monthly-report-review summary span:last-child,
   .team-dashboard-monthly-report-debug summary span:last-child {
     grid-column: 2;
     color: #667085;
@@ -1095,6 +1174,7 @@
   .team-dashboard-page .team-dashboard-monthly-report-grid,
   .team-dashboard-page .team-dashboard-monthly-report-editor,
   .team-dashboard-page .team-dashboard-monthly-report-preview,
+  .team-dashboard-page .team-dashboard-monthly-report-review,
   .team-dashboard-page .team-dashboard-monthly-report-debug {
     width: 100% !important;
     min-width: 0 !important;
@@ -1148,6 +1228,7 @@
     text-align: left !important;
   }
 
+  .team-dashboard-monthly-report-review-card dl > div,
   .team-dashboard-monthly-report-debug-card dl > div {
     grid-template-columns: minmax(0, 1fr);
     gap: 3px;

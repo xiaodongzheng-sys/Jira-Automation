@@ -488,6 +488,7 @@ class MonthlyReportService:
             for item in highlight_deep_evidence
             if isinstance(item, dict) and isinstance(item.get("evidence_debug"), dict)
         ]
+        evidence_review = build_monthly_report_evidence_review(highlight_deep_evidence)
         return {
             "status": "ok",
             "draft_markdown": draft_markdown,
@@ -501,6 +502,7 @@ class MonthlyReportService:
             "highlight_evidence_map": highlight_evidence_map,
             "highlight_evidence_debug": highlight_evidence_debug,
             "evidence_debug": highlight_evidence_debug,
+            "evidence_review": evidence_review,
             "highlight_narratives": highlight_narratives,
             "generation_diagnostics": diagnostics,
             "generation_summary": {
@@ -524,6 +526,7 @@ class MonthlyReportService:
                 "seatalk_conversation_scope": MONTHLY_REPORT_SEATALK_HIGHLIGHT_CONVERSATION_SCOPE,
                 "max_seatalk_chars": MONTHLY_REPORT_MAX_SEATALK_CHARS,
                 "evidence_debug_topic_count": len(highlight_evidence_debug),
+                "evidence_review_topic_count": len(evidence_review),
                 "total_batches": len(batch_summaries),
                 "batch_summary_cache_hit_count": len([item for item in batch_summaries if item.get("cache_hit")]),
                 "highlight_narrative_cache_hit_count": len([item for item in highlight_narratives if item.get("cache_hit")]),
@@ -1302,9 +1305,14 @@ def _monthly_report_topic_uses_source(topic: str, source_map: dict[str, list[str
 def match_monthly_report_highlight_topics(highlight_topics: list[str], key_projects: list[dict[str, Any]]) -> list[dict[str, Any]]:
     matches: list[dict[str, Any]] = []
     for topic in highlight_topics:
-        topic_aliases = _highlight_topic_aliases(topic)
-        product_area_scope = _monthly_report_highlight_product_area_scope(topic)
-        qualifier_marker_groups = _monthly_report_highlight_qualifier_marker_groups(topic)
+        query_plan = build_monthly_report_query_plan(topic)
+        topic_aliases = set(query_plan.get("aliases") or []) or _highlight_topic_aliases(topic)
+        product_area_scope = str(query_plan.get("product_area_scope") or "").strip()
+        qualifier_marker_groups = [
+            tuple(str(marker or "").strip() for marker in group if str(marker or "").strip())
+            for group in (query_plan.get("qualifier_marker_groups") or [])
+            if isinstance(group, list)
+        ]
         matched_projects: list[dict[str, Any]] = []
         for project in key_projects:
             if product_area_scope and _project_product_area(project) != product_area_scope:
@@ -1332,6 +1340,7 @@ def match_monthly_report_highlight_topics(highlight_topics: list[str], key_proje
         matches.append(
             {
                 "topic": topic,
+                "query_plan": query_plan,
                 "product_area_scope": product_area_scope,
                 "qualifier_marker_groups": [list(group) for group in qualifier_marker_groups],
                 "project_ids": project_ids,
@@ -1365,12 +1374,14 @@ def build_monthly_highlight_deep_evidence(
         use_gmail = MONTHLY_REPORT_HIGHLIGHT_SOURCE_GMAIL in selected_sources
         use_team_dashboard = MONTHLY_REPORT_HIGHLIGHT_SOURCE_TEAM_DASHBOARD in selected_sources
         match = match_by_topic.get(topic) or {"topic": topic, "project_ids": []}
-        product_area_scope = str(match.get("product_area_scope") or _monthly_report_highlight_product_area_scope(topic) or "").strip()
+        query_plan = match.get("query_plan") if isinstance(match.get("query_plan"), dict) else build_monthly_report_query_plan(topic, selected_sources=selected_sources)
+        product_area_scope = str(match.get("product_area_scope") or query_plan.get("product_area_scope") or _monthly_report_highlight_product_area_scope(topic) or "").strip()
         qualifier_marker_groups = [
             tuple(str(marker or "").strip() for marker in group if str(marker or "").strip())
             for group in (
                 match.get("qualifier_marker_groups")
                 or match.get("required_marker_groups")
+                or query_plan.get("qualifier_marker_groups")
                 or _monthly_report_highlight_qualifier_marker_groups(topic)
                 or []
             )
@@ -1378,9 +1389,9 @@ def build_monthly_highlight_deep_evidence(
         ]
         project_ids = [str(project_id or "").strip() for project_id in (match.get("project_ids") or []) if str(project_id or "").strip()]
         projects = [projects_by_id[project_id] for project_id in project_ids if project_id in projects_by_id] if use_team_dashboard else []
-        topic_intent = _monthly_report_highlight_topic_intent(topic)
+        topic_intent = str(query_plan.get("intent") or _monthly_report_highlight_topic_intent(topic))
         intent_focus = _monthly_report_highlight_intent_focus(topic_intent)
-        aliases = _highlight_topic_aliases(topic)
+        aliases = set(query_plan.get("aliases") or []) or _highlight_topic_aliases(topic)
         for project in projects:
             aliases.update(_project_aliases(project))
         seatalk_match_limit = MONTHLY_REPORT_HIGHLIGHT_EVIDENCE_MAX_LINES * (80 if qualifier_marker_groups else 1)
@@ -1511,6 +1522,7 @@ def build_monthly_highlight_deep_evidence(
         )
         evidence_debug = _monthly_report_topic_evidence_debug(
             topic=topic,
+            query_plan=query_plan,
             selected_sources=selected_sources,
             topic_intent=topic_intent,
             product_area_scope=product_area_scope,
@@ -1529,6 +1541,7 @@ def build_monthly_highlight_deep_evidence(
             {
                 "topic": topic,
                 "selected_sources": selected_sources,
+                "query_plan": query_plan,
                 "topic_intent": topic_intent,
                 "intent_focus": intent_focus,
                 "product_area_scope": product_area_scope,
@@ -1580,9 +1593,48 @@ def build_monthly_highlight_evidence_map(highlight_deep_evidence: list[dict[str,
     return maps
 
 
+def build_monthly_report_evidence_review(highlight_deep_evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    review: list[dict[str, Any]] = []
+    for item in highlight_deep_evidence:
+        if not isinstance(item, dict):
+            continue
+        evidence_map = item.get("evidence_map") if isinstance(item.get("evidence_map"), dict) else {}
+        query_plan = item.get("query_plan") if isinstance(item.get("query_plan"), dict) else {}
+        debug = item.get("evidence_debug") if isinstance(item.get("evidence_debug"), dict) else {}
+        confidence = str(evidence_map.get("confidence") or item.get("confidence") or "none").strip().lower()
+        gaps = [str(gap) for gap in (evidence_map.get("gaps") or []) if str(gap).strip()]
+        active_sources = [str(source) for source in (evidence_map.get("active_sources") or []) if str(source).strip()]
+        status = "ready"
+        if confidence in {"none", "low"} or gaps:
+            status = "needs_review"
+        if confidence == "none":
+            status = "blocked"
+        review.append(
+            {
+                "topic": str(item.get("topic") or "").strip(),
+                "status": status,
+                "confidence": confidence,
+                "intent": str(query_plan.get("intent") or item.get("topic_intent") or "").strip(),
+                "primary_topic": str(query_plan.get("primary_topic") or item.get("topic") or "").strip(),
+                "product_area_scope": str(query_plan.get("product_area_scope") or item.get("product_area_scope") or "").strip(),
+                "selected_sources": [str(source) for source in (item.get("selected_sources") or []) if str(source).strip()],
+                "active_sources": active_sources,
+                "source_counts": evidence_map.get("source_counts") or {},
+                "gaps": gaps,
+                "seatalk_conversation_labels": debug.get("seatalk_conversation_labels") or [],
+                "glossary_matches": query_plan.get("glossary_matches") or [],
+                "qualifiers": query_plan.get("qualifiers") or {},
+                "forbidden_meanings": query_plan.get("forbidden_meanings") or [],
+                "source_policy": query_plan.get("source_policy") or {},
+            }
+        )
+    return review
+
+
 def _monthly_report_topic_evidence_debug(
     *,
     topic: str,
+    query_plan: dict[str, Any],
     selected_sources: list[str],
     topic_intent: str,
     product_area_scope: str,
@@ -1605,6 +1657,7 @@ def _monthly_report_topic_evidence_debug(
             conversation_labels.append(clean.strip("= ").strip())
     return {
         "topic": topic,
+        "query_plan": query_plan,
         "selected_sources": selected_sources,
         "topic_intent": topic_intent,
         "product_area_scope": product_area_scope,
@@ -2772,6 +2825,106 @@ def monthly_report_business_glossary_summary() -> dict[str, Any]:
     }
 
 
+def build_monthly_report_query_plan(topic: Any, *, selected_sources: list[str] | None = None) -> dict[str, Any]:
+    text = str(topic or "").strip()
+    selected = selected_sources or list(MONTHLY_REPORT_HIGHLIGHT_SOURCES)
+    glossary_entries = _monthly_report_glossary_entries_for_topic(text)
+    qualifier_marker_groups = _monthly_report_highlight_qualifier_marker_groups_from_entries(text, glossary_entries)
+    aliases = _highlight_topic_aliases_without_query_plan(text)
+    aliases.update(_monthly_report_glossary_aliases_for_entries(glossary_entries))
+    qualifiers = {
+        "markets": sorted(_monthly_report_requested_markets(text)),
+        "domains": _dedupe_preserve_order([
+            str(entry.get("domain") or "")
+            for entry in glossary_entries
+            if str(entry.get("domain") or "").strip()
+        ]),
+        "context_only_terms": _monthly_report_context_only_terms_for_entries(glossary_entries, text),
+    }
+    forbidden_meanings = _dedupe_preserve_order(
+        [
+            str(term or "").strip()
+            for entry in glossary_entries
+            for term in (entry.get("reject_context_any") or [])
+            if str(term or "").strip()
+        ]
+    )
+    return {
+        "topic": text,
+        "primary_topic": _monthly_report_primary_topic(text, glossary_entries),
+        "intent": _monthly_report_highlight_topic_intent(text),
+        "product_area_scope": _monthly_report_highlight_product_area_scope(text) or _monthly_report_product_area_scope_from_glossary(glossary_entries),
+        "selected_sources": selected,
+        "source_policy": _monthly_report_query_source_policy(selected),
+        "qualifiers": qualifiers,
+        "qualifier_marker_groups": [list(group) for group in qualifier_marker_groups],
+        "glossary_matches": [
+            {
+                "id": str(entry.get("id") or ""),
+                "domain": str(entry.get("domain") or ""),
+                "canonical": str(entry.get("canonical") or ""),
+                "context_only": bool(entry.get("context_only_terms")),
+            }
+            for entry in glossary_entries
+        ],
+        "forbidden_meanings": forbidden_meanings,
+        "aliases": sorted(alias for alias in aliases if alias),
+    }
+
+
+def _monthly_report_query_source_policy(selected_sources: list[str]) -> dict[str, str]:
+    selected = set(selected_sources or [])
+    policy: dict[str, str] = {}
+    if MONTHLY_REPORT_HIGHLIGHT_SOURCE_SEATALK in selected:
+        policy[MONTHLY_REPORT_HIGHLIGHT_SOURCE_SEATALK] = "conversation_level"
+    if MONTHLY_REPORT_HIGHLIGHT_SOURCE_GMAIL in selected:
+        policy[MONTHLY_REPORT_HIGHLIGHT_SOURCE_GMAIL] = "thread_level"
+    if MONTHLY_REPORT_HIGHLIGHT_SOURCE_TEAM_DASHBOARD in selected:
+        policy[MONTHLY_REPORT_HIGHLIGHT_SOURCE_TEAM_DASHBOARD] = "project_level"
+    return policy
+
+
+def _monthly_report_product_area_scope_from_glossary(entries: list[dict[str, Any]]) -> str:
+    domain_to_scope = {"AF": "Anti-fraud", "CRMS": "Credit Risk", "GRC": "Ops Risk"}
+    scopes = _dedupe_preserve_order([
+        domain_to_scope.get(str(entry.get("domain") or "").strip(), "")
+        for entry in entries
+        if str(entry.get("domain") or "").strip()
+    ])
+    return scopes[0] if len(scopes) == 1 else ""
+
+
+def _monthly_report_primary_topic(topic: str, glossary_entries: list[dict[str, Any]]) -> str:
+    tokens = [part for part in re.split(r"(\W+)", str(topic or "")) if part]
+    context_only = {
+        _normalize_alias_token(term)
+        for entry in glossary_entries
+        for term in (entry.get("context_only_terms") or [])
+        if str(term or "").strip()
+    }
+    if not context_only:
+        return str(topic or "").strip()
+    kept: list[str] = []
+    for token in tokens:
+        if _normalize_alias_token(token) in context_only:
+            continue
+        kept.append(token)
+    primary = " ".join("".join(kept).split()).strip()
+    return primary or str(topic or "").strip()
+
+
+def _monthly_report_context_only_terms_for_entries(entries: list[dict[str, Any]], topic: str) -> list[str]:
+    lowered = str(topic or "").casefold()
+    compact = _normalize_alias_token(lowered)
+    terms: list[str] = []
+    for entry in entries:
+        for term in entry.get("context_only_terms") or []:
+            clean = str(term or "").strip()
+            if clean and _monthly_report_glossary_term_matches_text(lowered, compact, clean):
+                terms.append(clean)
+    return _dedupe_preserve_order(terms)
+
+
 def _monthly_report_read_json_file(path: Path) -> dict[str, Any]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -2863,6 +3016,13 @@ def _monthly_report_highlight_product_area_scope(topic: Any) -> str:
 
 
 def _monthly_report_highlight_qualifier_marker_groups(topic: Any) -> list[tuple[str, ...]]:
+    return _monthly_report_highlight_qualifier_marker_groups_from_entries(
+        topic,
+        _monthly_report_glossary_entries_for_topic(topic),
+    )
+
+
+def _monthly_report_highlight_qualifier_marker_groups_from_entries(topic: Any, glossary_entries: list[dict[str, Any]]) -> list[tuple[str, ...]]:
     text = str(topic or "").strip().casefold()
     compact = _normalize_alias_token(text)
     anti_fraud_signal = (
@@ -2881,7 +3041,7 @@ def _monthly_report_highlight_qualifier_marker_groups(topic: Any) -> list[tuple[
             marker_groups.append(("sg", "singapore", "seabank sg"))
         if re.search(r"\bid\b", text) or "indonesia" in text:
             marker_groups.append(("id", "indonesia", "seabank id"))
-    for entry in _monthly_report_glossary_entries_for_topic(topic):
+    for entry in glossary_entries:
         for group in entry.get("qualifier_groups") or []:
             if isinstance(group, list):
                 clean_group = tuple(str(marker or "").strip().casefold() for marker in group if str(marker or "").strip())
@@ -2911,8 +3071,12 @@ def _monthly_report_glossary_entries_for_topic(topic: Any) -> list[dict[str, Any
 
 
 def _monthly_report_glossary_aliases_for_topic(topic: Any) -> set[str]:
+    return _monthly_report_glossary_aliases_for_entries(_monthly_report_glossary_entries_for_topic(topic))
+
+
+def _monthly_report_glossary_aliases_for_entries(entries: list[dict[str, Any]]) -> set[str]:
     aliases: set[str] = set()
-    for entry in _monthly_report_glossary_entries_for_topic(topic):
+    for entry in entries:
         if entry.get("context_only_terms"):
             continue
         for term in [entry.get("canonical"), *(entry.get("aliases") or [])]:
@@ -3436,6 +3600,12 @@ def _monthly_report_intent_term_matches(text: str, compact: str, term: str) -> b
 
 
 def _highlight_topic_aliases(topic: Any) -> set[str]:
+    aliases = _highlight_topic_aliases_without_query_plan(topic)
+    aliases.update(_monthly_report_glossary_aliases_for_topic(topic))
+    return {alias for alias in aliases if alias}
+
+
+def _highlight_topic_aliases_without_query_plan(topic: Any) -> set[str]:
     aliases: set[str] = set()
     text = str(topic or "").strip()
     if len(text) >= 3:
@@ -3449,7 +3619,6 @@ def _highlight_topic_aliases(topic: Any) -> set[str]:
         if _is_useful_alias_token(token):
             aliases.add(token)
     aliases.update(_highlight_topic_phrase_aliases(tokens))
-    aliases.update(_monthly_report_glossary_aliases_for_topic(topic))
     return {alias for alias in aliases if alias}
 
 

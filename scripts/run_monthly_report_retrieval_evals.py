@@ -11,6 +11,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from bpmis_jira_tool.monthly_report import (  # noqa: E402
+    build_monthly_report_evidence_review,
     build_monthly_highlight_deep_evidence,
     match_monthly_report_highlight_topics,
     monthly_report_business_glossary_summary,
@@ -66,6 +67,9 @@ def main() -> int:
         debug = result.get("evidence_debug") or {}
         if not isinstance(debug, dict) or not debug.get("source_counts"):
             failures.append(f"{case['id']}: missing evidence debug payload")
+        review = build_monthly_report_evidence_review([result])
+        if not review or not review[0].get("source_policy"):
+            failures.append(f"{case['id']}: missing evidence review source policy")
     if failures:
         print("\n".join(failures), file=sys.stderr)
         return 1

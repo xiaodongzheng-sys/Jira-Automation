@@ -207,6 +207,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         highlight_topics = (result or {}).get("highlight_topics") or generation_summary.get("highlight_topics") or []
         highlight_topic_sources = (result or {}).get("highlight_topic_sources") or generation_summary.get("highlight_topic_sources") or {}
         evidence_debug = (result or {}).get("evidence_debug") or (result or {}).get("highlight_evidence_debug") or []
+        evidence_review = (result or {}).get("evidence_review") or []
         return jsonify(
             {
                 "status": "ok",
@@ -220,6 +221,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
                 "period_end_exclusive": generation_summary.get("period_end_exclusive") or "",
                 "highlight_topics": highlight_topics if isinstance(highlight_topics, list) else [],
                 "highlight_topic_sources": highlight_topic_sources if isinstance(highlight_topic_sources, (dict, list)) else {},
+                "evidence_review": evidence_review if isinstance(evidence_review, list) else [],
                 "evidence_debug": evidence_debug if isinstance(evidence_debug, list) else [],
             }
         )
