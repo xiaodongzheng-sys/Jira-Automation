@@ -1,0 +1,53 @@
+[
+  {
+    "id": "ph_mari_credit_card_employee_testing",
+    "topic": "PH Credit Card MVP Employee Live Testing Status",
+    "selected_sources": ["seatalk"],
+    "seatalk_history_text": "=== [Temp] SEA Group MCC Whitelisted ===\n[2026-04-21 12:27:29] PM: SEA employee LV will have 3000 users to be whitelisted. On Jun 8 we will whitelist 50k users.\n=== PH Credit Card MVP Live Testing & Public with Local & RPMs & Dev ===\n[2026-04-21 16:34:28] PM: PH Credit Card completed EPFS. Plan is Sea Group Employee Live Testing on May 7 and Public Launch on Jun 8.\n=== Credit Card Launch - Small Group ===\n[2026-04-24 10:02:08] Dev: For PH Mari Credit Card, 2nd Live Testing May 7-Jun 7 covers Sea group employee 3000 users.\n=== ID Credit Card Launch ===\n[2026-04-22 11:00:00] PM: ID Credit Card has unrelated testing progress.\n=== PH GRC Live Testing ===\n[2026-04-22 12:00:00] PM: PH GRC live testing finished last Friday.",
+    "expected_substrings": ["SEA Group MCC Whitelisted", "PH Credit Card MVP Live Testing", "Credit Card Launch - Small Group", "Sea Group Employee Live Testing"],
+    "forbidden_substrings": ["ID Credit Card has unrelated", "PH GRC live testing"]
+  },
+  {
+    "id": "mcc_disambiguates_merchant_category_code",
+    "topic": "PH MCC Employee Live Testing Status",
+    "selected_sources": ["seatalk"],
+    "seatalk_history_text": "=== [Temp] SEA Group MCC Whitelisted ===\n[2026-04-21 10:00:00] PM: PH MCC whitelisted users are ready for employee live testing.\n=== Payment MCC Mapping ===\n[2026-04-21 11:00:00] PM: PH risk rule updated the merchant category code MCC mapping for payments.",
+    "expected_substrings": ["SEA Group MCC Whitelisted", "employee live testing"],
+    "forbidden_substrings": ["merchant category code MCC"]
+  },
+  {
+    "id": "bank_af_requires_bank_context",
+    "topic": "PH AFASA ShopeePay Transaction limit Bank AF",
+    "selected_sources": ["seatalk", "team_dashboard"],
+    "seatalk_history_text": "2026-05-01 PH ShopeePay wallet transaction risk rule continued.\n2026-05-02 PH ShopeePay transaction limit Bank AF UAT completed.\n2026-05-03 PH Credit Card transaction limit alignment continued.\n2026-05-04 Banking Product Update covered unrelated ShopeePay wallet status.",
+    "expected_substrings": ["Bank AF UAT completed"],
+    "forbidden_substrings": ["wallet transaction risk rule", "Credit Card transaction limit", "Banking Product Update"],
+    "key_projects": [
+      {
+        "bpmis_id": "BANK-AF",
+        "project_name": "PH AFASA ShopeePay Transaction Limit Bank AF",
+        "market": "PH",
+        "priority": "SP",
+        "teams": ["Anti-fraud"],
+        "jira_tickets": [{"jira_id": "AF-1", "jira_title": "ShopeePay transaction limit for Bank AF"}]
+      },
+      {
+        "bpmis_id": "WALLET-AF",
+        "project_name": "PH ShopeePay Wallet Transaction Limit Anti-Fraud",
+        "market": "PH",
+        "priority": "SP",
+        "teams": ["Anti-fraud"],
+        "jira_tickets": [{"jira_id": "AF-2", "jira_title": "ShopeePay transaction risk rules"}]
+      }
+    ],
+    "expected_project_ids": ["BANK-AF"]
+  },
+  {
+    "id": "sg_credit_risk_flexible_workflow",
+    "topic": "SG Credit Risk a more flexible workflow",
+    "selected_sources": ["seatalk"],
+    "seatalk_history_text": "=== SG Credit Risk Workflow ===\n[2026-05-03 09:00:00] PM: SG Credit Risk needs a more flexible workflow for underwriting approvals.\n[2026-05-03 09:05:00] Dev: We can adjust precheck rule config and approval flow after impact review.\n=== SG GRC Parameter Workflow ===\n[2026-05-03 10:00:00] PM: SG GRC parameter approval workflow has unrelated changes.",
+    "expected_substrings": ["SG Credit Risk Workflow", "more flexible workflow", "precheck rule config"],
+    "forbidden_substrings": ["SG GRC parameter approval"]
+  }
+]

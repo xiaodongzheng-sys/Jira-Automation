@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "updated_at": "2026-05-10",
+  "purpose": "Monthly Report business glossary derived from AF, CRMS, and GRC source-code QA domain profiles, effort dictionaries, and knowledge packs. Generic acronyms should enrich context but should not become standalone search intent.",
+  "repo_sources": [
+    "config/source_code_qa_domain_profiles.json",
+    "config/source_code_qa_effort_dictionaries.json",
+    "config/source_code_qa_domain_knowledge_packs.json"
+  ],
+  "domains": {
+    "AF": {
+      "label": "Anti-fraud",
+      "aliases": ["Anti-Fraud", "Anti Fraud", "AF", "AFASA", "fraud risk"],
+      "terms": ["blacklist", "whitelist", "risk rule", "risk config", "case review", "flow report", "CRC", "screening", "fraud decision"]
+    },
+    "CRMS": {
+      "label": "Credit Risk",
+      "aliases": ["Credit Risk", "CRMS", "CRS", "credit-risk"],
+      "terms": ["underwriting", "precheck", "pre-check", "credit card", "card income screening", "credit card limit", "income document", "payslip", "limit assignment", "flexible workflow"]
+    },
+    "GRC": {
+      "label": "Ops Risk",
+      "aliases": ["GRC", "Ops Risk", "Operational Risk"],
+      "terms": ["parameter", "authorization", "approval", "global lock", "globallock", "function unit", "permission", "risk control", "RCSA"]
+    }
+  },
+  "entries": [
+    {
+      "id": "mari_credit_card",
+      "domain": "CRMS",
+      "canonical": "Mari Credit Card",
+      "aliases": ["Mari Credit Card", "MCC", "PH Credit Card", "credit card", "card launch", "credit card launch", "employee live testing", "public launch"],
+      "trigger_terms": ["mcc", "credit card", "creditcard", "card launch"],
+      "qualifier_groups": [
+        ["credit card", "creditcard", "mari credit card", "mcc", "mcc whitelisted", "sea group mcc"]
+      ],
+      "requires_context_any": ["mari", "maribank", "credit card", "card launch", "employee", "whitelist", "whitelisted", "live testing", "public launch", "sea group"],
+      "reject_context_any": ["merchant category", "merchant-category"],
+      "notes": "MCC usually means Mari Credit Card in MariBank launch context; merchant category code is explicitly rejected."
+    },
+    {
+      "id": "bank_anti_fraud",
+      "domain": "AF",
+      "canonical": "Bank Anti-Fraud",
+      "aliases": ["Bank AF", "Bank Anti-Fraud", "Bank Anti Fraud", "AFASA", "Anti-Fraud", "Anti Fraud"],
+      "trigger_terms": ["bank af", "bank anti-fraud", "bank anti fraud"],
+      "qualifier_groups": [
+        ["bank", "maribank", "seabank"]
+      ],
+      "context_only_terms": ["bank", "af"],
+      "notes": "Bank and AF are context qualifiers; they must not become standalone search keywords."
+    },
+    {
+      "id": "card_income_screening",
+      "domain": "CRMS",
+      "canonical": "PH Card Income Screening",
+      "aliases": ["card income screening", "credit card income", "LLM payslip", "Ops extracted fields", "income document review", "payslip extraction"],
+      "trigger_terms": ["card income", "payslip", "income document"]
+    },
+    {
+      "id": "credit_card_limit",
+      "domain": "CRMS",
+      "canonical": "Credit Card Limit",
+      "aliases": ["credit card limit", "card limit", "credit limit", "product limit", "limit assignment"],
+      "trigger_terms": ["credit card limit", "card limit", "credit limit"]
+    },
+    {
+      "id": "underwriting_precheck",
+      "domain": "CRMS",
+      "canonical": "Underwriting PreCheck",
+      "aliases": ["underwriting", "precheck", "pre-check", "rule config", "risk strategy config", "credit risk workflow", "flexible workflow"],
+      "trigger_terms": ["underwriting", "precheck", "pre-check", "workflow"]
+    },
+    {
+      "id": "af_rule_and_list",
+      "domain": "AF",
+      "canonical": "Anti-Fraud Rule/List",
+      "aliases": ["risk rule", "risk config", "blacklist", "whitelist", "case review", "flow report", "CRC", "screening", "strategy"],
+      "trigger_terms": ["risk rule", "risk config", "blacklist", "whitelist", "case review", "flow report", "crc"]
+    },
+    {
+      "id": "grc_parameter_authorization",
+      "domain": "GRC",
+      "canonical": "GRC Parameter Authorization",
+      "aliases": ["parameter", "authorization", "approval", "global lock", "globallock", "function unit", "functionUnit", "permission", "risk control"],
+      "trigger_terms": ["parameter", "authorization", "approval", "global lock", "globallock", "function unit"]
+    }
+  ]
+}

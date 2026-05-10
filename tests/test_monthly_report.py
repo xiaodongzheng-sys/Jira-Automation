@@ -28,6 +28,7 @@ from bpmis_jira_tool.monthly_report import (
     build_monthly_report_final_prompt,
     generate_monthly_report_with_codex,
     match_monthly_report_highlight_topics,
+    monthly_report_business_glossary_summary,
     normalize_monthly_report_highlight_topic_sources,
     monthly_report_markdown_to_html,
     normalize_monthly_report_highlight_topics,
@@ -882,6 +883,9 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertTrue(any("Whitelist 50k users" in item for item in deep[0]["seatalk_evidence"]))
         self.assertFalse(any("ID Credit Card" in item for item in deep[0]["seatalk_evidence"]))
         self.assertFalse(any("PH GRC" in item for item in deep[0]["seatalk_evidence"]))
+        self.assertEqual(deep[0]["evidence_debug"]["source_counts"]["seatalk"], len(deep[0]["seatalk_evidence"]))
+        self.assertIn("mari_credit_card", [item["id"] for item in deep[0]["evidence_debug"]["glossary_matches"]])
+        self.assertTrue(any("group-4285581" in item for item in deep[0]["evidence_debug"]["seatalk_conversation_labels"]))
 
     def test_mcc_qualifier_disambiguates_mari_credit_card_from_merchant_category_code(self):
         topic = "PH MCC Employee Live Testing Status"
@@ -905,6 +909,16 @@ class MonthlyReportTests(unittest.TestCase):
                 marker_groups,
             )
         )
+
+    def test_monthly_report_business_glossary_loads_repo_derived_terms(self):
+        summary = monthly_report_business_glossary_summary()
+
+        self.assertGreaterEqual(summary["entry_count"], 3)
+        self.assertIn("AF", summary["domains"])
+        self.assertIn("CRMS", summary["domains"])
+        self.assertIn("GRC", summary["domains"])
+        self.assertGreater(summary["derived_source_counts"].get("source_code_qa_domain_profiles.json", 0), 0)
+        self.assertIn("mari credit card", _highlight_topic_aliases("PH MCC Employee Live Testing Status"))
 
     def test_highlight_product_area_scope_keeps_credit_risk_only(self):
         period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")

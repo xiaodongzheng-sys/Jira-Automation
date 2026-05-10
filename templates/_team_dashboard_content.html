@@ -146,6 +146,13 @@
           </div>
         </details>
       </div>
+      <details class="team-dashboard-monthly-report-debug" data-monthly-report-evidence-debug hidden>
+        <summary>
+          <span>Evidence Debug</span>
+          <span>Source matching and gaps</span>
+        </summary>
+        <div class="team-dashboard-monthly-report-debug-body" data-monthly-report-evidence-debug-body></div>
+      </details>
       {% if can_manage_team_dashboard %}
         <form method="post" action="{{ url_for('save_team_dashboard_monthly_report_template') }}" class="stack team-dashboard-monthly-report-template-form" data-monthly-report-template-form>
           <details class="config-card config-card-wide team-dashboard-monthly-report-template-panel">

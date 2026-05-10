@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 import hashlib
 import html
 import json
@@ -147,6 +148,13 @@ MONTHLY_REPORT_DECISION_TERMS = (
     "to be confirmed",
     "是否",
     "确认",
+)
+MONTHLY_REPORT_CONFIG_ROOT = Path(__file__).resolve().parents[1] / "config"
+MONTHLY_REPORT_BUSINESS_GLOSSARY_PATH = MONTHLY_REPORT_CONFIG_ROOT / "monthly_report_business_glossary.json"
+MONTHLY_REPORT_SOURCE_CODE_QA_GLOSSARY_SOURCE_PATHS = (
+    MONTHLY_REPORT_CONFIG_ROOT / "source_code_qa_domain_profiles.json",
+    MONTHLY_REPORT_CONFIG_ROOT / "source_code_qa_effort_dictionaries.json",
+    MONTHLY_REPORT_CONFIG_ROOT / "source_code_qa_domain_knowledge_packs.json",
 )
 
 DEFAULT_MONTHLY_REPORT_TEMPLATE = """# Monthly Report
@@ -475,6 +483,11 @@ class MonthlyReportService:
             highlight_narratives=highlight_narratives,
             timings=timings,
         )
+        highlight_evidence_debug = [
+            item.get("evidence_debug")
+            for item in highlight_deep_evidence
+            if isinstance(item, dict) and isinstance(item.get("evidence_debug"), dict)
+        ]
         return {
             "status": "ok",
             "draft_markdown": draft_markdown,
@@ -486,6 +499,8 @@ class MonthlyReportService:
             "model_id": generated["model_id"],
             "trace": generated["trace"],
             "highlight_evidence_map": highlight_evidence_map,
+            "highlight_evidence_debug": highlight_evidence_debug,
+            "evidence_debug": highlight_evidence_debug,
             "highlight_narratives": highlight_narratives,
             "generation_diagnostics": diagnostics,
             "generation_summary": {
@@ -508,6 +523,7 @@ class MonthlyReportService:
                 "seatalk_history_chars": len(history_text),
                 "seatalk_conversation_scope": MONTHLY_REPORT_SEATALK_HIGHLIGHT_CONVERSATION_SCOPE,
                 "max_seatalk_chars": MONTHLY_REPORT_MAX_SEATALK_CHARS,
+                "evidence_debug_topic_count": len(highlight_evidence_debug),
                 "total_batches": len(batch_summaries),
                 "batch_summary_cache_hit_count": len([item for item in batch_summaries if item.get("cache_hit")]),
                 "highlight_narrative_cache_hit_count": len([item for item in highlight_narratives if item.get("cache_hit")]),
@@ -1384,6 +1400,7 @@ def build_monthly_highlight_deep_evidence(
                 )
             )
         )
+        raw_matched_seatalk_count = len(matched_seatalk)
         project_updates: list[dict[str, Any]] = []
         prd_facts: list[str] = []
         for project in projects:
@@ -1492,6 +1509,22 @@ def build_monthly_highlight_deep_evidence(
             issue_followup_facts=issue_followup_facts,
             selected_sources=selected_sources,
         )
+        evidence_debug = _monthly_report_topic_evidence_debug(
+            topic=topic,
+            selected_sources=selected_sources,
+            topic_intent=topic_intent,
+            product_area_scope=product_area_scope,
+            aliases=aliases,
+            qualifier_marker_groups=qualifier_marker_groups,
+            raw_matched_seatalk_count=raw_matched_seatalk_count,
+            matched_seatalk_count=len(matched_seatalk),
+            seatalk_evidence=compact_seatalk,
+            gmail_evidence=compact_gmail,
+            google_sheet_evidence=compact_sheets,
+            project_updates=project_updates,
+            prd_scope_summaries=compact_prd,
+            evidence_map=evidence_map,
+        )
         evidence.append(
             {
                 "topic": topic,
@@ -1510,6 +1543,7 @@ def build_monthly_highlight_deep_evidence(
                 "prd_scope_summaries": compact_prd,
                 "issue_followup_facts": issue_followup_facts,
                 "evidence_map": evidence_map,
+                "evidence_debug": evidence_debug,
                 "confidence": evidence_map["confidence"],
                 "recommended_tone": evidence_map["recommended_tone"],
             }
@@ -1544,6 +1578,60 @@ def build_monthly_highlight_evidence_map(highlight_deep_evidence: list[dict[str,
             )
         )
     return maps
+
+
+def _monthly_report_topic_evidence_debug(
+    *,
+    topic: str,
+    selected_sources: list[str],
+    topic_intent: str,
+    product_area_scope: str,
+    aliases: set[str],
+    qualifier_marker_groups: list[tuple[str, ...]],
+    raw_matched_seatalk_count: int,
+    matched_seatalk_count: int,
+    seatalk_evidence: list[str],
+    gmail_evidence: list[str],
+    google_sheet_evidence: list[dict[str, Any]],
+    project_updates: list[dict[str, Any]],
+    prd_scope_summaries: list[str],
+    evidence_map: dict[str, Any],
+) -> dict[str, Any]:
+    glossary_entries = _monthly_report_glossary_entries_for_topic(topic)
+    conversation_labels = []
+    for item in seatalk_evidence:
+        clean = str(item or "").strip()
+        if clean.startswith("==="):
+            conversation_labels.append(clean.strip("= ").strip())
+    return {
+        "topic": topic,
+        "selected_sources": selected_sources,
+        "topic_intent": topic_intent,
+        "product_area_scope": product_area_scope,
+        "confidence": evidence_map.get("confidence"),
+        "confidence_score": evidence_map.get("confidence_score"),
+        "source_counts": evidence_map.get("source_counts") or {},
+        "active_sources": evidence_map.get("active_sources") or [],
+        "gaps": evidence_map.get("gaps") or [],
+        "alias_sample": sorted(alias for alias in aliases if alias)[:24],
+        "qualifier_marker_groups": [list(group) for group in qualifier_marker_groups],
+        "glossary_matches": [
+            {
+                "id": str(entry.get("id") or ""),
+                "domain": str(entry.get("domain") or ""),
+                "canonical": str(entry.get("canonical") or ""),
+            }
+            for entry in glossary_entries
+        ],
+        "seatalk_raw_match_count": max(0, int(raw_matched_seatalk_count or 0)),
+        "seatalk_filtered_match_count": max(0, int(matched_seatalk_count or 0)),
+        "seatalk_compact_count": len(seatalk_evidence),
+        "seatalk_conversation_labels": _dedupe_preserve_order(conversation_labels)[:8],
+        "gmail_evidence_count": len(gmail_evidence),
+        "google_sheet_count": len(google_sheet_evidence),
+        "team_dashboard_project_count": len(project_updates),
+        "prd_scope_count": len(prd_scope_summaries),
+    }
 
 
 def _monthly_highlight_topic_evidence_map(
@@ -2648,6 +2736,120 @@ def _project_product_area(project: dict[str, Any]) -> str:
     return "Credit Risk"
 
 
+@lru_cache(maxsize=1)
+def _monthly_report_business_glossary() -> dict[str, Any]:
+    glossary = _monthly_report_read_json_file(MONTHLY_REPORT_BUSINESS_GLOSSARY_PATH)
+    if not isinstance(glossary, dict):
+        glossary = {}
+    source_counts: dict[str, int] = {}
+    derived_terms: dict[str, list[str]] = {}
+    for path in MONTHLY_REPORT_SOURCE_CODE_QA_GLOSSARY_SOURCE_PATHS:
+        payload = _monthly_report_read_json_file(path)
+        if not isinstance(payload, dict):
+            source_counts[path.name] = 0
+            continue
+        terms_by_domain = _monthly_report_extract_domain_terms(payload)
+        source_counts[path.name] = sum(len(terms) for terms in terms_by_domain.values())
+        for domain, terms in terms_by_domain.items():
+            derived_terms.setdefault(domain, [])
+            derived_terms[domain].extend(terms)
+    glossary["_derived_source_counts"] = source_counts
+    glossary["_derived_terms"] = {
+        domain: _dedupe_preserve_order(terms)[:80]
+        for domain, terms in derived_terms.items()
+    }
+    return glossary
+
+
+def monthly_report_business_glossary_summary() -> dict[str, Any]:
+    glossary = _monthly_report_business_glossary()
+    entries = [entry for entry in (glossary.get("entries") or []) if isinstance(entry, dict)]
+    return {
+        "version": glossary.get("version"),
+        "entry_count": len(entries),
+        "domains": sorted((glossary.get("domains") or {}).keys()),
+        "derived_source_counts": glossary.get("_derived_source_counts") or {},
+    }
+
+
+def _monthly_report_read_json_file(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _monthly_report_extract_domain_terms(payload: dict[str, Any]) -> dict[str, list[str]]:
+    domains = payload.get("domains")
+    if not isinstance(domains, dict):
+        domains = {
+            key: value
+            for key, value in payload.items()
+            if key in {"AF", "CRMS", "GRC"} and isinstance(value, dict)
+        }
+    results: dict[str, list[str]] = {}
+    for domain, value in domains.items():
+        if domain not in {"AF", "CRMS", "GRC"} or not isinstance(value, dict):
+            continue
+        terms: list[str] = []
+        terms.extend(_monthly_report_collect_terms_from_value(value.get("aliases")))
+        terms.extend(_monthly_report_collect_terms_from_value(value.get("terms")))
+        terms.extend(_monthly_report_collect_terms_from_value(value.get("data_carriers")))
+        terms.extend(_monthly_report_collect_terms_from_value(value.get("source_terms")))
+        terms.extend(_monthly_report_collect_terms_from_value(value.get("api_terms")))
+        terms.extend(_monthly_report_collect_terms_from_value(value.get("config_terms")))
+        terms.extend(_monthly_report_collect_terms_from_value(value.get("logic_terms")))
+        terms.extend(_monthly_report_collect_terms_from_value(value.get("field_population_terms")))
+        for entry in value.get("entries") or []:
+            if isinstance(entry, dict):
+                terms.extend(_monthly_report_collect_terms_from_value(entry.get("business_aliases")))
+                terms.extend(_monthly_report_collect_terms_from_value(entry.get("technical_terms")))
+                terms.extend(_monthly_report_collect_terms_from_value(entry.get("product_terms")))
+                terms.extend(_monthly_report_collect_terms_from_value(entry.get("limit_terms")))
+        for module in value.get("module_map") or []:
+            if isinstance(module, dict):
+                terms.append(str(module.get("name") or ""))
+                terms.extend(_monthly_report_collect_terms_from_value(module.get("aliases")))
+                terms.extend(_monthly_report_collect_terms_from_value(module.get("code_hints")))
+        for term in value.get("terminology") or []:
+            if isinstance(term, dict):
+                terms.append(str(term.get("term") or ""))
+                terms.extend(_monthly_report_collect_terms_from_value(term.get("aliases")))
+                terms.extend(_monthly_report_collect_terms_from_value(term.get("code_terms")))
+        results[domain] = [
+            term for term in _dedupe_preserve_order(str(item).strip() for item in terms)
+            if _monthly_report_useful_glossary_term(term)
+        ]
+    return results
+
+
+def _monthly_report_collect_terms_from_value(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        terms: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                terms.append(item)
+            elif isinstance(item, dict):
+                terms.extend(_monthly_report_collect_terms_from_value(item.get("name")))
+                terms.extend(_monthly_report_collect_terms_from_value(item.get("term")))
+                terms.extend(_monthly_report_collect_terms_from_value(item.get("aliases")))
+                terms.extend(_monthly_report_collect_terms_from_value(item.get("code_terms")))
+        return terms
+    return []
+
+
+def _monthly_report_useful_glossary_term(value: str) -> bool:
+    text = str(value or "").strip()
+    compact = _normalize_alias_token(text)
+    if not compact or compact.isdigit():
+        return False
+    if len(compact) <= 2:
+        return False
+    return True
+
+
 def _monthly_report_highlight_product_area_scope(topic: Any) -> str:
     text = str(topic or "").strip().casefold()
     compact = _normalize_alias_token(text)
@@ -2679,11 +2881,70 @@ def _monthly_report_highlight_qualifier_marker_groups(topic: Any) -> list[tuple[
             marker_groups.append(("sg", "singapore", "seabank sg"))
         if re.search(r"\bid\b", text) or "indonesia" in text:
             marker_groups.append(("id", "indonesia", "seabank id"))
-    if "credit card" in text or "creditcard" in compact or re.search(r"\bcc\b", text) or re.search(r"\bmcc\b", text):
-        marker_groups.append(("credit card", "creditcard", "mari credit card", "mcc", "mcc whitelisted", "sea group mcc"))
-    if anti_fraud_signal and re.search(r"\bbank\b", text):
+    for entry in _monthly_report_glossary_entries_for_topic(topic):
+        for group in entry.get("qualifier_groups") or []:
+            if isinstance(group, list):
+                clean_group = tuple(str(marker or "").strip().casefold() for marker in group if str(marker or "").strip())
+                if clean_group:
+                    marker_groups.append(clean_group)
+    if not any("mcc" in group or "credit card" in group for group in marker_groups):
+        if "credit card" in text or "creditcard" in compact or re.search(r"\bmcc\b", text):
+            marker_groups.append(("credit card", "creditcard", "mari credit card", "mcc", "mcc whitelisted", "sea group mcc"))
+    if anti_fraud_signal and re.search(r"\bbank\b", text) and not any("bank" in group for group in marker_groups):
         marker_groups.append(("bank", "maribank", "seabank"))
-    return marker_groups
+    return _dedupe_marker_groups(marker_groups)
+
+
+def _monthly_report_glossary_entries_for_topic(topic: Any) -> list[dict[str, Any]]:
+    glossary = _monthly_report_business_glossary()
+    entries = [entry for entry in (glossary.get("entries") or []) if isinstance(entry, dict)]
+    lowered = str(topic or "").casefold()
+    compact = _normalize_alias_token(lowered)
+    matches: list[dict[str, Any]] = []
+    for entry in entries:
+        trigger_terms = entry.get("trigger_terms") or []
+        aliases = [] if entry.get("context_only_terms") else (entry.get("aliases") or [])
+        terms = [str(term or "") for term in [entry.get("canonical"), *trigger_terms, *aliases] if str(term or "").strip()]
+        if any(_monthly_report_glossary_term_matches_text(lowered, compact, term) for term in terms):
+            matches.append(entry)
+    return matches
+
+
+def _monthly_report_glossary_aliases_for_topic(topic: Any) -> set[str]:
+    aliases: set[str] = set()
+    for entry in _monthly_report_glossary_entries_for_topic(topic):
+        if entry.get("context_only_terms"):
+            continue
+        for term in [entry.get("canonical"), *(entry.get("aliases") or [])]:
+            clean = str(term or "").strip()
+            if clean and clean.casefold() not in {"bank", "af"}:
+                aliases.add(clean.casefold())
+                aliases.add(_normalize_alias_token(clean))
+    return {alias for alias in aliases if alias}
+
+
+def _monthly_report_glossary_term_matches_text(lowered_text: str, compact_text: str, term: str) -> bool:
+    clean = str(term or "").strip().casefold()
+    if not clean:
+        return False
+    if _normalize_alias_token(clean) in {"af", "cr", "cc"}:
+        return bool(re.search(rf"\b{re.escape(clean)}\b", lowered_text))
+    if clean in {"mcc", "ph", "sg", "id"}:
+        return bool(re.search(rf"\b{re.escape(clean)}\b", lowered_text))
+    compact = _normalize_alias_token(clean)
+    return clean in lowered_text or bool(len(compact) >= 4 and compact in compact_text)
+
+
+def _dedupe_marker_groups(marker_groups: list[tuple[str, ...]]) -> list[tuple[str, ...]]:
+    seen: set[tuple[str, ...]] = set()
+    deduped: list[tuple[str, ...]] = []
+    for group in marker_groups:
+        clean_group = tuple(str(marker or "").strip().casefold() for marker in group if str(marker or "").strip())
+        if not clean_group or clean_group in seen:
+            continue
+        seen.add(clean_group)
+        deduped.append(clean_group)
+    return deduped
 
 
 def _monthly_report_text_matches_qualifier_marker_groups(text: str, marker_groups: list[tuple[str, ...]]) -> bool:
@@ -2706,29 +2967,45 @@ def _monthly_report_text_matches_qualifier_marker(lowered_text: str, compact_tex
     if normalized_marker == "mcc":
         if not re.search(r"\bmcc\b", lowered_text):
             return False
-        if "merchant category" in lowered_text or "merchant-category" in lowered_text:
+        context = _monthly_report_glossary_context_for_marker("mcc")
+        if any(term in lowered_text for term in context.get("reject_context_any", [])):
             return False
-        return any(
-            term in lowered_text
-            for term in (
-                "mari",
-                "maribank",
-                "credit card",
-                "card launch",
-                "employee",
-                "whitelist",
-                "whitelisted",
-                "live testing",
-                "public launch",
-                "sea group",
-            )
-        )
+        return any(term in lowered_text for term in context.get("requires_context_any", []))
     if normalized_marker == "bank":
         return bool(re.search(r"\bbank\b", lowered_text))
     if normalized_marker == "cc":
         return bool(re.search(r"\bcc\b", lowered_text))
     compact_marker = _normalize_alias_token(normalized_marker)
     return normalized_marker in lowered_text or bool(compact_marker and compact_marker in compact_text)
+
+
+def _monthly_report_glossary_context_for_marker(marker: str) -> dict[str, list[str]]:
+    clean_marker = str(marker or "").strip().casefold()
+    requires: list[str] = []
+    rejects: list[str] = []
+    for entry in (_monthly_report_business_glossary().get("entries") or []):
+        if not isinstance(entry, dict):
+            continue
+        terms = [
+            str(term or "").casefold()
+            for term in [
+                entry.get("canonical"),
+                *(entry.get("trigger_terms") or []),
+                *(entry.get("aliases") or []),
+            ]
+            if str(term or "").strip()
+        ]
+        if clean_marker not in {_normalize_alias_token(term) for term in terms} and clean_marker not in terms:
+            continue
+        requires.extend(str(term or "").casefold() for term in (entry.get("requires_context_any") or []) if str(term or "").strip())
+        rejects.extend(str(term or "").casefold() for term in (entry.get("reject_context_any") or []) if str(term or "").strip())
+    if clean_marker == "mcc" and not requires:
+        requires.extend(["mari", "maribank", "credit card", "card launch", "employee", "whitelist", "whitelisted", "live testing", "public launch", "sea group"])
+        rejects.extend(["merchant category", "merchant-category"])
+    return {
+        "requires_context_any": _dedupe_preserve_order(requires),
+        "reject_context_any": _dedupe_preserve_order(rejects),
+    }
 
 
 def _prefer_monthly_report_texts_by_qualifier_marker_groups(items: list[str], marker_groups: list[tuple[str, ...]]) -> list[str]:
@@ -3172,6 +3449,7 @@ def _highlight_topic_aliases(topic: Any) -> set[str]:
         if _is_useful_alias_token(token):
             aliases.add(token)
     aliases.update(_highlight_topic_phrase_aliases(tokens))
+    aliases.update(_monthly_report_glossary_aliases_for_topic(topic))
     return {alias for alias in aliases if alias}
 
 
@@ -3411,6 +3689,11 @@ def _matched_conversation_context_lines_for_project(text: str, aliases: set[str]
         conversation_lines = raw_lines[start:end]
         if not any(_text_matches_aliases(line.strip(), aliases) for line in conversation_lines if line.strip()):
             continue
+        clean_header = str(_header or "").strip()
+        if clean_header:
+            matches.append(clean_header[:800])
+            if len(matches) >= limit:
+                return matches
         for line in conversation_lines:
             clean = line.strip()
             if not clean or len(clean) < 8 or clean.startswith("==="):

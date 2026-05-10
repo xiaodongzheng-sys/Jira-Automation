@@ -56,6 +56,8 @@
   const monthlyReportProgress = root.querySelector('[data-monthly-report-progress]');
   const monthlyReportProgressFill = root.querySelector('[data-monthly-report-progress-fill]');
   const monthlyReportProgressMessage = root.querySelector('[data-monthly-report-progress-message]');
+  const monthlyReportEvidenceDebug = root.querySelector('[data-monthly-report-evidence-debug]');
+  const monthlyReportEvidenceDebugBody = root.querySelector('[data-monthly-report-evidence-debug-body]');
   const monthlyReportTemplateForm = root.querySelector('[data-monthly-report-template-form]');
   const monthlyReportTemplate = root.querySelector('[data-monthly-report-template]');
   const monthlyReportTemplateStatus = root.querySelector('[data-monthly-report-template-status]');
@@ -203,6 +205,7 @@
         subject: String(payload?.subject || monthlyReportSubject || 'Monthly Report'),
         highlight_topics: Array.isArray(payload?.highlight_topics) ? payload.highlight_topics : readMonthlyReportTopics({ strict: false }),
         highlight_topic_sources: Array.isArray(payload?.highlight_topic_sources) ? payload.highlight_topic_sources : readMonthlyReportTopicSources({ strict: false }),
+        evidence_debug: Array.isArray(payload?.evidence_debug) ? payload.evidence_debug : [],
         period_start: String(payload?.period_start || monthlyReportPeriodStart?.value || ''),
         period_end: String(payload?.period_end || monthlyReportPeriodEnd?.value || ''),
         saved_at: payload?.saved_at || new Date().toISOString(),
@@ -1337,6 +1340,53 @@
     }
   };
 
+  const renderMonthlyReportEvidenceDebug = (items) => {
+    if (!monthlyReportEvidenceDebug || !monthlyReportEvidenceDebugBody) return;
+    const rows = Array.isArray(items) ? items.filter((item) => item && typeof item === 'object') : [];
+    monthlyReportEvidenceDebug.hidden = rows.length === 0;
+    if (!rows.length) {
+      monthlyReportEvidenceDebugBody.innerHTML = '';
+      return;
+    }
+    monthlyReportEvidenceDebugBody.innerHTML = rows.map((item) => {
+      const counts = item.source_counts || {};
+      const groups = Array.isArray(item.qualifier_marker_groups) ? item.qualifier_marker_groups : [];
+      const aliases = Array.isArray(item.alias_sample) ? item.alias_sample.slice(0, 12) : [];
+      const conversations = Array.isArray(item.seatalk_conversation_labels) ? item.seatalk_conversation_labels : [];
+      const gaps = Array.isArray(item.gaps) ? item.gaps : [];
+      const glossary = Array.isArray(item.glossary_matches) ? item.glossary_matches : [];
+      const countText = [
+        `SeaTalk ${Number(counts.seatalk || 0)}`,
+        `Gmail ${Number(counts.gmail || 0)}`,
+        `Sheet ${Number(counts.google_sheet || 0)}`,
+        `Projects ${Number(counts.project || 0)}`,
+        `PRD ${Number(counts.prd || 0)}`,
+      ].join(' · ');
+      const groupText = groups.length ? groups.map((group) => (Array.isArray(group) ? group.join(' / ') : String(group || ''))).join(' | ') : '-';
+      const glossaryText = glossary.length
+        ? glossary.map((entry) => [entry.domain, entry.canonical || entry.id].filter(Boolean).join(': ')).join(' | ')
+        : '-';
+      return `
+        <article class="team-dashboard-monthly-report-debug-card">
+          <div class="team-dashboard-monthly-report-debug-head">
+            <strong>${escapeHtml(item.topic || 'Highlight')}</strong>
+            <span>${escapeHtml(String(item.confidence || 'none'))}</span>
+          </div>
+          <dl>
+            <div><dt>Intent</dt><dd>${escapeHtml(item.topic_intent || '-')}</dd></div>
+            <div><dt>Sources</dt><dd>${escapeHtml(countText)}</dd></div>
+            <div><dt>SeaTalk Matches</dt><dd>${escapeHtml(`${Number(item.seatalk_raw_match_count || 0)} raw / ${Number(item.seatalk_filtered_match_count || 0)} filtered / ${Number(item.seatalk_compact_count || 0)} shown`)}</dd></div>
+            <div><dt>Qualifiers</dt><dd>${escapeHtml(groupText)}</dd></div>
+            <div><dt>Glossary</dt><dd>${escapeHtml(glossaryText)}</dd></div>
+            <div><dt>Groups</dt><dd>${escapeHtml(conversations.join(' | ') || '-')}</dd></div>
+            <div><dt>Aliases</dt><dd>${escapeHtml(aliases.join(' | ') || '-')}</dd></div>
+            <div><dt>Gaps</dt><dd>${escapeHtml(gaps.join(' | ') || '-')}</dd></div>
+          </dl>
+        </article>
+      `;
+    }).join('');
+  };
+
   const setMonthlyReportProgressStep = (activeStep, percent, message) => {
     if (!monthlyReportProgress) return;
     monthlyReportProgress.hidden = false;
@@ -1512,6 +1562,7 @@
       applyMonthlyReportInputs(cached);
       monthlyReportDraft.value = cached.draft_markdown || '';
       updateMonthlyReportPreview();
+      renderMonthlyReportEvidenceDebug(cached.evidence_debug || []);
       setStatus(monthlyReportStatus, 'Restored the last Monthly Report draft from this browser.', 'neutral');
     }
     try {
@@ -1531,12 +1582,14 @@
         subject: monthlyReportSubject,
         highlight_topics: payload.highlight_topics || [],
         highlight_topic_sources: payload.highlight_topic_sources || payload.generation_summary?.highlight_topic_sources || [],
+        evidence_debug: payload.evidence_debug || payload.highlight_evidence_debug || [],
         period_start: payload.period_start || '',
         period_end: payload.period_end || '',
         saved_at: payload.generated_at ? new Date(Number(payload.generated_at) * 1000).toISOString() : undefined,
         source: 'server',
       });
       updateMonthlyReportPreview();
+      renderMonthlyReportEvidenceDebug(payload.evidence_debug || payload.highlight_evidence_debug || []);
       setStatus(monthlyReportStatus, 'Restored the latest generated Monthly Report draft.', 'neutral');
     } catch (error) {
       // Missing historical drafts should not block the Team Dashboard.
@@ -1580,11 +1633,13 @@
         subject: monthlyReportSubject,
         highlight_topics: payload.highlight_topics || requestPayload.highlight_topics,
         highlight_topic_sources: payload.highlight_topic_sources || payload.generation_summary?.highlight_topic_sources || requestPayload.highlight_topic_sources,
+        evidence_debug: payload.evidence_debug || payload.highlight_evidence_debug || [],
         period_start: payload.generation_summary?.period_start || requestPayload.period_start,
         period_end: payload.generation_summary?.period_end || requestPayload.period_end,
         source: 'generate',
       });
       updateMonthlyReportPreview();
+      renderMonthlyReportEvidenceDebug(payload.evidence_debug || payload.highlight_evidence_debug || []);
       const evidence = payload.evidence_summary || {};
       const projectCount = Number(evidence.key_project_count || 0);
       const ticketCount = Number(evidence.jira_ticket_count || 0);
