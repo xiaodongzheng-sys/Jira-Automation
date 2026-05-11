@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.meeting_recorder import (
     CALENDAR_READONLY_SCOPE,
+    GoogleCalendarMeetingService,
     MeetingProcessingService,
     MeetingRecorderConfig,
     MeetingRecorderRuntime,
@@ -97,6 +98,72 @@ class MeetingRecorderParsingTests(unittest.TestCase):
         }
 
         self.assertIsNone(normalize_calendar_event(event))
+
+    def test_google_calendar_meeting_service_normalizes_events_and_bounds_query(self):
+        class FakeEvents:
+            def __init__(self):
+                self.kwargs = None
+
+            def list(self, **kwargs):
+                self.kwargs = kwargs
+                return self
+
+            def execute(self):
+                return {
+                    "items": [
+                        {
+                            "id": "event-1",
+                            "summary": "Meet",
+                            "start": {"dateTime": "2026-05-04T09:00:00+08:00"},
+                            "end": {"dateTime": "2026-05-04T09:30:00+08:00"},
+                            "hangoutLink": "https://meet.google.com/abc-defg-hij",
+                        },
+                        {"id": "office", "eventType": "workingLocation"},
+                        "not-a-dict",
+                    ]
+                }
+
+        class FakeCalendar:
+            def __init__(self):
+                self.events_resource = FakeEvents()
+
+            def events(self):
+                return self.events_resource
+
+        calendar = FakeCalendar()
+        service = GoogleCalendarMeetingService(credentials=object(), calendar_service=calendar)
+        meetings = service.upcoming_meetings(
+            now=datetime(2026, 5, 4, 9, 0, 0),
+            days=30,
+            max_results=99,
+        )
+
+        self.assertEqual(len(meetings), 1)
+        self.assertEqual(meetings[0]["platform"], "google_meet")
+        self.assertEqual(calendar.events_resource.kwargs["maxResults"], 50)
+        self.assertIn("+00:00", calendar.events_resource.kwargs["timeMin"])
+
+    def test_meeting_record_store_rejects_missing_invalid_and_deleted_records(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = MeetingRecordStore(Path(temp_dir))
+            with self.assertRaisesRegex(ToolError, "not found"):
+                store.get_record("missing")
+            with self.assertRaisesRegex(ToolError, "id is missing"):
+                store.save_record({"status": "recorded"})
+            with self.assertRaisesRegex(ToolError, "Invalid meeting record status"):
+                store.save_record({"record_id": "bad", "status": "unknown"})
+
+            unreadable = store.metadata_path("bad-json")
+            unreadable.parent.mkdir(parents=True, exist_ok=True)
+            unreadable.write_text("{bad", encoding="utf-8")
+            with self.assertRaisesRegex(ToolError, "unreadable"):
+                store.get_record("bad-json")
+
+            valid = store.create_record(owner_email="owner@npt.sg", title="Keep", platform="zoom", meeting_link="")
+            deleted = store.create_record(owner_email="owner@npt.sg", title="Delete", platform="zoom", meeting_link="")
+            deleted["status"] = "deleted"
+            store.save_record(deleted)
+            self.assertEqual([item["record_id"] for item in store.list_records(owner_email="owner@npt.sg")], [valid["record_id"]])
 
     def test_parse_avfoundation_devices_and_audio_capture_modes(self):
         output = """
@@ -2344,6 +2411,45 @@ class MeetingRecorderRouteTests(unittest.TestCase):
             record_id="meeting-1",
             owner_email="xiaodong.zheng@npt.sg",
             recipient="pm@npt.sg",
+        )
+
+    def test_meeting_translation_routes_cover_local_agent_stream_and_error_mapping(self):
+        fake_stream = FakeStreamingResponse(
+            status_code=200,
+            headers={"Content-Type": "text/event-stream", "X-Upstream": "local"},
+            chunks=[b"data: ready\n\n"],
+        )
+        fake_client = Mock()
+        fake_client.meeting_translation_start.side_effect = [
+            {"session": {"session_id": "session-1", "status": "running", "target_language": "en"}},
+            ToolError("local-agent unavailable"),
+        ]
+        fake_client.meeting_translation_stop.side_effect = [
+            {"session": {"session_id": "session-1", "status": "stopped"}},
+            ToolError("missing session"),
+        ]
+        fake_client.meeting_translation_events_response.side_effect = [fake_stream, ToolError("local-agent unavailable")]
+
+        with patch("bpmis_jira_tool.web._local_agent_meeting_recorder_enabled", return_value=True):
+            with patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client):
+                with self.app.test_client() as client:
+                    self._login(client, email="xiaodong.zheng@npt.sg")
+                    started = client.post("/api/meeting-translation/start", json={"target_language": "en"})
+                    start_error = client.post("/api/meeting-translation/start", json={"target_language": "en"})
+                    stopped = client.post("/api/meeting-translation/sessions/session-1/stop")
+                    stop_error = client.post("/api/meeting-translation/sessions/session-1/stop")
+                    events = client.get("/api/meeting-translation/sessions/session-1/events")
+                    events_error = client.get("/api/meeting-translation/sessions/session-1/events")
+
+        self.assertEqual(started.status_code, 200)
+        self.assertEqual(start_error.status_code, 502)
+        self.assertEqual(stopped.status_code, 200)
+        self.assertEqual(stop_error.status_code, 404)
+        self.assertEqual(events.status_code, 200)
+        self.assertEqual(events.data, b"data: ready\n\n")
+        self.assertEqual(events_error.status_code, 502)
+        fake_client.meeting_translation_start.assert_any_call(
+            {"owner_email": "xiaodong.zheng@npt.sg", "target_language": "en"}
         )
 
     def test_local_recorder_routes_cover_calendar_and_asset_guards(self):

@@ -810,6 +810,10 @@ class WorkMemoryRouteTests(unittest.TestCase):
         app, store, _local_client = self._make_route_app(local_agent_enabled=False)
 
         with app.test_client() as client:
+            with patch("bpmis_jira_tool.web_work_memory_routes.render_template", return_value="memory-page"):
+                page = client.get("/work-memory")
+            with client.session_transaction() as session:
+                session["google_credentials"] = {"token": "x"}
             responses = [
                 client.get("/api/work-memory/health"),
                 client.get("/api/work-memory/recent?q=approval&limit=2&scope=team&source_type=gmail&item_type=decision"),
@@ -828,11 +832,15 @@ class WorkMemoryRouteTests(unittest.TestCase):
                 client.post("/api/superagent/eval?suite_id=gold", json={"cases": [{"query": "q"}], "limit": 1}),
                 client.post("/api/superagent/quality-gate?suite_id=gold", json={"limit": 1, "min_cases": 1}),
                 client.get("/api/superagent/audit?limit=2"),
+                client.post("/api/work-memory/backfill-gmail", json={"days": 30, "max_messages": 10}),
             ]
+            bad_gmail_backfill = client.post("/api/work-memory/backfill-gmail", json={"days": "bad"})
             store.feedback_error = True
             feedback_error = client.post("/api/work-memory/feedback", json={"item_id": "item-1", "action": "bad"})
 
+        self.assertEqual(page.status_code, 200)
         self.assertTrue(all(response.status_code in {200, 202} for response in responses))
+        self.assertEqual(bad_gmail_backfill.status_code, 400)
         self.assertEqual(feedback_error.status_code, 400)
         self.assertEqual(feedback_error.get_json()["status"], "error")
 
