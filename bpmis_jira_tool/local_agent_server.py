@@ -24,7 +24,7 @@ from bpmis_jira_tool.bpmis import BPMISDirectApiClient
 from bpmis_jira_tool.bpmis_projects import BPMISProjectStore
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.daily_brief_archive import DailyBriefArchiveStore, daily_brief_archive_path, daily_brief_pdf_bytes
-from bpmis_jira_tool.errors import ToolError
+from bpmis_jira_tool.errors import ConfigError, ToolError
 from bpmis_jira_tool.job_store import JobStore
 from bpmis_jira_tool.local_agent_protocol import NONCE_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER, verify_signature
 from bpmis_jira_tool.meeting_recorder import (
@@ -114,9 +114,20 @@ def create_local_agent_app() -> Flask:
     app.config["MEETING_RECORDER_JOB_STORE"] = JobStore(_data_root(settings) / "run" / "meeting_recorder_jobs.json")
     meeting_store = MeetingRecordStore(_data_root(settings) / "meeting_records")
     app.config["MEETING_RECORD_STORE"] = meeting_store
+
+    def _queue_scheduled_meeting_auto_process(record: dict[str, Any]) -> dict[str, Any]:
+        with app.app_context():
+            return _queue_meeting_recorder_process_job(
+                app=app,
+                record_id=str(record.get("record_id") or ""),
+                owner_email=str(record.get("owner_email") or ""),
+                send_email_on_complete=True,
+            )
+
     app.config["MEETING_RECORDER_RUNTIME"] = MeetingRecorderRuntime(
         store=meeting_store,
         config=_meeting_recorder_config(settings),
+        scheduled_auto_stop_callback=_queue_scheduled_meeting_auto_process,
     )
     app.config["MEETING_TRANSLATION_RUNTIME"] = MeetingTranslationRuntime(
         root_dir=_data_root(settings) / "run" / "meeting_translation",

@@ -384,6 +384,59 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertEqual(updated["scheduled_auto_stop"]["stopped_at"], "2026-05-04T01:40:00+00:00")
         terminate.assert_called_once()
 
+    def test_scheduled_auto_stop_callback_queues_post_stop_work(self):
+        queued_records = []
+
+        def queue_after_stop(record):
+            queued_records.append(dict(record))
+            return {"state": "queued", "job_id": "job-1"}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(
+                store=store,
+                config=MeetingRecorderConfig(),
+                scheduled_auto_stop_callback=queue_after_stop,
+            )
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Calendar review",
+                platform="google_meet",
+                meeting_link="https://meet.google.com/abc-defg-hij",
+                calendar_event_id="calendar-1",
+                scheduled_start="2026-05-04T09:00:00+08:00",
+                scheduled_end="2026-05-04T09:30:00+08:00",
+            )
+            record["status"] = "recording"
+            record["recording_started_at"] = "2026-05-04T01:00:00+00:00"
+            record["scheduled_auto_stop"] = {
+                "status": "scheduled",
+                "mode": "scheduled_end_plus_grace",
+                "grace_seconds": 600,
+                "scheduled_for": "2026-05-04T01:40:00+00:00",
+            }
+            store.save_record(record)
+
+            with patch("bpmis_jira_tool.meeting_recorder._utc_now", return_value="2026-05-04T01:40:00+00:00"), patch.object(
+                runtime,
+                "_terminate_persisted_recorder_process",
+            ):
+                runtime._scheduled_auto_stop_callback(
+                    record_id=record["record_id"],
+                    owner_email="owner@npt.sg",
+                    scheduled_for="2026-05-04T01:40:00+00:00",
+                )
+
+            updated = store.get_record(record["record_id"])
+
+        self.assertEqual(len(queued_records), 1)
+        self.assertEqual(queued_records[0]["status"], "recorded")
+        self.assertEqual(queued_records[0]["recording_stop_reason"], "scheduled_auto_stop")
+        self.assertEqual(updated["scheduled_auto_stop"]["status"], "completed")
+        self.assertEqual(updated["scheduled_auto_stop"]["process_queue_status"], "queued")
+        self.assertEqual(updated["scheduled_auto_stop"]["process_job_id"], "job-1")
+
     def test_manual_stop_cancels_scheduled_auto_stop(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2112,6 +2165,70 @@ class MeetingRecorderRouteTests(unittest.TestCase):
                 release_processing.set()
                 completed = self._wait_for_process_job(client, payload["job_id"])
 
+        self.assertEqual(completed["state"], "completed")
+        self.assertEqual(completed["results"][0]["email"]["status"], "sent")
+        fake_processing.process_recording.assert_called_once_with(
+            record_id=record["record_id"],
+            owner_email="xiaodong.zheng@npt.sg",
+        )
+        fake_processing.send_minutes_email.assert_called_once_with(
+            record_id=record["record_id"],
+            owner_email="xiaodong.zheng@npt.sg",
+            recipient="xiaodong.zheng@npt.sg",
+        )
+
+    def test_scheduled_auto_stop_queues_processing_and_email(self):
+        store = self.app.config["MEETING_RECORD_STORE"]
+        record = store.create_record(
+            owner_email="xiaodong.zheng@npt.sg",
+            title="Scheduled Auto Stop",
+            platform="google_meet",
+            meeting_link="https://meet.google.com/abc-defg-hij",
+            calendar_event_id="event-1",
+            scheduled_start="2026-05-04T09:00:00+08:00",
+            scheduled_end="2026-05-04T09:30:00+08:00",
+        )
+        record["status"] = "recording"
+        record["recording_started_at"] = "2026-05-04T01:00:00+00:00"
+        record["scheduled_auto_stop"] = {
+            "status": "scheduled",
+            "mode": "scheduled_end_plus_grace",
+            "grace_seconds": 600,
+            "scheduled_for": "2026-05-04T01:40:00+00:00",
+        }
+        store.save_record(record)
+        fake_processing = Mock()
+        fake_processing.process_recording.return_value = {
+            "record_id": record["record_id"],
+            "title": "Scheduled Auto Stop",
+            "platform": "google_meet",
+            "status": "completed",
+        }
+        fake_processing.send_minutes_email.return_value = {
+            "status": "sent",
+            "recipient": "xiaodong.zheng@npt.sg",
+            "message_id": "msg-1",
+        }
+
+        with self.app.test_client() as client:
+            self._login(client, email="xiaodong.zheng@npt.sg")
+            with self.app.app_context(), patch(
+                "bpmis_jira_tool.web._build_meeting_processing_service",
+                return_value=fake_processing,
+            ), patch.object(
+                self.app.config["MEETING_RECORDER_RUNTIME"],
+                "_terminate_persisted_recorder_process",
+            ):
+                self.app.config["MEETING_RECORDER_RUNTIME"]._scheduled_auto_stop_callback(
+                    record_id=record["record_id"],
+                    owner_email="xiaodong.zheng@npt.sg",
+                    scheduled_for="2026-05-04T01:40:00+00:00",
+                )
+                updated = store.get_record(record["record_id"])
+                completed = self._wait_for_process_job(client, updated["scheduled_auto_stop"]["process_job_id"])
+
+        self.assertEqual(updated["recording_stop_reason"], "scheduled_auto_stop")
+        self.assertEqual(updated["scheduled_auto_stop"]["process_queue_status"], "queued")
         self.assertEqual(completed["state"], "completed")
         self.assertEqual(completed["results"][0]["email"]["status"], "sent")
         fake_processing.process_recording.assert_called_once_with(

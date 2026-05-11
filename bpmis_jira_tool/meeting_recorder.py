@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import google_auth_httplib2
@@ -330,9 +330,16 @@ class MeetingRecordStore:
 
 
 class MeetingRecorderRuntime:
-    def __init__(self, *, store: MeetingRecordStore, config: MeetingRecorderConfig) -> None:
+    def __init__(
+        self,
+        *,
+        store: MeetingRecordStore,
+        config: MeetingRecorderConfig,
+        scheduled_auto_stop_callback: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+    ) -> None:
         self.store = store
         self.config = config
+        self._scheduled_auto_stop_callback_after_stop = scheduled_auto_stop_callback
         self._processes: dict[str, Any] = {}
         self._auto_stop_timers: dict[str, threading.Timer] = {}
         self._lock = threading.Lock()
@@ -668,7 +675,8 @@ class MeetingRecorderRuntime:
             auto_stop.update({"status": "stopping", "triggered_at": _utc_now(), "scheduled_for": scheduled_for})
             record["scheduled_auto_stop"] = auto_stop
             self.store.save_record(record)
-            self.stop_recording(record_id=record_id, owner_email=owner_email, stop_reason="scheduled_auto_stop")
+            stopped_record = self.stop_recording(record_id=record_id, owner_email=owner_email, stop_reason="scheduled_auto_stop")
+            self._run_scheduled_auto_stop_callback_after_stop(stopped_record)
         except Exception as error:  # noqa: BLE001
             try:
                 record = self.store.get_record(record_id)
@@ -685,6 +693,35 @@ class MeetingRecorderRuntime:
                 self.store.save_record(record)
             except Exception:
                 return
+
+    def _run_scheduled_auto_stop_callback_after_stop(self, record: dict[str, Any]) -> None:
+        callback = self._scheduled_auto_stop_callback_after_stop
+        if callback is None:
+            return
+        auto_stop = dict(record.get("scheduled_auto_stop") or {})
+        try:
+            payload = callback(record) or {}
+        except Exception as error:  # noqa: BLE001
+            auto_stop.update({"process_queue_status": "failed", "process_queue_error": str(error)[:500]})
+        else:
+            if payload.get("auto_process_error"):
+                auto_stop.update(
+                    {
+                        "process_queue_status": "failed",
+                        "process_queue_error": str(payload.get("auto_process_error") or "")[:500],
+                    }
+                )
+            elif payload.get("job_id") or payload.get("state"):
+                auto_stop.update(
+                    {
+                        "process_queue_status": str(payload.get("state") or "queued"),
+                        "process_job_id": str(payload.get("job_id") or ""),
+                    }
+                )
+            else:
+                auto_stop.update({"process_queue_status": "skipped"})
+        record["scheduled_auto_stop"] = auto_stop
+        self.store.save_record(record)
 
     def check_recording_signal(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
         record = self.store.get_record(record_id)

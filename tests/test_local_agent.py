@@ -611,6 +611,68 @@ class LocalAgentServerTests(unittest.TestCase):
             recipient="owner@npt.sg",
         )
 
+    def test_scheduled_auto_stop_queues_local_processing_and_email(self):
+        store = self.app.config["MEETING_RECORD_STORE"]
+        record = store.create_record(
+            owner_email="owner@npt.sg",
+            title="Scheduled Local Auto Stop",
+            platform="google_meet",
+            meeting_link="https://meet.google.com/abc-defg-hij",
+            calendar_event_id="event-1",
+            scheduled_start="2026-05-04T09:00:00+08:00",
+            scheduled_end="2026-05-04T09:30:00+08:00",
+        )
+        record["status"] = "recording"
+        record["recording_started_at"] = "2026-05-04T01:00:00+00:00"
+        record["scheduled_auto_stop"] = {
+            "status": "scheduled",
+            "mode": "scheduled_end_plus_grace",
+            "grace_seconds": 600,
+            "scheduled_for": "2026-05-04T01:40:00+00:00",
+        }
+        store.save_record(record)
+        fake_processing = Mock()
+        fake_processing.process_recording.return_value = {
+            "record_id": record["record_id"],
+            "title": "Scheduled Local Auto Stop",
+            "platform": "google_meet",
+            "status": "completed",
+        }
+        fake_processing.send_minutes_email.return_value = {
+            "status": "sent",
+            "recipient": "owner@npt.sg",
+            "message_id": "msg-1",
+        }
+
+        with self.app.app_context(), patch(
+            "bpmis_jira_tool.local_agent_server._build_meeting_processing_service",
+            return_value=fake_processing,
+        ), patch.object(
+            self.app.config["MEETING_RECORDER_RUNTIME"],
+            "_terminate_persisted_recorder_process",
+        ):
+            self.app.config["MEETING_RECORDER_RUNTIME"]._scheduled_auto_stop_callback(
+                record_id=record["record_id"],
+                owner_email="owner@npt.sg",
+                scheduled_for="2026-05-04T01:40:00+00:00",
+            )
+            updated = store.get_record(record["record_id"])
+            completed = self._wait_for_meeting_process_job(updated["scheduled_auto_stop"]["process_job_id"])
+
+        self.assertEqual(updated["recording_stop_reason"], "scheduled_auto_stop")
+        self.assertEqual(updated["scheduled_auto_stop"]["process_queue_status"], "queued")
+        self.assertEqual(completed["state"], "completed")
+        self.assertEqual(completed["results"][0]["email"]["status"], "sent")
+        fake_processing.process_recording.assert_called_once_with(
+            record_id=record["record_id"],
+            owner_email="owner@npt.sg",
+        )
+        fake_processing.send_minutes_email.assert_called_once_with(
+            record_id=record["record_id"],
+            owner_email="owner@npt.sg",
+            recipient="owner@npt.sg",
+        )
+
     def test_signed_meeting_recorder_process_job_is_owner_scoped(self):
         store = self.app.config["MEETING_RECORD_STORE"]
         record = store.create_record(

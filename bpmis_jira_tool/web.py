@@ -633,9 +633,19 @@ def create_app() -> Flask:
     app.config["SEATALK_DAILY_CACHE_DIR"] = data_root / "seatalk" / "cache"
     meeting_store = MeetingRecordStore(data_root / "meeting_records")
     app.config["MEETING_RECORD_STORE"] = meeting_store
+
+    def _queue_scheduled_meeting_auto_process(record: dict[str, Any]) -> dict[str, Any]:
+        with app.app_context():
+            return _meeting_recorder_auto_process_payload(
+                settings=settings,
+                record_id=str(record.get("record_id") or ""),
+                owner_email=str(record.get("owner_email") or ""),
+            )
+
     app.config["MEETING_RECORDER_RUNTIME"] = MeetingRecorderRuntime(
         store=meeting_store,
         config=_meeting_recorder_config(settings),
+        scheduled_auto_stop_callback=_queue_scheduled_meeting_auto_process,
     )
     app.config["MEETING_TRANSLATION_RUNTIME"] = MeetingTranslationRuntime(
         root_dir=data_root / "run" / "meeting_translation",
