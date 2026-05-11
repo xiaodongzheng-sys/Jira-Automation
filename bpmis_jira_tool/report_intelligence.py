@@ -219,12 +219,24 @@ def filter_text_by_noise(text: str, *, config: Any, source: str) -> str:
     if not clean_terms:
         return str(text or "")
     kept = []
+    skip_seatalk_block = False
     for line in str(text or "").splitlines():
         lowered = line.casefold()
+        if source == "seatalk" and _is_seatalk_conversation_header(line):
+            skip_seatalk_block = any(term in lowered for term in clean_terms)
+            if skip_seatalk_block:
+                continue
+        if skip_seatalk_block:
+            continue
         if any(term in lowered for term in clean_terms):
             continue
         kept.append(line)
     return "\n".join(kept)
+
+
+def _is_seatalk_conversation_header(line: str) -> bool:
+    text = str(line or "").strip()
+    return text.startswith("===") and text.endswith("===")
 
 
 def is_gmail_noise(headers: dict[str, str], *, config: Any) -> bool:
