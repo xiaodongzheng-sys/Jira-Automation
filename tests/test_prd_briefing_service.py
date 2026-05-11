@@ -6,13 +6,16 @@ from unittest.mock import patch
 import json
 
 from bpmis_jira_tool.config import Settings
+from bpmis_jira_tool.errors import ToolError
 
 from prd_briefing.confluence import ConfluenceConnector, IngestedConfluencePage, ParsedSection
 from prd_briefing.reviewer import (
     PRD_BRIEFING_REVIEW_CACHE_KEY,
     PRD_REVIEW_PROMPT_VERSION,
+    PRD_SUMMARY_PROMPT_VERSION,
     PRD_URL_SUMMARY_CACHE_KEY,
     PRDBriefingReviewRequest,
+    PRDReviewRequest,
     PRDReviewService,
     build_prd_review_prompt,
     build_prd_summary_prompt,
@@ -669,6 +672,71 @@ class PRDBriefingServiceTests(unittest.TestCase):
         )
         self.assertIsNone(stale)
 
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_prd_review_persists_generation_failure_and_validates_inputs(self, mock_generate):
+        mock_generate.side_effect = RuntimeError("model unavailable")
+        service = PRDReviewService(
+            store=self.store,
+            confluence=self.service.confluence,
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        with self.assertRaisesRegex(ToolError, "model unavailable"):
+            service.review(
+                PRDReviewRequest(
+                    owner_key=" anon:test ",
+                    jira_id=" AF-123 ",
+                    jira_link=" https://jira.example/browse/AF-123 ",
+                    prd_url=" https://example.atlassian.net/wiki/pages/123 ",
+                )
+            )
+
+        failed = self.store.get_prd_review_result(
+            owner_key="anon:test",
+            jira_id="AF-123",
+            prd_url=self.service.confluence.page.source_url,
+            prd_updated_at=self.service.confluence.page.updated_at,
+            prompt_version=PRD_REVIEW_PROMPT_VERSION,
+        )
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("model unavailable", failed["error"])
+
+        invalid_requests = [
+            PRDReviewRequest(owner_key="", jira_id="AF-123", jira_link="", prd_url="https://example.com"),
+            PRDReviewRequest(owner_key="anon:test", jira_id="", jira_link="", prd_url="https://example.com"),
+            PRDReviewRequest(owner_key="anon:test", jira_id="AF-123", jira_link="", prd_url="not-a-url"),
+            PRDBriefingReviewRequest(owner_key="", prd_url="https://example.com"),
+            PRDBriefingReviewRequest(owner_key="anon:test", prd_url="file:///tmp/prd.html"),
+        ]
+        for request_model in invalid_requests:
+            with self.assertRaises(ToolError):
+                if isinstance(request_model, PRDBriefingReviewRequest):
+                    service.review_url(request_model)
+                else:
+                    service.review(request_model)
+
+    def test_prd_review_rejects_pages_without_readable_sections(self):
+        empty_page = IngestedConfluencePage(
+            page_id="empty",
+            title="Empty PRD",
+            source_url="https://example.atlassian.net/wiki/pages/empty",
+            updated_at="2026-05-01T00:00:00Z",
+            language="en",
+            sections=[],
+        )
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeConnector(empty_page),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        with self.assertRaisesRegex(ToolError, "readable sections"):
+            service.review_url(PRDBriefingReviewRequest(owner_key="anon:test", prd_url=empty_page.source_url))
+        with self.assertRaisesRegex(ToolError, "readable sections"):
+            service.summarize_url(PRDBriefingReviewRequest(owner_key="anon:test", prd_url=empty_page.source_url))
+
     @patch("prd_briefing.reviewer.generate_prd_summary_with_codex")
     def test_prd_url_summary_cache_varies_by_language_and_updated_at(self, mock_generate):
         mock_generate.return_value = {
@@ -721,6 +789,37 @@ class PRDBriefingServiceTests(unittest.TestCase):
             prompt_version=prd_summary_prompt_version("zh"),
         )
         self.assertIsNone(stale)
+
+    @patch("prd_briefing.reviewer.generate_prd_summary_with_codex")
+    def test_prd_summary_failure_is_saved_for_retry_context(self, mock_generate):
+        mock_generate.side_effect = RuntimeError("summary failed")
+        service = PRDReviewService(
+            store=self.store,
+            confluence=self.service.confluence,
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        with self.assertRaisesRegex(ToolError, "summary failed"):
+            service.summarize(
+                PRDReviewRequest(
+                    owner_key="anon:test",
+                    jira_id="AF-456",
+                    jira_link="",
+                    prd_url="https://example.atlassian.net/wiki/pages/123",
+                    force_refresh=True,
+                )
+            )
+
+        failed = self.store.get_prd_review_result(
+            owner_key="anon:test",
+            jira_id="AF-456",
+            prd_url=self.service.confluence.page.source_url,
+            prd_updated_at=self.service.confluence.page.updated_at,
+            prompt_version=PRD_SUMMARY_PROMPT_VERSION,
+        )
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("summary failed", failed["error"])
 
     def test_unsupported_question_is_declined(self):
         payload = self.service.create_session(

@@ -2273,6 +2273,121 @@ class MeetingRecorderRouteTests(unittest.TestCase):
             send_email_on_complete=True,
         )
 
+    def test_local_agent_recorder_routes_proxy_lifecycle_and_failures(self):
+        fake_client = Mock()
+        fake_client.meeting_recorder_start.return_value = {
+            "record": {"record_id": "meeting-1", "title": "Review", "status": "recording"}
+        }
+        fake_client.meeting_recorder_signal_check.return_value = {
+            "record": {"record_id": "meeting-1", "status": "recording", "audio_status": "ok"}
+        }
+        fake_client.meeting_recorder_process_start.return_value = {
+            "state": "queued",
+            "job_id": "job-1",
+            "record": {"record_id": "meeting-1", "status": "recorded"},
+        }
+        fake_client.meeting_recorder_process_job.return_value = {
+            "job_id": "job-1",
+            "state": "running",
+            "owner_email": "xiaodong.zheng@npt.sg",
+            "stage": "transcribe",
+            "message": "Transcribing",
+        }
+        fake_client.meeting_recorder_send_email.return_value = {
+            "email": {"status": "sent", "recipient": "pm@npt.sg"}
+        }
+        fake_client.meeting_recorder_record.return_value = {
+            "record": {"record_id": "meeting-1", "owner_email": "xiaodong.zheng@npt.sg"}
+        }
+        fake_client.meeting_recorder_delete.return_value = {"status": "ok"}
+        fake_client.meeting_recorder_diagnostics.side_effect = [ToolError("local-agent unavailable"), {"ffmpeg_configured": True}]
+
+        with patch("bpmis_jira_tool.web._local_agent_meeting_recorder_enabled", return_value=True):
+            with patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client):
+                with self.app.test_client() as client:
+                    self._login(client, email="xiaodong.zheng@npt.sg")
+                    diagnostics_failure = client.get("/api/meeting-recorder/diagnostics")
+                    diagnostics = client.get("/api/meeting-recorder/diagnostics")
+                    start = client.post(
+                        "/api/meeting-recorder/start",
+                        json={
+                            "title": "Review",
+                            "meetingLink": "https://meet.google.com/abc-defg-hij",
+                            "recordingMode": "",
+                            "transcriptLanguage": "english",
+                            "attendees": "not-a-list",
+                        },
+                    )
+                    signal = client.post("/api/meeting-recorder/records/meeting-1/signal-check")
+                    process = client.post("/api/meeting-recorder/records/meeting-1/process")
+                    job = client.get("/api/meeting-recorder/process-jobs/job-1")
+                    email = client.post("/api/meeting-recorder/records/meeting-1/send-email", json={"recipient": "pm@npt.sg"})
+                    record = client.get("/api/meeting-recorder/records/meeting-1")
+                    delete = client.delete("/api/meeting-recorder/records/meeting-1")
+
+        self.assertEqual(diagnostics_failure.status_code, 502)
+        self.assertEqual(diagnostics.status_code, 200)
+        self.assertEqual(start.status_code, 200)
+        self.assertEqual(signal.get_json()["record"]["audio_status"], "ok")
+        self.assertEqual(process.get_json()["job_id"], "job-1")
+        self.assertEqual(job.get_json()["state"], "running")
+        self.assertNotIn("owner_email", job.get_json())
+        self.assertEqual(email.get_json()["email"]["recipient"], "pm@npt.sg")
+        self.assertEqual(record.get_json()["record"]["record_id"], "meeting-1")
+        self.assertEqual(delete.get_json()["status"], "ok")
+        fake_client.meeting_recorder_start.assert_called_once()
+        start_payload = fake_client.meeting_recorder_start.call_args.args[0]
+        self.assertEqual(start_payload["transcript_language"], "en")
+        self.assertEqual(start_payload["recording_mode"], "audio_only")
+        self.assertEqual(start_payload["platform"], "google_meet")
+        fake_client.meeting_recorder_send_email.assert_called_once_with(
+            record_id="meeting-1",
+            owner_email="xiaodong.zheng@npt.sg",
+            recipient="pm@npt.sg",
+        )
+
+    def test_local_recorder_routes_cover_calendar_and_asset_guards(self):
+        with self.app.test_client() as client:
+            self._login(client, email="xiaodong.zheng@npt.sg", scopes=[])
+            missing_calendar = client.get("/api/meeting-recorder/calendar/upcoming")
+
+        store = self.app.config["MEETING_RECORD_STORE"]
+        record = store.create_record(
+            owner_email="xiaodong.zheng@npt.sg",
+            title="Active",
+            platform="zoom",
+            meeting_link="https://zoom.us/j/active",
+        )
+        record["status"] = "recording"
+        record["media"] = {"audio_path": f"{record['record_id']}/meeting.wav"}
+        store.save_record(record)
+        asset_dir = store.record_dir(record["record_id"])
+        asset_path = asset_dir / "meeting.wav"
+        asset_path.write_bytes(b"active-audio")
+        other_record = store.create_record(
+            owner_email="owner@npt.sg",
+            title="Other",
+            platform="zoom",
+            meeting_link="https://zoom.us/j/other",
+        )
+        other_asset = store.record_dir(other_record["record_id"]) / "meeting.wav"
+        other_asset.write_bytes(b"other-audio")
+
+        with self.app.test_client() as client:
+            self._login(client, email="xiaodong.zheng@npt.sg")
+            forbidden_owner = client.get(f"/api/meeting-recorder/records/{record['record_id']}")
+            active_download = client.get(f"/meeting-recorder/assets/{record['record_id']}/meeting.wav?download=1")
+            traversal = client.get(f"/meeting-recorder/assets/{record['record_id']}/../secret.txt")
+            missing_asset = client.get(f"/meeting-recorder/assets/{record['record_id']}/missing.wav")
+            wrong_owner_asset = client.get(f"/meeting-recorder/assets/{other_record['record_id']}/meeting.wav")
+
+        self.assertEqual(missing_calendar.status_code, 400)
+        self.assertEqual(forbidden_owner.status_code, 200)
+        self.assertEqual(active_download.status_code, 409)
+        self.assertEqual(traversal.status_code, 400)
+        self.assertEqual(missing_asset.status_code, 404)
+        self.assertEqual(wrong_owner_asset.status_code, 403)
+
     def test_auto_process_email_failure_does_not_fail_completed_minutes_job(self):
         record = self.app.config["MEETING_RECORD_STORE"].create_record(
             owner_email="xiaodong.zheng@npt.sg",

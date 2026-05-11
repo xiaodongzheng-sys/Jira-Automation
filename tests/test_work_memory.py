@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from flask import Flask, jsonify
+
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.work_memory import (
     VISIBILITY_PRIVATE,
@@ -20,6 +22,7 @@ from bpmis_jira_tool.work_memory import (
     team_dashboard_memory_items,
 )
 from bpmis_jira_tool.web import create_app, _backfill_gmail_work_memory, _build_google_drive_service, _is_sent_monthly_report_subject
+from bpmis_jira_tool.web_work_memory_routes import register_work_memory_routes
 
 
 class WorkMemoryStoreTests(unittest.TestCase):
@@ -684,6 +687,177 @@ class WorkMemoryStoreTests(unittest.TestCase):
 
 
 class WorkMemoryRouteTests(unittest.TestCase):
+    def _make_route_app(self, *, local_agent_enabled=False, access_denied=False):
+        app = Flask(__name__)
+        app.secret_key = "test-secret"
+
+        class FakeStore:
+            def __init__(self):
+                self.feedback_error = False
+
+            def health(self):
+                return {"status": "ok", "mode": "store"}
+
+            def query_work_memory(self, **kwargs):
+                return [{"item_id": "item-1", "owner_email": kwargs["owner_email"], "query": kwargs["query"]}]
+
+            def review_candidates(self, **kwargs):
+                return [{"item_id": "candidate-1", "limit": kwargs["limit"]}]
+
+            def project_timeline(self, **kwargs):
+                return [{"project_ref": kwargs["project_ref"], "limit": kwargs["limit"]}]
+
+            def resolve_work_entity(self, **kwargs):
+                return {"status": "ok", "entity": kwargs["query"], "owner_email": kwargs["owner_email"]}
+
+            def record_memory_feedback(self, **kwargs):
+                if self.feedback_error:
+                    raise ValueError("bad feedback")
+                return {"status": "ok", "feedback": kwargs}
+
+            def distill_work_memory(self, **kwargs):
+                return {"distilled": True, "project_refs": kwargs["project_refs"]}
+
+            def superagent_health(self, **kwargs):
+                return {"status": "ok", "owner_email": kwargs["owner_email"]}
+
+            def query_superagent_context(self, **kwargs):
+                return [{"summary": kwargs["query"], "task_type": kwargs["task_type"]}]
+
+            def generate_llm_superagent_answer(self, **kwargs):
+                return {"answer": "grounded", "task_type": kwargs["task_type"]}
+
+            def record_superagent_audit_log(self, **kwargs):
+                return {"audit_id": "audit-1", "metadata": kwargs["metadata"]}
+
+            def explain_superagent_answer(self, **kwargs):
+                return {"status": "ok", "explanation": kwargs["query"]}
+
+            def run_superagent_eval_cases(self, **kwargs):
+                return {"status": "ok", "cases": kwargs["cases"] or [], "suite_id": kwargs["suite_id"]}
+
+            def run_superagent_quality_gate(self, **kwargs):
+                return {"status": "ok", "passed": True, "suite_id": kwargs["suite_id"]}
+
+            def superagent_audit_log(self, **kwargs):
+                return [{"audit_id": "audit-1", "limit": kwargs["limit"]}]
+
+        class FakeLocalClient:
+            def __init__(self):
+                self.calls = []
+
+            def _reply(self, name, **kwargs):
+                self.calls.append((name, kwargs))
+                if name in {"work_memory_recent", "work_memory_review_candidates", "work_memory_project_timeline"}:
+                    return [{"source": "local-agent", "name": name, **kwargs}]
+                if name == "superagent_audit":
+                    return [{"audit_id": "remote-audit", **kwargs}]
+                return {"status": "ok", "source": "local-agent", "name": name, **kwargs}
+
+            def work_memory_health(self):
+                self.calls.append(("work_memory_health", {}))
+                return {"status": "ok", "source": "local-agent"}
+
+            def __getattr__(self, name):
+                def method(**kwargs):
+                    return self._reply(name, **kwargs)
+
+                return method
+
+        class FakeJobStore:
+            def active_for_record(self, *_args, **_kwargs):
+                return None
+
+            def create(self, *_args, **_kwargs):
+                return SimpleNamespace(job_id="job-1")
+
+            def snapshot(self, job_id):
+                return {"job_id": job_id, "state": "queued"}
+
+            def list_snapshots(self, **kwargs):
+                return [{"job_id": "job-1", "limit": kwargs["limit"]}]
+
+        store = FakeStore()
+        local_client = FakeLocalClient()
+
+        def require_access(_settings, api=False):
+            if access_denied:
+                return (jsonify({"status": "error", "message": "denied"}), 403) if api else ("denied", 403)
+            return None
+
+        deps = SimpleNamespace(
+            GMAIL_READONLY_SCOPE="gmail.readonly",
+            GOOGLE_DRIVE_READONLY_SCOPE="drive.readonly",
+            WORK_MEMORY_GMAIL_BACKFILL_ACTION="work-memory-gmail-backfill",
+            require_work_memory_access=require_access,
+            local_agent_work_memory_enabled=lambda _settings: local_agent_enabled,
+            build_local_agent_client=lambda _settings: local_client,
+            get_work_memory_store=lambda: store,
+            current_google_email=lambda: "owner@npt.sg",
+            ingest_sent_monthly_reports_from_gmail=lambda _settings: {"recorded": 1},
+            classify_portal_error=lambda error: {"error_category": type(error).__name__},
+            ingest_existing_work_memory_sources=lambda _settings, **kwargs: {"sources": kwargs["sources"], "date_range": kwargs["date_range"]},
+            run_incremental_memory_ingestion=lambda _settings, **kwargs: {"window": kwargs["window"], "reconciliation": kwargs["reconciliation"]},
+            google_credentials_have_scopes=lambda _scope: True,
+            get_team_dashboard_config_store=lambda: SimpleNamespace(load=lambda: {"report_intelligence_config": {}}),
+            run_work_memory_gmail_backfill_job=lambda *_args, **_kwargs: None,
+        )
+        app.config["JOB_STORE"] = FakeJobStore()
+        register_work_memory_routes(app, SimpleNamespace(), deps)
+        return app, store, local_client
+
+    def test_work_memory_routes_cover_local_store_success_and_error_boundaries(self):
+        app, store, _local_client = self._make_route_app(local_agent_enabled=False)
+
+        with app.test_client() as client:
+            responses = [
+                client.get("/api/work-memory/health"),
+                client.get("/api/work-memory/recent?q=approval&limit=2&scope=team&source_type=gmail&item_type=decision"),
+                client.get("/api/work-memory/review-candidates?limit=3"),
+                client.get("/api/work-memory/project-timeline?project_ref=AF-1&limit=4"),
+                client.get("/api/work-memory/entity-resolution?q=AF-1&entity_type=project"),
+                client.post("/api/work-memory/feedback", json={"item_id": "item-1", "action": "correct", "correction_text": "fixed"}),
+                client.post("/api/work-memory/ingest-sent-monthly-reports", json={}),
+                client.post("/api/work-memory/backfill-existing", json={"date_range": "30d", "sources": ["gmail", "meeting"]}),
+                client.post("/api/work-memory/distill", json={"date_range": "30d", "sources": ["gmail"], "project_refs": ["AF-1"]}),
+                client.post("/api/work-memory/ingest-incremental", json={"window": "14d", "reconciliation": True}),
+                client.get("/api/work-memory/ingestion-jobs?limit=5"),
+                client.get("/api/superagent/health"),
+                client.post("/api/superagent/query", json={"query": "status", "task_type": "project", "limit": 2}),
+                client.post("/api/superagent/explain", json={"query": "status", "task_type": "project"}),
+                client.post("/api/superagent/eval?suite_id=gold", json={"cases": [{"query": "q"}], "limit": 1}),
+                client.post("/api/superagent/quality-gate?suite_id=gold", json={"limit": 1, "min_cases": 1}),
+                client.get("/api/superagent/audit?limit=2"),
+            ]
+            store.feedback_error = True
+            feedback_error = client.post("/api/work-memory/feedback", json={"item_id": "item-1", "action": "bad"})
+
+        self.assertTrue(all(response.status_code in {200, 202} for response in responses))
+        self.assertEqual(feedback_error.status_code, 400)
+        self.assertEqual(feedback_error.get_json()["status"], "error")
+
+    def test_work_memory_routes_proxy_local_agent_and_preserve_access_gate(self):
+        app, _store, local_client = self._make_route_app(local_agent_enabled=True)
+
+        with app.test_client() as client:
+            health = client.get("/api/work-memory/health")
+            recent = client.get("/api/work-memory/recent?q=approval&limit=2")
+            query = client.post("/api/superagent/query", json={"query": "status", "task_type": "project", "limit": 2})
+            quality_gate = client.post("/api/superagent/quality-gate", json={"suite_id": "gold", "limit": 1, "min_cases": 1})
+            audit = client.get("/api/superagent/audit?limit=2")
+
+        self.assertEqual(health.get_json()["source"], "local-agent")
+        self.assertEqual(recent.get_json()["items"][0]["source"], "local-agent")
+        self.assertEqual(query.get_json()["name"], "superagent_query")
+        self.assertEqual(quality_gate.get_json()["name"], "superagent_quality_gate")
+        self.assertEqual(audit.get_json()["items"][0]["audit_id"], "remote-audit")
+        self.assertIn(("work_memory_health", {}), local_client.calls)
+
+        denied_app, _store, _local = self._make_route_app(access_denied=True)
+        with denied_app.test_client() as client:
+            denied = client.get("/api/work-memory/health")
+        self.assertEqual(denied.status_code, 403)
+
     def test_google_drive_service_uses_bounded_http_timeout(self):
         credentials = object()
         with patch.dict("os.environ", {"GOOGLE_DRIVE_HTTP_TIMEOUT_SECONDS": "9"}):

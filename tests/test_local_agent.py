@@ -864,6 +864,185 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertEqual(payload["status"], "error")
         self.assertIn("upstream exploded", payload["message"])
 
+    def test_signed_storage_and_memory_contract_routes_return_stable_payloads(self):
+        class FakeWorkMemoryStore:
+            def health(self):
+                return {"status": "ok", "item_count": 1}
+
+            def query_work_memory(self, **kwargs):
+                return [{"summary": kwargs["query"], "owner_email": kwargs["owner_email"]}]
+
+            def review_candidates(self, **kwargs):
+                return [{"item_id": "review-1"}]
+
+            def project_timeline(self, **kwargs):
+                return [{"project_ref": kwargs["project_ref"]}]
+
+            def resolve_work_entity(self, **kwargs):
+                return {"status": "ok", "entities": [{"name": kwargs["query"]}]}
+
+            def record_memory_feedback(self, **kwargs):
+                return {"status": "ok", "item_id": kwargs["item_id"], "action": kwargs["action"]}
+
+            def distill_work_memory(self, **kwargs):
+                return {"distilled": True, "owner_email": kwargs["owner_email"]}
+
+            def record_ingestion_run(self, **kwargs):
+                return {"run_id": "ingest-1", **kwargs}
+
+            def superagent_health(self, **kwargs):
+                return {"status": "ok", "owner_email": kwargs["owner_email"]}
+
+            def query_superagent_context(self, **kwargs):
+                return {"items": [{"summary": kwargs["query"]}]}
+
+            def generate_llm_superagent_answer(self, **kwargs):
+                return {"answer": "Use the cited memory.", "confidence": "high"}
+
+            def record_superagent_audit_log(self, **kwargs):
+                return {"audit_id": "audit-1", "query": kwargs["query"]}
+
+            def explain_superagent_answer(self, **kwargs):
+                return {"status": "ok", "explanation": kwargs["query"]}
+
+            def run_superagent_eval_cases(self, **kwargs):
+                return {"status": "ok", "total": 1, "failed": 0}
+
+            def run_superagent_quality_gate(self, **kwargs):
+                return {"status": "pass", "total": kwargs["min_cases"]}
+
+            def superagent_audit_log(self, **kwargs):
+                return [{"audit_id": "audit-1"}]
+
+        class FakeSeaTalkService:
+            def build_overview(self):
+                return {"messages": 1}
+
+            def build_insights(self, **kwargs):
+                return {"insights": [{"todo_since": kwargs.get("todo_since")}]}
+
+            def build_project_updates(self):
+                return {"updates": [{"project": "AF"}]}
+
+            def build_todos(self, **kwargs):
+                return {"todos": [{"id": "todo-1"}]}
+
+            def build_name_mappings(self, **kwargs):
+                return {"mappings": {"group-1": "Risk PM"}, "force_refresh": kwargs.get("force_refresh")}
+
+            def export_history_text(self):
+                return "history", "history.txt"
+
+            def export_history_since(self, **kwargs):
+                return f"history since {kwargs['since'].date().isoformat()}"
+
+        class FakeTodoStore:
+            def completed_ids(self, **kwargs):
+                return {"todo-2", "todo-1"}
+
+            def open_todos(self, **kwargs):
+                return [{"id": "todo-1"}]
+
+            def processed_until(self, **kwargs):
+                return "2026-05-01T00:00:00Z"
+
+            def mark_processed_until(self, **kwargs):
+                self.last_processed = kwargs["processed_until"]
+
+            def merge_open_todos(self, **kwargs):
+                return kwargs["todos"] or [{"id": "todo-1"}]
+
+            def mark_completed(self, **kwargs):
+                return {"status": "ok", "todo": kwargs["todo"]}
+
+        class FakeNameMappingStore:
+            def mappings(self):
+                return {"group-1": "Risk PM"}
+
+            def merge_mappings(self, mappings):
+                return {**mappings, "group-1": "Risk PM"}
+
+        self.app.config["WORK_MEMORY_STORE"] = FakeWorkMemoryStore()
+        patchers = [
+            patch("bpmis_jira_tool.local_agent_server._build_seatalk_service", return_value=FakeSeaTalkService()),
+            patch("bpmis_jira_tool.local_agent_server._build_seatalk_todo_store", return_value=FakeTodoStore()),
+            patch("bpmis_jira_tool.local_agent_server._build_seatalk_name_mapping_store", return_value=FakeNameMappingStore()),
+        ]
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        post_cases = [
+            ("/api/local-agent/work-memory/health", {}),
+            ("/api/local-agent/work-memory/recent", {"owner_email": "Owner@NPT.SG", "query": "risk", "filters": {"source_type": "gmail"}, "limit": 2}),
+            ("/api/local-agent/work-memory/review-candidates", {"owner_email": "owner@npt.sg", "limit": 1}),
+            ("/api/local-agent/work-memory/project-timeline", {"owner_email": "owner@npt.sg", "project_ref": "AF-1"}),
+            ("/api/local-agent/work-memory/entity-resolution", {"owner_email": "owner@npt.sg", "query": "AF-1", "entity_type": "jira"}),
+            ("/api/local-agent/work-memory/feedback", {"owner_email": "owner@npt.sg", "item_id": "item-1", "action": "accept"}),
+            ("/api/local-agent/work-memory/distill", {"owner_email": "owner@npt.sg", "sources": ["gmail"], "project_refs": ["AF-1"]}),
+            ("/api/local-agent/work-memory/backfill-existing", {"owner_email": "owner@npt.sg", "sources": ["meeting_recorder", "team_dashboard"]}),
+            ("/api/local-agent/work-memory/ingest-incremental", {"owner_email": "owner@npt.sg", "reconciliation": True}),
+            ("/api/local-agent/superagent/health", {"owner_email": "owner@npt.sg"}),
+            ("/api/local-agent/superagent/query", {"owner_email": "owner@npt.sg", "user_email": "user@npt.sg", "query": "risk", "task_type": "decision"}),
+            ("/api/local-agent/superagent/explain", {"owner_email": "owner@npt.sg", "query": "risk"}),
+            ("/api/local-agent/superagent/eval", {"owner_email": "owner@npt.sg", "cases": [{"query": "risk"}], "limit": 1}),
+            ("/api/local-agent/superagent/quality-gate", {"owner_email": "owner@npt.sg", "min_cases": 1}),
+            ("/api/local-agent/superagent/audit", {"owner_email": "owner@npt.sg"}),
+            ("/api/local-agent/source-code-qa/sessions/list", {"owner_email": "owner@npt.sg"}),
+            ("/api/local-agent/source-code-qa/sessions/create", {"owner_email": "owner@npt.sg", "pm_team": "AF", "country": "All", "title": "Question"}),
+            ("/api/local-agent/source-code-qa/sessions/get", {"owner_email": "owner@npt.sg", "session_id": "missing"}),
+            ("/api/local-agent/source-code-qa/sessions/archive", {"owner_email": "owner@npt.sg", "session_id": "missing"}),
+            ("/api/local-agent/source-code-qa/sessions/context", {"owner_email": "owner@npt.sg", "session_id": "missing"}),
+            ("/api/local-agent/source-code-qa/sessions/append", {"owner_email": "owner@npt.sg", "session_id": "missing", "question": "q", "result": {"answer": "a"}}),
+            ("/api/local-agent/source-code-qa/sessions/pending", {"owner_email": "owner@npt.sg", "session_id": "missing", "question": "q", "job_id": "job-1"}),
+            ("/api/local-agent/source-code-qa/attachments/save", {"owner_email": "owner@npt.sg", "session_id": "s1", "filename": "a.txt", "content_base64": base64.b64encode(b"a").decode("ascii")}),
+            ("/api/local-agent/source-code-qa/attachments/resolve", {"owner_email": "owner@npt.sg", "session_id": "s1", "attachment_ids": []}),
+            ("/api/local-agent/source-code-qa/attachments/get", {"owner_email": "owner@npt.sg", "session_id": "s1", "attachment_id": "missing"}),
+            ("/api/local-agent/source-code-qa/generated-artifacts/save", {"owner_email": "owner@npt.sg", "session_id": "s1", "pm_team": "AF", "country": "All", "question": "q", "sql": "select 1", "readme": "r"}),
+            ("/api/local-agent/source-code-qa/generated-artifacts/get", {"owner_email": "owner@npt.sg", "session_id": "s1", "artifact_id": "missing"}),
+            ("/api/local-agent/source-code-qa/runtime-evidence/list", {"pm_team": "AF", "country": "All"}),
+            ("/api/local-agent/source-code-qa/runtime-evidence/save", {"pm_team": "AF", "country": "All", "source_type": "log", "uploaded_by": "owner", "filename": "log.txt", "content_base64": base64.b64encode(b"log").decode("ascii")}),
+            ("/api/local-agent/source-code-qa/runtime-evidence/resolve", {"pm_team": "AF", "country": "All"}),
+            ("/api/local-agent/source-code-qa/runtime-evidence/delete", {"pm_team": "AF", "country": "All", "evidence_id": "missing"}),
+            ("/api/local-agent/seatalk/overview", {}),
+            ("/api/local-agent/seatalk/insights", {"name_mappings": {"group-1": "Risk PM"}, "todo_since": "2026-05-01"}),
+            ("/api/local-agent/seatalk/project-updates", {"name_mappings": {"group-1": "Risk PM"}}),
+            ("/api/local-agent/seatalk/todos", {"name_mappings": {"group-1": "Risk PM"}}),
+            ("/api/local-agent/seatalk/name-mappings", {"force_refresh": True}),
+            ("/api/local-agent/seatalk/todos/completed-ids", {"owner_email": "owner@npt.sg"}),
+            ("/api/local-agent/seatalk/todos/open", {"owner_email": "owner@npt.sg"}),
+            ("/api/local-agent/seatalk/todos/processed-until", {"owner_email": "owner@npt.sg"}),
+            ("/api/local-agent/seatalk/todos/mark-processed-until", {"owner_email": "owner@npt.sg", "processed_until": "2026-05-01"}),
+            ("/api/local-agent/seatalk/todos/merge-open", {"owner_email": "owner@npt.sg", "todos": [{"id": "todo-1"}]}),
+            ("/api/local-agent/seatalk/todos/complete", {"owner_email": "owner@npt.sg", "todo": {"id": "todo-1"}}),
+            ("/api/local-agent/seatalk/name-mappings/store/get", {}),
+            ("/api/local-agent/seatalk/name-mappings/store/merge", {"mappings": {"group-2": "Ops"}}),
+            ("/api/local-agent/seatalk/export", {"name_mappings": {"group-1": "Risk PM"}, "since": "2026-05-01T00:00:00", "days": 7}),
+            ("/api/local-agent/bpmis/config/load", {"user_key": "google:owner@npt.sg"}),
+            ("/api/local-agent/bpmis/config/save", {"user_key": "google:owner@npt.sg", "config": {"pm_team": "AF"}}),
+            ("/api/local-agent/bpmis/config/migrate", {"from_user_key": "anon:1", "to_user_key": "google:owner@npt.sg"}),
+            ("/api/local-agent/bpmis/team-profiles/load", {}),
+            ("/api/local-agent/bpmis/team-profiles/save", {"team_key": "AF", "profile": {"member_emails": ["owner@npt.sg"]}}),
+            ("/api/local-agent/team-dashboard/config/load", {}),
+            ("/api/local-agent/team-dashboard/config/save", {"config": {"teams": {"AF": {}}}}),
+            ("/api/local-agent/bpmis/projects/list", {"user_key": "google:owner@npt.sg"}),
+            ("/api/local-agent/bpmis/projects/reorder", {"user_key": "google:owner@npt.sg", "bpmis_ids": ["225159"]}),
+            ("/api/local-agent/bpmis/projects/upsert", {"user_key": "google:owner@npt.sg", "bpmis_id": "225159", "project_name": "Risk", "brd_link": "", "market": "ID"}),
+            ("/api/local-agent/bpmis/projects/comment", {"user_key": "google:owner@npt.sg", "bpmis_id": "225159", "pm_comment": "ok"}),
+            ("/api/local-agent/bpmis/projects/jira-tickets/add", {"user_key": "google:owner@npt.sg", "bpmis_id": "225159", "ticket_key": "AF-1", "ticket_link": "https://jira/AF-1"}),
+            ("/api/local-agent/bpmis/projects/jira-tickets/upsert-synced", {"user_key": "google:owner@npt.sg", "bpmis_id": "225159", "ticket_key": "AF-2", "ticket_link": "https://jira/AF-2"}),
+            ("/api/local-agent/bpmis/projects/jira-tickets/status", {"user_key": "google:owner@npt.sg", "bpmis_id": "225159", "ticket_id": "AF-1", "status": "Done"}),
+            ("/api/local-agent/bpmis/projects/jira-tickets/version", {"user_key": "google:owner@npt.sg", "bpmis_id": "225159", "ticket_id": "AF-1", "version_name": "26Q2"}),
+            ("/api/local-agent/bpmis/projects/jira-tickets/delete", {"user_key": "google:owner@npt.sg", "bpmis_id": "225159", "ticket_id": "AF-1"}),
+            ("/api/local-agent/bpmis/projects/delete", {"user_key": "google:owner@npt.sg", "bpmis_id": "225159"}),
+        ]
+
+        for path, payload in post_cases:
+            with self.subTest(path=path):
+                response = self._post_signed(path, payload)
+                self.assertIn(response.status_code, {200, 400, 404}, msg=response.get_data(as_text=True))
+                self.assertIsInstance(response.get_json(), dict)
+
 
 class LocalAgentClientTests(unittest.TestCase):
     def test_source_code_query_with_progress_uses_local_async_job(self):
