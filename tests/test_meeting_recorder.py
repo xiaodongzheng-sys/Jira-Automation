@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from bpmis_jira_tool.errors import ToolError
+from bpmis_jira_tool.errors import ConfigError, ToolError
 from bpmis_jira_tool.meeting_recorder import (
     CALENDAR_READONLY_SCOPE,
     GoogleCalendarMeetingService,
@@ -25,6 +25,7 @@ from bpmis_jira_tool.meeting_recorder import (
     _parse_avfoundation_devices,
     _parse_srt_transcript,
     _SegmentedAudioRecorder,
+    _ScreenCaptureKitAudioRecorder,
     build_calendar_api_service,
     extract_meeting_links,
     meeting_transcript_whisper_language,
@@ -572,6 +573,78 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertEqual(updated["recording_stop_reason"], "manual")
         self.assertEqual(updated["scheduled_auto_stop"]["status"], "cancelled")
 
+    def test_scheduled_auto_stop_ignores_invalid_records_and_persists_failures(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
+
+            recorded = store.create_record(owner_email="owner@npt.sg", title="Done", platform="zoom", meeting_link="")
+            recorded["status"] = "recorded"
+            store.save_record(recorded)
+            ignored = runtime._schedule_auto_stop_if_needed(recorded)
+
+            missing_identity = dict(recorded)
+            missing_identity["record_id"] = ""
+            missing_identity["status"] = "recording"
+            no_identity = runtime._schedule_auto_stop_if_needed(missing_identity)
+
+            failing = store.create_record(owner_email="owner@npt.sg", title="Failing", platform="zoom", meeting_link="")
+            failing["status"] = "recording"
+            failing["scheduled_auto_stop"] = {"status": "scheduled"}
+            store.save_record(failing)
+
+            with patch.object(runtime, "stop_recording", side_effect=ToolError("stop failed")):
+                runtime._scheduled_auto_stop_callback(
+                    record_id=failing["record_id"],
+                    owner_email="owner@npt.sg",
+                    scheduled_for="2026-05-04T01:40:00+00:00",
+                )
+            failed = store.get_record(failing["record_id"])
+
+            callback_record = store.create_record(owner_email="owner@npt.sg", title="Callback", platform="zoom", meeting_link="")
+            callback_record["scheduled_auto_stop"] = {"status": "completed"}
+            store.save_record(callback_record)
+            runtime_with_empty_callback = MeetingRecorderRuntime(
+                store=store,
+                config=MeetingRecorderConfig(),
+                scheduled_auto_stop_callback=lambda _record: {},
+            )
+            runtime_with_empty_callback._run_scheduled_auto_stop_callback_after_stop(callback_record)
+            skipped = store.get_record(callback_record["record_id"])
+
+            queue_error = store.create_record(owner_email="owner@npt.sg", title="Queue Error", platform="zoom", meeting_link="")
+            queue_error["scheduled_auto_stop"] = {"status": "completed"}
+            store.save_record(queue_error)
+            runtime_with_bad_callback = MeetingRecorderRuntime(
+                store=store,
+                config=MeetingRecorderConfig(),
+                scheduled_auto_stop_callback=lambda _record: (_ for _ in ()).throw(ToolError("queue failed")),
+            )
+            runtime_with_bad_callback._run_scheduled_auto_stop_callback_after_stop(queue_error)
+            failed_queue = store.get_record(queue_error["record_id"])
+
+            auto_process_error = store.create_record(owner_email="owner@npt.sg", title="Auto Error", platform="zoom", meeting_link="")
+            auto_process_error["scheduled_auto_stop"] = {"status": "completed"}
+            store.save_record(auto_process_error)
+            runtime_with_error_payload = MeetingRecorderRuntime(
+                store=store,
+                config=MeetingRecorderConfig(),
+                scheduled_auto_stop_callback=lambda _record: {"auto_process_error": "local agent unavailable"},
+            )
+            runtime_with_error_payload._run_scheduled_auto_stop_callback_after_stop(auto_process_error)
+            failed_payload = store.get_record(auto_process_error["record_id"])
+
+        self.assertEqual(ignored["status"], "recorded")
+        self.assertEqual(no_identity["status"], "recording")
+        self.assertEqual(failed["scheduled_auto_stop"]["status"], "failed")
+        self.assertIn("stop failed", failed["scheduled_auto_stop"]["error"])
+        self.assertEqual(skipped["scheduled_auto_stop"]["process_queue_status"], "skipped")
+        self.assertEqual(failed_queue["scheduled_auto_stop"]["process_queue_status"], "failed")
+        self.assertIn("queue failed", failed_queue["scheduled_auto_stop"]["process_queue_error"])
+        self.assertEqual(failed_payload["scheduled_auto_stop"]["process_queue_status"], "failed")
+        self.assertEqual(failed_payload["scheduled_auto_stop"]["process_queue_error"], "local agent unavailable")
+
     def test_audio_only_linked_fallback_keeps_aggregate_input(self):
         self.assertEqual(
             _effective_recording_audio_input(
@@ -880,6 +953,114 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertEqual(media["audio_original_duration_seconds"], 60.0)
         self.assertIn("audio_concat_command", media)
 
+    def test_segmented_audio_finalization_records_warning_boundaries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
+
+            missing_dir_record = store.create_record(owner_email="owner@npt.sg", title="Missing Dir", platform="zoom", meeting_link="")
+            missing_dir_record["media"] = {
+                "audio_capture_profile": "segmented_avfoundation_v1",
+                "audio_segment_dir": "records/missing/audio_segments",
+            }
+            missing_dir = runtime._finalize_segmented_audio_recording(missing_dir_record)
+
+            empty_dir_record = store.create_record(owner_email="owner@npt.sg", title="Empty Dir", platform="zoom", meeting_link="")
+            empty_segment_dir = store.record_dir(empty_dir_record["record_id"]) / "audio_segments"
+            empty_segment_dir.mkdir()
+            empty_dir_record["media"] = {
+                "audio_capture_profile": "segmented_avfoundation_v1",
+                "audio_segment_dir": str(empty_segment_dir.relative_to(store.root_dir)),
+            }
+            empty_dir = runtime._finalize_segmented_audio_recording(empty_dir_record)
+
+            no_ffmpeg_record = store.create_record(owner_email="owner@npt.sg", title="No FFMPEG", platform="zoom", meeting_link="")
+            no_ffmpeg_dir = store.record_dir(no_ffmpeg_record["record_id"]) / "audio_segments"
+            no_ffmpeg_dir.mkdir()
+            (no_ffmpeg_dir / "segment-000000.wav").write_bytes(b"0" * 100)
+            no_ffmpeg_record["media"] = {
+                "audio_capture_profile": "segmented_avfoundation_v1",
+                "audio_segment_dir": str(no_ffmpeg_dir.relative_to(store.root_dir)),
+            }
+            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value=""):
+                no_ffmpeg = runtime._finalize_segmented_audio_recording(no_ffmpeg_record)
+
+            single_copy_record = store.create_record(owner_email="owner@npt.sg", title="Single Copy", platform="zoom", meeting_link="")
+            single_copy_dir = store.record_dir(single_copy_record["record_id"]) / "audio_segments"
+            single_copy_dir.mkdir()
+            (single_copy_dir / "segment-000000.wav").write_bytes(b"1" * 100)
+            single_copy_record["media"] = {
+                "audio_capture_profile": "segmented_avfoundation_v1",
+                "audio_segment_dir": str(single_copy_dir.relative_to(store.root_dir)),
+            }
+            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
+                "bpmis_jira_tool.meeting_recorder._run_command",
+                side_effect=ToolError("concat failed"),
+            ), patch("bpmis_jira_tool.meeting_recorder._audio_duration_seconds", return_value=5.0):
+                single_copy = runtime._finalize_segmented_audio_recording(single_copy_record)
+
+            multi_fail_record = store.create_record(owner_email="owner@npt.sg", title="Multi Fail", platform="zoom", meeting_link="")
+            multi_fail_dir = store.record_dir(multi_fail_record["record_id"]) / "audio_segments"
+            multi_fail_dir.mkdir()
+            (multi_fail_dir / "segment-000000.wav").write_bytes(b"1" * 100)
+            (multi_fail_dir / "segment-000001.wav").write_bytes(b"2" * 100)
+            multi_fail_record["media"] = {
+                "audio_capture_profile": "segmented_avfoundation_v1",
+                "audio_segment_dir": str(multi_fail_dir.relative_to(store.root_dir)),
+            }
+            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
+                "bpmis_jira_tool.meeting_recorder._run_command",
+                side_effect=ToolError("concat failed"),
+            ):
+                multi_fail = runtime._finalize_segmented_audio_recording(multi_fail_record)
+
+            empty_output_record = store.create_record(owner_email="owner@npt.sg", title="Empty Output", platform="zoom", meeting_link="")
+            empty_output_dir = store.record_dir(empty_output_record["record_id"]) / "audio_segments"
+            empty_output_dir.mkdir()
+            (empty_output_dir / "segment-000000.wav").write_bytes(b"1" * 100)
+            empty_output_record["media"] = {
+                "audio_capture_profile": "segmented_avfoundation_v1",
+                "audio_segment_dir": str(empty_output_dir.relative_to(store.root_dir)),
+            }
+            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
+                "bpmis_jira_tool.meeting_recorder._run_command",
+                return_value=Mock(stdout="", stderr=""),
+            ):
+                empty_output = runtime._finalize_segmented_audio_recording(empty_output_record)
+
+        self.assertIn("did not produce", missing_dir["media"]["audio_segment_warning"])
+        self.assertIn("no usable", empty_dir["media"]["audio_segment_warning"])
+        self.assertIn("ffmpeg is required", no_ffmpeg["media"]["audio_segment_warning"])
+        self.assertEqual(single_copy["media"]["audio_path"], f"records/{single_copy_record['record_id']}/meeting.wav")
+        self.assertNotIn("audio_segment_warning", single_copy["media"])
+        self.assertIn("concat failed", multi_fail["media"]["audio_segment_warning"])
+        self.assertIn("combined audio file is empty", empty_output["media"]["audio_segment_warning"])
+
+    def test_audio_preflight_reports_unavailable_quiet_and_ok_states(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = MeetingRecordStore(Path(temp_dir))
+            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
+
+            with patch("bpmis_jira_tool.meeting_recorder._run_command", side_effect=ToolError("device busy")):
+                unavailable = runtime._audio_preflight(ffmpeg_path="/opt/homebrew/bin/ffmpeg", audio_input="Microphone")
+            with patch("bpmis_jira_tool.meeting_recorder._run_command", return_value=Mock(stdout="", stderr="")), patch(
+                "bpmis_jira_tool.meeting_recorder._audio_volume_metrics",
+                return_value={"mean_volume_db": -70.0, "max_volume_db": -60.0},
+            ):
+                quiet = runtime._audio_preflight(ffmpeg_path="/opt/homebrew/bin/ffmpeg", audio_input="Microphone")
+            with patch("bpmis_jira_tool.meeting_recorder._run_command", return_value=Mock(stdout="", stderr="")), patch(
+                "bpmis_jira_tool.meeting_recorder._audio_volume_metrics",
+                return_value={"mean_volume_db": -25.0, "max_volume_db": -10.0},
+            ):
+                ok = runtime._audio_preflight(ffmpeg_path="/opt/homebrew/bin/ffmpeg", audio_input="Microphone")
+
+        self.assertEqual(unavailable["status"], "unavailable")
+        self.assertIn("device busy", unavailable["warning"])
+        self.assertEqual(quiet["status"], "too_quiet")
+        self.assertEqual(ok["status"], "ok")
+        self.assertEqual(ok["warning"], "")
+
     def test_screencapturekit_audio_mix_runs_at_background_priority(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1098,6 +1279,132 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertEqual(records[0]["status"], "failed")
         self.assertIn("declined TCCs", records[0]["error"])
 
+    def test_screencapturekit_start_exception_marks_record_failed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(
+                store=store,
+                config=MeetingRecorderConfig(ffmpeg_bin="/opt/homebrew/bin/ffmpeg"),
+            )
+
+            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
+                "bpmis_jira_tool.meeting_recorder._avfoundation_devices",
+                return_value={
+                    "video_devices": ["Capture screen 0"],
+                    "audio_devices": ["Meeting Recorder Aggregate"],
+                },
+            ), patch(
+                "bpmis_jira_tool.meeting_recorder._resolve_screencapturekit_helper",
+                side_effect=ConfigError("helper missing"),
+            ), self.assertRaisesRegex(ToolError, "helper missing"):
+                runtime.start_recording(
+                    owner_email="owner@npt.sg",
+                    title="Face to face",
+                    platform="unknown",
+                    meeting_link="",
+                    recording_mode="audio_only",
+                )
+
+            records = store.list_records(owner_email="owner@npt.sg")
+
+        self.assertEqual(records[0]["status"], "failed")
+        self.assertIn("helper missing", records[0]["error"])
+
+    def test_stop_recording_covers_attached_recorders_and_subprocess_termination(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
+
+            screen_record = store.create_record(owner_email="owner@npt.sg", title="Screen", platform="zoom", meeting_link="")
+            screen_record.update(
+                {
+                    "status": "recording",
+                    "recording_started_at": "2026-05-03T00:00:00+00:00",
+                    "media": {"audio_capture_profile": "screencapturekit_audio_v1"},
+                }
+            )
+            store.save_record(screen_record)
+            screen_recorder = _ScreenCaptureKitAudioRecorder(
+                helper_path=Path("/tmp/helper"),
+                system_audio_path=root / "system.caf",
+                microphone_audio_path=root / "mic.caf",
+                status_path=root / "status.json",
+                log_path=root / "screen.log",
+            )
+            runtime._processes[screen_record["record_id"]] = screen_recorder
+
+            segmented_record = store.create_record(owner_email="owner@npt.sg", title="Segmented", platform="zoom", meeting_link="")
+            segmented_record.update(
+                {
+                    "status": "recording",
+                    "recording_started_at": "2026-05-03T00:00:00+00:00",
+                    "media": {"audio_capture_profile": "segmented_avfoundation_v1"},
+                }
+            )
+            store.save_record(segmented_record)
+            segmented_recorder = _SegmentedAudioRecorder(
+                ffmpeg_path="/opt/homebrew/bin/ffmpeg",
+                audio_input="Meeting Recorder Aggregate",
+                segment_dir=root / "segments",
+                log_path=root / "segmented.log",
+                segment_seconds=30,
+            )
+            runtime._processes[segmented_record["record_id"]] = segmented_recorder
+
+            process_record = store.create_record(owner_email="owner@npt.sg", title="Process", platform="zoom", meeting_link="")
+            process_record.update({"status": "recording", "recording_started_at": "2026-05-03T00:00:00+00:00"})
+            store.save_record(process_record)
+            process = Mock()
+            process.poll.return_value = None
+            runtime._processes[process_record["record_id"]] = process
+
+            with patch.object(
+                _ScreenCaptureKitAudioRecorder,
+                "stop",
+                return_value={"screencapture_stop_status": "stopped"},
+            ) as screen_stop, patch.object(
+                _SegmentedAudioRecorder,
+                "stop",
+                return_value={"audio_segment_dir": "records/segmented/audio_segments"},
+            ) as segmented_stop, patch(
+                "bpmis_jira_tool.meeting_recorder._terminate_recorder_process",
+            ) as terminate_process, patch.object(
+                runtime,
+                "_recording_health",
+                return_value={"status": "ok", "checked_at": "2026-05-03T00:01:00+00:00", "warning": ""},
+            ):
+                stopped_screen = runtime.stop_recording(record_id=screen_record["record_id"], owner_email="owner@npt.sg")
+                stopped_segmented = runtime.stop_recording(record_id=segmented_record["record_id"], owner_email="owner@npt.sg")
+                stopped_process = runtime.stop_recording(record_id=process_record["record_id"], owner_email="owner@npt.sg")
+
+        self.assertEqual(stopped_screen["media"]["screencapture_stop_status"], "stopped")
+        self.assertEqual(stopped_segmented["media"]["audio_segment_dir"], "records/segmented/audio_segments")
+        self.assertEqual(stopped_process["status"], "recorded")
+        screen_stop.assert_called_once()
+        segmented_stop.assert_called_once()
+        terminate_process.assert_called_once_with(process)
+
+    def test_stop_recording_marks_failed_when_health_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = MeetingRecordStore(Path(temp_dir))
+            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
+            record = store.create_record(owner_email="owner@npt.sg", title="Bad audio", platform="zoom", meeting_link="")
+            record["status"] = "recording"
+            record["recording_started_at"] = "2026-05-03T00:00:00+00:00"
+            store.save_record(record)
+
+            with patch.object(runtime, "_terminate_persisted_recorder_process"), patch.object(
+                runtime,
+                "_recording_health",
+                return_value={"status": "failed", "warning": "Recorded audio file is missing."},
+            ):
+                stopped = runtime.stop_recording(record_id=record["record_id"], owner_email="owner@npt.sg")
+
+        self.assertEqual(stopped["status"], "failed")
+        self.assertEqual(stopped["error"], "Recorded audio file is missing.")
+
     def test_signal_check_keeps_running_when_wav_file_has_not_flushed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1193,6 +1500,92 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertEqual(check["status"], "failed")
         self.assertEqual(check["failure_count"], 2)
         self.assertIn("stopped repeatedly", check["warning"])
+
+    def test_signal_check_fails_unattached_and_stops_failed_recorders(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
+
+            unattached_screen = store.create_record(owner_email="owner@npt.sg", title="Screen", platform="zoom", meeting_link="")
+            unattached_screen.update(
+                {
+                    "status": "recording",
+                    "media": {"audio_capture_profile": "screencapturekit_audio_v1"},
+                }
+            )
+            store.save_record(unattached_screen)
+
+            attached_screen = store.create_record(owner_email="owner@npt.sg", title="Attached Screen", platform="zoom", meeting_link="")
+            attached_screen.update(
+                {
+                    "status": "recording",
+                    "media": {"audio_capture_profile": "screencapturekit_audio_v1"},
+                }
+            )
+            store.save_record(attached_screen)
+            screen_recorder = _ScreenCaptureKitAudioRecorder(
+                helper_path=Path("/tmp/helper"),
+                system_audio_path=root / "system.caf",
+                microphone_audio_path=root / "mic.caf",
+                status_path=root / "status.json",
+                log_path=root / "screen.log",
+            )
+            runtime._processes[attached_screen["record_id"]] = screen_recorder
+
+            unattached_segmented = store.create_record(owner_email="owner@npt.sg", title="Segmented", platform="zoom", meeting_link="")
+            unattached_segmented.update(
+                {
+                    "status": "recording",
+                    "media": {"audio_capture_profile": "segmented_avfoundation_v1"},
+                }
+            )
+            store.save_record(unattached_segmented)
+
+            attached_segmented = store.create_record(owner_email="owner@npt.sg", title="Attached Segmented", platform="zoom", meeting_link="")
+            attached_segmented.update(
+                {
+                    "status": "recording",
+                    "media": {"audio_capture_profile": "segmented_avfoundation_v1"},
+                }
+            )
+            store.save_record(attached_segmented)
+            segmented_recorder = _SegmentedAudioRecorder(
+                ffmpeg_path="/opt/homebrew/bin/ffmpeg",
+                audio_input="Meeting Recorder Aggregate",
+                segment_dir=root / "segments",
+                log_path=root / "segmented.log",
+                segment_seconds=30,
+            )
+            runtime._processes[attached_segmented["record_id"]] = segmented_recorder
+
+            failed_check = {
+                "status": "failed",
+                "checked_at": "2026-05-03T00:00:05+00:00",
+                "warning": "audio is not growing",
+            }
+            with patch.object(_ScreenCaptureKitAudioRecorder, "signal_snapshot", return_value=failed_check), patch.object(
+                _ScreenCaptureKitAudioRecorder,
+                "stop",
+                return_value={"screen_summary": "stopped"},
+            ), patch.object(_SegmentedAudioRecorder, "signal_snapshot", return_value=failed_check), patch.object(
+                _SegmentedAudioRecorder,
+                "stop",
+                return_value={"segment_summary": "stopped"},
+            ):
+                screen_missing = runtime.check_recording_signal(record_id=unattached_screen["record_id"], owner_email="owner@npt.sg")
+                screen_failed = runtime.check_recording_signal(record_id=attached_screen["record_id"], owner_email="owner@npt.sg")
+                segmented_missing = runtime.check_recording_signal(record_id=unattached_segmented["record_id"], owner_email="owner@npt.sg")
+                segmented_failed = runtime.check_recording_signal(record_id=attached_segmented["record_id"], owner_email="owner@npt.sg")
+
+        self.assertEqual(screen_missing["status"], "failed")
+        self.assertIn("not attached", screen_missing["recording_health"]["warning"])
+        self.assertEqual(screen_failed["status"], "failed")
+        self.assertEqual(screen_failed["media"]["screen_summary"], "stopped")
+        self.assertEqual(segmented_missing["status"], "failed")
+        self.assertIn("not attached", segmented_missing["recording_health"]["warning"])
+        self.assertEqual(segmented_failed["status"], "failed")
+        self.assertEqual(segmented_failed["media"]["segment_summary"], "stopped")
 
 class FakeTextClient:
     def __init__(self):
