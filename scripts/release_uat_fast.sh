@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/team_env.sh"
+source "$ROOT_DIR/scripts/lib/release_window_policy.sh"
 
 STARTED_AT="$(date +%s)"
 GCLOUD_BIN="${GCLOUD_BIN:-$(command -v gcloud || true)}"
@@ -60,6 +61,7 @@ print_timing_tail() {
 }
 
 cd "$ROOT_DIR"
+enforce_release_window_target uat
 run_gate
 IMAGE_URI="$(build_image_if_needed)"
 if [[ -n "$IMAGE_URI" ]]; then

@@ -387,11 +387,13 @@ def _meeting_record_summary(record: dict[str, Any]) -> dict[str, Any]:
         "calendar_event_id": record.get("calendar_event_id"),
         "scheduled_start": record.get("scheduled_start"),
         "scheduled_end": record.get("scheduled_end"),
+        "scheduled_auto_stop": record.get("scheduled_auto_stop") or {},
         "status": record.get("status"),
         "transcript_language": normalize_meeting_transcript_language(record.get("transcript_language")),
         "transcript_language_label": record.get("transcript_language_label") or "",
         "recording_started_at": record.get("recording_started_at"),
         "recording_stopped_at": record.get("recording_stopped_at"),
+        "recording_stop_reason": record.get("recording_stop_reason") or "",
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
         "media": record.get("media") or {},
@@ -1221,6 +1223,8 @@ def create_app() -> Flask:
                 _run_team_dashboard_monthly_report_draft_job=lambda *args, **kwargs: _run_team_dashboard_monthly_report_draft_job(*args, **kwargs),
                 _google_credentials_have_scopes=lambda *args, **kwargs: _google_credentials_have_scopes(*args, **kwargs),
                 _ingest_sent_monthly_reports_from_gmail=lambda *args, **kwargs: _ingest_sent_monthly_reports_from_gmail(*args, **kwargs),
+                _local_agent_work_memory_enabled=lambda *args, **kwargs: _local_agent_work_memory_enabled(*args, **kwargs),
+                _get_work_memory_store=lambda *args, **kwargs: _get_work_memory_store(*args, **kwargs),
                 _local_agent_source_code_qa_enabled=lambda *args, **kwargs: _local_agent_source_code_qa_enabled(*args, **kwargs),
                 _build_prd_review_service=lambda *args, **kwargs: _build_prd_review_service(*args, **kwargs),
                 resolve_monthly_report_period=lambda *args, **kwargs: resolve_monthly_report_period(*args, **kwargs),
@@ -1482,14 +1486,14 @@ def _ingest_sent_monthly_reports_from_gmail(settings: Settings) -> dict[str, Any
     service = _build_gmail_dashboard_service()
     owner_email = _current_google_email()
     queries = [
-        'in:sent newer_than:180d from:me subject:"[Banking] Product Update"',
-        'in:sent newer_than:180d from:me subject:"Anti-Fraud, Credit Risk & Ops Risk"',
-        'in:sent newer_than:180d from:me "[Banking] Product Update" "Anti-Fraud, Credit Risk & Ops Risk"',
+        'in:sent newer_than:365d from:me subject:"[Banking] Product Update"',
+        'in:sent newer_than:365d from:me subject:"Anti-Fraud, Credit Risk & Ops Risk"',
+        'in:sent newer_than:365d from:me "[Banking] Product Update" "Anti-Fraud, Credit Risk & Ops Risk"',
     ]
     seen_ids: set[str] = set()
     records = []
     for query in queries:
-        for message_id in service._list_message_ids(query=query, max_messages=20):
+        for message_id in service._list_message_ids(query=query, max_messages=50):
             if message_id in seen_ids:
                 continue
             seen_ids.add(message_id)

@@ -53,7 +53,9 @@ MEETING_AUDIO_EARLY_SIGNAL_MIN_GROWTH_BYTES = 2048
 MEETING_AUDIO_MONITOR_OUTPUT_DEVICE_INDEX = "2"
 MEETING_TRANSCRIPT_SEGMENT_SECONDS = 60
 MEETING_RECORDING_MODE_AUDIO_ONLY = "audio_only"
+MEETING_RECORDER_AUTO_STOP_GRACE_SECONDS = 10 * 60
 MEETING_AUDIO_POST_STOP_PAD_PROFILE = "post_stop_pad_v1"
+MEETING_AUDIO_SHORT_SOURCE_PROFILE = "short_source_no_pad_v2"
 MEETING_SEGMENTED_AUDIO_PROFILE = "segmented_avfoundation_v1"
 MEETING_SCREENCAPTUREKIT_AUDIO_PROFILE = "screencapturekit_audio_v1"
 MEETING_TRANSCRIPT_REPETITIVE_DOMINANT_RATIO = 0.6
@@ -86,6 +88,7 @@ class MeetingRecorderConfig:
     background_nice: int = 10
     capture_status_every_buffers: int = 250
     startup_silence_grace_seconds: int = 300
+    scheduled_auto_stop_grace_seconds: int = MEETING_RECORDER_AUTO_STOP_GRACE_SECONDS
 
 
 def normalize_meeting_transcript_language(value: object) -> str:
@@ -331,7 +334,10 @@ class MeetingRecorderRuntime:
         self.store = store
         self.config = config
         self._processes: dict[str, Any] = {}
+        self._auto_stop_timers: dict[str, threading.Timer] = {}
         self._lock = threading.Lock()
+        self._auto_stop_lock = threading.Lock()
+        self._resume_scheduled_auto_stops()
 
     def diagnostics(self) -> dict[str, Any]:
         ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
@@ -557,12 +563,15 @@ class MeetingRecorderRuntime:
             }
         )
         record["media"] = media
+        record = self._schedule_auto_stop_if_needed(record)
         self.store.save_record(record)
         return record
 
-    def stop_recording(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
+    def stop_recording(self, *, record_id: str, owner_email: str, stop_reason: str = "manual") -> dict[str, Any]:
         record = self.store.get_record(record_id)
         _assert_record_owner(record, owner_email)
+        if stop_reason != "scheduled_auto_stop":
+            self._cancel_scheduled_auto_stop(record_id=record_id, record=record)
         with self._lock:
             process = self._processes.pop(record_id, None)
         recorder_summary: dict[str, Any] = {}
@@ -579,6 +588,11 @@ class MeetingRecorderRuntime:
             record["media"] = {**media, **recorder_summary}
         record["status"] = "recorded"
         record["recording_stopped_at"] = _utc_now()
+        record["recording_stop_reason"] = str(stop_reason or "manual").strip() or "manual"
+        if stop_reason == "scheduled_auto_stop":
+            auto_stop = dict(record.get("scheduled_auto_stop") or {})
+            auto_stop.update({"status": "completed", "stopped_at": record["recording_stopped_at"]})
+            record["scheduled_auto_stop"] = auto_stop
         record = self._finalize_segmented_audio_recording(record)
         record = self._finalize_screencapturekit_audio_recording(record)
         record = self._finalize_audio_only_recording(record)
@@ -588,6 +602,89 @@ class MeetingRecorderRuntime:
             record["error"] = str(record["recording_health"].get("warning") or "").strip()
         self.store.save_record(record)
         return record
+
+    def _resume_scheduled_auto_stops(self) -> None:
+        for record in self.store.list_records(owner_email=""):
+            if str(record.get("status") or "").strip().lower() == "recording":
+                self._schedule_auto_stop_if_needed(record)
+
+    def _schedule_auto_stop_if_needed(self, record: dict[str, Any]) -> dict[str, Any]:
+        if str(record.get("status") or "").strip().lower() != "recording":
+            return record
+        grace_seconds = _normalized_auto_stop_grace_seconds(self.config.scheduled_auto_stop_grace_seconds)
+        deadline = _scheduled_auto_stop_deadline(record, grace_seconds=grace_seconds)
+        if deadline is None:
+            return record
+        record_id = str(record.get("record_id") or "").strip()
+        owner_email = str(record.get("owner_email") or "").strip().lower()
+        if not record_id or not owner_email:
+            return record
+        scheduled_for = deadline.isoformat()
+        auto_stop = dict(record.get("scheduled_auto_stop") or {})
+        auto_stop.update(
+            {
+                "status": "scheduled",
+                "mode": "scheduled_end_plus_grace",
+                "grace_seconds": grace_seconds,
+                "scheduled_for": scheduled_for,
+            }
+        )
+        record["scheduled_auto_stop"] = auto_stop
+        delay_seconds = max(0.1, (deadline - datetime.now(timezone.utc)).total_seconds())
+        timer = threading.Timer(
+            delay_seconds,
+            self._scheduled_auto_stop_callback,
+            kwargs={"record_id": record_id, "owner_email": owner_email, "scheduled_for": scheduled_for},
+        )
+        timer.daemon = True
+        with self._auto_stop_lock:
+            existing = self._auto_stop_timers.pop(record_id, None)
+            if existing is not None:
+                existing.cancel()
+            self._auto_stop_timers[record_id] = timer
+        timer.start()
+        return record
+
+    def _cancel_scheduled_auto_stop(self, *, record_id: str, record: dict[str, Any] | None = None) -> None:
+        with self._auto_stop_lock:
+            timer = self._auto_stop_timers.pop(record_id, None)
+        if timer is not None:
+            timer.cancel()
+        if record is not None and isinstance(record.get("scheduled_auto_stop"), dict):
+            auto_stop = dict(record.get("scheduled_auto_stop") or {})
+            if auto_stop.get("status") == "scheduled":
+                auto_stop.update({"status": "cancelled", "cancelled_at": _utc_now()})
+                record["scheduled_auto_stop"] = auto_stop
+
+    def _scheduled_auto_stop_callback(self, *, record_id: str, owner_email: str, scheduled_for: str) -> None:
+        with self._auto_stop_lock:
+            self._auto_stop_timers.pop(record_id, None)
+        try:
+            record = self.store.get_record(record_id)
+            _assert_record_owner(record, owner_email)
+            if str(record.get("status") or "").strip().lower() != "recording":
+                return
+            auto_stop = dict(record.get("scheduled_auto_stop") or {})
+            auto_stop.update({"status": "stopping", "triggered_at": _utc_now(), "scheduled_for": scheduled_for})
+            record["scheduled_auto_stop"] = auto_stop
+            self.store.save_record(record)
+            self.stop_recording(record_id=record_id, owner_email=owner_email, stop_reason="scheduled_auto_stop")
+        except Exception as error:  # noqa: BLE001
+            try:
+                record = self.store.get_record(record_id)
+                auto_stop = dict(record.get("scheduled_auto_stop") or {})
+                auto_stop.update(
+                    {
+                        "status": "failed",
+                        "failed_at": _utc_now(),
+                        "scheduled_for": scheduled_for,
+                        "error": str(error)[:500],
+                    }
+                )
+                record["scheduled_auto_stop"] = auto_stop
+                self.store.save_record(record)
+            except Exception:
+                return
 
     def check_recording_signal(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
         record = self.store.get_record(record_id)
@@ -856,49 +953,20 @@ class MeetingRecorderRuntime:
         minimum_expected_seconds = max(10.0, elapsed_seconds * 0.7)
         if duration_seconds >= minimum_expected_seconds:
             return record
-        ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
-        if not ffmpeg_path:
-            media = dict(media)
-            media["audio_finalization_warning"] = "ffmpeg is required to pad short meeting audio after Stop."
-            record["media"] = media
-            return record
-        record_id = str(record.get("record_id") or "")
-        record_dir = self.store.record_dir(record_id)
-        output_path = record_dir / "meeting.padded.wav"
-        command = _build_ffmpeg_audio_post_stop_pad_command(
-            ffmpeg_path=ffmpeg_path,
-            source_path=audio_path,
-            output_path=output_path,
-            target_duration_seconds=elapsed_seconds,
-        )
         media = dict(media)
-        try:
-            _run_command(
-                command,
-                "Could not finalize meeting audio timeline.",
-                timeout_seconds=max(60, int(elapsed_seconds) + 30),
-            )
-        except ToolError as error:
-            media["audio_finalization_warning"] = str(error)
-            record["media"] = media
-            return record
-        if not output_path.exists() or output_path.stat().st_size <= 0:
-            media["audio_finalization_warning"] = "Meeting audio finalization produced no audio bytes."
-            record["media"] = media
-            return record
         media.update(
             {
-                "source_audio_path": relative,
-                "audio_path": str(output_path.relative_to(self.store.root_dir)),
-                "audio_url": f"/meeting-recorder/assets/{record_id}/meeting.padded.wav",
-                "audio_finalization_profile": MEETING_AUDIO_POST_STOP_PAD_PROFILE,
+                "audio_finalization_profile": MEETING_AUDIO_SHORT_SOURCE_PROFILE,
                 "audio_finalized_at": _utc_now(),
-                "audio_finalization_command": _redact_command(command),
+                "audio_finalization_warning": (
+                    f"Recorder captured only {duration_seconds:.0f}s of audio for a {elapsed_seconds:.0f}s recording. "
+                    "The source audio is kept as-is; no silence padding was added."
+                ),
                 "audio_original_duration_seconds": duration_seconds,
-                "audio_target_duration_seconds": elapsed_seconds,
+                "audio_recording_clock_seconds": elapsed_seconds,
+                "audio_short_capture": True,
             }
         )
-        media.pop("audio_finalization_warning", None)
         record["media"] = media
         return record
 
@@ -988,15 +1056,23 @@ class MeetingRecorderRuntime:
             minimum_expected_seconds = elapsed_seconds * 0.7
             if source_duration_seconds is not None and source_duration_seconds < minimum_expected_seconds:
                 status = "failed"
-                warning = (
-                    f"Recorder captured only {source_duration_seconds:.0f}s of source audio for a "
-                    f"{elapsed_seconds:.0f}s recording. The file was padded with silence after the recorder stopped early. "
-                    "Check the microphone input and start a new recording."
-                )
+                if str(media.get("audio_finalization_profile") or "") == MEETING_AUDIO_POST_STOP_PAD_PROFILE:
+                    warning = (
+                        f"Recorder captured only {source_duration_seconds:.0f}s of source audio for a "
+                        f"{elapsed_seconds:.0f}s recording. The file was padded with silence after the recorder stopped early. "
+                        "Check the microphone input and start a new recording."
+                    )
+                else:
+                    warning = (
+                        f"Recorder captured only {source_duration_seconds:.0f}s of source audio for a "
+                        f"{elapsed_seconds:.0f}s recording. No silence padding was added. "
+                        "Check the microphone input and start a new recording."
+                    )
             elif elapsed_seconds >= 10.0 and media_duration_seconds < minimum_expected_seconds:
-                status = "warning"
+                status = "failed" if media_duration_seconds < max(10.0, elapsed_seconds * 0.5) else "warning"
                 warning = (
-                    f"Recorded audio is only {media_duration_seconds:.0f}s for a {elapsed_seconds:.0f}s recording. "
+                    f"Recorder captured only {media_duration_seconds:.0f}s of audio for a {elapsed_seconds:.0f}s recording. "
+                    "No silence padding was added. "
                     "Check the microphone input and start a new recording."
                 )
             elif media_duration_seconds > elapsed_seconds * 1.3 + 10:
@@ -2530,6 +2606,24 @@ def _recording_elapsed_seconds(record: dict[str, Any]) -> float | None:
         return None
     elapsed = (stopped_at - started_at).total_seconds()
     return max(0.0, elapsed)
+
+
+def _normalized_auto_stop_grace_seconds(value: object) -> int:
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        seconds = MEETING_RECORDER_AUTO_STOP_GRACE_SECONDS
+    return max(0, min(seconds, 24 * 60 * 60))
+
+
+def _scheduled_auto_stop_deadline(record: dict[str, Any], *, grace_seconds: int) -> datetime | None:
+    raw_end = str(record.get("scheduled_end") or "").strip()
+    if "T" not in raw_end:
+        return None
+    scheduled_end = _parse_utc_timestamp(raw_end)
+    if scheduled_end is None:
+        return None
+    return scheduled_end + timedelta(seconds=_normalized_auto_stop_grace_seconds(grace_seconds))
 
 
 def _parse_utc_timestamp(value: str) -> datetime | None:

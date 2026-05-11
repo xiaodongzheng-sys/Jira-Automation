@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -21,13 +22,21 @@ class TeamStackScriptTests(unittest.TestCase):
         "TEAM_PORTAL_CLOUDFLARE_PROTOCOL",
         "TEAM_PORTAL_CLOUDFLARE_TUNNEL_NAME",
         "TEAM_PORTAL_DATA_DIR",
+        "RELEASE_WINDOW_POLICY_BYPASS",
+        "RELEASE_WINDOW_POLICY_NOW",
     )
 
     def setUp(self):
         self._timing_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self._timing_dir.cleanup)
         timing_file = str(Path(self._timing_dir.name) / "deploy_timings.jsonl")
-        self._timing_env_patch = patch.dict(os.environ, {"TEAM_DEPLOY_TIMING_FILE": timing_file})
+        self._timing_env_patch = patch.dict(
+            os.environ,
+            {
+                "TEAM_DEPLOY_TIMING_FILE": timing_file,
+                "RELEASE_WINDOW_POLICY_BYPASS": "1",
+            },
+        )
         self._timing_env_patch.start()
         self.addCleanup(self._timing_env_patch.stop)
 
@@ -35,6 +44,7 @@ class TeamStackScriptTests(unittest.TestCase):
         env = os.environ.copy()
         for key in self.SCRIPT_TEST_ENV_KEYS:
             env.pop(key, None)
+        env["RELEASE_WINDOW_POLICY_BYPASS"] = "1"
         env.update(overrides)
         return env
 
@@ -57,6 +67,22 @@ current_release_revision
         )
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
         return completed.stdout.strip()
+
+    def _run_team_env_helper(self, command: str, **env_overrides: str) -> subprocess.CompletedProcess:
+        helper_path = PROJECT_ROOT / "scripts/lib/team_env.sh"
+        return subprocess.run(
+            ["bash", "-lc", f'source "{helper_path}"\n{command}'],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={
+                **os.environ,
+                "ROOT_DIR": str(PROJECT_ROOT),
+                "PYTHON_BIN": sys.executable,
+                "ENV_FILE": "/dev/null",
+                **env_overrides,
+            },
+        )
 
     def _write_fake_curl(self, bin_dir: Path) -> Path:
         curl_path = bin_dir / "curl"
@@ -138,6 +164,7 @@ exit 0
         script_paths = [
             "scripts/lib/team_env.sh",
             "scripts/lib/cloud_run_image_policy.sh",
+            "scripts/lib/release_window_policy.sh",
             "scripts/run_team_portal_prod.sh",
             "scripts/run_team_portal_foreground.sh",
             "scripts/run_ngrok_tunnel.sh",
@@ -533,6 +560,7 @@ exit 0
         self.assertIn("LOCAL_AGENT_PORT=\"$UAT_LOCAL_AGENT_PORT\"", contents)
         self.assertIn("LOCAL_AGENT_TEAM_PORTAL_DATA_DIR=\"$UAT_LOCAL_AGENT_DATA_DIR\"", contents)
         self.assertIn("LOCAL_AGENT_SCREEN_SESSION=\"$UAT_LOCAL_AGENT_SCREEN_SESSION\"", contents)
+        self.assertIn("assert_no_active_meeting_recording_before_local_agent_restart", contents)
         self.assertIn("./scripts/run_local_agent.sh restart", contents)
         self.assertIn("CLOUD_RUN_UAT_VERIFY_SOURCE_CODE_QA_OPS:-1", contents)
         self.assertIn("source_code_qa_ops_summary.py\" --strict", contents)
@@ -982,7 +1010,16 @@ exit 0
         contents = deploy_script.read_text(encoding="utf-8")
 
         self.assertIn("CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY:-1", contents)
+        self.assertIn("assert_no_active_meeting_recording_before_local_agent_restart", contents)
         self.assertIn('"$ROOT_DIR/scripts/run_local_agent.sh" restart', contents)
+
+    def test_local_agent_restart_does_not_ignore_guarded_stop_failure(self):
+        local_agent_script = (PROJECT_ROOT / "scripts/run_local_agent.sh").read_text(encoding="utf-8")
+
+        self.assertIn("restart() {", local_agent_script)
+        self.assertIn('assert_no_active_meeting_recording_before_local_agent_restart "restart Mac local-agent" "$DATA_DIR"', local_agent_script)
+        self.assertIn("\n  stop\n  start\n", local_agent_script)
+        self.assertNotIn("stop || true\n  start", local_agent_script)
 
     def test_mac_stack_restart_refreshes_local_agent_when_bpmis_proxy_is_enabled(self):
         stack_script = PROJECT_ROOT / "scripts/run_team_stack.sh"
@@ -991,7 +1028,93 @@ exit 0
 
         self.assertIn("restart_local_agent_if_needed", contents)
         self.assertIn('read_env_value BPMIS_CALL_MODE', contents)
+        self.assertIn("assert_no_active_meeting_recording_before_local_agent_restart", contents)
         self.assertIn('"$ROOT_DIR/scripts/run_local_agent.sh" restart', contents)
+
+    def test_local_agent_restart_guard_detects_active_meeting_recording(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_root = Path(temp_dir)
+            record_dir = data_root / "meeting_records" / "records" / "meeting-active"
+            record_dir.mkdir(parents=True)
+            status_path = record_dir / "screencapture-status.json"
+            status_path.write_text(json.dumps({"status": "recording"}), encoding="utf-8")
+            (record_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "record_id": "meeting-active",
+                        "title": "Live Review",
+                        "status": "recording",
+                        "recording_started_at": "2026-05-11T06:03:51+00:00",
+                        "media": {
+                            "screencapture_status_path": str(status_path),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            completed = self._run_team_env_helper(
+                f'meeting_recorder_active_recordings "{data_root}"',
+            )
+
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        self.assertIn("meeting-active", completed.stdout)
+        self.assertIn("ScreenCaptureKit status is recording", completed.stdout)
+
+    def test_local_agent_restart_guard_ignores_stopped_meeting_recording(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_root = Path(temp_dir)
+            record_dir = data_root / "meeting_records" / "records" / "meeting-stopped"
+            record_dir.mkdir(parents=True)
+            (record_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "record_id": "meeting-stopped",
+                        "title": "Completed Review",
+                        "status": "recording",
+                        "recording_started_at": "2026-05-11T06:03:51+00:00",
+                        "recording_stopped_at": "2026-05-11T07:23:58+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            completed = self._run_team_env_helper(
+                f'meeting_recorder_active_recordings "{data_root}"',
+            )
+
+        self.assertEqual(completed.returncode, 1, msg=completed.stdout + completed.stderr)
+        self.assertEqual(completed.stdout, "")
+
+    def test_local_agent_restart_guard_blocks_when_active_meeting_recording_exists(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_root = Path(temp_dir)
+            record_dir = data_root / "meeting_records" / "records" / "meeting-active"
+            record_dir.mkdir(parents=True)
+            status_path = record_dir / "screencapture-status.json"
+            status_path.write_text(json.dumps({"status": "recording"}), encoding="utf-8")
+            (record_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "record_id": "meeting-active",
+                        "title": "Live Review",
+                        "status": "recording",
+                        "recording_started_at": "2026-05-11T06:03:51+00:00",
+                        "media": {
+                            "screencapture_status_path": str(status_path),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            completed = self._run_team_env_helper(
+                f'assert_no_active_meeting_recording_before_local_agent_restart "restart Mac local-agent" "{data_root}"',
+            )
+
+        self.assertEqual(completed.returncode, 1, msg=completed.stdout + completed.stderr)
+        self.assertIn("Refusing to restart Mac local-agent", completed.stdout)
+        self.assertIn("meeting-active", completed.stdout)
 
     def test_mac_stack_supports_portal_only_restart(self):
         stack_script = PROJECT_ROOT / "scripts/run_team_stack.sh"
@@ -1034,6 +1157,7 @@ exit 0
         self.assertIn("PROMOTE_UAT_BLUE_GREEN_VALIDATE", contents)
         self.assertIn("TEAM_PORTAL_SLOT_REPLACE_STALE=1", contents)
         self.assertIn("run_team_portal_slot.sh", contents)
+        self.assertIn("assert_no_active_meeting_recording_before_local_agent_restart", contents)
         self.assertIn("Skipping live local-agent restart", contents)
         self.assertIn("restart-guard", contents)
         self.assertIn("Live restart mode:", contents)
@@ -1062,16 +1186,23 @@ exit 0
         script = (PROJECT_ROOT / "scripts/release_uat_fast.sh").read_text(encoding="utf-8")
 
         self.assertIn("run_system_full_test_gate.py", script)
+        self.assertIn("enforce_release_window_target uat", script)
         self.assertIn("--parallel-workers", script)
         self.assertIn("build_cloud_run_image.sh", script)
         self.assertIn("CLOUD_RUN_UAT_SKIP_UNCHANGED", script)
         self.assertIn("CLOUD_RUN_UAT_PARALLEL_HOST_SYNC", script)
         self.assertIn("deploy_cloud_run_uat.sh", script)
 
-    def test_fast_uat_live_release_orchestrator_waits_deploys_promotes_and_reports(self):
+    def test_fast_uat_live_release_orchestrator_is_release_window_aware(self):
         script = (PROJECT_ROOT / "scripts/release_uat_live_fast.sh").read_text(encoding="utf-8")
 
         self.assertIn("run_gate_and_image_in_parallel", script)
+        self.assertIn("release_window_target", script)
+        self.assertIn("allows UAT only", script)
+        self.assertIn("allows Live only", script)
+        self.assertIn("Live already serves $SHA; skipping Cloud Run/UAT gcloud promotion checks.", script)
+        self.assertIn("require_gcloud_noninteractive_auth", script)
+        self.assertIn("gcloud credentials are not usable non-interactively", script)
         self.assertIn("cloud_run_image_policy.sh", script)
         self.assertIn("find_reusable_image_without_runtime_changes", script)
         self.assertIn("RELEASE_UAT_LIVE_REUSE_IMAGE_WITHOUT_RUNTIME_CHANGES", script)
@@ -1080,16 +1211,68 @@ exit 0
         self.assertIn("RELEASE_UAT_LIVE_GATE_PROOF_MAX_AGE_SECONDS", script)
         self.assertIn("wait_for_github_image_workflow", script)
         self.assertIn("run watch \"$run_id\"", script)
-        self.assertIn("RELEASE_UAT_LIVE_SKIP_GCLOUD_WHEN_LIVE_CURRENT", script)
-        self.assertIn("Live already serves $SHA; skipping Cloud Run/UAT gcloud steps.", script)
-        self.assertIn("require_gcloud_noninteractive_auth", script)
-        self.assertIn("gcloud credentials are not usable non-interactively", script)
-        self.assertIn("deploy_cloud_run_uat.sh", script)
+        self.assertIn("release_uat_fast.sh", script)
         self.assertIn("run_system_full_test_gate.py", script)
-        self.assertIn("--expect-live-promoted", script)
         self.assertIn("promote_uat_to_live.sh", script)
         self.assertIn("run_team_stack.sh\" doctor", script)
         self.assertIn("report_deploy_timings.py", script)
+
+    def test_release_window_policy_routes_targets_by_singapore_business_hours(self):
+        helper_path = PROJECT_ROOT / "scripts/lib/release_window_policy.sh"
+        team_env_path = PROJECT_ROOT / "scripts/lib/team_env.sh"
+        command = f'''
+source "{team_env_path}"
+source "{helper_path}"
+RELEASE_WINDOW_POLICY_NOW="2026-05-08T10:00:00+08:00" release_window_target
+RELEASE_WINDOW_POLICY_NOW="2026-05-08T18:59:00+08:00" release_window_target
+RELEASE_WINDOW_POLICY_NOW="2026-05-08T19:00:00+08:00" release_window_target
+RELEASE_WINDOW_POLICY_NOW="2026-05-09T12:00:00+08:00" release_window_target
+'''
+        completed = subprocess.run(
+            ["bash", "-lc", command],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=self._script_env(PYTHON_BIN=sys.executable),
+        )
+
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        self.assertEqual(completed.stdout.splitlines(), ["uat", "uat", "live", "live"])
+
+    def test_release_window_policy_blocks_wrong_target_by_default(self):
+        helper_path = PROJECT_ROOT / "scripts/lib/release_window_policy.sh"
+        team_env_path = PROJECT_ROOT / "scripts/lib/team_env.sh"
+        scenarios = [
+            ("2026-05-09T12:00:00+08:00", "uat", "live"),
+            ("2026-05-08T12:00:00+08:00", "live", "uat"),
+        ]
+
+        for timestamp, requested, allowed in scenarios:
+            command = f'''
+source "{team_env_path}"
+source "{helper_path}"
+RELEASE_WINDOW_POLICY_NOW="{timestamp}" enforce_release_window_target {requested}
+'''
+            completed = subprocess.run(
+                ["bash", "-lc", command],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=self._script_env(PYTHON_BIN=sys.executable, RELEASE_WINDOW_POLICY_BYPASS="0"),
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(f"blocked '{requested}' release", completed.stderr)
+            self.assertIn(f"Allowed target: {allowed}", completed.stderr)
+
+    def test_deploy_scripts_enforce_release_window_policy(self):
+        uat_script = (PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh").read_text(encoding="utf-8")
+        live_script = (PROJECT_ROOT / "scripts/promote_uat_to_live.sh").read_text(encoding="utf-8")
+
+        self.assertIn("release_window_policy.sh", uat_script)
+        self.assertIn("enforce_release_window_target uat", uat_script)
+        self.assertIn("release_window_policy.sh", live_script)
+        self.assertIn("enforce_release_window_target live", live_script)
 
     def test_report_deploy_timings_summarizes_recent_records(self):
         report_script = PROJECT_ROOT / "scripts/report_deploy_timings.py"

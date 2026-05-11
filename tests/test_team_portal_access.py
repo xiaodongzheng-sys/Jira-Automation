@@ -639,6 +639,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "team_dashboard_monthly_report_draft",
                 "team_dashboard_monthly_report_latest_draft",
                 "team_dashboard_monthly_report_send",
+                "team_dashboard_monthly_report_style_guide_refresh",
                 "team_dashboard_monthly_report_template",
                 "team_dashboard_page",
                 "team_dashboard_prd_review",

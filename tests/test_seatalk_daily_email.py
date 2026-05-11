@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import importlib.util
 import tempfile
 import unittest
 from dataclasses import replace
@@ -1046,8 +1047,46 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         ])
         self.assertIn("Section: Xiaodong Action Required", specs[0].description)
         self.assertIn("Due: today", specs[0].description)
+        self.assertEqual(specs[0].target_list, "Today")
+        self.assertEqual(specs[0].labels, ("AF-ID",))
+        self.assertEqual(specs[0].due, "")
         self.assertIn("Section: Watch / Delegate", specs[1].description)
+        self.assertEqual(specs[1].target_list, "Watch / Risk")
         self.assertIn("Person: Rene Chong", specs[2].description)
+        self.assertEqual(specs[2].target_list, "Waiting / Follow-up")
+
+    def test_build_trello_card_specs_routes_direct_by_due_window(self):
+        briefing = {
+            "direct_action_todos": [
+                {"task": "No due item", "domain": "General", "priority": "medium", "due": "TBD", "evidence": "A"},
+                {"task": "Tomorrow item", "domain": "Credit Risk", "priority": "medium", "due": "tomorrow", "evidence": "B"},
+                {"task": "This week item", "domain": "GRC", "priority": "medium", "due": "2026-05-13", "evidence": "C"},
+            ],
+            "watch_delegate_todos": [],
+            "team_member_reminders": [],
+        }
+
+        specs = build_trello_card_specs(briefing=briefing, run_date="2026-05-09")
+
+        self.assertEqual([spec.target_list for spec in specs], ["Inbox", "Today", "This Week"])
+        self.assertEqual(specs[0].due, "")
+        self.assertEqual(specs[1].due, "")
+        self.assertEqual(specs[2].due, "2026-05-13")
+        self.assertEqual(specs[1].labels, ("Credit Risk",))
+        self.assertEqual(specs[2].labels, ("GRC",))
+
+    def test_build_trello_card_specs_does_not_treat_validate_as_ai(self):
+        briefing = {
+            "direct_action_todos": [
+                {"task": "Validate Credit Card PRD", "domain": "Credit Risk", "priority": "medium", "due": "TBD", "evidence": "A"},
+            ],
+            "watch_delegate_todos": [],
+            "team_member_reminders": [],
+        }
+
+        specs = build_trello_card_specs(briefing=briefing, run_date="2026-05-09")
+
+        self.assertEqual(specs[0].labels, ("Credit Risk",))
 
     def test_build_trello_card_specs_drops_followups_covered_by_watch_delegate(self):
         briefing = {
@@ -1109,11 +1148,19 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         )
 
         list_id = client.get_or_create_list_id()
-        card = client.create_card(list_id=list_id, name="[Direct] Review", description="Report date: 2026-04-30")
+        card = client.create_card(
+            list_id=list_id,
+            name="[Direct] Review",
+            description="Report date: 2026-04-30",
+            label_ids=["label-1"],
+            due="2026-04-30",
+        )
 
         self.assertEqual(list_id, "list-1")
         self.assertEqual(card.url, "https://trello.test/card-1")
         self.assertEqual(session.posts[0]["params"]["idList"], "list-1")
+        self.assertEqual(session.posts[0]["params"]["idLabels"], "label-1")
+        self.assertEqual(session.posts[0]["params"]["due"], "2026-04-30")
 
     def test_trello_client_lists_existing_cards(self):
         class FakeResponse:
@@ -1182,6 +1229,39 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(client.get_or_create_list_id(), "new-list")
         self.assertEqual(session.posts[0]["params"]["name"], "Daily Summary Email")
 
+    def test_trello_client_reuses_and_creates_labels(self):
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+                self.text = ""
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        class FakeSession:
+            def __init__(self):
+                self.posts = []
+                self.gets = 0
+
+            def get(self, url, params, timeout):
+                self.gets += 1
+                return FakeResponse([{"id": "existing", "name": "AF-ID", "color": "red"}])
+
+            def post(self, url, params, timeout):
+                self.posts.append({"url": url, "params": params})
+                return FakeResponse({"id": "created", "name": params["name"], "color": params["color"]})
+
+        session = FakeSession()
+        client = TrelloDailySummaryClient(api_key="key", api_token="token", board_id="board-1", session=session)
+
+        self.assertEqual(client.get_or_create_label_id("AF-ID"), "existing")
+        self.assertEqual(client.get_or_create_label_id("Credit Risk", color="purple"), "created")
+        self.assertEqual(session.posts[0]["params"]["name"], "Credit Risk")
+        self.assertEqual(session.posts[0]["params"]["color"], "purple")
+
     def test_trello_client_requires_env_config(self):
         with self.assertRaisesRegex(ConfigError, "TRELLO_API_KEY"):
             TrelloDailySummaryClient(api_key="", api_token="token", board_id="board")
@@ -1195,11 +1275,11 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             def __init__(self):
                 self.created = []
 
-            def get_or_create_list_id(self):
-                return "list-1"
+            def get_or_create_list_id(self, list_name=None):
+                return {"Inbox": "inbox", "Today": "today", "Watch / Risk": "watch", "Waiting / Follow-up": "follow"}.get(list_name, "list-1")
 
-            def create_card(self, *, list_id, name, description):
-                self.created.append({"list_id": list_id, "name": name, "description": description})
+            def create_card(self, *, list_id, name, description, label_ids=None, due=None):
+                self.created.append({"list_id": list_id, "name": name, "description": description, "label_ids": label_ids or [], "due": due or ""})
                 from bpmis_jira_tool.trello_daily_summary import TrelloCardResult
 
                 return TrelloCardResult(
@@ -1264,11 +1344,11 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             def __init__(self):
                 self.created = []
 
-            def get_or_create_list_id(self):
-                return "list-1"
+            def get_or_create_list_id(self, list_name=None):
+                return {"Today": "today"}.get(list_name, "list-1")
 
-            def create_card(self, *, list_id, name, description):
-                self.created.append({"list_id": list_id, "name": name, "description": description})
+            def create_card(self, *, list_id, name, description, label_ids=None, due=None):
+                self.created.append({"list_id": list_id, "name": name, "description": description, "label_ids": label_ids or [], "due": due or ""})
                 from bpmis_jira_tool.trello_daily_summary import TrelloCardResult
 
                 return TrelloCardResult(status="created", name=name, url=f"https://trello.test/{len(self.created)}", trello_id=f"card-{len(self.created)}")
@@ -1327,21 +1407,24 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             def __init__(self):
                 self.created = []
 
-            def get_or_create_list_id(self):
-                return "list-1"
+            def get_or_create_list_id(self, list_name=None):
+                return {"Today": "today"}.get(list_name, "list-1")
 
-            def list_cards(self, *, list_id):
-                self.list_id = list_id
+            def list_board_cards(self):
                 return [
                     {
                         "id": "card-existing",
                         "name": "[Direct] Review rollout",
                         "desc": "Report date: 2026-04-30\nDomain: Anti-fraud\nTask: Review rollout",
                         "closed": False,
+                        "idList": "inbox",
                     }
                 ]
 
-            def create_card(self, *, list_id, name, description):
+            def list_cards(self, *, list_id):
+                raise AssertionError("daily sync should dedupe against board-wide open cards")
+
+            def create_card(self, *, list_id, name, description, label_ids=None, due=None):
                 self.created.append({"list_id": list_id, "name": name, "description": description})
                 from bpmis_jira_tool.trello_daily_summary import TrelloCardResult
 
@@ -1368,6 +1451,128 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
 
         self.assertEqual(result.created_count, 0)
         self.assertEqual(result.skipped_count, 1)
+
+    def test_daily_trello_sync_skips_existing_legacy_list_card_when_local_state_is_missing(self):
+        class FakeTrelloClient:
+            def __init__(self):
+                self.created = []
+
+            def get_or_create_list_id(self, list_name=None):
+                return "list-1"
+
+            def list_cards(self, *, list_id):
+                self.list_id = list_id
+                return [
+                    {
+                        "id": "card-existing",
+                        "name": "[Direct] Review rollout",
+                        "desc": "Report date: 2026-04-30\nDomain: Anti-fraud\nTask: Review rollout",
+                        "closed": False,
+                    }
+                ]
+
+            def create_card(self, *, list_id, name, description, label_ids=None, due=None):
+                self.created.append({"list_id": list_id, "name": name, "description": description})
+                from bpmis_jira_tool.trello_daily_summary import TrelloCardResult
+
+                return TrelloCardResult(status="created", name=name, url="https://trello.test/new", trello_id="card-new")
+
+        briefing = {
+            "direct_action_todos": [{"task": "Review rollout", "domain": "Anti-fraud", "priority": "high", "due": "today", "evidence": "Alice"}],
+            "watch_delegate_todos": [],
+            "team_member_reminders": [],
+        }
+        now = datetime(2026, 4, 30, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = sync_daily_summary_to_trello(
+                briefing=briefing,
+                run_date="2026-04-30",
+                run_slot="morning",
+                window_label="2026-04-30 08:00 - 2026-04-30 13:00",
+                data_root=Path(temp_dir),
+                now=now,
+                trello_client=FakeTrelloClient(),
+                trello_store=TrelloDailySummaryStore(Path(temp_dir) / "daily_trello_cards.json"),
+            )
+
+        self.assertEqual(result.created_count, 0)
+        self.assertEqual(result.skipped_count, 1)
+
+    def test_trello_organizer_plans_workflow_moves_and_labels(self):
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "organize_trello_board.py"
+        spec = importlib.util.spec_from_file_location("organize_trello_board", script_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        lists = [
+            {"id": "today", "name": "Today", "closed": False},
+            {"id": "week", "name": "This week", "closed": False},
+            {"id": "afph", "name": "Anti Fraud - PH", "closed": False},
+            {"id": "other", "name": "Others", "closed": False},
+            {"id": "daily", "name": "Daily Summary Email", "closed": False},
+        ]
+        cards = [
+            {"id": "c1", "idList": "afph", "name": "[Follow-up] Ker Yin: Confirm PH scope", "labels": [], "due": None},
+            {"id": "c2", "idList": "afph", "name": "ShopeePay Txn Limit Project", "labels": [], "due": None},
+            {"id": "c3", "idList": "other", "name": "VPN Password: secret", "labels": [], "due": None},
+            {"id": "c4", "idList": "daily", "name": "[Direct] Review rollout", "labels": [], "due": None},
+        ]
+
+        actions = module.plan_board_reorganization(lists=lists, cards=cards, labels=[])
+
+        self.assertIn({"id": "week", "from": "This week", "to": "This Week"}, actions["rename_lists"])
+        self.assertIn({"id": "c4", "name": "[Direct] Review rollout"}, actions["archive_cards"])
+        self.assertIn({"id": "c1", "name": "[Follow-up] Ker Yin: Confirm PH scope", "from": "Anti Fraud - PH", "to": "Waiting / Follow-up"}, actions["move_cards"])
+        self.assertIn({"id": "c2", "name": "ShopeePay Txn Limit Project", "from": "Anti Fraud - PH", "to": "Project Backlog"}, actions["move_cards"])
+        self.assertIn({"id": "c3", "name": "VPN Password: secret", "from": "Others", "to": "Personal / Sensitive"}, actions["move_cards"])
+        self.assertIn({"id": "c1", "name": "[Follow-up] Ker Yin: Confirm PH scope", "label": "AF-PH"}, actions["add_labels"])
+        self.assertIn({"id": "c3", "name": "VPN Password: secret", "label": "Sensitive"}, actions["add_labels"])
+
+    def test_trello_organizer_ignores_cards_from_closed_or_unknown_lists(self):
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "organize_trello_board.py"
+        spec = importlib.util.spec_from_file_location("organize_trello_board", script_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        actions = module.plan_board_reorganization(
+            lists=[{"id": "visible", "name": "Anti Fraud - PH", "closed": False}],
+            cards=[
+                {"id": "c1", "idList": "closed", "name": "Old hidden card", "labels": [], "due": None},
+                {"id": "c2", "idList": "visible", "name": "Current PH card", "labels": [], "due": None},
+            ],
+            labels=[],
+        )
+
+        moved_card_ids = {action["id"] for action in actions["move_cards"]}
+        self.assertNotIn("c1", moved_card_ids)
+        self.assertIn("c2", moved_card_ids)
+
+    def test_trello_organizer_is_idempotent_for_workflow_lists(self):
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "organize_trello_board.py"
+        spec = importlib.util.spec_from_file_location("organize_trello_board", script_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        lists = [
+            {"id": "personal", "name": "Personal / Sensitive", "closed": False},
+            {"id": "watch", "name": "Watch / Risk", "closed": False},
+        ]
+        cards = [
+            {"id": "c1", "idList": "personal", "name": "VPN Password", "labels": [{"name": "Personal"}, {"name": "Sensitive"}], "due": None},
+            {"id": "c2", "idList": "watch", "name": "[Watch] Track ALCv12", "labels": [{"name": "AF-ID"}], "due": None},
+        ]
+
+        actions = module.plan_board_reorganization(lists=lists, cards=cards, labels=[])
+
+        self.assertEqual(actions["move_cards"], [])
+        self.assertEqual(actions["add_labels"], [])
 
     def test_gmail_raw_message_contains_expected_headers_and_body(self):
         raw = build_gmail_raw_message(
@@ -1536,11 +1741,11 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             def __init__(self):
                 self.created = []
 
-            def get_or_create_list_id(self):
-                return "list-1"
+            def get_or_create_list_id(self, list_name=None):
+                return {"Today": "today", "Watch / Risk": "watch", "Waiting / Follow-up": "follow"}.get(list_name, "list-1")
 
-            def create_card(self, *, list_id, name, description):
-                self.created.append({"list_id": list_id, "name": name, "description": description})
+            def create_card(self, *, list_id, name, description, label_ids=None, due=None):
+                self.created.append({"list_id": list_id, "name": name, "description": description, "label_ids": label_ids or [], "due": due or ""})
                 from bpmis_jira_tool.trello_daily_summary import TrelloCardResult
 
                 return TrelloCardResult(status="created", name=name, url=f"https://trello.test/{len(self.created)}", trello_id=f"card-{len(self.created)}")

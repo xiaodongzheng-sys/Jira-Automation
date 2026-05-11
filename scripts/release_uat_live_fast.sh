@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/team_env.sh"
+source "$ROOT_DIR/scripts/lib/release_window_policy.sh"
 source "$ROOT_DIR/scripts/lib/cloud_run_image_policy.sh"
 
 STARTED_AT="$(date +%s)"
@@ -247,7 +248,7 @@ require_gcloud_noninteractive_auth() {
     echo "gcloud is not installed. Install Google Cloud SDK first." >&2
     return 1
   fi
-  if "$GCLOUD_BIN" auth print-access-token >/dev/null 2>&1; then
+  if "$GCLOUD_BIN" auth print-access-token ${project_args[@]+"${project_args[@]}"} >/dev/null 2>&1; then
     return 0
   fi
   {
@@ -263,43 +264,36 @@ print_timing_report() {
 }
 
 cd "$ROOT_DIR"
+RELEASE_TARGET="$(release_window_target)"
+if [[ "$RELEASE_TARGET" == "uat" ]]; then
+  echo "Release window policy allows UAT only: $(release_window_summary)"
+  "$ROOT_DIR/scripts/release_uat_fast.sh"
+  print_timing_report
+  FINISHED_AT="$(date +%s)"
+  echo "Fast release completed UAT only in $((FINISHED_AT - STARTED_AT))s"
+  exit 0
+fi
+
+echo "Release window policy allows Live only: $(release_window_summary)"
 SHA="$(current_sha)"
 LIVE_URL="$(resolve_live_url)"
-if [[ "$(live_revision || true)" == "$SHA" && "${RELEASE_UAT_LIVE_SKIP_GCLOUD_WHEN_LIVE_CURRENT:-1}" == "1" ]]; then
-  echo "Live already serves $SHA; skipping Cloud Run/UAT gcloud steps."
+if [[ "$(live_revision || true)" == "$SHA" ]]; then
+  echo "Live already serves $SHA; skipping Cloud Run/UAT gcloud promotion checks."
   TEAM_STACK_HOST_ROOT="${TEAM_STACK_HOST_ROOT:-$(recommended_team_stack_root)}"
   "$TEAM_STACK_HOST_ROOT/scripts/run_team_stack.sh" doctor
   print_timing_report
   FINISHED_AT="$(date +%s)"
-  echo "Fast UAT/live release confirmed Live already current in $((FINISHED_AT - STARTED_AT))s"
+  echo "Fast release confirmed Live already current in $((FINISHED_AT - STARTED_AT))s"
   exit 0
 fi
 
 require_gcloud_noninteractive_auth
-IMAGE_URI=""
-run_gate_and_image_in_parallel "$SHA"
-
-echo "Deploying UAT with prebuilt image: $IMAGE_URI"
-CLOUD_RUN_IMAGE="$IMAGE_URI" \
-CLOUD_RUN_UAT_SKIP_UNCHANGED="${CLOUD_RUN_UAT_SKIP_UNCHANGED:-1}" \
-CLOUD_RUN_UAT_PARALLEL_HOST_SYNC="${CLOUD_RUN_UAT_PARALLEL_HOST_SYNC:-1}" \
-"$ROOT_DIR/scripts/deploy_cloud_run_uat.sh"
-
-UAT_URL="$(resolve_uat_url)"
-
-if [[ "$(live_revision || true)" == "$SHA" ]]; then
-  echo "Live already serves $SHA; skipping pre-promotion smoke and promote step."
-else
-  smoke "$SHA"
-  GOOGLE_CLOUD_PROJECT="$PROJECT_ID" \
-  CLOUD_RUN_DEPLOY_ACCOUNT="${CLOUD_RUN_DEPLOY_ACCOUNT:-$(read_env_value CLOUD_RUN_DEPLOY_ACCOUNT)}" \
-  "$ROOT_DIR/scripts/promote_uat_to_live.sh"
-fi
-
-smoke "$SHA" --expect-live-promoted
+GOOGLE_CLOUD_PROJECT="$PROJECT_ID" \
+CLOUD_RUN_DEPLOY_ACCOUNT="${CLOUD_RUN_DEPLOY_ACCOUNT:-$(read_env_value CLOUD_RUN_DEPLOY_ACCOUNT)}" \
+"$ROOT_DIR/scripts/promote_uat_to_live.sh"
 TEAM_STACK_HOST_ROOT="${TEAM_STACK_HOST_ROOT:-$(recommended_team_stack_root)}"
 "$TEAM_STACK_HOST_ROOT/scripts/run_team_stack.sh" doctor
 print_timing_report
-
 FINISHED_AT="$(date +%s)"
-echo "Fast UAT/live release completed in $((FINISHED_AT - STARTED_AT))s"
+echo "Fast release completed Live only in $((FINISHED_AT - STARTED_AT))s"
+exit 0

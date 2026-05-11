@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/team_env.sh"
+source "$ROOT_DIR/scripts/lib/release_window_policy.sh"
 
 SCRIPT_STARTED_AT="$(date +%s)"
 SERVICE="${CLOUD_RUN_SERVICE:-$(read_env_value CLOUD_RUN_SERVICE)}"
@@ -52,6 +53,8 @@ UAT_SYNC_PID=""
 UAT_SYNC_LOG=""
 UAT_SYNC_STARTED_AT=""
 UAT_LOCAL_AGENT_SECRET_SOURCE="${CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE:-secret_manager}"
+
+enforce_release_window_target uat
 
 record_uat_stage_timing() {
   local phase="$1"
@@ -468,6 +471,15 @@ sync_mac_local_agent_for_uat() {
       exit 1
     fi
     echo "Restarting isolated UAT Mac local-agent on port $UAT_LOCAL_AGENT_PORT"
+    (
+      cd "$host_workspace"
+      ROOT_DIR="$host_workspace" \
+      PYTHON_BIN="$host_workspace/.venv/bin/python" \
+      LOCAL_AGENT_PORT="$UAT_LOCAL_AGENT_PORT" \
+      LOCAL_AGENT_TEAM_PORTAL_DATA_DIR="$UAT_LOCAL_AGENT_DATA_DIR" \
+      TEAM_PORTAL_DATA_DIR="$UAT_LOCAL_AGENT_DATA_DIR" \
+      assert_no_active_meeting_recording_before_local_agent_restart "restart isolated UAT Mac local-agent" "$UAT_LOCAL_AGENT_DATA_DIR"
+    )
     (
       cd "$host_workspace"
       LOCAL_AGENT_HMAC_SECRET="$uat_local_agent_hmac_secret" \

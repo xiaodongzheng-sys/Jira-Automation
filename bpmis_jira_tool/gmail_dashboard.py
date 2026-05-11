@@ -33,6 +33,7 @@ GMAIL_METADATA_FAILURE_RATIO_THRESHOLD = 0.4
 GMAIL_EXPORT_BATCH_SIZE = 50
 GMAIL_EXPORT_MAX_TOTAL_MESSAGES = 200
 GMAIL_EXPORT_MAX_BODY_CHARS = 4000
+GMAIL_MONTHLY_REQUIREMENTS_EXPORT_MAX_BODY_CHARS = 30000
 GMAIL_TOPIC_MAX_GOOGLE_SHEET_LINKS = 4
 GMAIL_TOPIC_MAX_GOOGLE_SHEET_CHARS = 8000
 GMAIL_EXPORT_FETCH_WORKERS = 1
@@ -261,7 +262,16 @@ def _build_monthly_requirements_thread_export_query(period_start: datetime, peri
     if clean_sender:
         terms.append(f"from:{clean_sender}")
     if clean_subject:
-        terms.append(f'subject:"{clean_subject[:120]}"')
+        subject_terms = []
+        first_token = clean_subject.split(maxsplit=1)[0].strip()
+        if first_token:
+            subject_terms.append(f"subject:{first_token[:80]}")
+        for token in re.split(r"[\s_]+", clean_subject):
+            clean_token = token.strip()
+            if len(clean_token) >= 6:
+                subject_terms.append(f"subject:{clean_token[:80]}")
+        if subject_terms:
+            terms.append("{" + " ".join(dict.fromkeys(subject_terms)) + "}")
     return " ".join([base_query, *terms]).strip()
 
 
@@ -1151,14 +1161,19 @@ class GmailDashboardService:
             ],
             "Queries:",
             *[f"- {query}" for query in query_parts],
-            f"Max body length per message: {GMAIL_EXPORT_MAX_BODY_CHARS} characters",
+            f"Max body length per message: {GMAIL_MONTHLY_REQUIREMENTS_EXPORT_MAX_BODY_CHARS} characters",
             "",
         ]
         separator = "=" * 80
         included_threads = 0
         included_messages = 0
         for thread_id in ordered_thread_ids:
-            messages = self._fetch_thread_messages(thread_id=thread_id, since=local_since, now=local_now)
+            messages = self._fetch_thread_messages(
+                thread_id=thread_id,
+                since=local_since,
+                now=local_now,
+                max_body_chars=GMAIL_MONTHLY_REQUIREMENTS_EXPORT_MAX_BODY_CHARS,
+            )
             if not messages:
                 continue
             matched_market = _thread_monthly_requirements_market(messages, normalized_configs)
@@ -1569,7 +1584,14 @@ class GmailDashboardService:
             drive_links=_extract_drive_links_from_payload(message_payload),
         )
 
-    def _fetch_thread_messages(self, *, thread_id: str, since: datetime, now: datetime) -> list[GmailExportRecord]:
+    def _fetch_thread_messages(
+        self,
+        *,
+        thread_id: str,
+        since: datetime,
+        now: datetime,
+        max_body_chars: int = GMAIL_EXPORT_MAX_BODY_CHARS,
+    ) -> list[GmailExportRecord]:
         users_api = self.service.users().threads()
         payload = self._execute_gmail_request(
             lambda: users_api.get(
@@ -1591,9 +1613,10 @@ class GmailDashboardService:
             if _is_export_noise(headers, self.report_intelligence_config):
                 continue
             body_text = _clean_export_body_text(_extract_message_text_from_payload(mime_payload))
-            body_truncated = len(body_text) > GMAIL_EXPORT_MAX_BODY_CHARS
+            body_limit = max(1, int(max_body_chars or GMAIL_EXPORT_MAX_BODY_CHARS))
+            body_truncated = len(body_text) > body_limit
             if body_truncated:
-                body_text = f"{body_text[:GMAIL_EXPORT_MAX_BODY_CHARS].rstrip()}\n..."
+                body_text = f"{body_text[:body_limit].rstrip()}\n..."
             record = GmailExportRecord(
                 internal_date=message_time,
                 headers=headers,

@@ -221,6 +221,28 @@ class MeetingRecordStoreTests(unittest.TestCase):
 
 
 class MeetingRecorderRuntimeTests(unittest.TestCase):
+    class _FakeTimer:
+        instances = []
+
+        def __init__(self, delay, callback, args=None, kwargs=None):
+            self.delay = delay
+            self.callback = callback
+            self.args = args or ()
+            self.kwargs = kwargs or {}
+            self.daemon = False
+            self.started = False
+            self.cancelled = False
+            self.__class__.instances.append(self)
+
+        def start(self):
+            self.started = True
+
+        def cancel(self):
+            self.cancelled = True
+
+        def fire(self):
+            self.callback(*self.args, **self.kwargs)
+
     def test_audio_only_blank_link_uses_screencapturekit_f2f(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -271,6 +293,127 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertEqual(record["media"]["recording_background_nice"], 10)
         self.assertEqual(record["media"]["capture_status_every_buffers"], 250)
 
+    def test_calendar_meeting_schedules_auto_stop_ten_minutes_after_planned_end(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(
+                store=store,
+                config=MeetingRecorderConfig(
+                    ffmpeg_bin="/opt/homebrew/bin/ffmpeg",
+                    audio_input="Meeting Recorder Aggregate",
+                ),
+            )
+            self._FakeTimer.instances = []
+            with patch("bpmis_jira_tool.meeting_recorder.threading.Timer", self._FakeTimer), patch(
+                "bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin",
+                return_value="/opt/homebrew/bin/ffmpeg",
+            ), patch(
+                "bpmis_jira_tool.meeting_recorder._avfoundation_devices",
+                return_value={
+                    "video_devices": ["Capture screen 0"],
+                    "audio_devices": ["MacBook Air Microphone", "Meeting Recorder Aggregate"],
+                },
+            ), patch(
+                "bpmis_jira_tool.meeting_recorder._resolve_screencapturekit_helper",
+                return_value=Path("/tmp/meeting-screencapture-helper"),
+            ), patch(
+                "bpmis_jira_tool.meeting_recorder._ScreenCaptureKitAudioRecorder.start",
+                return_value={"status": "ok", "latency_seconds": 0.2, "bytes": 48000, "pid": 12345},
+            ):
+                record = runtime.start_recording(
+                    owner_email="owner@npt.sg",
+                    title="Calendar review",
+                    platform="google_meet",
+                    meeting_link="https://meet.google.com/abc-defg-hij",
+                    recording_mode="audio_only",
+                    calendar_event_id="calendar-1",
+                    scheduled_start="2099-05-04T09:00:00+08:00",
+                    scheduled_end="2099-05-04T09:30:00+08:00",
+                )
+
+        auto_stop = record["scheduled_auto_stop"]
+        self.assertEqual(auto_stop["status"], "scheduled")
+        self.assertEqual(auto_stop["mode"], "scheduled_end_plus_grace")
+        self.assertEqual(auto_stop["grace_seconds"], 600)
+        self.assertEqual(auto_stop["scheduled_for"], "2099-05-04T01:40:00+00:00")
+        self.assertEqual(len(self._FakeTimer.instances), 1)
+        self.assertTrue(self._FakeTimer.instances[0].started)
+        self.assertTrue(self._FakeTimer.instances[0].daemon)
+
+    def test_scheduled_auto_stop_callback_stops_recording(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Calendar review",
+                platform="google_meet",
+                meeting_link="https://meet.google.com/abc-defg-hij",
+                calendar_event_id="calendar-1",
+                scheduled_start="2026-05-04T09:00:00+08:00",
+                scheduled_end="2026-05-04T09:30:00+08:00",
+            )
+            record["status"] = "recording"
+            record["recording_started_at"] = "2026-05-04T01:00:00+00:00"
+            record["scheduled_auto_stop"] = {
+                "status": "scheduled",
+                "mode": "scheduled_end_plus_grace",
+                "grace_seconds": 600,
+                "scheduled_for": "2026-05-04T01:40:00+00:00",
+            }
+            store.save_record(record)
+
+            with patch("bpmis_jira_tool.meeting_recorder._utc_now", return_value="2026-05-04T01:40:00+00:00"), patch.object(
+                runtime,
+                "_terminate_persisted_recorder_process",
+            ) as terminate:
+                runtime._scheduled_auto_stop_callback(
+                    record_id=record["record_id"],
+                    owner_email="owner@npt.sg",
+                    scheduled_for="2026-05-04T01:40:00+00:00",
+                )
+
+            updated = store.get_record(record["record_id"])
+
+        self.assertEqual(updated["status"], "recorded")
+        self.assertEqual(updated["recording_stop_reason"], "scheduled_auto_stop")
+        self.assertEqual(updated["recording_stopped_at"], "2026-05-04T01:40:00+00:00")
+        self.assertEqual(updated["scheduled_auto_stop"]["status"], "completed")
+        self.assertEqual(updated["scheduled_auto_stop"]["stopped_at"], "2026-05-04T01:40:00+00:00")
+        terminate.assert_called_once()
+
+    def test_manual_stop_cancels_scheduled_auto_stop(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Calendar review",
+                platform="google_meet",
+                meeting_link="https://meet.google.com/abc-defg-hij",
+                calendar_event_id="calendar-1",
+                scheduled_end="2026-05-04T09:30:00+08:00",
+            )
+            record["status"] = "recording"
+            record["recording_started_at"] = "2026-05-04T01:00:00+00:00"
+            record["scheduled_auto_stop"] = {"status": "scheduled", "scheduled_for": "2026-05-04T01:40:00+00:00"}
+            store.save_record(record)
+            timer = self._FakeTimer(600, lambda: None)
+            runtime._auto_stop_timers[record["record_id"]] = timer
+
+            with patch("bpmis_jira_tool.meeting_recorder._utc_now", return_value="2026-05-04T01:20:00+00:00"), patch.object(
+                runtime,
+                "_terminate_persisted_recorder_process",
+            ):
+                updated = runtime.stop_recording(record_id=record["record_id"], owner_email="owner@npt.sg")
+
+        self.assertTrue(timer.cancelled)
+        self.assertEqual(updated["recording_stop_reason"], "manual")
+        self.assertEqual(updated["scheduled_auto_stop"]["status"], "cancelled")
+
     def test_audio_only_linked_fallback_keeps_aggregate_input(self):
         self.assertEqual(
             _effective_recording_audio_input(
@@ -309,10 +452,11 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
             with patch("bpmis_jira_tool.meeting_recorder._audio_duration_seconds", return_value=16.0):
                 health = runtime._recording_health(record)
 
-        self.assertEqual(health["status"], "warning")
+        self.assertEqual(health["status"], "failed")
         self.assertEqual(health["duration_seconds"], 16.0)
         self.assertEqual(health["elapsed_seconds"], 61.0)
-        self.assertIn("only 16s for a 61s recording", health["warning"])
+        self.assertIn("captured only 16s of audio for a 61s recording", health["warning"])
+        self.assertIn("No silence padding was added", health["warning"])
 
     def test_audio_only_recording_health_warns_when_padded_source_audio_is_short(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -337,6 +481,7 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
                         "recording_mode": "audio_only",
                         "source_audio_path": str(original_path.relative_to(store.root_dir)),
                         "audio_path": str(padded_path.relative_to(store.root_dir)),
+                        "audio_finalization_profile": "post_stop_pad_v1",
                         "audio_original_duration_seconds": 8.554688,
                         "audio_target_duration_seconds": 31.0,
                     },
@@ -462,7 +607,7 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertEqual(health["status"], "warning")
         self.assertIn("277s for a 32s recording", health["warning"])
 
-    def test_audio_only_stop_finalization_pads_short_audio_after_recording(self):
+    def test_audio_only_stop_finalization_keeps_short_audio_unpadded_after_recording(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             store = MeetingRecordStore(root)
@@ -487,24 +632,22 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
                 }
             )
 
-            def fake_run(command, *_args, **_kwargs):
-                Path(command[-1]).write_bytes(b"padded-audio")
-                return Mock(stdout="", stderr="")
-
             with patch("bpmis_jira_tool.meeting_recorder._audio_duration_seconds", return_value=11.0), patch(
-                "bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin",
-                return_value="/opt/homebrew/bin/ffmpeg",
-            ), patch("bpmis_jira_tool.meeting_recorder._run_command", side_effect=fake_run) as run_command:
+                "bpmis_jira_tool.meeting_recorder._run_command",
+            ) as run_command:
                 finalized = runtime._finalize_audio_only_recording(record)
 
         media = finalized["media"]
-        self.assertEqual(media["source_audio_path"], f"records/{record['record_id']}/meeting.wav")
-        self.assertEqual(media["audio_path"], f"records/{record['record_id']}/meeting.padded.wav")
-        self.assertEqual(media["audio_url"], f"/meeting-recorder/assets/{record['record_id']}/meeting.padded.wav")
-        self.assertEqual(media["audio_finalization_profile"], "post_stop_pad_v1")
+        self.assertEqual(media["audio_path"], f"records/{record['record_id']}/meeting.wav")
+        self.assertEqual(media["audio_url"], f"/meeting-recorder/assets/{record['record_id']}/meeting.wav")
+        self.assertEqual(media["audio_finalization_profile"], "short_source_no_pad_v2")
         self.assertEqual(media["audio_original_duration_seconds"], 11.0)
-        self.assertEqual(media["audio_target_duration_seconds"], 43.0)
-        self.assertEqual(run_command.call_args.args[0][run_command.call_args.args[0].index("-af") + 1], "apad=whole_dur=43.000")
+        self.assertEqual(media["audio_recording_clock_seconds"], 43.0)
+        self.assertTrue(media["audio_short_capture"])
+        self.assertIn("no silence padding was added", media["audio_finalization_warning"])
+        self.assertNotIn("source_audio_path", media)
+        self.assertNotIn("audio_target_duration_seconds", media)
+        run_command.assert_not_called()
 
     def test_audio_only_stop_finalization_leaves_normal_duration_audio_untouched(self):
         with tempfile.TemporaryDirectory() as temp_dir:

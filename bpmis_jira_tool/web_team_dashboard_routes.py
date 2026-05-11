@@ -21,12 +21,15 @@ from bpmis_jira_tool.monthly_report import (
     DEFAULT_MONTHLY_REPORT_RECIPIENT,
     DEFAULT_MONTHLY_REPORT_TEMPLATE,
     MONTHLY_REPORT_PRODUCT_SCOPE,
+    build_monthly_report_historical_style_guide,
     monthly_report_subject,
     normalize_monthly_report_highlight_topics,
     normalize_monthly_report_template,
+    read_monthly_report_historical_style_guide_cache,
     resolve_monthly_report_period_from_user_range,
     resolve_monthly_report_period,
     send_monthly_report_email,
+    write_monthly_report_historical_style_guide_cache,
 )
 from bpmis_jira_tool.report_intelligence import normalize_report_intelligence_config
 from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
@@ -85,6 +88,8 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
     _run_team_dashboard_monthly_report_draft_job = ctx._run_team_dashboard_monthly_report_draft_job
     _google_credentials_have_scopes = ctx._google_credentials_have_scopes
     _ingest_sent_monthly_reports_from_gmail = ctx._ingest_sent_monthly_reports_from_gmail
+    _local_agent_work_memory_enabled = ctx._local_agent_work_memory_enabled
+    _get_work_memory_store = ctx._get_work_memory_store
     _local_agent_source_code_qa_enabled = ctx._local_agent_source_code_qa_enabled
     _build_prd_review_service = ctx._build_prd_review_service
     resolve_monthly_report_period = ctx.resolve_monthly_report_period
@@ -122,6 +127,79 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             ),
             seatalk_configured=_seatalk_dashboard_is_configured(settings),
         )
+
+
+    def _monthly_report_cached_historical_style_guide() -> dict[str, Any]:
+        owner_email = _current_google_email()
+        if not owner_email:
+            return build_monthly_report_historical_style_guide([])
+        cached = read_monthly_report_historical_style_guide_cache(settings, owner_email=owner_email)
+        return cached or build_monthly_report_historical_style_guide([])
+
+
+    def _refresh_monthly_report_historical_style_guide() -> dict[str, Any]:
+        owner_email = _current_google_email()
+        if not owner_email:
+            return build_monthly_report_historical_style_guide([])
+        filters = {"source_type": "gmail_sent_monthly_report", "item_type": "curated_report"}
+        items: list[dict[str, Any]] = []
+        try:
+            items = _get_work_memory_store().query_work_memory(
+                owner_email=owner_email,
+                visibility_scope="owner",
+                filters=filters,
+                limit=8,
+            )
+            if len(items) < 3 and _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
+                _ingest_sent_monthly_reports_from_gmail(settings)
+                items = _get_work_memory_store().query_work_memory(
+                    owner_email=owner_email,
+                    visibility_scope="owner",
+                    filters=filters,
+                    limit=8,
+                )
+            if _local_agent_work_memory_enabled(settings):
+                local_agent_client = _build_local_agent_client(settings)
+                if hasattr(local_agent_client, "work_memory_recent"):
+                    remote_items = local_agent_client.work_memory_recent(
+                        owner_email=owner_email,
+                        visibility_scope="owner",
+                        filters=filters,
+                        limit=8,
+                    )
+                    seen = {str(item.get("source_id") or item.get("item_id") or "") for item in items if isinstance(item, dict)}
+                    for item in remote_items:
+                        key = str(item.get("source_id") or item.get("item_id") or "")
+                        if key and key in seen:
+                            continue
+                        items.append(item)
+                        if key:
+                            seen.add(key)
+                        if len(items) >= 8:
+                            break
+        except Exception:
+            current_app.logger.exception("Monthly Report historical sent-report style lookup failed.")
+        style_guide = build_monthly_report_historical_style_guide(items)
+        write_monthly_report_historical_style_guide_cache(settings, owner_email=owner_email, style_guide=style_guide)
+        return style_guide
+
+
+    def team_dashboard_monthly_report_style_guide_refresh():
+        access_gate = _require_team_dashboard_monthly_report_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            style_guide = _refresh_monthly_report_historical_style_guide()
+            return jsonify(
+                {
+                    "status": "ok",
+                    "report_count": int(style_guide.get("report_count") or 0),
+                    "subject_pattern": str(style_guide.get("subject_pattern") or ""),
+                    "observed_subjects": style_guide.get("observed_subjects") if isinstance(style_guide.get("observed_subjects"), list) else [],
+                }
+            )
+        except (ConfigError, ToolError) as error:
+            return jsonify({"status": "error", "message": str(error), **_classify_portal_error(error)}), HTTPStatus.BAD_REQUEST
 
 
     def team_dashboard_config():
@@ -375,14 +453,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
                 row for row in (candidates.get("unknown_ids") or [])
                 if isinstance(row, dict) and not (SeaTalkNameMappingStore.equivalent_keys(row.get("id")) & mapped_keys)
             ])
-            visible_keys = {
-                alias
-                for row in (candidates.get("unknown_ids") or [])
-                if isinstance(row, dict)
-                for alias in SeaTalkNameMappingStore.equivalent_keys(row.get("id"))
-            }
-            visible_mappings = {key: value for key, value in mappings.items() if key in visible_keys}
-            return jsonify({"status": "ok", "mappings": visible_mappings, **candidates})
+            return jsonify({"status": "ok", "mappings": mappings, **candidates})
         except (ConfigError, ToolError) as error:
             _log_portal_event(
                 "team_dashboard_report_intelligence_name_mapping_tool_error",
@@ -863,6 +934,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
                 "highlight_topics": highlight_topics,
                 "highlight_topic_sources": payload.get("highlight_topic_sources"),
                 "product_scope": list(MONTHLY_REPORT_PRODUCT_SCOPE),
+                "historical_report_style_guide": _monthly_report_cached_historical_style_guide(),
             }
             if _remote_bpmis_config_enabled(settings):
                 data = _build_local_agent_client(settings).team_dashboard_monthly_report_draft_start(request_payload)
@@ -1119,6 +1191,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         team_dashboard_config=team_dashboard_config,
         save_team_dashboard_members=save_team_dashboard_members,
         team_dashboard_monthly_report_template=team_dashboard_monthly_report_template,
+        team_dashboard_monthly_report_style_guide_refresh=team_dashboard_monthly_report_style_guide_refresh,
         team_dashboard_monthly_report_latest_draft=team_dashboard_monthly_report_latest_draft,
         team_dashboard_daily_briefs=team_dashboard_daily_briefs,
         team_dashboard_daily_brief_download=team_dashboard_daily_brief_download,
@@ -1144,6 +1217,7 @@ def register_team_dashboard_routes(app: Any, handlers: Any) -> None:
     _add_route(app, "/admin/team-dashboard/members", handlers.save_team_dashboard_members, methods=["POST"])
     _add_route(app, "/api/team-dashboard/config", handlers.team_dashboard_config)
     _add_route(app, "/api/team-dashboard/monthly-report/template", handlers.team_dashboard_monthly_report_template)
+    _add_route(app, "/api/team-dashboard/monthly-report/style-guide/refresh", handlers.team_dashboard_monthly_report_style_guide_refresh, methods=["POST"])
     _add_route(app, "/api/team-dashboard/monthly-report/latest-draft", handlers.team_dashboard_monthly_report_latest_draft)
     _add_route(app, "/api/team-dashboard/daily-briefs", handlers.team_dashboard_daily_briefs)
     _add_route(app, "/api/team-dashboard/daily-briefs/<brief_id>/download", handlers.team_dashboard_daily_brief_download)

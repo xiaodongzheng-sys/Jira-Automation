@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/team_env.sh"
+source "$ROOT_DIR/scripts/lib/release_window_policy.sh"
 
 SCRIPT_STARTED_AT="$(date +%s)"
 SERVICE="${CLOUD_RUN_SERVICE:-team-portal}"
@@ -30,6 +31,8 @@ ACCOUNT_ARGS=()
 if [[ -n "${CLOUD_RUN_DEPLOY_ACCOUNT:-}" ]]; then
   ACCOUNT_ARGS=(--account "$CLOUD_RUN_DEPLOY_ACCOUNT")
 fi
+
+enforce_release_window_target live
 
 record_promote_timing_on_exit() {
   local status=$?
@@ -227,6 +230,8 @@ echo "Live restart mode: $RESTART_MODE"
 echo "Live local-agent restart mode: $LOCAL_AGENT_RESTART_MODE"
 validate_live_candidate_slot "$UAT_COMMIT"
 if [[ "$LOCAL_AGENT_RESTART_MODE" == "restart" ]]; then
+  assert_no_active_meeting_recording_before_local_agent_restart "restart live Mac local-agent during UAT promotion" \
+    "${LOCAL_AGENT_TEAM_PORTAL_DATA_DIR:-${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}}"
   "$HOST_ROOT/scripts/run_local_agent.sh" restart
 else
   echo "Skipping live local-agent restart; changed files do not affect local-agent-backed workflows."

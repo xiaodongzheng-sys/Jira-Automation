@@ -24,6 +24,7 @@ from bpmis_jira_tool.monthly_report import (
     build_monthly_highlight_deep_evidence,
     build_monthly_highlight_evidence_map,
     build_monthly_highlight_topic_narrative_prompt,
+    build_monthly_report_historical_style_guide,
     build_monthly_requirements_target_map,
     build_monthly_project_evidence_brief,
     build_monthly_report_final_prompt,
@@ -31,13 +32,16 @@ from bpmis_jira_tool.monthly_report import (
     generate_monthly_report_with_codex,
     match_monthly_report_highlight_topics,
     monthly_report_business_glossary_summary,
+    monthly_report_subject,
     normalize_monthly_report_highlight_topic_sources,
     monthly_report_markdown_to_html,
     normalize_monthly_report_highlight_topics,
     normalize_monthly_report_template,
+    read_monthly_report_historical_style_guide_cache,
     resolve_monthly_report_period_from_user_range,
     resolve_monthly_report_period,
     _sanitize_monthly_report_output,
+    write_monthly_report_historical_style_guide_cache,
 )
 from bpmis_jira_tool.seatalk_dashboard import SEATALK_INSIGHTS_TIMEZONE
 
@@ -173,6 +177,77 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual((third.start_date, third.end_date), ("2026-06-08", "2026-06-08"))
         self.assertEqual((third.scheduled_start_date, third.scheduled_end_date), ("2026-06-08", "2026-07-03"))
         self.assertEqual(first.end_exclusive.isoformat(), "2026-05-04T00:00:00+08:00")
+
+    def test_monthly_report_subject_uses_banking_product_update_format(self):
+        period = resolve_monthly_report_period_from_user_range(period_start="2026-03-02", period_end="2026-03-13")
+        self.assertEqual(
+            monthly_report_subject(period=period),
+            "[Banking] Product Update (2 Mar - 13 Mar) - Anti-Fraud, Credit Risk & Ops Risk",
+        )
+
+    def test_historical_sent_reports_feed_final_prompt_style_guide(self):
+        period = resolve_monthly_report_period_from_user_range(period_start="2026-03-14", period_end="2026-04-10")
+        style_guide = build_monthly_report_historical_style_guide(
+            [
+                {
+                    "source_type": "gmail_sent_monthly_report",
+                    "item_type": "curated_report",
+                    "summary": "[Banking] Product Update (14 Mar - 10 Apr) - Anti-Fraud, Credit Risk & Ops Risk",
+                    "content": (
+                        "# Highlights\n"
+                        "- Anti-Fraud: PH launch risk was aligned with business impact and next action.\n"
+                        "- Credit Risk: SG credit policy rollout moved to UAT with owner follow-up.\n"
+                    ),
+                },
+                {
+                    "source_type": "team_dashboard",
+                    "item_type": "project_update",
+                    "summary": "Should not be used",
+                    "content": "Ignore this item.",
+                },
+            ]
+        )
+        self.assertEqual(style_guide["report_count"], 1)
+        prompt = build_monthly_report_final_prompt(
+            template="# Template",
+            generated_at=datetime(2026, 4, 10, 12, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            report_period=period,
+            highlight_topics=["PH launch risk"],
+            evidence_brief="Compact brief",
+            monthly_evidence_brief=[],
+            historical_report_style_guide=style_guide,
+        )
+        self.assertIn("Historical Sent Report Style Guide", prompt)
+        self.assertIn("[Banking] Product Update (14 Mar - 10 Apr)", prompt)
+        self.assertIn("Use the historical reports as writing-style references", prompt)
+        self.assertIn("Start the email body directly with Highlights", prompt)
+        self.assertIn("do not add a '0. Critical Updates' heading", prompt)
+        self.assertNotIn("Ignore this item", prompt)
+
+    def test_historical_style_guide_cache_round_trips_once_per_owner(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = _settings(temp_dir)
+            style_guide = build_monthly_report_historical_style_guide(
+                [
+                    {
+                        "source_type": "gmail_sent_monthly_report",
+                        "item_type": "curated_report",
+                        "summary": "[Banking] Product Update (2 Mar - 13 Mar) - Anti-Fraud, Credit Risk & Ops Risk",
+                        "content": "# Highlights\n- Anti-Fraud: Launch decision and next action were aligned.",
+                    }
+                ]
+            )
+            write_monthly_report_historical_style_guide_cache(
+                settings,
+                owner_email="xiaodong.zheng@npt.sg",
+                style_guide=style_guide,
+            )
+
+            cached = read_monthly_report_historical_style_guide_cache(settings, owner_email="xiaodong.zheng@npt.sg")
+
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached["report_count"], 1)
+        self.assertEqual(cached["observed_subjects"], ["[Banking] Product Update (2 Mar - 13 Mar) - Anti-Fraud, Credit Risk & Ops Risk"])
 
     def test_highlight_topics_and_user_date_range_are_validated(self):
         self.assertEqual(normalize_monthly_report_highlight_topics([" AF ", "", "CRMS", "AF"]), ["AF", "CRMS"])
@@ -497,7 +572,7 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertGreater(result["evidence_summary"]["report_intelligence_evidence_count"], 0)
         self.assertIn("Report Intelligence matched evidence", joined_prompts)
         self.assertNotIn("Today's matched VIPs", joined_prompts)
-        self.assertEqual(result["subject"], "Monthly Report - 2026-04-13 to 2026-05-03")
+        self.assertEqual(result["subject"], "[Banking] Product Update (13 Apr - 3 May) - Anti-Fraud, Credit Risk & Ops Risk")
         self.assertEqual(result["generation_summary"]["period_start"], "2026-04-13")
         self.assertEqual(result["generation_summary"]["period_end"], "2026-05-03")
         self.assertEqual(result["generation_summary"]["period_end_exclusive"], "2026-05-04T00:00:00+08:00")
@@ -791,6 +866,7 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertIn('"current_status"', prompt)
         self.assertIn("The audience is Xiaodong's manager", prompt)
         self.assertIn("executive product update", prompt)
+        self.assertIn("Do not create a '0. Critical Updates' heading", prompt)
         self.assertIn("Do not expose raw evidence mechanics in Highlights", prompt)
         self.assertIn("confidence/recommended_tone", prompt)
         self.assertIn("go_live_outcome", prompt)

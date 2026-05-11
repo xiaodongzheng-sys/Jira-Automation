@@ -73,6 +73,7 @@ start() {
 }
 
 stop() {
+  assert_no_active_meeting_recording_before_local_agent_restart "stop Mac local-agent" "$DATA_DIR"
   if command -v screen >/dev/null 2>&1; then
     screen -S "$SCREEN_SESSION" -X quit >/dev/null 2>&1 || true
   fi
@@ -104,7 +105,8 @@ logs() {
 }
 
 restart() {
-  stop || true
+  assert_no_active_meeting_recording_before_local_agent_restart "restart Mac local-agent" "$DATA_DIR"
+  stop
   start
 }
 

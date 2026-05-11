@@ -327,6 +327,8 @@ fi
 if [[ "${CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY:-1}" == "1" ]]; then
   LOCAL_AGENT_RESTART_STARTED_AT="$(date +%s)"
   echo "Restarting Mac local-agent so Cloud Run and local-agent routes stay in sync..."
+  assert_no_active_meeting_recording_before_local_agent_restart "restart Mac local-agent after Cloud Run deploy" \
+    "${LOCAL_AGENT_TEAM_PORTAL_DATA_DIR:-${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}}"
   if "$ROOT_DIR/scripts/run_local_agent.sh" restart; then
     LOCAL_AGENT_RESTART_FINISHED_AT="$(date +%s)"
     echo "Mac local-agent restart completed in $((LOCAL_AGENT_RESTART_FINISHED_AT - LOCAL_AGENT_RESTART_STARTED_AT))s"

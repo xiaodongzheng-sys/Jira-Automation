@@ -118,6 +118,7 @@
       isTransientJobStatusError,
       jobEventsUrl,
       jobStatusUrl,
+      readJson,
       readJobStatus,
       sleep,
       sourceQaJobErrorMessage,

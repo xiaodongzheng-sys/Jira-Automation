@@ -1,13 +1,18 @@
 # Release Checklist
 
-Use this checklist for every portal release. The default target is UAT only. Do not publish any Live surface unless the user explicitly asks for Live:
+Use this checklist for every portal release. Release target is selected by Singapore business hours:
+
+- Business hours are Monday-Friday, 10:00-19:00 Asia/Singapore.
+- During business hours, publish UAT only.
+- Outside business hours, publish Live only.
+- The release scripts enforce this by default. Set `RELEASE_WINDOW_POLICY_BYPASS=1` only for an explicitly approved exception.
 
 - The Mac-hosted portal exposed through Cloudflare Tunnel is the primary teammate entrypoint.
 - The Mac host owns Mac-only capabilities and durable portal state, including Source Code Q&A repos/indexes, Codex CLI access, Source Code Q&A sessions/attachments/runtime evidence, BPMIS setup/project rows, SeaTalk desktop data, and VPN-only BPMIS calls.
 - Cloud Run tagged revisions provide the UAT environment. UAT uses `--no-traffic --tag uat`, so it does not change Cloud Run live traffic or the Cloudflare Tunnel Live portal.
 - New services running on Cloud Run must default to local-agent-backed cache/DB/state. Use the Mac-local data root through local-agent APIs for durable cache, SQLite DBs, Source Code Q&A repos/indexes, PRD stores, Team Dashboard job state, and similar records; do not use the Cloud Run team portal filesystem or container-local DB as the system of record unless explicitly requested.
-- If the user says only "deploy", "publish", "release", or "发/发布", deploy UAT only.
-- If the user says "发 live", "publish live", "deploy live", or "发布 live" without saying Cloud Run, publish only the Cloudflare Tunnel Live portal.
+- If the user says only "deploy", "publish", "release", or "发/发布", apply the release-window rule above.
+- If the user says "发 live", "publish live", "deploy live", or "发布 live" without saying Cloud Run, publish only the Cloudflare Tunnel Live portal, and only when the release window allows Live unless an explicit exception is approved.
 - Deploy Cloud Run live traffic only when the user explicitly says "live Cloud Run", "Cloud Run live", "publish the cloud version", or equivalent.
 
 ## 1. Pre-Release
@@ -145,7 +150,7 @@ curl -fsS "$LIVE_URL/api/local-agent/healthz"
 
 ## 2. UAT Release
 
-Run this for routine releases after changes are committed and pushed to `origin/main`.
+Run this for routine releases after changes are committed and pushed to `origin/main`. This is allowed only during business hours.
 
 - Deploy timing metrics are appended to the Mac data root by default:
 
@@ -235,7 +240,7 @@ For faster UAT releases, use the one-command orchestrator. It runs the release g
 ./scripts/release_uat_fast.sh
 ```
 
-For routine UAT plus live promotion, use the full one-command orchestrator. It runs the release gate and image preparation in parallel, reuses the most recent SHA image when the current commit did not change Cloud Run runtime inputs, waits for the GitHub SHA image only when a new runtime image is required, falls back to a local image build if needed, deploys UAT from the selected image, runs the read-only smoke, promotes UAT to live, runs the promoted smoke, runs the live doctor, and prints the timing report:
+For one-command release handling, use the window-aware orchestrator. During business hours it publishes UAT only. Outside business hours it publishes Live only by promoting the existing UAT tag to the Mac-hosted Live portal, runs the live doctor, and prints the timing report:
 
 ```bash
 ./scripts/release_uat_live_fast.sh
@@ -373,6 +378,8 @@ git pull --ff-only
 ./scripts/run_local_agent.sh restart
 ```
 
+- The restart path is guarded by Meeting Recorder state. If a recording is active under the Mac data root, `run_local_agent.sh restart`, `run_team_stack.sh restart`, Cloud Run post-deploy local-agent restart, UAT local-agent restart, and UAT-to-Live local-agent promotion restart must refuse to stop the local-agent. Stop the recording from the portal first so the ScreenCaptureKit helper is allowed to finalize the source audio.
+
 - Confirm the local-agent is healthy on loopback and through the portal proxy:
 
 ```bash
@@ -388,7 +395,7 @@ curl https://app.bankpmtool.uk/api/local-agent/healthz
 
 ## 5. Live Promotion
 
-Run this only after the user explicitly confirms UAT passed and asks to publish Live. The promotion script reads the Cloud Run `uat` tag, verifies the tagged revision's `TEAM_PORTAL_RELEASE_REVISION`, refuses to publish if `origin/main` has moved past that UAT commit, fast-forwards the host workspace, validates the new portal revision on an inactive local slot, restarts the live guard, restarts the live local-agent only when local-agent-backed files changed, and verifies `/healthz`.
+Run this only after the user explicitly confirms UAT passed and asks to publish Live. This is allowed only outside business hours. The promotion script reads the Cloud Run `uat` tag, verifies the tagged revision's `TEAM_PORTAL_RELEASE_REVISION`, refuses to publish if `origin/main` has moved past that UAT commit, fast-forwards the host workspace, validates the new portal revision on an inactive local slot, restarts the live guard, restarts the live local-agent only when local-agent-backed files changed, and verifies `/healthz`.
 
 ```bash
 CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceaccount.com \

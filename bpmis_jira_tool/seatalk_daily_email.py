@@ -7,7 +7,7 @@ import os
 import signal
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 import re
@@ -32,6 +32,11 @@ from bpmis_jira_tool.seatalk_dashboard import (
     SeaTalkDashboardService,
 )
 from bpmis_jira_tool.trello_daily_summary import (
+    TRELLO_WORKFLOW_LIST_FOLLOW_UP,
+    TRELLO_WORKFLOW_LIST_INBOX,
+    TRELLO_WORKFLOW_LIST_THIS_WEEK,
+    TRELLO_WORKFLOW_LIST_TODAY,
+    TRELLO_WORKFLOW_LIST_WATCH,
     TrelloCardSpec,
     TrelloDailySummaryClient,
     TrelloDailySummaryStore,
@@ -837,14 +842,33 @@ def sync_daily_summary_to_trello(
     if not specs:
         return TrelloSyncResult(status="no_cards")
 
-    list_id = client.get_or_create_list_id()
     existing_board_identities: set[str] = set()
-    list_cards = getattr(client, "list_cards", None)
-    if callable(list_cards):
-        for card in list_cards(list_id=list_id):
-            identity = daily_card_identity_from_trello_card(card)
-            if identity:
-                existing_board_identities.add(identity)
+    board_cards = getattr(client, "list_board_cards", None)
+    if callable(board_cards):
+        cards_to_check = board_cards()
+    else:
+        list_id = client.get_or_create_list_id()
+        list_cards = getattr(client, "list_cards", None)
+        cards_to_check = list_cards(list_id=list_id) if callable(list_cards) else []
+    for card in cards_to_check:
+        identity = daily_card_identity_from_trello_card(card)
+        if identity:
+            existing_board_identities.add(identity)
+    target_list_ids: dict[str, str] = {}
+    label_id_cache: dict[tuple[str, ...], list[str]] = {}
+
+    def list_id_for(target_list: str) -> str:
+        clean_target = str(target_list or "").strip() or TRELLO_WORKFLOW_LIST_INBOX
+        if clean_target not in target_list_ids:
+            target_list_ids[clean_target] = client.get_or_create_list_id(clean_target)
+        return target_list_ids[clean_target]
+
+    def label_ids_for(label_names: tuple[str, ...]) -> list[str]:
+        clean_names = tuple(name for name in label_names if str(name).strip())
+        if clean_names not in label_id_cache:
+            get_label_ids = getattr(client, "get_or_create_label_ids", None)
+            label_id_cache[clean_names] = get_label_ids(clean_names) if callable(get_label_ids) else []
+        return label_id_cache[clean_names]
     created = 0
     skipped = 0
     cards: list[dict[str, str]] = []
@@ -873,7 +897,13 @@ def sync_daily_summary_to_trello(
         ):
             skipped += 1
             continue
-        card = client.create_card(list_id=list_id, name=spec.name, description=spec.description)
+        card = client.create_card(
+            list_id=list_id_for(spec.target_list),
+            name=spec.name,
+            description=spec.description,
+            label_ids=label_ids_for(spec.labels),
+            due=spec.due or None,
+        )
         existing_board_identities.add(board_identity)
         store.mark_card(
             fingerprint=fingerprint,
@@ -883,7 +913,7 @@ def sync_daily_summary_to_trello(
             created_at=created_at,
         )
         created += 1
-        cards.append({"name": card.name, "url": card.url, "id": card.trello_id})
+        cards.append({"name": card.name, "url": card.url, "id": card.trello_id, "list": spec.target_list, "due": spec.due})
     return TrelloSyncResult(
         status="synced",
         created_count=created,
@@ -907,6 +937,7 @@ def build_trello_card_specs(*, briefing: dict[str, Any], run_date: str, window_l
     specs: list[TrelloCardSpec] = []
     for item in direct_action_todos:
         task = _sentence_text(item.get("task"), "Untitled").rstrip(".")
+        due = _trello_explicit_due(item.get("due"))
         specs.append(
             TrelloCardSpec(
                 section="Xiaodong Action Required",
@@ -919,10 +950,14 @@ def build_trello_card_specs(*, briefing: dict[str, Any], run_date: str, window_l
                 ),
                 fingerprint_text=task,
                 domain=_display_domain(item.get("domain")),
+                target_list=_trello_direct_target_list(item.get("due"), run_date=run_date),
+                labels=_trello_domain_labels(item.get("domain"), task),
+                due=due,
             )
         )
     for item in watch_delegate_todos:
         task = _sentence_text(item.get("task"), "Untitled").rstrip(".")
+        due = _trello_explicit_due(item.get("due"))
         specs.append(
             TrelloCardSpec(
                 section="Watch / Delegate",
@@ -935,6 +970,9 @@ def build_trello_card_specs(*, briefing: dict[str, Any], run_date: str, window_l
                 ),
                 fingerprint_text=task,
                 domain=_display_domain(item.get("domain")),
+                target_list=TRELLO_WORKFLOW_LIST_WATCH,
+                labels=_trello_domain_labels(item.get("domain"), task),
+                due=due,
             )
         )
     for item in reminders:
@@ -947,9 +985,63 @@ def build_trello_card_specs(*, briefing: dict[str, Any], run_date: str, window_l
                 description=_trello_reminder_description(item, run_date=run_date, window_label=window_label),
                 fingerprint_text=f"{person} {reminder}",
                 domain=_display_domain(item.get("domain")),
+                target_list=TRELLO_WORKFLOW_LIST_FOLLOW_UP,
+                labels=_trello_domain_labels(item.get("domain"), reminder),
             )
         )
     return specs
+
+
+def _trello_direct_target_list(value: Any, *, run_date: str) -> str:
+    text = str(value or "").strip().lower()
+    if not text or text in {"tbd", "unknown", "none", "n/a", "na"}:
+        return TRELLO_WORKFLOW_LIST_INBOX
+    if text in {"today", "tomorrow"}:
+        return TRELLO_WORKFLOW_LIST_TODAY
+    due_date = _trello_due_date(value)
+    report_date = _trello_due_date(run_date)
+    if due_date and report_date:
+        days_until_due = (due_date - report_date).days
+        if days_until_due <= 1:
+            return TRELLO_WORKFLOW_LIST_TODAY
+        if days_until_due <= 7:
+            return TRELLO_WORKFLOW_LIST_THIS_WEEK
+    return TRELLO_WORKFLOW_LIST_INBOX
+
+
+def _trello_explicit_due(value: Any) -> str:
+    due_date = _trello_due_date(value)
+    return due_date.isoformat() if due_date else ""
+
+
+def _trello_due_date(value: Any) -> date | None:
+    text = str(value or "").strip()
+    match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", text)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _trello_domain_labels(domain: Any, text: str = "") -> tuple[str, ...]:
+    haystack = f"{domain or ''} {text or ''}".lower()
+    labels: list[str] = []
+    if "credit risk" in haystack or "credit" in haystack or "dwh" in haystack or "cbs" in haystack:
+        labels.append("Credit Risk")
+    if "grc" in haystack or "pmo" in haystack:
+        labels.append("GRC")
+    if re.search(r"\b(ai|llm|apollo|gemini)\b", haystack):
+        labels.append("AI")
+    if "anti" in haystack or "fraud" in haystack or "alc" in haystack or "afasa" in haystack or "qris" in haystack:
+        if re.search(r"\bph\b|philippines|spph", haystack):
+            labels.append("AF-PH")
+        elif re.search(r"\bsg\b|singapore", haystack):
+            labels.append("AF-SG")
+        else:
+            labels.append("AF-ID")
+    return tuple(dict.fromkeys(labels))
 
 
 def _trello_todo_description(item: dict[str, Any], *, run_date: str, section: str, window_label: str = "") -> str:

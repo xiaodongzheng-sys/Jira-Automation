@@ -331,6 +331,19 @@
         priorityReason: row.priority_reason || 'Frequent unknown ID',
       });
     });
+    Object.entries(mappings).forEach(([id, value]) => {
+      const displayName = String(value || '').trim();
+      if (!displayName || isIgnoredSeatalkMappingId(id)) return;
+      const canonicalId = canonicalMappingId(id);
+      if (!canonicalId || rowsById.has(canonicalId)) return;
+      rowsById.set(canonicalId, {
+        id: canonicalId,
+        type: canonicalId.startsWith('group-') ? 'group' : 'uid',
+        count: 0,
+        example: '',
+        priorityReason: 'Saved mapping',
+      });
+    });
     const rows = Array.from(rowsById.values());
     const state = seatalkMappingStateFor(root);
     state.rows = rows;

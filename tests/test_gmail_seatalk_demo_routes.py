@@ -760,7 +760,14 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertEqual(saved.status_code, 200)
         self.assertEqual(loaded.status_code, 200)
         payload = loaded.get_json()
-        self.assertEqual(payload["mappings"], {})
+        self.assertEqual(
+            payload["mappings"],
+            {
+                "UID 456": "Important DM",
+                "buddy-456": "Important DM",
+                "group-123": "Risk Project Group",
+            },
+        )
         self.assertEqual(payload["unknown_ids"], [])
         self.assertNotIn("candidates", payload)
         self.assertEqual(updated.status_code, 200)
@@ -770,7 +777,7 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertEqual(updated_mappings["UID 888"], "Alice")
         self.assertEqual(legacy_loaded.status_code, 200)
         legacy_payload = legacy_loaded.get_json()
-        self.assertEqual(legacy_payload["mappings"], {})
+        self.assertEqual(legacy_payload["mappings"], {"UID 888": "Alice", "buddy-888": "Alice"})
         self.assertEqual([row["id"] for row in legacy_payload["unknown_ids"]], ["group-123", "UID 456"])
 
     def test_seatalk_name_mapping_script_paginates_candidates(self):
@@ -780,6 +787,7 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertIn("data-seatalk-name-mapping-prev", source)
         self.assertIn("data-seatalk-name-mapping-next", source)
         self.assertIn("syncVisibleNameMappingInputs(root)", source)
+        self.assertIn("Saved mapping", source)
 
     def test_owner_seatalk_name_mappings_dedupes_buddy_and_uid_candidates(self):
         class FakeSeaTalkService:

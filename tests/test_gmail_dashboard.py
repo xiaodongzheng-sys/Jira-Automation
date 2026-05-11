@@ -15,6 +15,7 @@ from bpmis_jira_tool.gmail_dashboard import (
     GmailDashboardService,
     build_gmail_api_service,
     _build_export_query,
+    _build_monthly_requirements_thread_export_query,
     _build_topic_thread_export_query,
     _build_thread_export_query,
     _clean_export_body_text,
@@ -697,6 +698,74 @@ class GmailDashboardServiceTests(unittest.TestCase):
         self.assertEqual(payload["query"], query)
         self.assertIn("Gmail topic thread history export", payload["text"])
         self.assertIn("CIB Phase 2 release owner confirmed.", payload["text"])
+
+    def test_monthly_requirements_query_uses_subject_tokens_for_suffixed_subjects(self):
+        now = datetime(2026, 5, 8, 0, 0).astimezone()
+        since = now - timedelta(days=25)
+
+        query = _build_monthly_requirements_thread_export_query(
+            since,
+            now,
+            sender="yuanfang.zhou@npt.sg",
+            subject="PH_2026 Monthly Requirements Biweekly Update",
+        )
+
+        self.assertIn("from:yuanfang.zhou@npt.sg", query)
+        self.assertIn("subject:PH_2026", query)
+        self.assertIn("subject:Requirements", query)
+        self.assertNotIn('subject:"PH_2026 Monthly Requirements Biweekly Update"', query)
+
+    def test_monthly_requirements_export_keeps_long_body_target_rows(self):
+        now = datetime(2026, 5, 8, 0, 0).astimezone()
+        since = now - timedelta(days=25)
+        query = _build_monthly_requirements_thread_export_query(
+            since,
+            now,
+            sender="yuanfang.zhou@npt.sg",
+            subject="PH_2026 Monthly Requirements Biweekly Update",
+        )
+        body = (
+            "Intro\n"
+            + ("filler line\n" * 450)
+            + "[Strategic Project] [PH] MariBank Card on Google Pay - On Track\n"
+            + "Timeline: Tech GoLive: 2026.05.21 -> 2026.06.09, LV: 2026.05.18 ~ 2026.07.17, Public: 2026.07.24\n"
+        )
+        message_time = now - timedelta(days=1)
+        thread_payloads = {
+            "t1": {
+                "id": "t1",
+                "messages": [
+                    {
+                        "id": "m1",
+                        "threadId": "t1",
+                        "internalDate": str(int(message_time.timestamp() * 1000)),
+                        "labelIds": ["INBOX"],
+                        "payload": {
+                            "headers": [
+                                {"name": "From", "value": "Yuanfang Zhou <yuanfang.zhou@npt.sg>"},
+                                {"name": "Subject", "value": "PH_2026 Monthly Requirements Biweekly Update_0430"},
+                            ],
+                            "parts": [{"mimeType": "text/plain", "body": {"data": base64.urlsafe_b64encode(body.encode()).decode("utf-8")}}],
+                        },
+                    }
+                ],
+            }
+        }
+        service = GmailDashboardService(
+            credentials=object(),
+            gmail_service=_FakeGmailService({(query, None): {"messages": [{"id": "m1", "threadId": "t1"}]}}, {}, thread_payloads),
+        )
+
+        payload = service.export_monthly_requirements_thread_history_since(
+            since=since,
+            now=now,
+            configs={"PH": {"sender": "yuanfang.zhou@npt.sg", "subject": "PH_2026 Monthly Requirements Biweekly Update"}},
+        )
+
+        self.assertEqual(payload["thread_count"], 1)
+        self.assertIn("MariBank Card on Google Pay", payload["text"])
+        self.assertIn("Tech GoLive: 2026.05.21 -> 2026.06.09", payload["text"])
+        self.assertNotIn("[body truncated]", payload["text"])
 
     def test_topic_thread_export_requires_multiple_meaningful_topic_terms(self):
         now = datetime(2026, 5, 9, 0, 0).astimezone()

@@ -199,6 +199,167 @@ resolve_team_data_dir() {
   printf '%s\n' "$data_dir"
 }
 
+meeting_recorder_active_recordings() {
+  local data_dir="${1:-${LOCAL_AGENT_TEAM_PORTAL_DATA_DIR:-${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}}}"
+  data_dir="$(resolve_team_data_dir "$data_dir")"
+  if [[ ! -x "$PYTHON_BIN" ]]; then
+    echo "Python is required to inspect active Meeting Recorder sessions: $PYTHON_BIN"
+    return 2
+  fi
+
+  local output
+  local active_status
+  set +e
+  output="$(
+    TEAM_PORTAL_DATA_DIR_VALUE="$data_dir" \
+    MEETING_RECORDER_ACTIVE_RECORDING_STALE_SECONDS="${MEETING_RECORDER_ACTIVE_RECORDING_STALE_SECONDS:-43200}" \
+    "$PYTHON_BIN" - <<'PY'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+data_dir = Path(os.environ["TEAM_PORTAL_DATA_DIR_VALUE"])
+records_dir = data_dir / "meeting_records" / "records"
+try:
+    stale_seconds = int(os.environ.get("MEETING_RECORDER_ACTIVE_RECORDING_STALE_SECONDS") or "43200")
+except ValueError:
+    stale_seconds = 43200
+
+def parse_timestamp(value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+def process_alive(pid):
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid_int <= 0:
+        return False
+    try:
+        os.kill(pid_int, 0)
+    except OSError:
+        return False
+    return True
+
+def resolve_record_path(record_dir, value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return data_dir / value
+
+active = []
+now = datetime.now(timezone.utc)
+if records_dir.exists():
+    for metadata_path in sorted(records_dir.glob("*/metadata.json")):
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if str(metadata.get("status") or "").strip().lower() != "recording":
+            continue
+        if str(metadata.get("recording_stopped_at") or "").strip():
+            continue
+
+        media = metadata.get("media") if isinstance(metadata.get("media"), dict) else {}
+        reasons = []
+        status_path = resolve_record_path(metadata_path.parent, media.get("screencapture_status_path"))
+        if status_path and status_path.exists():
+            try:
+                capture_status = json.loads(status_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                capture_status = {}
+            capture_state = str(capture_status.get("status") or "").strip().lower()
+            if capture_state == "recording":
+                reasons.append("ScreenCaptureKit status is recording")
+            elif capture_state == "stopped":
+                continue
+
+        if process_alive(media.get("recorder_pid")):
+            reasons.append(f"recorder pid {media.get('recorder_pid')} is alive")
+
+        updated_at = parse_timestamp(metadata.get("updated_at") or metadata.get("recording_started_at") or metadata.get("created_at"))
+        if not reasons and updated_at is not None and stale_seconds > 0:
+            age = (now - updated_at).total_seconds()
+            if 0 <= age <= stale_seconds:
+                reasons.append(f"metadata status is recording and was updated {int(age)}s ago")
+
+        if not reasons:
+            continue
+
+        record_id = str(metadata.get("record_id") or metadata_path.parent.name)
+        title = str(metadata.get("title") or "Untitled meeting")
+        started_at = str(metadata.get("recording_started_at") or metadata.get("created_at") or "")
+        active.append(f"- {record_id}: {title} (started {started_at}; {', '.join(reasons)})")
+
+if active:
+    print("\n".join(active))
+    sys.exit(10)
+sys.exit(0)
+PY
+  )"
+  active_status=$?
+  set -e
+
+  if [[ "$active_status" == "10" ]]; then
+    printf '%s\n' "$output"
+    return 0
+  fi
+  if [[ "$active_status" != "0" ]]; then
+    if [[ -n "$output" ]]; then
+      printf '%s\n' "$output"
+    else
+      echo "Failed to inspect active Meeting Recorder sessions under $data_dir."
+    fi
+    return 2
+  fi
+  return 1
+}
+
+assert_no_active_meeting_recording_before_local_agent_restart() {
+  local action="${1:-restart Mac local-agent}"
+  local data_dir="${2:-${LOCAL_AGENT_TEAM_PORTAL_DATA_DIR:-${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}}}"
+  data_dir="$(resolve_team_data_dir "$data_dir")"
+  if [[ "${MEETING_RECORDER_ALLOW_LOCAL_AGENT_RESTART_DURING_RECORDING:-0}" == "1" ]]; then
+    echo "Bypassing active Meeting Recorder guard because MEETING_RECORDER_ALLOW_LOCAL_AGENT_RESTART_DURING_RECORDING=1."
+    return 0
+  fi
+
+  local active_output
+  local active_status
+  set +e
+  active_output="$(meeting_recorder_active_recordings "$data_dir")"
+  active_status=$?
+  set -e
+
+  if [[ "$active_status" == "0" ]]; then
+    echo "Refusing to $action because Meeting Recorder is actively recording."
+    echo "Stop the recording from the portal before restarting the Mac local-agent."
+    printf '%s\n' "$active_output"
+    return 1
+  fi
+  if [[ "$active_status" == "2" ]]; then
+    echo "Refusing to $action because active Meeting Recorder sessions could not be verified."
+    printf '%s\n' "$active_output"
+    return 1
+  fi
+  return 0
+}
+
 hash_text() {
   if [[ ! -x "$PYTHON_BIN" ]]; then
     printf 'unknown\n'

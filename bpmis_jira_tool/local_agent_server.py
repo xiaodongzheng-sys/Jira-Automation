@@ -420,6 +420,7 @@ def create_local_agent_app() -> Flask:
             highlight_topics=payload.get("highlight_topics"),
             highlight_topic_sources=payload.get("highlight_topic_sources"),
             product_scope=[str(item) for item in (payload.get("product_scope") or [])] if isinstance(payload.get("product_scope"), list) else list(MONTHLY_REPORT_PRODUCT_SCOPE),
+            historical_report_style_guide=payload.get("historical_report_style_guide") if isinstance(payload.get("historical_report_style_guide"), dict) else None,
         )
         return jsonify(result)
 
@@ -441,7 +442,24 @@ def create_local_agent_app() -> Flask:
         job_store: JobStore = current_app.config["TEAM_DASHBOARD_JOB_STORE"]
         snapshot = job_store.snapshot(job_id)
         if snapshot is None:
-            return jsonify({"status": "error", "message": "Monthly Report local-agent job was not found."}), HTTPStatus.NOT_FOUND
+            message = "Monthly Report local-agent job was interrupted by a server restart. Please start it again."
+            return jsonify({
+                "status": "ok",
+                "job_id": job_id,
+                "state": "failed",
+                "stage": "failed",
+                "message": message,
+                "error": message,
+                "error_category": "server_restart",
+                "error_code": "monthly_report_job_interrupted",
+                "error_retryable": True,
+                "progress": {
+                    "stage": "failed",
+                    "current": 0,
+                    "total": 0,
+                    "message": message,
+                },
+            })
         return jsonify({"status": "ok", **snapshot})
 
     @app.get("/api/local-agent/team-dashboard/monthly-report/latest-draft")
@@ -1941,6 +1959,7 @@ def _run_monthly_report_draft_job(app: Flask, job_id: str, payload: dict[str, An
                 highlight_topics=payload.get("highlight_topics"),
                 highlight_topic_sources=payload.get("highlight_topic_sources"),
                 product_scope=[str(item) for item in (payload.get("product_scope") or [])] if isinstance(payload.get("product_scope"), list) else list(MONTHLY_REPORT_PRODUCT_SCOPE),
+                historical_report_style_guide=payload.get("historical_report_style_guide") if isinstance(payload.get("historical_report_style_guide"), dict) else None,
                 progress_callback=progress_callback,
             )
             job_store.complete(
@@ -2399,11 +2418,13 @@ def _meeting_record_summary(record: dict[str, Any]) -> dict[str, Any]:
         "calendar_event_id": record.get("calendar_event_id"),
         "scheduled_start": record.get("scheduled_start"),
         "scheduled_end": record.get("scheduled_end"),
+        "scheduled_auto_stop": record.get("scheduled_auto_stop") or {},
         "status": record.get("status"),
         "transcript_language": normalize_meeting_transcript_language(record.get("transcript_language")),
         "transcript_language_label": record.get("transcript_language_label") or "",
         "recording_started_at": record.get("recording_started_at"),
         "recording_stopped_at": record.get("recording_stopped_at"),
+        "recording_stop_reason": record.get("recording_stop_reason") or "",
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
         "media": record.get("media") or {},

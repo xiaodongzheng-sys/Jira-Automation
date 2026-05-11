@@ -331,6 +331,8 @@ restart_local_agent_if_needed() {
     echo "BPMIS_CALL_MODE=local_agent but scripts/run_local_agent.sh is not executable."
     return 1
   fi
+  assert_no_active_meeting_recording_before_local_agent_restart "restart Mac local-agent for team stack" \
+    "${LOCAL_AGENT_TEAM_PORTAL_DATA_DIR:-${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}}"
   echo "BPMIS_CALL_MODE=local_agent; restarting Mac local-agent to avoid stale BPMIS proxy code."
   "$ROOT_DIR/scripts/run_local_agent.sh" restart
 }

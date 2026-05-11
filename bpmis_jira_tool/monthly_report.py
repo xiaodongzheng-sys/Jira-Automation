@@ -32,7 +32,7 @@ from prd_briefing.reviewer import _build_prd_source
 
 DEFAULT_MONTHLY_REPORT_RECIPIENT = "xiaodong.zheng@npt.sg"
 MONTHLY_REPORT_PROMPT_VERSION = "v1_team_dashboard_monthly_report"
-MONTHLY_REPORT_GENERATION_VERSION = "v6_topic_narrative"
+MONTHLY_REPORT_GENERATION_VERSION = "v8_historical_style_guide_v2"
 MONTHLY_REPORT_PERIOD_ANCHOR_START = date(2026, 4, 13)
 MONTHLY_REPORT_PERIOD_ANCHOR_END = date(2026, 5, 8)
 MONTHLY_REPORT_PERIOD_DAYS = 28
@@ -76,7 +76,11 @@ MONTHLY_REPORT_GMAIL_TOPIC_CACHE_TTL_SECONDS = 6 * 60 * 60
 MONTHLY_REPORT_PRD_SCOPE_CACHE_VERSION = "v1"
 MONTHLY_REPORT_BATCH_SUMMARY_CACHE_VERSION = "v1"
 MONTHLY_REPORT_TOPIC_NARRATIVE_CACHE_VERSION = "v1"
+MONTHLY_REPORT_STYLE_GUIDE_CACHE_VERSION = "v2"
 MONTHLY_REPORT_TOPIC_NARRATIVE_MAX_TOKENS = 32_000
+MONTHLY_REPORT_STYLE_GUIDE_MAX_REPORTS = 12
+MONTHLY_REPORT_STYLE_GUIDE_MAX_EXCERPT_CHARS = 2_400
+MONTHLY_REPORT_STYLE_GUIDE_MAX_CHARS = 24_000
 MONTHLY_REPORT_REQUIREMENTS_EMAILS = {
     "SG": {
         "subject": "SG_2026 Monthly Requirements Biweekly Update",
@@ -246,6 +250,8 @@ class MonthlyReportService:
         highlight_topics: list[str] | str | None = None,
         highlight_topic_sources: Any | None = None,
         product_scope: list[str] | None = None,
+        historical_monthly_reports: list[dict[str, Any]] | None = None,
+        historical_report_style_guide: dict[str, Any] | None = None,
         progress_callback: Any | None = None,
     ) -> dict[str, Any]:
         started_at = time.monotonic()
@@ -264,6 +270,11 @@ class MonthlyReportService:
         normalized_highlight_sources = normalize_monthly_report_highlight_topic_sources(
             highlight_topic_sources,
             normalized_highlight_topics,
+        )
+        style_guide = (
+            historical_report_style_guide
+            if isinstance(historical_report_style_guide, dict) and historical_report_style_guide.get("report_count")
+            else build_monthly_report_historical_style_guide(historical_monthly_reports or [])
         )
         _emit_monthly_report_progress(progress_callback, "preparing_sources", "Preparing Key Projects, Jira, PRD, and SeaTalk sources.", 0, 0)
         key_projects = self._key_projects(team_payloads)
@@ -424,6 +435,7 @@ class MonthlyReportService:
             monthly_evidence_brief=monthly_evidence_brief,
             highlight_deep_evidence=highlight_deep_evidence,
             highlight_narratives=highlight_narratives,
+            historical_report_style_guide=style_guide,
         )
         final_estimated_tokens = _estimate_token_count(prompt)
         if final_estimated_tokens > MONTHLY_REPORT_FINAL_MAX_TOKENS:
@@ -441,6 +453,7 @@ class MonthlyReportService:
                 monthly_evidence_brief=monthly_evidence_brief,
                 highlight_deep_evidence=highlight_deep_evidence,
                 highlight_narratives=highlight_narratives,
+                historical_report_style_guide=style_guide,
             )
             final_estimated_tokens = _estimate_token_count(prompt)
         if final_estimated_tokens > MONTHLY_REPORT_FINAL_MAX_TOKENS:
@@ -512,6 +525,7 @@ class MonthlyReportService:
                 "period_end_exclusive": report_period.end_exclusive.isoformat(),
                 "highlight_topics": normalized_highlight_topics,
                 "highlight_topic_sources": normalized_highlight_sources,
+                "historical_style_report_count": int(style_guide.get("report_count") or 0),
                 "scheduled_period_start": report_period.scheduled_start_date,
                 "scheduled_period_end": report_period.scheduled_end_date,
                 "effective_period_start": report_period.start_date,
@@ -561,6 +575,7 @@ class MonthlyReportService:
                 "highlight_gmail_message_count": int(highlight_gmail_summary.get("message_count") or 0),
                 "highlight_gmail_cache_hit_count": int(highlight_gmail_summary.get("cache_hit_count") or 0),
                 "highlight_google_sheet_count": int(highlight_gmail_summary.get("google_sheet_count") or 0),
+                "historical_style_report_count": int(style_guide.get("report_count") or 0),
                 "vip_gmail_thread_count": int(vip_gmail_summary.get("thread_count") or 0),
                 "vip_gmail_message_count": int(vip_gmail_summary.get("message_count") or 0),
                 "monthly_requirements_gmail_thread_count": int(requirements_gmail_summary.get("thread_count") or 0),
@@ -1296,6 +1311,153 @@ def _normalize_monthly_report_highlight_source_list(value: Any) -> list[str]:
         if source and source not in sources:
             sources.append(source)
     return sources
+
+
+def build_monthly_report_historical_style_guide(sent_reports: list[dict[str, Any]] | None) -> dict[str, Any]:
+    examples: list[dict[str, str]] = []
+    subjects: list[str] = []
+    for item in sent_reports or []:
+        if not isinstance(item, dict):
+            continue
+        source_type = str(item.get("source_type") or "").strip()
+        item_type = str(item.get("item_type") or "").strip()
+        if source_type and source_type != "gmail_sent_monthly_report":
+            continue
+        if item_type and item_type != "curated_report":
+            continue
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        subject = str(item.get("summary") or item.get("subject") or metadata.get("subject") or "").strip()
+        content = str(item.get("content") or item.get("body") or "").strip()
+        excerpt = _monthly_report_historical_excerpt(content)
+        if not excerpt:
+            continue
+        if subject and subject in subjects:
+            continue
+        if subject:
+            subjects.append(subject)
+        examples.append({"subject": subject, "excerpt": excerpt})
+        if len(examples) >= MONTHLY_REPORT_STYLE_GUIDE_MAX_REPORTS:
+            break
+    if not examples:
+        return {"report_count": 0, "subject_pattern": monthly_report_subject_pattern(), "style_rules": [], "examples": []}
+    return {
+        "report_count": len(examples),
+        "subject_pattern": monthly_report_subject_pattern(),
+        "observed_subjects": subjects[:MONTHLY_REPORT_STYLE_GUIDE_MAX_REPORTS],
+        "style_rules": [
+            "Use the historical reports as writing-style references, not as factual evidence for the current period.",
+            "Keep the email subject in the Banking Product Update format.",
+            "Start the email body directly with Highlights; do not add a '0. Critical Updates' heading.",
+            "Write highlights as concise manager-facing product updates, with business impact before implementation detail.",
+            "Select Highlights only for material recent discussions, launch outcomes, delays, risks, decisions, management alignment, cross-team dependencies, or next actions worth updating Xiaodong's manager.",
+            "Prefer direct progress, risk, decision, and next-action wording over investigation-log or tool-facing language.",
+            "Use the pattern '[Product Area] [Market or Region] Project/Topic: impact/status/decision/next action' when the evidence supports it.",
+            "Keep each Highlight to one compact paragraph unless timeline or impact needs two to three short bullets.",
+            "For delays or resource constraints, state the affected phase, revised timeline, business impact, and owner/next step.",
+            "For go-live or UAT updates, state the launch/UAT status, observed issue or feedback if any, and what will happen next.",
+            "Keep Anti-Fraud, Credit Risk, and Ops Risk separated when the evidence supports separate product areas.",
+            "Avoid exposing Jira IDs, source mechanics, raw chat phrasing, or internal evidence labels in the final email.",
+        ],
+        "examples": examples,
+    }
+
+
+def read_monthly_report_historical_style_guide_cache(settings: Settings, *, owner_email: str) -> dict[str, Any] | None:
+    cached = _read_monthly_report_json_cache(_monthly_report_style_guide_cache_path(settings, owner_email=owner_email))
+    if not isinstance(cached, dict):
+        return None
+    if cached.get("version") != MONTHLY_REPORT_STYLE_GUIDE_CACHE_VERSION:
+        return None
+    style_guide = cached.get("style_guide")
+    if isinstance(style_guide, dict) and style_guide.get("report_count"):
+        return style_guide
+    return None
+
+
+def write_monthly_report_historical_style_guide_cache(settings: Settings, *, owner_email: str, style_guide: dict[str, Any]) -> None:
+    if not isinstance(style_guide, dict) or not style_guide.get("report_count"):
+        return
+    _write_monthly_report_json_cache(
+        _monthly_report_style_guide_cache_path(settings, owner_email=owner_email),
+        {
+            "version": MONTHLY_REPORT_STYLE_GUIDE_CACHE_VERSION,
+            "owner_email": str(owner_email or "").strip().lower(),
+            "cached_at": datetime.now(SEATALK_INSIGHTS_TIMEZONE).isoformat(),
+            "style_guide": _compact_monthly_report_style_guide(style_guide),
+        },
+    )
+
+
+def monthly_report_subject_pattern() -> str:
+    return "[Banking] Product Update (dd mmm - dd mmm) - Anti-Fraud, Credit Risk & Ops Risk"
+
+
+def _monthly_report_historical_excerpt(content: str) -> str:
+    text = str(content or "").strip()
+    if not text:
+        return ""
+    text = _strip_jira_issue_keys_for_report(text)
+    text = re.sub(r"https?://\S+", "[link]", text)
+    text = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[email]", text)
+    lines = [line.rstrip() for line in text.splitlines()]
+    selected: list[str] = []
+    capturing = False
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            if selected and selected[-1]:
+                selected.append("")
+            continue
+        lower = line.casefold()
+        if any(marker in lower for marker in ("highlight", "anti-fraud", "anti fraud", "credit risk", "ops risk", "operational risk", "key update", "product update")):
+            capturing = True
+        if capturing:
+            selected.append(raw_line)
+        if len("\n".join(selected)) >= MONTHLY_REPORT_STYLE_GUIDE_MAX_EXCERPT_CHARS:
+            break
+    excerpt = "\n".join(selected).strip() or "\n".join(lines[:40]).strip()
+    return excerpt[:MONTHLY_REPORT_STYLE_GUIDE_MAX_EXCERPT_CHARS].rstrip()
+
+
+def _compact_monthly_report_style_guide(style_guide: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(style_guide, dict) or not style_guide.get("report_count"):
+        return {"report_count": 0, "subject_pattern": monthly_report_subject_pattern(), "style_rules": [], "examples": []}
+    compacted: dict[str, Any] = {
+        "report_count": int(style_guide.get("report_count") or 0),
+        "subject_pattern": str(style_guide.get("subject_pattern") or monthly_report_subject_pattern()).strip(),
+        "observed_subjects": [
+            str(item or "").strip()
+            for item in (style_guide.get("observed_subjects") or [])
+            if str(item or "").strip()
+        ][:MONTHLY_REPORT_STYLE_GUIDE_MAX_REPORTS],
+        "style_rules": [
+            str(item or "").strip()
+            for item in (style_guide.get("style_rules") or [])
+            if str(item or "").strip()
+        ][:12],
+        "examples": [],
+    }
+    for item in style_guide.get("examples") or []:
+        if not isinstance(item, dict):
+            continue
+        excerpt = str(item.get("excerpt") or "").strip()
+        if not excerpt:
+            continue
+        compacted["examples"].append(
+            {
+                "subject": str(item.get("subject") or "").strip(),
+                "excerpt": excerpt[:MONTHLY_REPORT_STYLE_GUIDE_MAX_EXCERPT_CHARS].rstrip(),
+            }
+        )
+        if len(compacted["examples"]) >= MONTHLY_REPORT_STYLE_GUIDE_MAX_REPORTS:
+            break
+    serialized = json.dumps(compacted, ensure_ascii=False)
+    if len(serialized) <= MONTHLY_REPORT_STYLE_GUIDE_MAX_CHARS:
+        return compacted
+    compacted["examples"] = compacted["examples"][:3]
+    for example in compacted["examples"]:
+        example["excerpt"] = str(example.get("excerpt") or "")[:1_200].rstrip()
+    return compacted
 
 
 def _monthly_report_topic_uses_source(topic: str, source_map: dict[str, list[str]], source: str) -> bool:
@@ -2080,6 +2242,7 @@ def build_monthly_report_prompt(
         "- Return only the final Markdown draft.\n"
         "- Keep it suitable to send by email after light PM editing.\n"
         "- Follow the template headings unless the evidence clearly requires a small additional subsection.\n"
+        "- Start the report body directly with 'Highlights'. Do not create a '0. Critical Updates' heading or any numbered critical-update wrapper before Highlights.\n"
         "- If the configured template contains Markdown tables, preserve those table structures and fill rows from evidence; use TBD for missing cells instead of converting the table to bullets.\n"
         "- Do not include Jira ticket IDs or Jira links in the final report.\n\n"
         f"# Generated At\n{generated_at.isoformat()}\n\n"
@@ -2214,10 +2377,12 @@ def build_monthly_report_final_prompt(
     monthly_evidence_brief: list[dict[str, Any]],
     highlight_deep_evidence: list[dict[str, Any]] | None = None,
     highlight_narratives: list[dict[str, Any]] | None = None,
+    historical_report_style_guide: dict[str, Any] | None = None,
 ) -> str:
     included_project_evidence = _strip_jira_issue_keys_from_data(_compact_monthly_evidence_for_final(monthly_evidence_brief))
     safe_highlight_deep_evidence = _strip_jira_issue_keys_from_data(highlight_deep_evidence or [])
     safe_highlight_narratives = _strip_jira_issue_keys_from_data(highlight_narratives or [])
+    safe_style_guide = _compact_monthly_report_style_guide(historical_report_style_guide)
     safe_evidence_brief = re.sub(
         r"No material update found",
         "No material update; use BRD status",
@@ -2231,6 +2396,7 @@ def build_monthly_report_final_prompt(
         "Use only the Other Key Project Updates JSON below as the authoritative project-table allowlist. The compact evidence brief is supplemental context only.\n"
         "Use Highlight Narrative Candidates as the primary source for the Highlights section, and use Highlight Deep Evidence only to resolve missing nuance. Use Other Key Project Updates only for the project table and concise non-highlight updates.\n"
         "The audience is Xiaodong's manager. Write Highlights as an executive product update, not as an investigation log: emphasize business impact, delivery progress, material risk, decision needed, and next action.\n"
+        "Use Historical Sent Report Style Guide for tone, section rhythm, subject format, and wording style only. Do not copy old facts into the current report.\n"
         "Use calm, factual, ownership-oriented wording. Avoid alarmist language, raw technical incident wording, internal tool/process details, chat-style phrasing, and over-hedged phrases unless the uncertainty itself is the management point.\n"
         "Use the topic_intent/intent_focus/confidence/recommended_tone fields inside Highlight Deep Evidence to calibrate wording: high confidence can state progress directly; medium confidence should be framed as directional progress with pending confirmation; low or none should be framed as a watch item or pending confirmation, not as a failure to find evidence.\n"
         "If a Highlight Deep Evidence item has product_area_scope, write that Highlight only from that product area's changes and timeline. For example, a Credit Risk topic should not include Anti-Fraud progress even if the project names overlap.\n"
@@ -2246,7 +2412,9 @@ def build_monthly_report_final_prompt(
         "# Output Rules\n"
         "- Return only the final Markdown draft.\n"
         "- Keep it suitable to send by email after light PM editing.\n"
+        f"- Email subject must follow: {monthly_report_subject_pattern()}.\n"
         "- Follow the template headings unless the evidence clearly requires a small additional subsection.\n"
+        "- Start the report body directly with 'Highlights'. Do not create a '0. Critical Updates' heading or any numbered critical-update wrapper before Highlights.\n"
         "- If the configured template contains Markdown tables, preserve those table structures and fill rows from evidence; use TBD for missing cells instead of converting the table to bullets.\n"
         "- Highlights must cover only the user-provided highlight topics below; do not add unrelated highlight topics.\n"
         "- Each Highlight should be manager-ready: one compact paragraph per topic, focused on what changed, why it matters, current risk or decision, and the expected next movement.\n"
@@ -2260,6 +2428,8 @@ def build_monthly_report_final_prompt(
         f"# Report Period\n{report_period.start_date} to {report_period.end_date}\n\n"
         f"# User-Provided Highlight Topics\n{_json_block(highlight_topics)}\n\n"
         f"# Monthly Report Template\n{normalize_monthly_report_template(template)}\n\n"
+        "# Historical Sent Report Style Guide\n"
+        f"{_json_block(safe_style_guide)}\n\n"
         "# Highlight Narrative Candidates\n"
         f"{_json_block(safe_highlight_narratives)}\n\n"
         "# Highlight Deep Evidence\n"
@@ -2460,7 +2630,13 @@ def send_monthly_report_email(
 
 def monthly_report_subject(now: datetime | None = None, *, period: MonthlyReportPeriod | None = None) -> str:
     report_period = period or resolve_monthly_report_period(now)
-    return f"Monthly Report - {report_period.start_date} to {report_period.end_date}"
+    start_label = _monthly_report_day_month_label(report_period.start)
+    end_label = _monthly_report_day_month_label(report_period.end_exclusive - timedelta(days=1))
+    return f"[Banking] Product Update ({start_label} - {end_label}) - Anti-Fraud, Credit Risk & Ops Risk"
+
+
+def _monthly_report_day_month_label(value: datetime) -> str:
+    return f"{value.day} {value.strftime('%b')}"
 
 
 def monthly_report_markdown_to_html(markdown_text: str) -> str:
@@ -2707,6 +2883,18 @@ def _monthly_report_topic_narrative_cache_path(
         }
     )
     return _monthly_report_cache_root(settings) / "highlight_narrative" / f"{digest}.json"
+
+
+def _monthly_report_style_guide_cache_path(settings: Settings, *, owner_email: str) -> Path:
+    digest = _monthly_report_cache_digest(
+        {
+            "version": MONTHLY_REPORT_STYLE_GUIDE_CACHE_VERSION,
+            "owner_email": str(owner_email or "").strip().lower(),
+            "subject_pattern": monthly_report_subject_pattern(),
+            "max_reports": MONTHLY_REPORT_STYLE_GUIDE_MAX_REPORTS,
+        }
+    )
+    return _monthly_report_cache_root(settings) / "historical_style_guide" / f"{digest}.json"
 
 
 def _read_monthly_report_json_cache(path: Path, *, max_age_seconds: int | None = None) -> dict[str, Any] | None:
