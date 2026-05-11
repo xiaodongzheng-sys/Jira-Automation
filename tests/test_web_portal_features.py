@@ -3033,6 +3033,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("seatalkNameMappingPageSizeOptions = [20, 50, 100, 200]", script)
         self.assertIn("data-seatalk-name-mapping-page-size", script)
         self.assertIn("Rows per page", script)
+        self.assertIn("Object.entries(mappings).forEach", script)
+        self.assertIn("Saved mapping", script)
 
     def test_team_dashboard_seatalk_name_mapping_has_grid_styles(self):
         stylesheet = Path("static/style.css").read_text(encoding="utf-8")
