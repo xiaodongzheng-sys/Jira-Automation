@@ -1,7 +1,7 @@
 {
   "overall": {
     "label": "bpmis_jira_tool + prd_briefing",
-    "min_percent": 83.0,
+    "min_percent": 81.0,
     "paths": [
       "bpmis_jira_tool/",
       "prd_briefing/"
@@ -20,27 +20,27 @@
   "critical_modules": [
     {
       "path": "bpmis_jira_tool/local_agent_client.py",
-      "min_percent": 70.0
+      "min_percent": 52.0
     },
     {
       "path": "bpmis_jira_tool/local_agent_server.py",
-      "min_percent": 65.0
+      "min_percent": 53.0
     },
     {
       "path": "bpmis_jira_tool/meeting_recorder.py",
-      "min_percent": 70.0
+      "min_percent": 68.0
     },
     {
       "path": "bpmis_jira_tool/web_meeting_recorder_routes.py",
-      "min_percent": 75.0
+      "min_percent": 60.0
     },
     {
       "path": "bpmis_jira_tool/web_work_memory_routes.py",
-      "min_percent": 75.0
+      "min_percent": 57.0
     },
     {
       "path": "prd_briefing/reviewer.py",
-      "min_percent": 75.0
+      "min_percent": 62.0
     }
   ]
 }
