@@ -27,7 +27,7 @@ git status --short
 
 Run this gate before every portal release. It is intentionally read-only except for local test temp/cache output: it must not create Jira tickets, send Gmail/SeaTalk messages, write BPMIS data, or mutate production portal state.
 
-- Run the one-command local gate first. This executes the governed-code 100% coverage suite, frontend JavaScript syntax checks for checked-in browser scripts, and the deterministic Source Code Q&A release gate:
+- Run the one-command local gate first. This executes the governed-code 100% coverage suite, the blocking risk-based integration coverage policy, frontend JavaScript syntax checks for checked-in browser scripts, and the deterministic Source Code Q&A release gate:
 
 ```bash
 ./.venv/bin/python scripts/run_system_full_test_gate.py --skip-smoke
@@ -47,14 +47,15 @@ Use an explicit threshold when validating release tooling changes:
 ./.venv/bin/python scripts/run_system_full_test_gate.py --coverage-fail-under 100 --skip-smoke
 ```
 
-- The Python coverage gate is intentionally strict for the governed release surface configured in `.coveragerc` (`bpmis_jira_tool/config.py`, `bpmis_jira_tool/errors.py`, `bpmis_jira_tool/user_config.py`, `prd_briefing/models.py`, and `prd_briefing/text_generation.py`). Broader all-module coverage is tracked as an advisory baseline until each legacy integration module is made deterministic enough for a real 100% gate; do not exclude business logic, permission checks, release safety checks, or read-only smoke behavior just to raise the percentage.
+- The Python coverage gate is strict in two layers. Governed modules must remain at 100% (`bpmis_jira_tool/config.py`, `bpmis_jira_tool/errors.py`, `bpmis_jira_tool/user_config.py`, `prd_briefing/models.py`, and `prd_briefing/text_generation.py`). The `risk_coverage_gate` then enforces `config/coverage_risk_policy.json`: `local_agent_client.py` >= 70%, `local_agent_server.py` >= 65%, `meeting_recorder.py` >= 70%, `web_meeting_recorder_routes.py` >= 75%, `web_work_memory_routes.py` >= 75%, `prd_briefing/reviewer.py` >= 75%, and combined `bpmis_jira_tool/` + `prd_briefing/` coverage >= 83%. Do not exclude business logic, permission checks, release safety checks, or read-only smoke behavior just to raise the percentage.
 
 - If debugging a failed step, the equivalent local commands are:
 
 ```bash
-ENV_FILE=/dev/null ./.venv/bin/python -m coverage erase
-ENV_FILE=/dev/null ./.venv/bin/python -m coverage run -m unittest discover -s tests
-ENV_FILE=/dev/null ./.venv/bin/python -m coverage report --fail-under 100
+ENV_FILE=/dev/null ./.venv/bin/python -m coverage erase --rcfile=/dev/null
+ENV_FILE=/dev/null ./.venv/bin/python -m coverage run --rcfile=/dev/null --source=bpmis_jira_tool,prd_briefing -m unittest discover -s tests
+ENV_FILE=/dev/null ./.venv/bin/python -m coverage json --rcfile=/dev/null -o .team-portal/run/system_full_coverage.json
+ENV_FILE=/dev/null ./.venv/bin/python scripts/check_coverage_policy.py --coverage-json .team-portal/run/system_full_coverage.json --policy config/coverage_risk_policy.json --governed-fail-under 100
 node --check static/gmail_seatalk_demo.js
 node --check static/productization_upgrade_summary.js
 node --check static/team_dashboard.js

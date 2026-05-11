@@ -25,7 +25,9 @@ from bpmis_jira_tool.meeting_recorder import (
     _parse_avfoundation_devices,
     _parse_srt_transcript,
     _SegmentedAudioRecorder,
+    build_calendar_api_service,
     extract_meeting_links,
+    meeting_transcript_whisper_language,
     meeting_platform_from_link,
     normalize_calendar_event,
 )
@@ -143,6 +145,21 @@ class MeetingRecorderParsingTests(unittest.TestCase):
         self.assertEqual(calendar.events_resource.kwargs["maxResults"], 50)
         self.assertIn("+00:00", calendar.events_resource.kwargs["timeMin"])
 
+    def test_transcript_whisper_language_and_calendar_builder_defaults(self):
+        self.assertEqual(meeting_transcript_whisper_language("english"), "en")
+        self.assertEqual(meeting_transcript_whisper_language("mixed", fallback="zh"), "zh")
+
+        credentials = object()
+        with patch("bpmis_jira_tool.meeting_recorder.httplib2.Http") as http_cls:
+            with patch("bpmis_jira_tool.meeting_recorder.google_auth_httplib2.AuthorizedHttp") as auth_http_cls:
+                with patch("bpmis_jira_tool.meeting_recorder.build") as build_mock:
+                    service = build_calendar_api_service(credentials, cache_discovery=True)
+
+        http_cls.assert_called_once_with(timeout=20)
+        auth_http_cls.assert_called_once_with(credentials, http=http_cls.return_value)
+        build_mock.assert_called_once_with("calendar", "v3", http=auth_http_cls.return_value, cache_discovery=True)
+        self.assertEqual(service, build_mock.return_value)
+
     def test_meeting_record_store_rejects_missing_invalid_and_deleted_records(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = MeetingRecordStore(Path(temp_dir))
@@ -158,12 +175,33 @@ class MeetingRecorderParsingTests(unittest.TestCase):
             unreadable.write_text("{bad", encoding="utf-8")
             with self.assertRaisesRegex(ToolError, "unreadable"):
                 store.get_record("bad-json")
+            invalid_payload = store.metadata_path("invalid-payload")
+            invalid_payload.parent.mkdir(parents=True, exist_ok=True)
+            invalid_payload.write_text("[]", encoding="utf-8")
+            with self.assertRaisesRegex(ToolError, "invalid"):
+                store.get_record("invalid-payload")
 
             valid = store.create_record(owner_email="owner@npt.sg", title="Keep", platform="zoom", meeting_link="")
+            ignored = store.metadata_path("ignored")
+            ignored.parent.mkdir(parents=True, exist_ok=True)
+            ignored.write_text("[]", encoding="utf-8")
             deleted = store.create_record(owner_email="owner@npt.sg", title="Delete", platform="zoom", meeting_link="")
             deleted["status"] = "deleted"
             store.save_record(deleted)
             self.assertEqual([item["record_id"] for item in store.list_records(owner_email="owner@npt.sg")], [valid["record_id"]])
+
+            artifact_record = store.create_record(owner_email="owner@npt.sg", title="Artifacts", platform="zoom", meeting_link="")
+            artifact_dir = store.record_dir(artifact_record["record_id"])
+            (artifact_dir / "audio.wav").write_bytes(b"audio")
+            nested_dir = artifact_dir / "segments"
+            nested_dir.mkdir()
+            (nested_dir / "chunk.wav").write_bytes(b"chunk")
+            removed = store.delete_record(record_id=artifact_record["record_id"], owner_email="owner@npt.sg")
+
+            self.assertEqual(removed["status"], "deleted")
+            self.assertTrue(store.metadata_path(artifact_record["record_id"]).exists())
+            self.assertFalse((artifact_dir / "audio.wav").exists())
+            self.assertFalse(nested_dir.exists())
 
     def test_parse_avfoundation_devices_and_audio_capture_modes(self):
         output = """
