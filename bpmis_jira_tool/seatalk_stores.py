@@ -297,6 +297,21 @@ class SeaTalkNameMappingStore:
                     mappings[alias] = name[:180]
         return mappings
 
+    @classmethod
+    def missing_mappings(cls, current: Any, candidates: Any) -> dict[str, str]:
+        normalized_current = cls.normalize_mappings(current)
+        normalized_candidates = cls.normalize_mappings(candidates)
+        existing_keys = {
+            alias
+            for key in normalized_current
+            for alias in cls.equivalent_keys(key)
+        }
+        return {
+            key: name
+            for key, name in normalized_candidates.items()
+            if not (cls.equivalent_keys(key) & existing_keys)
+        }
+
     def _load(self) -> dict[str, Any]:
         if self.storage_path is None or not self.storage_path.exists():
             return {"mappings": {}}

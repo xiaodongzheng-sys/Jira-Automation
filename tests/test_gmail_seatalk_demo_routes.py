@@ -780,6 +780,35 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertEqual(legacy_payload["mappings"], {"UID 888": "Alice", "buddy-888": "Alice"})
         self.assertEqual([row["id"] for row in legacy_payload["unknown_ids"]], ["group-123", "UID 456"])
 
+    def test_team_dashboard_name_mapping_auto_merges_confident_candidates(self):
+        class FakeSeaTalkService:
+            def build_name_mappings(self, *, force_refresh=False):
+                return {
+                    "unknown_ids": [
+                        {"id": "group-123", "type": "group", "count": 12, "example": "2026-04-21: kickoff"},
+                        {"id": "UID 456", "type": "uid", "count": 6, "example": "2026-04-21: hello"},
+                        {"id": "UID 777", "type": "uid", "count": 3, "example": "2026-04-21: needs manual"},
+                    ],
+                    "auto_mappings": {
+                        "group-123": "Risk Project Group",
+                        "buddy-456": "Alice Tan",
+                    },
+                    "generated_at": "2026-04-21T21:00:00+08:00",
+                    "period_days": 7,
+                }
+
+        with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=FakeSeaTalkService()):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                loaded = client.get("/api/team-dashboard/report-intelligence/seatalk/name-mappings")
+
+        self.assertEqual(loaded.status_code, 200)
+        payload = loaded.get_json()
+        self.assertEqual(payload["mappings"]["group-123"], "Risk Project Group")
+        self.assertEqual(payload["mappings"]["UID 456"], "Alice Tan")
+        self.assertEqual(payload["mappings"]["buddy-456"], "Alice Tan")
+        self.assertEqual([row["id"] for row in payload["unknown_ids"]], ["UID 777"])
+
     def test_seatalk_name_mapping_script_paginates_candidates(self):
         source = Path("static/gmail_seatalk_demo.js").read_text(encoding="utf-8")
 

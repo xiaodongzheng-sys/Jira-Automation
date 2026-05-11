@@ -25,7 +25,7 @@ SEATALK_DASHBOARD_CACHE_TTL_SECONDS = 300
 SEATALK_DEFAULT_APP_PATH = "/Applications/SeaTalk.app"
 SEATALK_DEFAULT_DATA_DIR = "~/Library/Application Support/SeaTalk"
 SEATALK_INSIGHTS_PROMPT_MODE = "seatalk_7_day_insights_v4"
-SEATALK_NAME_MAPPINGS_CANDIDATE_VERSION = "v2_daily_brief_sources"
+SEATALK_NAME_MAPPINGS_CANDIDATE_VERSION = "v3_auto_mappings"
 SEATALK_INSIGHTS_TIMEZONE = ZoneInfo("Asia/Singapore")
 SEATALK_INSIGHTS_HISTORY_MAX_CHARS = 520_000
 SEATALK_INSIGHTS_TODO_HISTORY_MAX_CHARS = 260_000
@@ -332,6 +332,7 @@ class SeaTalkDashboardService:
                 row for row in unknown_ids
                 if isinstance(row, dict) and not self._is_ignored_unknown_id(row.get("id"))
             ]
+            payload["auto_mappings"] = self._normalize_auto_mappings(payload.get("auto_mappings") or {})
             payload["cache"] = {"hit": True, "expires_at": self._insights_cache_expiry(now).isoformat()}
             return payload
         self._validate_local_environment()
@@ -363,6 +364,7 @@ class SeaTalkDashboardService:
                 row for row in normalized_unknown_ids
                 if not self._is_ignored_unknown_id(row.get("id"))
             ],
+            "auto_mappings": self._normalize_auto_mappings(payload.get("auto_mappings") or {}),
             "generated_at": self._clean_text(payload.get("generated_at"), now.isoformat()),
             "period_days": int(payload.get("period_days") or days),
             "cache": {"hit": False, "expires_at": self._insights_cache_expiry(now).isoformat()},
@@ -1072,6 +1074,40 @@ class SeaTalkDashboardService:
     def _is_ignored_unknown_id(value: Any) -> bool:
         text = " ".join(str(value or "").split()).lower()
         return text in {"0", "uid 0", "buddy-0"}
+
+    @classmethod
+    def _normalize_auto_mappings(cls, value: Any) -> dict[str, str]:
+        if not isinstance(value, dict):
+            return {}
+        mappings: dict[str, str] = {}
+        for raw_key, raw_name in value.items():
+            key = cls._normalize_mapping_key(raw_key)
+            name = " ".join(str(raw_name or "").split())
+            if key and name and not cls._is_ignored_unknown_id(key):
+                mappings[key] = name[:180]
+                for alias in cls._person_mapping_aliases(key):
+                    mappings[alias] = name[:180]
+        return mappings
+
+    @staticmethod
+    def _normalize_mapping_key(value: Any) -> str:
+        key = str(value or "").strip()
+        if key.startswith("group-") or key.startswith("buddy-"):
+            return key
+        uid_match = re.match(r"^UID\s+(.+)$", key, re.IGNORECASE)
+        if uid_match and uid_match.group(1).strip():
+            return f"UID {uid_match.group(1).strip()}"
+        return ""
+
+    @staticmethod
+    def _person_mapping_aliases(key: str) -> set[str]:
+        if key.startswith("buddy-"):
+            suffix = key.removeprefix("buddy-").strip()
+            return {f"UID {suffix}"} if suffix else set()
+        uid_match = re.match(r"^UID\s+(.+)$", key, re.IGNORECASE)
+        if uid_match and uid_match.group(1).strip():
+            return {f"buddy-{uid_match.group(1).strip()}"}
+        return set()
 
     @classmethod
     def _normalize_unknown_id(cls, row: dict[str, Any]) -> dict[str, Any]:

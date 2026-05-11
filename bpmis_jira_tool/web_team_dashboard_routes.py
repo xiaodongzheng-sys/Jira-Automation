@@ -447,6 +447,9 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         try:
             candidates = _build_seatalk_dashboard_service(settings).build_name_mappings(force_refresh=force_refresh)
             mappings = mapping_store.mappings()
+            auto_mappings = SeaTalkNameMappingStore.missing_mappings(mappings, candidates.get("auto_mappings") if isinstance(candidates, dict) else {})
+            if auto_mappings:
+                mappings = mapping_store.merge_mappings(auto_mappings)
             mapped_keys = {alias for key in mappings for alias in SeaTalkNameMappingStore.equivalent_keys(key)}
             candidates = dict(candidates)
             candidates["unknown_ids"] = _dedupe_seatalk_name_mapping_candidates([

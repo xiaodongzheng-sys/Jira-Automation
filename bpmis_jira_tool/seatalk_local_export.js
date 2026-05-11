@@ -327,6 +327,14 @@ function resolveName(id, autoName, overrides) {
   return { display: `${name} (${id})`, resolved: true, name };
 }
 
+function cleanAutoMappingName(id, name) {
+  const text = String(name || '').replace(/\s+/g, ' ').trim();
+  if (!text || text === String(id || '').trim()) return '';
+  if (/^(unknown|null|undefined)$/i.test(text)) return '';
+  if (/^(group-|buddy-|UID\s+\d+)/i.test(text)) return '';
+  return text.slice(0, 180);
+}
+
 function senderIdentity(row, selfUid, uidNames, overrides) {
   const uid = String(row.u);
   const id = `UID ${uid}`;
@@ -553,7 +561,34 @@ function collectUnknownIds(rows, selfUid, db, overrides, periodEndEpoch) {
     .map((row) => {
       const { priority_rank: _priorityRank, daily_brief_source: _dailyBriefSource, ...publicRow } = row;
       return publicRow;
-    });
+  });
+}
+
+function collectAutoMappings(rows, selfUid, db, overrides) {
+  const { uidNames, sidNames } = buildNameMaps(rows, db);
+  const filteredRows = rows.filter((row) => !isBotConversationRow(row, sidNames));
+  const mappings = new Map();
+  const remember = (id, name) => {
+    const key = normalizeMappingKey(id);
+    if (!key || isIgnoredMappingKey(key)) return;
+    if (overrides.has(key) || personMappingAliases(key).some((alias) => overrides.has(alias))) return;
+    const cleanName = cleanAutoMappingName(key, name);
+    if (!cleanName) return;
+    const current = mappings.get(key);
+    if (!current || cleanName.length > current.length) mappings.set(key, cleanName);
+  };
+
+  for (const row of filteredRows) {
+    if (row.sid && (row.sid.startsWith('group-') || row.sid.startsWith('buddy-'))) {
+      remember(row.sid, sidNames.get(row.sid));
+    }
+    if (row.u !== null && row.u !== undefined && String(row.u) !== String(selfUid)) {
+      const uid = String(row.u);
+      remember(`UID ${uid}`, uidNames.get(uid));
+    }
+  }
+
+  return Object.fromEntries([...mappings.entries()].sort(([left], [right]) => left.localeCompare(right)));
 }
 
 function isBotConversationRow(row, sidNames) {
@@ -589,6 +624,7 @@ function main() {
     if (args.unknownIdsJson) {
       process.stdout.write(JSON.stringify({
         unknown_ids: collectUnknownIds(rows, uid, db, overrides, ranges.periodEndEpoch),
+        auto_mappings: collectAutoMappings(rows, uid, db, overrides),
         generated_at: args.now,
         period_days: args.days,
       }));

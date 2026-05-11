@@ -455,6 +455,7 @@ def build_daily_briefing(
     intelligence_config = normalize_report_intelligence_config(report_intelligence_config)
     local_window_start = window_start.astimezone(SEATALK_INSIGHTS_TIMEZONE) if window_start else None
     local_window_end = window_end.astimezone(SEATALK_INSIGHTS_TIMEZONE) if window_end else None
+    refresh_seatalk_auto_name_mappings(service, now=local_now)
     if local_window_start and local_window_end:
         history_text = service._filter_system_generated_history(
             export_window_history(service, window_start=local_window_start, window_end=local_window_end)
@@ -1185,6 +1186,24 @@ def _load_seatalk_name_mappings(service: Any) -> dict[str, str]:
         for key in _seatalk_mapping_equivalent_keys(raw_key):
             normalized[key.lower()] = name[:180]
     return normalized
+
+
+def refresh_seatalk_auto_name_mappings(service: Any, *, now: datetime) -> dict[str, str]:
+    path = getattr(service, "name_overrides_path", None)
+    if not path or not hasattr(service, "build_name_mappings"):
+        return {}
+    try:
+        from bpmis_jira_tool.seatalk_stores import SeaTalkNameMappingStore
+
+        mapping_store = SeaTalkNameMappingStore(Path(path).expanduser())
+        payload = service.build_name_mappings(now=now)
+        auto_mappings = payload.get("auto_mappings") if isinstance(payload, dict) else {}
+        missing = SeaTalkNameMappingStore.missing_mappings(mapping_store.mappings(), auto_mappings)
+        if missing:
+            return mapping_store.merge_mappings(missing)
+        return mapping_store.mappings()
+    except Exception:
+        return {}
 
 
 def _apply_report_intelligence_matches(items: list[dict[str, Any]], *, daily_matches: dict[str, Any]) -> None:

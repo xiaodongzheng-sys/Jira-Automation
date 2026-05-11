@@ -35,6 +35,7 @@ from bpmis_jira_tool.seatalk_daily_email import (
     export_rolling_gmail_threads,
     render_email,
     resolve_daily_email_window,
+    refresh_seatalk_auto_name_mappings,
     send_daily_email,
     seatalk_name_overrides_path,
     should_skip_fixed_daily_email_window,
@@ -153,6 +154,35 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             agent_mapping.write_text('{"mappings": {"UID 1": "Alice"}}', encoding="utf-8")
             with patch.dict("os.environ", {"LOCAL_AGENT_TEAM_PORTAL_DATA_DIR": str(agent_root)}):
                 self.assertEqual(seatalk_name_overrides_path(data_root=root), agent_mapping)
+
+    def test_refresh_seatalk_auto_name_mappings_merges_only_missing_candidates(self):
+        class AutoMappingService:
+            def __init__(self, path: Path) -> None:
+                self.name_overrides_path = path
+
+            def build_name_mappings(self, *, now):
+                return {
+                    "auto_mappings": {
+                        "group-123": "Risk Project Group",
+                        "buddy-456": "Alice Tan",
+                        "UID 888": "Should Not Override",
+                    }
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mapping_path = Path(temp_dir) / "seatalk" / "name_overrides.json"
+            mapping_path.parent.mkdir(parents=True)
+            mapping_path.write_text('{"mappings": {"UID 888": "Manual Name"}}', encoding="utf-8")
+
+            mappings = refresh_seatalk_auto_name_mappings(
+                AutoMappingService(mapping_path),
+                now=datetime(2026, 4, 27, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            )
+
+        self.assertEqual(mappings["group-123"], "Risk Project Group")
+        self.assertEqual(mappings["UID 456"], "Alice Tan")
+        self.assertEqual(mappings["buddy-456"], "Alice Tan")
+        self.assertEqual(mappings["UID 888"], "Manual Name")
 
     def test_build_daily_briefing_skips_model_when_window_has_no_messages(self):
         service = FakeSeaTalkService("SeaTalk Chat History Export\nWindow: since 2026-04-26T19:00:00+08:00\n")

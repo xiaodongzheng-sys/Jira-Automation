@@ -235,7 +235,7 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(cache_path)
-        self.assertIn("name_mappings_v2_daily_brief_sources", cache_path.name)
+        self.assertIn("name_mappings_v3_auto_mappings", cache_path.name)
 
     def test_build_name_mappings_parses_unknown_ids(self):
         calls: list[list[str]] = []
@@ -258,6 +258,12 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
                             {"id": "UID 0", "type": "uid", "count": 10, "example": "2026-05-04: [custom.missing]"},
                             {"id": "UID 888", "type": "uid", "count": "4", "example": "2026-04-21: hello"},
                         ],
+                        "auto_mappings": {
+                            "group-123": "Risk Project Group",
+                            "buddy-888": "Alice Tan",
+                            "UID 0": "Ignored User",
+                            "bad": "Ignored Bad Key",
+                        },
                         "generated_at": "2026-04-21T21:00:00+08:00",
                         "period_days": 7,
                     }
@@ -279,6 +285,10 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertEqual(result["unknown_ids"][0]["priority_reason"], "@mentioned me")
         self.assertEqual(result["unknown_ids"][1]["id"], "UID 888")
         self.assertNotIn("UID 0", [row["id"] for row in result["unknown_ids"]])
+        self.assertEqual(result["auto_mappings"]["group-123"], "Risk Project Group")
+        self.assertEqual(result["auto_mappings"]["UID 888"], "Alice Tan")
+        self.assertEqual(result["auto_mappings"]["buddy-888"], "Alice Tan")
+        self.assertNotIn("UID 0", result["auto_mappings"])
         self.assertTrue(any("--unknown-ids-json" in command for command in calls))
 
     def test_build_name_mappings_reuses_daily_disk_cache(self):
