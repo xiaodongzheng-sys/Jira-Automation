@@ -20,6 +20,8 @@ from urllib.request import Request, urlopen
 ROOT_DIR = Path(__file__).resolve().parents[1]
 STATIC_JS_PATHS = sorted((ROOT_DIR / "static").glob("*.js"))
 GATE_PROOF_VERSION = 1
+COVERAGE_JSON_PATH = ROOT_DIR / ".team-portal" / "run" / "system_full_coverage.json"
+COVERAGE_POLICY_PATH = ROOT_DIR / "config" / "coverage_risk_policy.json"
 
 
 @dataclass
@@ -222,9 +224,48 @@ def run_gate(
         }
 
     coverage_commands = [
-        ("coverage_erase", [sys.executable, "-m", "coverage", "erase"]),
-        ("python_unittest_coverage", [sys.executable, "-m", "coverage", "run", "-m", "unittest", "discover", "-s", "tests"]),
-        ("python_coverage_report", [sys.executable, "-m", "coverage", "report", "--fail-under", str(coverage_fail_under)]),
+        ("coverage_erase", [sys.executable, "-m", "coverage", "erase", "--rcfile=/dev/null"]),
+        (
+            "python_unittest_coverage",
+            [
+                sys.executable,
+                "-m",
+                "coverage",
+                "run",
+                "--rcfile=/dev/null",
+                "--source=bpmis_jira_tool,prd_briefing",
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "tests",
+            ],
+        ),
+        (
+            "python_coverage_json",
+            [
+                sys.executable,
+                "-m",
+                "coverage",
+                "json",
+                "--rcfile=/dev/null",
+                "-o",
+                str(COVERAGE_JSON_PATH.relative_to(ROOT_DIR)),
+            ],
+        ),
+        (
+            "risk_coverage_gate",
+            [
+                sys.executable,
+                "scripts/check_coverage_policy.py",
+                "--coverage-json",
+                str(COVERAGE_JSON_PATH.relative_to(ROOT_DIR)),
+                "--policy",
+                str(COVERAGE_POLICY_PATH.relative_to(ROOT_DIR)),
+                "--governed-fail-under",
+                str(coverage_fail_under),
+            ],
+        ),
     ]
     parallel_commands = [("node_check", ["node", "--check", str(path.relative_to(ROOT_DIR))]) for path in STATIC_JS_PATHS]
     parallel_commands.append(("source_code_qa_release_gate", [sys.executable, "scripts/run_source_code_qa_release_gate.py"]))

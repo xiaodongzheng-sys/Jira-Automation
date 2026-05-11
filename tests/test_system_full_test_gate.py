@@ -46,15 +46,17 @@ class SystemFullTestGateTests(unittest.TestCase):
             [
                 "coverage_erase",
                 "python_unittest_coverage",
-                "python_coverage_report",
+                "python_coverage_json",
+                "risk_coverage_gate",
                 "node_check",
                 "node_check",
                 "source_code_qa_release_gate",
             ],
         )
-        self.assertEqual(commands[2][1][-2:], ["--fail-under", "100"])
-        self.assertEqual(commands[3][1], ["node", "--check", "static/a.js"])
-        self.assertEqual(commands[4][1], ["node", "--check", "static/b.js"])
+        self.assertIn("--source=bpmis_jira_tool,prd_briefing", commands[1][1])
+        self.assertEqual(commands[3][1][-2:], ["--governed-fail-under", "100"])
+        self.assertEqual(commands[4][1], ["node", "--check", "static/a.js"])
+        self.assertEqual(commands[5][1], ["node", "--check", "static/b.js"])
         self.assertEqual(parallel_workers, [3])
         self.assertEqual(result["steps"][-1]["status"], "skipped")
 
@@ -80,6 +82,33 @@ class SystemFullTestGateTests(unittest.TestCase):
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["failed_steps"], ["python_unittest_coverage"])
         self.assertEqual([step["name"] for step in result["steps"]], ["coverage_erase", "python_unittest_coverage"])
+
+    def test_gate_stops_after_failed_risk_coverage_policy(self):
+        def fake_run_command(name, command):
+            if name == "risk_coverage_gate":
+                return gate.GateStep(name=name, command=command, returncode=1, status="fail", stderr="coverage low")
+            return gate.GateStep(name=name, command=command)
+
+        with patch.object(gate, "STATIC_JS_PATHS", [gate.ROOT_DIR / "static" / "a.js"]), patch.object(
+            gate,
+            "_run_command",
+            side_effect=fake_run_command,
+        ), patch.object(gate, "_run_parallel_commands") as parallel:
+            result = gate.run_gate(
+                skip_smoke=True,
+                uat_url=None,
+                live_url=None,
+                expected_revision=None,
+                coverage_fail_under=100,
+            )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["failed_steps"], ["risk_coverage_gate"])
+        self.assertEqual(
+            [step["name"] for step in result["steps"]],
+            ["coverage_erase", "python_unittest_coverage", "python_coverage_json", "risk_coverage_gate"],
+        )
+        parallel.assert_not_called()
 
     def test_smoke_only_skips_local_release_gate_commands(self):
         payloads = {
