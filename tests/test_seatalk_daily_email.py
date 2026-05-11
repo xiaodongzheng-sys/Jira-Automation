@@ -40,6 +40,7 @@ from bpmis_jira_tool.seatalk_daily_email import (
     seatalk_name_overrides_path,
     should_skip_fixed_daily_email_window,
     sync_daily_summary_to_trello,
+    _build_unanswered_seatalk_question_hints,
     _daily_brief_user_prompt,
 )
 from bpmis_jira_tool.seatalk_dashboard import SEATALK_INSIGHTS_TIMEZONE
@@ -1034,6 +1035,38 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertIn("already represented as a my_todos watch_delegate item", prompt)
         self.assertIn("Report Intelligence Matches", prompt)
         self.assertIn("Use these matches only as prioritization hints", prompt)
+
+    def test_unanswered_seatalk_question_hints_include_pm_relevant_thread_questions(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== [PH Card] google pay 新增域名 (group-4374390) ===",
+                "[2026-05-11 16:39:23] Qiao Wenxing (乔文星) (UID 342609) [thread reply under: notifyServiceActivated setup]: [image]",
+                "[2026-05-11 16:39:26] Qiao Wenxing (乔文星) (UID 342609) [thread reply under: notifyServiceActivated setup]: notifyServiceActivated流程中没有cvc校验，是不是写错了，不用上送这个吧",
+                "=== Other group (group-1) ===",
+                "[2026-05-11 16:40:00] Someone (UID 1): thanks",
+            ]
+        )
+
+        hints = _build_unanswered_seatalk_question_hints(history)
+
+        self.assertIn("[PH Card] google pay 新增域名", hints)
+        self.assertIn("notifyServiceActivated流程中没有cvc校验", hints)
+        self.assertIn("Qiao Wenxing", hints)
+
+    def test_unanswered_seatalk_question_hints_exclude_answered_thread_questions(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== [PH Card] google pay 新增域名 (group-4374390) ===",
+                "[2026-05-11 16:39:26] Qiao Wenxing (乔文星) (UID 342609) [thread reply under: notifyServiceActivated setup]: notifyServiceActivated流程中没有cvc校验，是不是写错了",
+                "[2026-05-11 16:41:00] Ker Yin (UID 786789) [thread reply under: notifyServiceActivated setup]: 对，这里不用上送 cvc",
+            ]
+        )
+
+        hints = _build_unanswered_seatalk_question_hints(history)
+
+        self.assertEqual(hints, "")
 
     def test_build_trello_card_specs_includes_direct_watch_and_followups(self):
         briefing = {

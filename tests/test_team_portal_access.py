@@ -123,6 +123,31 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertIn(".login-image-hero-bg", stylesheet)
         self.assertIn(".login-image-google-button", stylesheet)
         self.assertIn(".login-image-accessibility-copy", stylesheet)
+        self.assertIn(".page-shell-login-image .flash-stack", stylesheet)
+        self.assertIn("position: fixed", stylesheet)
+        self.assertNotIn(".page-shell-login-image .flash-stack {\n  display: none;", stylesheet)
+
+    def test_google_login_config_error_is_visible_on_login_gate(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "GOOGLE_OAUTH_CLIENT_SECRET_FILE": str(Path(temp_dir) / "missing-client.json"),
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                response = client.get("/auth/google/login", follow_redirects=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Google OAuth client secret file was not found", response.data)
+        self.assertIn(b"Continue with Google", response.data)
 
     def test_shared_mode_redirects_protected_route_to_login_gate(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -790,7 +815,7 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         soup = BeautifulSoup(response.get_data(as_text=True), "html.parser")
         labels = [node.get_text(strip=True) for node in soup.select(".site-switcher-tab")]
-        self.assertIn("Meetings", labels)
+        self.assertIn("Meeting Module", labels)
         meeting_labels = [node.get_text(strip=True) for node in soup.select(".site-switcher-subtab")]
         self.assertIn("Meeting Recorder", meeting_labels)
         self.assertIn("Meeting Translation", meeting_labels)

@@ -11,12 +11,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from bpmis_jira_tool.web import (
-    _build_source_code_qa_effort_business_plan,
-    _build_source_code_qa_effort_estimation_rubric,
-    _build_source_code_qa_effort_structured_assessment,
-    _build_source_code_qa_effort_technical_candidates,
-)
+from bpmis_jira_tool import web as web_module
+
+web_module.bind_source_code_qa_effort_helpers(web_module.__dict__)
+
+_build_source_code_qa_effort_business_plan = web_module._build_source_code_qa_effort_business_plan
+_build_source_code_qa_effort_estimation_rubric = web_module._build_source_code_qa_effort_estimation_rubric
+_build_source_code_qa_effort_structured_assessment = web_module._build_source_code_qa_effort_structured_assessment
+_build_source_code_qa_effort_technical_candidates = web_module._build_source_code_qa_effort_technical_candidates
 
 
 DEFAULT_CASES = PROJECT_ROOT / "evals" / "effort_assessment" / "crms_golden.jsonl"

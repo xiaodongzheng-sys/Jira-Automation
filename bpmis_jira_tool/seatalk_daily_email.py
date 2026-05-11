@@ -60,6 +60,7 @@ MAX_PROJECT_UPDATES = 10
 MAX_OTHER_UPDATES = 8
 MAX_TEAM_MEMBER_REMINDERS = 8
 MAX_USEFUL_AWARENESS_OTHER_UPDATES = 5
+MAX_UNANSWERED_SEATALK_QUESTION_HINTS = 10
 MAX_TOP_FOCUS_ITEMS = 3
 LOW_SIGNAL_EMAIL_SUMMARY = "No clear action, blocker, key project update, or team follow-up was found in this window."
 EMPTY_TODO_SECTION_SUMMARY = "No Xiaodong-owned action or watch/delegate item found."
@@ -505,6 +506,7 @@ def build_daily_briefing(
     )
     if gmail_history_text:
         gmail_history_text = gmail_history_text[:360_000]
+    unanswered_question_hints = _build_unanswered_seatalk_question_hints(history_text)
     daily_matches = match_report_intelligence(
         f"{history_text}\n\n{gmail_history_text}",
         config=intelligence_config,
@@ -520,6 +522,7 @@ def build_daily_briefing(
             local_now=local_now,
             window_label=window_label,
             match_summary=daily_match_summary,
+            unanswered_question_hints=unanswered_question_hints,
         ),
     )
     name_mappings = _load_seatalk_name_mappings(service)
@@ -1097,6 +1100,7 @@ def _daily_brief_user_prompt(
     local_now: datetime,
     window_label: str = "",
     match_summary: str = "",
+    unanswered_question_hints: str = "",
 ) -> str:
     window_text = window_label or f"previous {hours} hours"
     match_block = (
@@ -1105,6 +1109,15 @@ def _daily_brief_user_prompt(
         "Use these matches only as prioritization hints. Do not create items unless the source evidence supports them. "
         "For matching output items, fill matched_vips, matched_keywords, matched_key_projects, and priority_reason.\n\n"
         if str(match_summary or "").strip()
+        else ""
+    )
+    unanswered_question_block = (
+        "## Unanswered SeaTalk Question Candidates\n"
+        f"{unanswered_question_hints}\n"
+        "These are deterministic candidates from SeaTalk thread/group history where a human asked a PM-relevant question and no later human reply was visible in the same thread during the window. "
+        "Prioritize them as my_todos watch_delegate items, project_updates with blocked/unknown status, or team_member_reminders when the named owner is in the allowed reminder list. "
+        "Do not include a candidate if the surrounding source text shows it was already answered or is only low-value chatter.\n\n"
+        if str(unanswered_question_hints or "").strip()
         else ""
     )
     return (
@@ -1152,6 +1165,7 @@ def _daily_brief_user_prompt(
         "If an item mentions MAS, launch before a fix, risk endorsement, ITC endorsement, blocked, or missing real-time fraud surveillance, treat it as high-risk and prefer status=blocked or signal_type=risk_compliance when appropriate.\n"
         "Avoid repeating the same topic across sections unless each section has a distinct role: Xiaodong next action, project state, or team member follow-up.\n\n"
         f"{match_block}"
+        f"{unanswered_question_block}"
         "## Exclusions\n"
         "For other_updates and team_member_reminders, ignore bot-generated alerts, automated reminders, system notifications, Jira/Confluence/calendar reminders, and no-reply notification emails unless a human adds meaningful follow-up in the same thread.\n\n"
         "For team_member_reminders, always exclude SDLC Checker and SG BAU SDLC material check content; those are automated release hygiene signals, not human team follow-up requests.\n\n"
@@ -1165,6 +1179,133 @@ def _daily_brief_user_prompt(
         "=== Gmail thread history ===\n"
         f"{gmail_history_text or 'No Gmail messages were found in this window.'}"
     )
+
+
+_SEATALK_HISTORY_HEADER_RE = re.compile(r"^===\s*(?P<group>.+?)\s*===$")
+_SEATALK_HISTORY_MESSAGE_RE = re.compile(
+    r"^\[(?P<timestamp>[^\]]+)\]\s+(?P<sender>.+?)(?:\s+\[thread reply under:\s*(?P<thread>.*?)\])?:\s*(?P<text>.*)$"
+)
+_UNANSWERED_QUESTION_CUES = (
+    "?",
+    "？",
+    "吗",
+    "么",
+    "是不是",
+    "是否",
+    "请问",
+    "确认下",
+    "看下",
+    "may i know",
+    "can you",
+    "could you",
+)
+_UNANSWERED_PM_RELEVANT_TERMS = (
+    "af",
+    "anti-fraud",
+    "fraud",
+    "card",
+    "google pay",
+    "gpay",
+    "token",
+    "tokenization",
+    "cvc",
+    "notifyservice",
+    "risk",
+    "rule",
+    "校验",
+    "上送",
+    "写错",
+    "配置",
+    "规则",
+    "域名",
+)
+
+
+def _build_unanswered_seatalk_question_hints(history_text: str) -> str:
+    current_group = ""
+    pending: list[dict[str, str | bool | tuple[str, str]]] = []
+    for line in str(history_text or "").splitlines():
+        header_match = _SEATALK_HISTORY_HEADER_RE.match(line.strip())
+        if header_match:
+            current_group = header_match.group("group").strip()
+            continue
+        message_match = _SEATALK_HISTORY_MESSAGE_RE.match(line)
+        if not message_match or not current_group:
+            continue
+        sender = message_match.group("sender").strip()
+        thread = (message_match.group("thread") or "").strip()
+        text = message_match.group("text").strip()
+        key = (current_group, thread or "__main__")
+        if _is_meaningful_human_seatalk_line(sender, text) and not _looks_like_unanswered_question(text):
+            for item in pending:
+                if item.get("key") == key and item.get("sender") != sender:
+                    item["answered"] = True
+        if _is_unanswered_question_candidate(text, group=current_group, thread=thread, sender=sender):
+            pending.append(
+                {
+                    "key": key,
+                    "sender": sender,
+                    "group": current_group,
+                    "thread": thread,
+                    "timestamp": message_match.group("timestamp").strip(),
+                    "text": text,
+                    "answered": False,
+                }
+            )
+
+    unanswered = [item for item in pending if not item.get("answered")]
+    unanswered.sort(key=_unanswered_question_sort_key, reverse=True)
+    hints: list[str] = []
+    for item in unanswered:
+        group = str(item.get("group") or "").strip()
+        thread = str(item.get("thread") or "").strip()
+        sender = str(item.get("sender") or "").strip()
+        timestamp = str(item.get("timestamp") or "").strip()
+        text = _clip_hint_text(item.get("text"), limit=220)
+        source = f"{group} / thread: {thread}" if thread else group
+        hints.append(f"- [{timestamp}] {source}: {sender} asked: {text}")
+        if len(hints) >= MAX_UNANSWERED_SEATALK_QUESTION_HINTS:
+            break
+    return "\n".join(hints)
+
+
+def _unanswered_question_sort_key(item: dict[str, Any]) -> tuple[int, str]:
+    haystack = f"{item.get('group') or ''} {item.get('thread') or ''} {item.get('text') or ''}".casefold()
+    score = sum(1 for term in _UNANSWERED_PM_RELEVANT_TERMS if term in haystack)
+    for strong_term in ("cvc", "notifyservice", "google pay", "gpay", "tokenization", "live issue"):
+        if strong_term in haystack:
+            score += 3
+    for strong_term in ("写错", "校验", "上送", "blocked", "blocker"):
+        if strong_term in haystack:
+            score += 2
+    return score, str(item.get("timestamp") or "")
+
+
+def _is_unanswered_question_candidate(text: str, *, group: str, thread: str, sender: str) -> bool:
+    if not _is_meaningful_human_seatalk_line(sender, text) or not _looks_like_unanswered_question(text):
+        return False
+    haystack = f"{group} {thread} {text}".casefold()
+    return any(term in haystack for term in _UNANSWERED_PM_RELEVANT_TERMS)
+
+
+def _looks_like_unanswered_question(text: str) -> bool:
+    lowered = str(text or "").casefold()
+    return any(cue in lowered for cue in _UNANSWERED_QUESTION_CUES)
+
+
+def _is_meaningful_human_seatalk_line(sender: str, text: str) -> bool:
+    lowered_sender = str(sender or "").casefold()
+    if any(marker in lowered_sender for marker in ("bot", "checker", "alert", "reminder")):
+        return False
+    clean_text = str(text or "").strip()
+    if not clean_text or clean_text in {"[image]", "[video]", "[file]", "[sticker]", "[empty message]"}:
+        return False
+    return True
+
+
+def _clip_hint_text(value: Any, *, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else f"{text[:limit].rstrip()}..."
 
 
 def _load_seatalk_name_mappings(service: Any) -> dict[str, str]:

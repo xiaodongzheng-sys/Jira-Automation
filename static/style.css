@@ -5723,7 +5723,13 @@ select:focus {
 }
 
 .page-shell-login-image .flash-stack {
-  display: none;
+  position: fixed;
+  z-index: 10;
+  top: 16px;
+  left: max(16px, env(safe-area-inset-left));
+  right: max(16px, env(safe-area-inset-right));
+  width: min(520px, calc(100vw - 32px));
+  margin: 0 auto;
 }
 
 .login-image-hero {
@@ -5834,9 +5840,10 @@ select:focus {
   }
 
   .page-shell-login-image .flash-stack {
-    top: 10px;
+    top: max(10px, env(safe-area-inset-top));
     left: 10px;
     right: 10px;
+    width: auto;
   }
 
   .login-image-hero {

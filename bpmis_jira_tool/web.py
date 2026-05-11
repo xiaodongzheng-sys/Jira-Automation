@@ -713,7 +713,7 @@ def create_app() -> Flask:
                     "active": request.path.startswith("/meeting-translation"),
                 }
             )
-            site_tabs.append(_nav_group("Meetings", url_for("meeting_recorder_page"), meeting_tabs))
+            site_tabs.append(_nav_group("Meeting Module", url_for("meeting_recorder_page"), meeting_tabs))
         prd_tabs = []
         if _can_access_prd_self_assessment(settings):
             prd_tabs.append(
@@ -742,13 +742,6 @@ def create_app() -> Flask:
                     "active": current_endpoint == "team_dashboard_page",
                 }
             )
-            project_tabs.append(
-                {
-                    "label": "Reports",
-                    "href": url_for("reports_page"),
-                    "active": current_endpoint == "reports_page",
-                }
-            )
         project_tabs.append(
             {
                 "label": "BPMIS Automation Tool",
@@ -756,6 +749,14 @@ def create_app() -> Flask:
                 "active": current_endpoint == "index",
             }
         )
+        if can_access_team_dashboard:
+            project_tabs.append(
+                {
+                    "label": "Reports",
+                    "href": url_for("reports_page"),
+                    "active": current_endpoint == "reports_page",
+                }
+            )
         if _can_access_work_memory(settings):
             project_tabs.append(
                 {
