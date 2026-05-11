@@ -1008,6 +1008,149 @@ class LocalAgentClientTests(unittest.TestCase):
         self.assertEqual(request.call_count, 2)
         sleep_mock.assert_called_once_with(1.0)
 
+    def test_local_agent_client_contract_wrappers_send_expected_paths_and_payload_shapes(self):
+        client = LocalAgentClient(base_url="https://portal.example", hmac_secret="shared-secret")
+        calls = []
+
+        def fake_request(method, path, payload=None, **kwargs):
+            calls.append((method, path, payload, kwargs))
+            return {
+                "status": "ok",
+                "config": {"pm_team": "AF"},
+                "profiles": {"AF": {"member_emails": ["owner@npt.sg"]}},
+                "profile": {"member_emails": ["owner@npt.sg"]},
+                "projects": [{"bpmis_id": "225159"}],
+                "ticket": {"ticket_key": "AF-1"},
+                "deleted": True,
+                "updated": True,
+                "result": "stored-id",
+                "sessions": [{"session_id": "s1"}],
+                "session": {"session_id": "s1"},
+                "archived": {"session_id": "s1", "archived": True},
+                "context": {"messages": []},
+                "attachment": {"id": "att-1"},
+                "attachments": [{"id": "att-1"}],
+                "artifact": {"id": "artifact-1"},
+                "evidence": [{"id": "e1"}] if path.endswith("/list") or path.endswith("/resolve") else {"id": "e1"},
+                "content_base64": base64.b64encode(b"payload").decode("ascii"),
+                "records": [{"record_id": "r1"}],
+                "briefs": [{"id": "brief-1"}],
+                "items": [{"id": "item-1"}],
+                "completed_ids": ["todo-1", 2],
+                "todos": [{"id": "todo-1"}],
+                "processed_until": "2026-05-01T00:00:00Z",
+                "mappings": {"group-1": "Risk PM"},
+            }
+
+        with patch.object(client, "_request", side_effect=fake_request):
+            self.assertEqual(client.source_code_qa_config()["config"]["pm_team"], "AF")
+            self.assertEqual(client.source_code_qa_save_mapping(pm_team="AF", country="All", repositories=[]), fake_request("", "") | {"status": "ok"})
+            self.assertEqual(client.source_code_qa_sync(pm_team="AF", country="All")["status"], "ok")
+            self.assertEqual(client.source_code_qa_ensure_synced_today(pm_team="AF", country="All", background=True)["status"], "ok")
+            self.assertEqual(client.productization_llm_descriptions(items=[{"id": "1"}]), [{"id": "item-1"}])
+            self.assertEqual(client.prd_review({"prd_url": "https://c"}), fake_request("", "") | {"status": "ok"})
+            self.assertEqual(client.prd_summary({"prd_url": "https://c"})["status"], "ok")
+            self.assertEqual(client.prd_briefing_review({"session_id": "s"})["status"], "ok")
+            self.assertEqual(client.prd_self_assessment_review({"prd": "text"})["status"], "ok")
+            self.assertEqual(client.prd_self_assessment_summary({"prd": "text"})["status"], "ok")
+            self.assertEqual(client.prd_self_assessment_latest(owner_key="owner")["status"], "ok")
+            self.assertEqual(client.prd_briefing_process_prd({"page_ref": "123"})["status"], "ok")
+            self.assertEqual(client.prd_briefing_latest(owner_key="owner")["status"], "ok")
+            self.assertEqual(client.prd_briefing_generate_audio({"text": "hello"})["status"], "ok")
+            self.assertEqual(client.team_dashboard_monthly_report_draft({"topic": "Risk"})["status"], "ok")
+            self.assertEqual(client.team_dashboard_monthly_report_draft_start({"topic": "Risk"})["status"], "ok")
+            self.assertEqual(client.team_dashboard_monthly_report_job("job 1")["status"], "ok")
+            self.assertEqual(client.team_dashboard_monthly_report_latest_draft()["status"], "ok")
+            self.assertEqual(client.team_dashboard_monthly_report_send({"recipient": "pm@npt.sg"})["status"], "ok")
+            self.assertEqual(client.team_dashboard_daily_briefs(), [{"id": "brief-1"}])
+            self.assertEqual(client.meeting_recorder_diagnostics()["status"], "ok")
+            self.assertEqual(client.meeting_recorder_records(owner_email="owner@npt.sg"), [{"record_id": "r1"}])
+            self.assertEqual(client.meeting_recorder_record(record_id="r1", owner_email="owner@npt.sg")["status"], "ok")
+            self.assertEqual(client.meeting_recorder_start({"owner_email": "owner@npt.sg"})["status"], "ok")
+            self.assertEqual(client.meeting_recorder_stop(record_id="r1", owner_email="owner@npt.sg")["status"], "ok")
+            self.assertEqual(client.meeting_recorder_signal_check(record_id="r1", owner_email="owner@npt.sg")["status"], "ok")
+            self.assertEqual(client.meeting_recorder_process(record_id="r1", owner_email="owner@npt.sg")["status"], "ok")
+            self.assertEqual(client.meeting_recorder_process_start(record_id="r1", owner_email="owner@npt.sg", send_email_on_complete=True)["status"], "ok")
+            self.assertEqual(client.meeting_recorder_process_job(job_id="job 1", owner_email="owner@npt.sg")["status"], "ok")
+            self.assertEqual(client.meeting_recorder_send_email(record_id="r1", owner_email="owner@npt.sg", recipient="pm@npt.sg")["status"], "ok")
+            self.assertEqual(client.meeting_recorder_delete(record_id="r1", owner_email="owner@npt.sg")["status"], "ok")
+            self.assertEqual(client.meeting_translation_start({"owner_email": "owner@npt.sg"})["status"], "ok")
+            self.assertEqual(client.meeting_translation_stop(session_id="s1", owner_email="owner@npt.sg")["status"], "ok")
+            self.assertEqual(client.work_memory_health()["status"], "ok")
+            self.assertEqual(client.work_memory_recent(owner_email="owner@npt.sg"), [{"id": "item-1"}])
+            self.assertEqual(client.work_memory_review_candidates(owner_email="owner@npt.sg"), [{"id": "item-1"}])
+            self.assertEqual(client.work_memory_project_timeline(project_ref="AF-1", owner_email="owner@npt.sg"), [{"id": "item-1"}])
+            self.assertEqual(client.work_memory_entity_resolution(query="AF-1", owner_email="owner@npt.sg")["status"], "ok")
+            self.assertEqual(client.work_memory_feedback(item_id="i1", action="accept", owner_email="owner@npt.sg")["status"], "ok")
+            self.assertEqual(client.work_memory_distill(owner_email="owner@npt.sg")["status"], "ok")
+            self.assertEqual(client.work_memory_backfill_existing(owner_email="owner@npt.sg")["status"], "ok")
+            self.assertEqual(client.work_memory_ingest_incremental(owner_email="owner@npt.sg", reconciliation=True)["status"], "ok")
+            self.assertEqual(client.superagent_health(owner_email="owner@npt.sg")["status"], "ok")
+            self.assertEqual(client.superagent_query(owner_email="owner@npt.sg", user_email="owner@npt.sg", query="risk")["status"], "ok")
+            self.assertEqual(client.superagent_explain(owner_email="owner@npt.sg", query="risk")["status"], "ok")
+            self.assertEqual(client.superagent_eval(owner_email="owner@npt.sg")["status"], "ok")
+            self.assertEqual(client.superagent_quality_gate(owner_email="owner@npt.sg")["status"], "ok")
+            self.assertEqual(client.superagent_audit(owner_email="owner@npt.sg"), [{"id": "item-1"}])
+            self.assertEqual(client.seatalk_overview()["status"], "ok")
+            self.assertEqual(client.seatalk_insights()["status"], "ok")
+            self.assertEqual(client.seatalk_project_updates()["status"], "ok")
+            self.assertEqual(client.seatalk_todos()["status"], "ok")
+            self.assertEqual(client.seatalk_name_mappings(force_refresh=True)["status"], "ok")
+            self.assertEqual(client.seatalk_export(), ("", "seatalk-history-last-7-days.txt"))
+            self.assertEqual(client.seatalk_export_since(since=datetime(2026, 5, 1), days=7), "")
+            self.assertEqual(client.bpmis_config_load(user_key="google:owner")["pm_team"], "AF")
+            self.assertEqual(client.bpmis_config_save(user_key="google:owner", config={"pm_team": "AF"})["pm_team"], "AF")
+            self.assertIsNone(client.bpmis_config_migrate(from_user_key="anon", to_user_key="google:owner"))
+            self.assertEqual(client.bpmis_team_profiles_load()["AF"]["member_emails"], ["owner@npt.sg"])
+            self.assertEqual(client.bpmis_team_profile_save(team_key="AF", profile={"member_emails": []})["member_emails"], ["owner@npt.sg"])
+            self.assertEqual(client.team_dashboard_config_load()["pm_team"], "AF")
+            self.assertEqual(client.team_dashboard_config_save({"pm_team": "AF"})["pm_team"], "AF")
+            self.assertEqual(client.bpmis_projects_list(user_key="u"), [{"bpmis_id": "225159"}])
+            self.assertEqual(client.bpmis_projects_reorder(user_key="u", bpmis_ids=["225159"]), [{"bpmis_id": "225159"}])
+            self.assertEqual(client.bpmis_project_upsert(user_key="u", bpmis_id="225159", project_name="P", brd_link="", market="ID"), "stored-id")
+            self.assertTrue(client.bpmis_project_delete(user_key="u", bpmis_id="225159"))
+            self.assertTrue(client.bpmis_project_comment_update(user_key="u", bpmis_id="225159", pm_comment="ok"))
+            self.assertEqual(client.bpmis_project_ticket_add(user_key="u", bpmis_id="225159")["ticket_key"], "AF-1")
+            self.assertEqual(client.bpmis_project_ticket_upsert_synced(user_key="u", bpmis_id="225159")["ticket_key"], "AF-1")
+            self.assertTrue(client.bpmis_project_ticket_delete(user_key="u", bpmis_id="225159", ticket_id="1"))
+            self.assertTrue(client.bpmis_project_ticket_status_update(user_key="u", bpmis_id="225159", ticket_id="1", status="Done"))
+            self.assertTrue(client.bpmis_project_ticket_version_update(user_key="u", bpmis_id="225159", ticket_id="1", version_name="26Q2"))
+            self.assertEqual(client.source_code_qa_sessions_list(owner_email="owner@npt.sg"), [{"session_id": "s1"}])
+            self.assertEqual(client.source_code_qa_session_create(owner_email="owner@npt.sg")["session_id"], "s1")
+            self.assertEqual(client.source_code_qa_session_get(session_id="s1", owner_email="owner@npt.sg")["session_id"], "s1")
+            self.assertTrue(client.source_code_qa_session_archive(session_id="s1", owner_email="owner@npt.sg")["archived"])
+            self.assertEqual(client.source_code_qa_session_context(session_id="s1", owner_email="owner@npt.sg")["messages"], [])
+            self.assertEqual(client.source_code_qa_session_append(session_id="s1", owner_email="owner@npt.sg")["session_id"], "s1")
+            self.assertEqual(client.source_code_qa_session_pending(session_id="s1", owner_email="owner@npt.sg")["session_id"], "s1")
+            self.assertEqual(client.source_code_qa_attachment_save(owner_email="owner@npt.sg", session_id="s1", filename="a.txt", mime_type="text/plain", content=b"x")["id"], "att-1")
+            self.assertEqual(client.source_code_qa_attachments_resolve(owner_email="owner@npt.sg", session_id="s1", attachment_ids=["att-1"]), [{"id": "att-1"}])
+            metadata, content = client.source_code_qa_attachment_get(owner_email="owner@npt.sg", session_id="s1", attachment_id="att-1")
+            self.assertEqual(metadata["id"], "att-1")
+            self.assertEqual(content, b"payload")
+            self.assertEqual(client.source_code_qa_generated_artifact_save(owner_email="owner@npt.sg", session_id="s1", pm_team="AF", country="All", question="q", sql="select 1", readme="r")["id"], "artifact-1")
+            artifact, artifact_content = client.source_code_qa_generated_artifact_get(owner_email="owner@npt.sg", session_id="s1", artifact_id="artifact-1")
+            self.assertEqual(artifact["id"], "artifact-1")
+            self.assertEqual(artifact_content, b"payload")
+            self.assertEqual(client.source_code_qa_runtime_evidence_list(pm_team="AF", country="All"), [{"id": "e1"}])
+            self.assertEqual(client.source_code_qa_runtime_evidence_save(pm_team="AF", country="All", source_type="log", uploaded_by="owner", filename="log.txt", mime_type="text/plain", content=b"x")["id"], "e1")
+            self.assertEqual(client.source_code_qa_runtime_evidence_resolve(pm_team="AF", country="All"), [{"id": "e1"}])
+            self.assertTrue(client.source_code_qa_runtime_evidence_delete(pm_team="AF", country="All", evidence_id="e1"))
+            self.assertEqual(client.seatalk_todos_completed_ids(owner_email="owner@npt.sg"), ["todo-1", "2"])
+            self.assertEqual(client.seatalk_todos_open(owner_email="owner@npt.sg"), [{"id": "todo-1"}])
+            self.assertEqual(client.seatalk_todos_processed_until(owner_email="owner@npt.sg"), "2026-05-01T00:00:00Z")
+            self.assertIsNone(client.seatalk_todos_mark_processed_until(owner_email="owner@npt.sg", processed_until="2026-05-01T00:00:00Z"))
+            self.assertEqual(client.seatalk_todos_merge_open(owner_email="owner@npt.sg", todos=[]), [{"id": "todo-1"}])
+            self.assertEqual(client.seatalk_todo_complete(owner_email="owner@npt.sg", todo={"id": "todo-1"})["status"], "ok")
+            self.assertEqual(client.seatalk_name_mappings_get(), {"group-1": "Risk PM"})
+            self.assertEqual(client.seatalk_name_mappings_merge({"group-1": "Risk PM"}), {"group-1": "Risk PM"})
+
+        paths = [path for _method, path, _payload, _kwargs in calls]
+        self.assertIn("/api/local-agent/source-code-qa/config", paths)
+        self.assertIn("/api/local-agent/meeting-recorder/start", paths)
+        self.assertIn("/api/local-agent/work-memory/recent", paths)
+        self.assertIn("/api/local-agent/bpmis/config/save", paths)
+        self.assertIn("/api/local-agent/source-code-qa/runtime-evidence/save", paths)
+
     def test_remote_bpmis_client_exposes_live_jira_operations(self):
         calls = []
 
