@@ -361,6 +361,38 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("Unsupported image source", response.get_json()["message"])
 
+    def test_signed_prd_self_assessment_review_forwards_selected_sections(self):
+        class FakePRDReviewService:
+            def __init__(self):
+                self.request = None
+
+            def review_url(self, request):
+                self.request = request
+                return {
+                    "status": "ok",
+                    "cached": False,
+                    "language": request.language,
+                    "review": {"result_markdown": "### Review"},
+                    "prd": {"title": "PRD"},
+                    "coverage": {"selected_section_indexes": request.selected_section_indexes},
+                }
+
+        fake_service = FakePRDReviewService()
+        with patch("bpmis_jira_tool.local_agent_server._build_prd_review_service", return_value=fake_service):
+            response = self._post_signed(
+                "/api/local-agent/prd-self-assessment/review",
+                {
+                    "owner_key": "google:teammate@npt.sg",
+                    "prd_url": "https://confluence.shopee.io/display/SPDB/PRD",
+                    "language": "en",
+                    "selected_section_indexes": [27],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["coverage"]["selected_section_indexes"], [27])
+        self.assertEqual(fake_service.request.selected_section_indexes, [27])
+
     def test_seatalk_service_uses_agent_daily_cache_dir(self):
         from bpmis_jira_tool.local_agent_server import _build_seatalk_service
 
