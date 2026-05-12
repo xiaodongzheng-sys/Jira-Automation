@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,16 +17,16 @@ from .confluence import ConfluenceConnector, IngestedConfluencePage
 from .storage import BriefingStore
 
 
-PRD_REVIEW_PROMPT_VERSION = "v6_prd_review_prioritized_actionable_guidance"
+PRD_REVIEW_PROMPT_VERSION = "v7_prd_review_report_template_feasibility"
 PRD_SUMMARY_PROMPT_VERSION = "v2_prd_summary_hybrid_sections"
 PRD_REVIEW_MAX_SOURCE_CHARS = 90_000
 PRD_HYBRID_BATCH_SOURCE_CHARS = 45_000
 PRD_SECTION_LONG_CHAR_THRESHOLD = 8_000
-PRD_LINKED_SPREADSHEET_MAX_FILES = 5
 PRD_LINKED_SPREADSHEET_MAX_SHEETS = 10
 PRD_LINKED_SPREADSHEET_MAX_ROWS_PER_SHEET = 80
 PRD_LINKED_SPREADSHEET_MAX_COLS = 20
 PRD_LINKED_SPREADSHEET_MAX_TEXT_CHARS = 60_000
+PRD_REPORT_SECTION_KEYWORDS = ("report", "layout", "format", "template", "register", "field name", "字段", "报表", "报告", "模板", "格式")
 PRD_BRIEFING_REVIEW_CACHE_KEY = "__prd_briefing_url_review__"
 PRD_URL_SUMMARY_CACHE_KEY = "__prd_url_summary__"
 
@@ -37,6 +38,7 @@ class PRDReviewRequest:
     jira_link: str
     prd_url: str
     force_refresh: bool = False
+    google_credentials: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -73,7 +75,7 @@ class PRDReviewService:
             confluence=self.confluence,
             page=page,
             selected_section_indexes=list(range(1, len(page.sections) + 1)),
-            google_credentials=None,
+            google_credentials=normalized.google_credentials,
             include_linked_spreadsheets=True,
         )
         coverage = _merge_linked_spreadsheet_coverage(
@@ -536,6 +538,7 @@ class PRDReviewService:
             jira_link=jira_link,
             prd_url=prd_url,
             force_refresh=bool(request.force_refresh),
+            google_credentials=dict(request.google_credentials or {}) or None,
         )
 
     @staticmethod
@@ -703,6 +706,8 @@ def _resolve_linked_spreadsheet_evidence(
     artifacts: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
     for section_index, section in zip(selected_section_indexes, page.sections):
+        if not _is_report_related_section(section):
+            continue
         for raw_link in getattr(section, "spreadsheet_links", []) or []:
             url = str(getattr(raw_link, "url", "") or "").strip()
             if not url or url in seen_urls:
@@ -719,17 +724,16 @@ def _resolve_linked_spreadsheet_evidence(
                     "reason": "",
                     "text": "",
                     "content_hash": "",
+                    "metadata_hash": "",
                     "sheet_count": 0,
                     "sheets_extracted": [],
                     "skipped_sheet_count": 0,
+                    "template_metadata": {},
                 }
             )
 
     remaining_text_chars = PRD_LINKED_SPREADSHEET_MAX_TEXT_CHARS
-    for index, artifact in enumerate(artifacts):
-        if index >= PRD_LINKED_SPREADSHEET_MAX_FILES:
-            artifact.update({"status": "failed", "reason": "max_linked_spreadsheet_limit"})
-            continue
+    for artifact in artifacts:
         _resolve_one_linked_spreadsheet(
             confluence=confluence,
             artifact=artifact,
@@ -740,10 +744,15 @@ def _resolve_linked_spreadsheet_evidence(
             remaining_text_chars -= len(str(artifact.get("text") or ""))
 
     fingerprint = "|".join(
-        f"{item.get('source_section_index')}:{item.get('url')}:{item.get('status')}:{item.get('reason')}:{item.get('content_hash')}:{item.get('sheet_count')}:{item.get('skipped_sheet_count')}"
+        f"{item.get('source_section_index')}:{item.get('url')}:{item.get('status')}:{item.get('reason')}:{item.get('content_hash')}:{item.get('metadata_hash')}:{item.get('sheet_count')}:{item.get('skipped_sheet_count')}"
         for item in artifacts
     )
     return {"artifacts": artifacts, "cache_fingerprint": fingerprint}
+
+
+def _is_report_related_section(section: Any) -> bool:
+    haystack = f"{getattr(section, 'section_path', '')} {getattr(section, 'title', '')}".casefold()
+    return any(keyword.casefold() in haystack for keyword in PRD_REPORT_SECTION_KEYWORDS)
 
 
 def _resolve_one_linked_spreadsheet(
@@ -859,20 +868,24 @@ def _coerce_download_bytes(content: Any) -> bytes:
 
 
 def _extract_workbook_text(content: bytes, *, max_chars: int) -> dict[str, Any]:
-    if max_chars <= 0:
-        return {
-            "text": "[Linked spreadsheet text omitted because the linked artifact text limit was reached.]",
-            "sheet_count": 0,
-            "sheets_extracted": [],
-            "skipped_sheet_count": 0,
-        }
     try:
         from openpyxl import load_workbook
     except ImportError as error:
         raise ToolError("openpyxl_unavailable") from error
-    workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    workbook = load_workbook(io.BytesIO(content), read_only=False, data_only=False)
     lines: list[str] = []
     sheets = workbook.worksheets[:PRD_LINKED_SPREADSHEET_MAX_SHEETS]
+    template_metadata = _extract_workbook_template_metadata(workbook, sheets=sheets)
+    metadata_hash = hashlib.sha256(json.dumps(template_metadata, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    if max_chars <= 0:
+        return {
+            "text": "[Linked spreadsheet text omitted because the linked artifact text limit was reached.]",
+            "sheet_count": len(workbook.worksheets),
+            "sheets_extracted": [sheet.title for sheet in sheets],
+            "skipped_sheet_count": max(len(workbook.worksheets) - len(sheets), 0),
+            "template_metadata": template_metadata,
+            "metadata_hash": metadata_hash,
+        }
     for worksheet in sheets:
         lines.append(f"[Sheet: {worksheet.title}]")
         for row in worksheet.iter_rows(
@@ -891,6 +904,8 @@ def _extract_workbook_text(content: bytes, *, max_chars: int) -> dict[str, Any]:
                     "sheet_count": len(workbook.worksheets),
                     "sheets_extracted": [sheet.title for sheet in sheets],
                     "skipped_sheet_count": max(len(workbook.worksheets) - len(sheets), 0),
+                    "template_metadata": template_metadata,
+                    "metadata_hash": metadata_hash,
                 }
     text = "\n".join(lines).strip()
     if not text:
@@ -900,7 +915,82 @@ def _extract_workbook_text(content: bytes, *, max_chars: int) -> dict[str, Any]:
         "sheet_count": len(workbook.worksheets),
         "sheets_extracted": [sheet.title for sheet in sheets],
         "skipped_sheet_count": max(len(workbook.worksheets) - len(sheets), 0),
+        "template_metadata": template_metadata,
+        "metadata_hash": metadata_hash,
     }
+
+
+def _extract_workbook_template_metadata(workbook: Any, *, sheets: list[Any]) -> dict[str, Any]:
+    sheet_payloads: list[dict[str, Any]] = []
+    hidden_sheets = [sheet.title for sheet in workbook.worksheets if str(getattr(sheet, "sheet_state", "visible") or "visible") != "visible"]
+    for worksheet in sheets:
+        non_empty_rows: list[list[str]] = []
+        formula_cells: list[str] = []
+        for row in worksheet.iter_rows(max_row=PRD_LINKED_SPREADSHEET_MAX_ROWS_PER_SHEET, max_col=PRD_LINKED_SPREADSHEET_MAX_COLS):
+            values: list[str] = []
+            for cell in row:
+                value = cell.value
+                text = "" if value is None else str(value).strip()
+                values.append(text)
+                if text.startswith("=") and len(formula_cells) < 8:
+                    formula_cells.append(cell.coordinate)
+            if any(values):
+                non_empty_rows.append(values)
+        header = _likely_header_row(non_empty_rows)
+        duplicate_headers = sorted({value for value in header if value and header.count(value) > 1})
+        empty_header_count = sum(1 for value in header if not value)
+        merged_ranges = [str(range_ref) for range_ref in getattr(worksheet, "merged_cells", []) .ranges] if getattr(worksheet, "merged_cells", None) else []
+        hidden_rows = [index for index, dimension in worksheet.row_dimensions.items() if bool(getattr(dimension, "hidden", False))]
+        hidden_cols = [key for key, dimension in worksheet.column_dimensions.items() if bool(getattr(dimension, "hidden", False))]
+        sheet_payloads.append(
+            {
+                "name": worksheet.title,
+                "state": str(getattr(worksheet, "sheet_state", "visible") or "visible"),
+                "max_row": int(worksheet.max_row or 0),
+                "max_column": int(worksheet.max_column or 0),
+                "sampled_rows": len(non_empty_rows),
+                "header_row": header[:PRD_LINKED_SPREADSHEET_MAX_COLS],
+                "empty_header_count": empty_header_count,
+                "duplicate_headers": duplicate_headers,
+                "merged_ranges": merged_ranges[:20],
+                "merged_range_count": len(merged_ranges),
+                "formula_cells": formula_cells,
+                "formula_cell_count": _count_formula_cells(worksheet),
+                "hidden_rows_count": len(hidden_rows),
+                "hidden_columns": hidden_cols[:20],
+                "hidden_columns_count": len(hidden_cols),
+                "multi_level_header_risk": _has_multi_level_header_risk(non_empty_rows, merged_ranges),
+                "wide_template_risk": int(worksheet.max_column or 0) > PRD_LINKED_SPREADSHEET_MAX_COLS,
+            }
+        )
+    return {
+        "workbook_sheet_count": len(workbook.worksheets),
+        "hidden_sheets": hidden_sheets,
+        "sheets": sheet_payloads,
+    }
+
+
+def _likely_header_row(rows: list[list[str]]) -> list[str]:
+    candidates = [row for row in rows[:5] if any(row)]
+    if not candidates:
+        return []
+    return max(candidates, key=lambda row: sum(1 for value in row if value))
+
+
+def _count_formula_cells(worksheet: Any) -> int:
+    count = 0
+    for row in worksheet.iter_rows(max_row=PRD_LINKED_SPREADSHEET_MAX_ROWS_PER_SHEET, max_col=PRD_LINKED_SPREADSHEET_MAX_COLS):
+        for cell in row:
+            if str(cell.value or "").strip().startswith("="):
+                count += 1
+    return count
+
+
+def _has_multi_level_header_risk(rows: list[list[str]], merged_ranges: list[str]) -> bool:
+    non_empty = [row for row in rows[:3] if sum(1 for value in row if value) >= 2]
+    if len(non_empty) >= 2:
+        return True
+    return any(any(ch.isdigit() for ch in range_ref) for range_ref in merged_ranges)
 
 
 def _merge_linked_spreadsheet_coverage(coverage: dict[str, Any], linked_spreadsheet_evidence: dict[str, Any]) -> dict[str, Any]:
@@ -914,6 +1004,10 @@ def _merge_linked_spreadsheet_coverage(coverage: dict[str, Any], linked_spreadsh
             "linked_artifacts_reviewed": len(reviewed),
             "linked_artifacts_failed": len(failed),
             "linked_artifacts": [_linked_artifact_public_payload(item) for item in artifacts],
+            "report_templates_total": len(artifacts),
+            "report_templates_reviewed": len(reviewed),
+            "report_templates_failed": len(failed),
+            "report_templates": [_linked_artifact_public_payload(item) for item in artifacts],
         }
     )
     return merged
@@ -931,14 +1025,19 @@ def _linked_artifact_public_payload(item: dict[str, Any]) -> dict[str, Any]:
         "sheets_extracted": list(item.get("sheets_extracted") or []),
         "skipped_sheet_count": int(item.get("skipped_sheet_count") or 0),
         "char_count": len(str(item.get("text") or "")),
+        "metadata_hash": str(item.get("metadata_hash") or ""),
+        "template_metadata": item.get("template_metadata") if isinstance(item.get("template_metadata"), dict) else {},
     }
 
 
 def _build_linked_spreadsheet_prompt_section(linked_spreadsheet_evidence: dict[str, Any]) -> str:
     artifacts = list(linked_spreadsheet_evidence.get("artifacts") or [])
     if not artifacts:
-        return "# Linked Spreadsheet Evidence\nNo linked spreadsheet links were found in the selected PRD sections."
-    blocks = ["# Linked Spreadsheet Evidence"]
+        return (
+            "# Linked Spreadsheet Evidence\n"
+            "No report-template spreadsheet links were found in report-related PRD sections."
+        )
+    blocks = ["# Linked Spreadsheet Evidence", "Use this section specifically for report generation feasibility and PRD-to-template mapping assessment."]
     for index, artifact in enumerate(artifacts, start=1):
         title = str(artifact.get("title") or artifact.get("url") or f"Linked spreadsheet {index}")
         section = str(artifact.get("source_section_title") or f"Section {artifact.get('source_section_index') or '-'}")
@@ -947,11 +1046,13 @@ def _build_linked_spreadsheet_prompt_section(linked_spreadsheet_evidence: dict[s
             sheets = ", ".join(str(sheet) for sheet in (artifact.get("sheets_extracted") or []))
             skipped = int(artifact.get("skipped_sheet_count") or 0)
             skipped_line = f"\nSkipped sheets: {skipped}" if skipped else ""
+            metadata = _format_template_metadata_for_prompt(artifact.get("template_metadata") if isinstance(artifact.get("template_metadata"), dict) else {})
             blocks.append(
                 f"## Linked artifact reviewed: {title}\n"
                 f"Source section: {section}\n"
                 f"Sheets extracted: {sheets or '-'}{skipped_line}\n"
                 f"Use this artifact as evidence only for the linked source section.\n"
+                f"Report template metadata:\n{metadata}\n"
                 f"{str(artifact.get('text') or '').strip()}"
             )
         else:
@@ -962,6 +1063,38 @@ def _build_linked_spreadsheet_prompt_section(linked_spreadsheet_evidence: dict[s
                 f"Do not infer this artifact's contents."
             )
     return "\n\n".join(blocks).strip()
+
+
+def _format_template_metadata_for_prompt(metadata: dict[str, Any]) -> str:
+    if not metadata:
+        return "- Metadata unavailable."
+    lines = [
+        f"- Workbook sheets: {metadata.get('workbook_sheet_count') or 0}",
+        f"- Hidden sheets: {', '.join(str(item) for item in (metadata.get('hidden_sheets') or [])) or '-'}",
+    ]
+    for sheet in list(metadata.get("sheets") or [])[:PRD_LINKED_SPREADSHEET_MAX_SHEETS]:
+        if not isinstance(sheet, dict):
+            continue
+        header = ", ".join(str(value) for value in (sheet.get("header_row") or []) if str(value or "").strip())
+        lines.append(
+            "- Sheet: {name}; rows={rows}; columns={cols}; header={header}; merged_ranges={merged}; "
+            "formula_cells={formula}; hidden_rows={hidden_rows}; hidden_columns={hidden_cols}; "
+            "empty_headers={empty_headers}; duplicate_headers={duplicates}; multi_level_header_risk={multi}; wide_template_risk={wide}".format(
+                name=sheet.get("name") or "-",
+                rows=sheet.get("max_row") or 0,
+                cols=sheet.get("max_column") or 0,
+                header=header or "-",
+                merged=sheet.get("merged_range_count") or 0,
+                formula=sheet.get("formula_cell_count") or 0,
+                hidden_rows=sheet.get("hidden_rows_count") or 0,
+                hidden_cols=sheet.get("hidden_columns_count") or 0,
+                empty_headers=sheet.get("empty_header_count") or 0,
+                duplicates=", ".join(str(value) for value in (sheet.get("duplicate_headers") or [])) or "-",
+                multi=bool(sheet.get("multi_level_header_risk")),
+                wide=bool(sheet.get("wide_template_risk")),
+            )
+        )
+    return "\n".join(lines)
 
 
 def _build_section_coverage(
@@ -1087,6 +1220,7 @@ You are a senior PRD delivery-readiness reviewer using the `prd-review` skill. Y
 - Do not evaluate business value, ROI, KPI choice, API design, database design, code architecture, implementation approach, or engineering effort.
 - Do not invent rules. If the selected PRD sections do not contain evidence for a claim, write `Source not found in selected sections`.
 - Treat linked spreadsheet evidence as part of the selected PRD section when it is listed under `# Linked Spreadsheet Evidence`. If an expected linked spreadsheet is listed as not reviewed, call out the coverage gap instead of guessing its content.
+- When report-template spreadsheet evidence is reviewed, assess whether the report format is reasonable, technically generatable, and testable by QA. This is a template feasibility review, not backend architecture or effort estimation.
 
 # Task
 Assess the selected PRD sections for delivery readiness. Prioritize only the issues that would materially block development, QA, UAT, release, operations, or support. Every important blocker must name the PRD section that should be changed and include text the PM can add back to the PRD.
@@ -1111,6 +1245,7 @@ Assess the selected PRD sections for delivery readiness. Prioritize only the iss
 3. **Role and ownership clarity:** Is it clear who can act, approve, reject, withdraw, edit, retry, or override at each step?
 4. **Exception and reverse paths:** Are timeout, interruption, retry, rejection, rollback, cancellation, blacklist, permission failure, and manual fallback handled?
 5. **Acceptance clarity:** Can QA/dev verify the expected behavior after the PRD is updated?
+6. **Report generation feasibility:** For report/template/register sections, do reviewed Google Sheet or Excel templates have clear headers, stable columns, avoid risky merged/multi-level headers or formula dependencies, and map cleanly back to PRD field definitions?
 
 # Output Format
 Return only concise Markdown in English. Every blocker or gap must include a section name and evidence basis.
@@ -1142,9 +1277,28 @@ Return only concise Markdown in English. Every blocker or gap must include a sec
   - **Section:** [section title]
   - **Clarification:** [Non-blocking question or cleanup.]
 
+### Report Generation Feasibility
+1. **Template / Sheet:** [template title / sheet name, or Cannot assess report template feasibility because linked artifact was not reviewed.]
+   - **Generation feasibility:** [Ready / Risky / Not Ready]
+   - **Format issue:** [Header, merged-cell, formula, hidden row/column, duplicate field, dynamic row, or layout issue.]
+   - **Technical generation risk:** [Why system-generated XLSX may be unstable or ambiguous.]
+   - **PRD mapping gap:** [Missing PRD field definition, source rule, row duplication rule, snapshot rule, or fallback.]
+   - **Suggested PRD patch:** [Concrete PRD wording/table/rule the PM should add.]
+   - **QA acceptance check:** [How QA can verify generated report against the template.]
+   - **Evidence basis:** [Spreadsheet evidence reviewed / Linked artifact not reviewed]
+   - **Used in findings:** [Yes/No]
+   - **Related finding:** [P0/P1/P2 item id or "-"]
+   - **Reason:** [What changed in the assessment because of this artifact.]
+
+### Report Template Risks
+- [Prioritized risks from reviewed templates, or coverage gap if no report template was readable.]
+
+### PRD-to-Template Mapping Gaps
+- [Fields, rows, statuses, dates, source systems, snapshot timing, or fallback rules that the PRD must define for template generation.]
+
 ### Evidence Coverage
 - **Current PRD sections reviewed:** [brief coverage]
-- **Linked artifacts:** [Reviewed count and unreadable artifacts if any]
+- **Report templates:** [Reviewed count and unreadable artifacts with reasons]
 
 ### PM Decision Checklist
 - [Concrete yes/no or rule-choice question the PM should answer, ordered by priority.]
@@ -1170,6 +1324,7 @@ Return only concise Markdown in English. Every blocker or gap must include a sec
 - 不评价商业价值、ROI、指标选择、API 设计、数据库设计、代码架构、实现方案或研发工期。
 - 不臆测 PRD 没写的规则。如果选中的 PRD Section 中没有依据，必须写 `Source not found in selected sections`。
 - `# Linked Spreadsheet Evidence` 中列出的 spreadsheet evidence 属于对应 PRD Section 的评审依据；如果某个关键 spreadsheet 标记为 not reviewed，必须把它当作覆盖缺口说明，不能臆测其内容。
+- 当读取到 report-template spreadsheet evidence 时，必须评估报表格式是否合理、系统是否能稳定生成、QA 是否能按模板验收。这是模板可生成性和 PRD 映射评估，不是后端架构或工期评估。
 
 # Task
 请评估选中的 PRD Section 是否具备交付就绪度。优先输出真正会阻塞研发、QA、UAT、上线、运营或客服承接的问题。每个关键 blocker 都必须指出应该修改哪个 PRD Section，并给出 PM 可直接写回 PRD 的补写文本。
@@ -1194,6 +1349,7 @@ Return only concise Markdown in English. Every blocker or gap must include a sec
 3. **角色与权限：** 谁能提交、审批、拒绝、撤回、编辑、重试、覆盖或人工介入是否明确？
 4. **异常与逆向：** 超时、中断、重试、拒绝、回滚、取消、拉黑、权限失败、人工兜底是否有处理方式？
 5. **验收清晰度：** PRD 补完后，QA/研发是否能验证行为正确？
+6. **Report 生成可行性：** 对 report/template/register 类 section，已读取的 Google Sheet 或 Excel 模板是否有清晰表头、稳定列结构，是否避免高风险合并单元格/多层表头/公式依赖，并能和 PRD 字段定义清楚映射？
 
 # Output Format
 请严格按以下结构输出精炼 Markdown。每个 blocker 或 gap 都必须包含 Section 名称和证据依据。
@@ -1225,9 +1381,28 @@ Return only concise Markdown in English. Every blocker or gap must include a sec
   - **Section：** [section title]
   - **Clarification：** [非阻塞澄清问题或文案清理。]
 
+### Report Generation Feasibility / 报表生成可行性
+1. **Template / Sheet：** [template title / sheet name，或 Cannot assess report template feasibility because linked artifact was not reviewed.]
+   - **Generation feasibility：** [Ready / Risky / Not Ready]
+   - **Format issue：** [表头、合并单元格、公式、隐藏行列、重复字段、动态行或版式问题。]
+   - **Technical generation risk：** [为什么系统生成 XLSX 会不稳定或有歧义。]
+   - **PRD mapping gap：** [缺失的 PRD 字段定义、来源规则、行复制规则、快照规则或 fallback。]
+   - **Suggested PRD patch：** [PM 应补进 PRD 的具体文案/表格/规则。]
+   - **QA acceptance check：** [QA 如何按模板验收生成结果。]
+   - **Evidence basis：** [Spreadsheet evidence reviewed / Linked artifact not reviewed]
+   - **Used in findings：** [Yes/No]
+   - **Related finding：** [P0/P1/P2 item id 或 "-"]
+   - **Reason：** [这个模板证据如何改变了评审结论。]
+
+### Report Template Risks / 报表模板风险
+- [来自已读模板的优先级风险；如果没有可读模板，说明 coverage gap。]
+
+### PRD-to-Template Mapping Gaps / PRD 到模板映射缺口
+- [PRD 为支持模板生成必须定义的字段、行规则、状态、日期、数据源、快照时间或兜底规则。]
+
 ### Evidence Coverage / 证据覆盖
 - **Current PRD sections reviewed：** [简要覆盖范围]
-- **Linked artifacts：** [已读数量和未读附件]
+- **Report templates：** [已读数量和未读模板及原因]
 
 ### PM Decision Checklist
 - [PM 需要回答的具体 yes/no 或规则选择问题，按优先级排序。]
@@ -1526,10 +1701,13 @@ Synthesize the batch reviews into one final prioritized PRD assessment. Keep onl
 ### Top Must-Fix Delivery Blockers
 ### Section Patch Suggestions
 ### Secondary Clarifications
+### Report Generation Feasibility
+### Report Template Risks
+### PRD-to-Template Mapping Gaps
 ### Evidence Coverage
 ### PM Decision Checklist
 
-Every finding must include Priority, Section, Problem, Why this is important, Suggested PRD patch, Acceptance check, and Evidence basis. If evidence is not in the reviewed sections, write `Source not found in selected sections`.
+Every finding must include Priority, Section, Problem, Why this is important, Suggested PRD patch, Acceptance check, and Evidence basis. Report-template findings must include Template / Sheet, Generation feasibility, Format issue, Technical generation risk, PRD mapping gap, QA acceptance check, Used in findings, Related finding, and Reason. If evidence is not in the reviewed sections, write `Source not found in selected sections`. If a linked report template was not readable, write `Cannot assess report template feasibility because linked artifact was not reviewed.`
 
 # Context
 - Jira ID: {jira_id or "-"}
@@ -1554,10 +1732,13 @@ Every finding must include Priority, Section, Problem, Why this is important, Su
 ### Top Must-Fix Delivery Blockers
 ### Section Patch Suggestions
 ### Secondary Clarifications
+### Report Generation Feasibility
+### Report Template Risks
+### PRD-to-Template Mapping Gaps
 ### Evidence Coverage
 ### PM Decision Checklist
 
-每条 finding 必须包含优先级、Section、Problem、Why this is important、Suggested PRD patch、Acceptance check、Evidence basis。如果 reviewed sections 没有依据，写 `Source not found in selected sections`。
+每条 finding 必须包含优先级、Section、Problem、Why this is important、Suggested PRD patch、Acceptance check、Evidence basis。Report-template finding 必须包含 Template / Sheet、Generation feasibility、Format issue、Technical generation risk、PRD mapping gap、QA acceptance check、Used in findings、Related finding、Reason。如果 reviewed sections 没有依据，写 `Source not found in selected sections`。如果 linked report template 不可读，写 `Cannot assess report template feasibility because linked artifact was not reviewed.`
 
 # Context
 - Jira ID: {jira_id or "-"}
@@ -1601,6 +1782,9 @@ def build_prd_review_system_text(language: str | None = "zh") -> str:
         "Every important blocker or gap must name the affected PRD section and include Priority, Problem, Why this is important, "
         "Suggested PRD patch, Acceptance check, and Evidence basis. If evidence is not in the selected sections, "
         "say `Source not found in selected sections`. "
+        "For report-generation PRDs, assess reviewed Google Sheet or Excel templates for report format reasonableness, "
+        "generation feasibility, PRD-to-template mapping gaps, and QA acceptance checks. State whether spreadsheet evidence "
+        "was used in findings and which finding it changed. "
         f"Return only the requested Markdown review in {output_language}. Do not include tool logs."
     )
 

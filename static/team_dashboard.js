@@ -2376,11 +2376,17 @@
       const coverageLine = coverage.mode
         ? `<span>Coverage: ${escapeHtml(coverage.mode)} · ${escapeHtml(coverage.sections_covered || coverage.sections_assessed || 0)}/${escapeHtml(coverage.sections_total || coverage.selected_sections_total || 0)} sections${coverage.truncated ? ' · truncated' : ''}</span>`
         : '';
+      const templateTotal = Number(coverage.report_templates_total ?? coverage.linked_artifacts_total);
+      const templateReviewed = Number(coverage.report_templates_reviewed ?? coverage.linked_artifacts_reviewed ?? 0);
+      const templateLine = !isSummary && Number.isFinite(templateTotal) && templateTotal > 0
+        ? `<span>Report templates reviewed: ${escapeHtml(templateReviewed)}/${escapeHtml(templateTotal)}</span>`
+        : '';
       panel.innerHTML = `
         <div class="team-dashboard-review-meta">
           <strong>${escapeHtml(payload.cached ? `Cached PRD ${isSummary ? 'Summary' : 'Review'}` : `PRD ${isSummary ? 'Summary' : 'Review'}`)}</strong>
           <span>${escapeHtml(result.updated_at || '')}</span>
           ${coverageLine}
+          ${templateLine}
         </div>
         <div class="team-dashboard-review-markdown">${renderMarkdown(result.result_markdown || '')}</div>
         <div class="team-dashboard-review-actions">

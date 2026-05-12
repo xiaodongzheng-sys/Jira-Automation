@@ -12,7 +12,7 @@ from http import HTTPStatus
 from types import SimpleNamespace
 from typing import Any, Callable
 
-from flask import current_app, jsonify, render_template, request, send_file, url_for
+from flask import current_app, jsonify, render_template, request, send_file, session, url_for
 
 from bpmis_jira_tool.daily_brief_archive import daily_brief_pdf_bytes
 from bpmis_jira_tool.errors import BPMISError, ConfigError, ToolError
@@ -36,6 +36,8 @@ from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.seatalk_stores import SeaTalkNameMappingStore
 from bpmis_jira_tool.team_dashboard_config import TEAM_DASHBOARD_TEAMS
 from prd_briefing.reviewer import PRDReviewRequest
+
+GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 
 
 def _add_route(app: Any, rule: str, view_func: Callable[..., Any], *, methods: list[str] | None = None) -> None:
@@ -1079,6 +1081,10 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             "prd_url": str(payload.get("prd_url") or ""),
             "force_refresh": bool(payload.get("force_refresh")),
         }
+        if _google_credentials_have_scopes(GOOGLE_DRIVE_READONLY_SCOPE):
+            credentials_payload = dict(session.get("google_credentials") or {})
+            if credentials_payload:
+                review_payload["google_credentials"] = credentials_payload
         if bool(payload.get("async")):
             return _queue_prd_generation_job(
                 settings,

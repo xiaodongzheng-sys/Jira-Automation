@@ -306,12 +306,15 @@
     const generationCoverageLine = coverage.mode
       ? `<span>Coverage: ${escapeHtml(coverage.mode)} · ${escapeHtml(coverage.sections_covered || coverage.sections_assessed || 0)}/${escapeHtml(coverage.sections_total || coverage.selected_sections_total || 0)} sections${coverage.truncated ? ' · truncated' : ''}</span>`
       : '';
-    const linkedCoverageLine = !isSummary && Number.isFinite(Number(coverage.linked_artifacts_total)) && Number(coverage.linked_artifacts_total) > 0
-      ? `<span>Linked artifacts reviewed: ${escapeHtml(coverage.linked_artifacts_reviewed || 0)}/${escapeHtml(coverage.linked_artifacts_total || 0)}${Number(coverage.linked_artifacts_failed || 0) ? ` · ${escapeHtml(coverage.linked_artifacts_failed)} not reviewed` : ''}</span>`
+    const reportTemplatesTotal = Number(coverage.report_templates_total ?? coverage.linked_artifacts_total);
+    const reportTemplatesReviewed = Number(coverage.report_templates_reviewed ?? coverage.linked_artifacts_reviewed ?? 0);
+    const reportTemplatesFailed = Number(coverage.report_templates_failed ?? coverage.linked_artifacts_failed ?? 0);
+    const linkedCoverageLine = !isSummary && Number.isFinite(reportTemplatesTotal) && reportTemplatesTotal > 0
+      ? `<span>Report templates reviewed: ${escapeHtml(reportTemplatesReviewed)}/${escapeHtml(reportTemplatesTotal)}${reportTemplatesFailed ? ` · ${escapeHtml(reportTemplatesFailed)} not reviewed` : ''}</span>`
       : '';
-    const linkedArtifacts = Array.isArray(coverage.linked_artifacts) ? coverage.linked_artifacts : [];
+    const linkedArtifacts = Array.isArray(coverage.report_templates) ? coverage.report_templates : (Array.isArray(coverage.linked_artifacts) ? coverage.linked_artifacts : []);
     const linkedArtifactLine = !isSummary && linkedArtifacts.length
-      ? `<p class="help-text">${escapeHtml(linkedArtifacts.slice(0, 4).map((item) => `${item.status === 'ok' ? 'Reviewed' : 'Not reviewed'}: ${item.title || item.url || 'Linked spreadsheet'}`).join(' · '))}${linkedArtifacts.length > 4 ? ` · +${escapeHtml(linkedArtifacts.length - 4)} more` : ''}</p>`
+      ? `<p class="help-text">${escapeHtml(linkedArtifacts.slice(0, 4).map((item) => `${item.status === 'ok' ? 'Reviewed' : 'Not reviewed'}: ${item.title || item.url || 'Report template'}${item.status === 'ok' ? ` (${item.sheet_count || 0} sheets${item.skipped_sheet_count ? `, ${item.skipped_sheet_count} skipped` : ''})` : ` - ${item.reason || 'unavailable'}`}`).join(' · '))}${linkedArtifacts.length > 4 ? ` · +${escapeHtml(linkedArtifacts.length - 4)} more` : ''}</p>`
       : '';
     const titleLine = !isSummary && titles.length
       ? `<p class="help-text">${escapeHtml(titles.slice(0, 6).join(' · '))}${titles.length > 6 ? ` · +${escapeHtml(titles.length - 6)} more` : ''}</p>`

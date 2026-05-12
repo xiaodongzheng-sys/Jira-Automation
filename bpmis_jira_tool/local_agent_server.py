@@ -290,6 +290,7 @@ def create_local_agent_app() -> Flask:
                 jira_link=str(payload.get("jira_link") or ""),
                 prd_url=str(payload.get("prd_url") or ""),
                 force_refresh=bool(payload.get("force_refresh")),
+                google_credentials=payload.get("google_credentials") if isinstance(payload.get("google_credentials"), dict) else None,
             )
         )
         return jsonify(result)
@@ -2024,6 +2025,7 @@ def _run_prd_job(app: Flask, job_id: str, payload: dict[str, Any], action: str) 
                         jira_link=str(payload.get("jira_link") or ""),
                         prd_url=str(payload.get("prd_url") or ""),
                         force_refresh=bool(payload.get("force_refresh")),
+                        google_credentials=payload.get("google_credentials") if isinstance(payload.get("google_credentials"), dict) else None,
                     )
                 )
                 notice_title = "PRD Review"
