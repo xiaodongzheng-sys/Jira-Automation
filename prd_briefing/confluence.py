@@ -774,6 +774,36 @@ class ConfluenceConnector:
             if table and not self._table_has_displayable_content(table):
                 return [], [], [], []
             block = self._render_html_fragment(node, base_url=base_url)
+            images: list[str] = []
+            image_media_refs: list[str] = []
+            for image in (table.find_all("img") if table else []):
+                src = (image.get("src") or "").strip()
+                if not src:
+                    continue
+                media_ref = self._register_image_media(
+                    image,
+                    base_url=base_url,
+                    media_dict=media_dict,
+                    section_path=section_path,
+                )
+                if not media_ref:
+                    continue
+                images.append(self._resolve_image_ref(src, base_url=base_url))
+                image_media_refs.append(media_ref)
+            for image in (table.find_all(self._is_confluence_image_tag) if table else []):
+                image_ref = self._resolve_confluence_image_ref(image, base_url=base_url, page_id=page_id)
+                if not image_ref or self._is_noise_confluence_image(image, image_ref):
+                    continue
+                media_ref = self._register_confluence_image_media(
+                    image,
+                    image_ref=image_ref,
+                    media_dict=media_dict,
+                    section_path=section_path,
+                )
+                if not media_ref:
+                    continue
+                images.append(image_ref)
+                image_media_refs.append(media_ref)
             media_ref = self._register_table_media(
                 table,
                 base_url=base_url,
@@ -781,8 +811,11 @@ class ConfluenceConnector:
                 section_path=section_path,
             ) if table else None
             if media_ref:
-                return [f"[{media_ref}]"], ([block] if block else []), [], [media_ref]
-            return (self._extract_table_lines(table) if table else []), ([block] if block else []), [], []
+                lines = [f"[{media_ref}]", *[f"[{ref}]" for ref in image_media_refs]]
+                return lines, ([block] if block else []), images, [media_ref, *image_media_refs]
+            lines = self._extract_table_lines(table) if table else []
+            lines.extend(f"[{ref}]" for ref in image_media_refs)
+            return lines, ([block] if block else []), images, image_media_refs
 
         if node.name in {"p", "blockquote", "pre"}:
             text = self._clean_text(node.get_text(" ", strip=True))

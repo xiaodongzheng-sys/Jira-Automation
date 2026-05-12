@@ -318,7 +318,10 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertNotIn("$statusIcon", html)
         self.assertIn("SPSK-264073", html)
         self.assertIn("/prd-briefing/image-proxy?src=", html)
-        self.assertEqual([item["type"] for item in media_dict.values()], ["table"])
+        self.assertIn("table", [item["type"] for item in media_dict.values()])
+        self.assertIn("image", [item["type"] for item in media_dict.values()])
+        self.assertEqual(len(sections[0].image_refs), 1)
+        self.assertIn("/download/attachments/123/real.png", sections[0].image_refs[0])
 
     def test_confluence_parser_registers_storage_attachment_images(self):
         connector = ConfluenceConnector(
@@ -1743,6 +1746,81 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertIn("Visible fields: Scenario Code, Trigger, Action.", prompt)
         self.assertEqual(result["coverage"]["google_sheet_screenshots_reviewed"], 1)
         self.assertIn("/download/attachments/123/AF%20Scenario%20Sheet.png", service.confluence.requested_urls[0][0])
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
+    def test_anti_fraud_table_embedded_image_enters_review_prompt(self, mock_extract, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        mock_extract.return_value = {
+            "is_google_sheet_screenshot": True,
+            "reason": "",
+            "classification": "Google Sheets grid inside Confluence table",
+            "evidence_text": "Visible fields: L1 scenario, L2 scenario, Action, Report V1.",
+        }
+        connector = ConfluenceConnector(
+            base_url="https://example.atlassian.net",
+            email=None,
+            api_token=None,
+            bearer_token=None,
+            store=self.store,
+        )
+        media_dict = {}
+        sections = connector._parse_sections(
+            html="""
+            <h2>3.1 Scenario Rules</h2>
+            <table>
+              <tr><th>Details</th></tr>
+              <tr>
+                <td>
+                  Please refer to gsheet: Row 17
+                  <img class="confluence-embedded-image" src="/download/attachments/123/sheet-row-17.png" width="1200">
+                </td>
+              </tr>
+            </table>
+            """,
+            base_url="https://example.atlassian.net",
+            source_url="https://example.atlassian.net/pages/viewpage.action?pageId=123",
+            page_id="123",
+            session_id="session-1",
+            media_dict=media_dict,
+        )
+        page = IngestedConfluencePage(
+            page_id="123",
+            title="Anti-Fraud PRD",
+            source_url="https://example.atlassian.net/pages/viewpage.action?pageId=123",
+            updated_at="2026-05-12T17:56:27.000+08:00",
+            language="en",
+            sections=sections,
+            media_dict=media_dict,
+            ancestor_titles=["2.2 Authentication & Antifraud"],
+        )
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeAttachmentConnector(page, b"sheet-image-v1"),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        result = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url=page.source_url,
+                language="en",
+                selected_section_indexes=[1],
+            )
+        )
+
+        prompt = mock_generate.call_args.kwargs["prompt"]
+        self.assertIn("# Google Sheet Screenshot Evidence", prompt)
+        self.assertIn("Visible fields: L1 scenario, L2 scenario, Action, Report V1.", prompt)
+        self.assertEqual(result["coverage"]["google_sheet_screenshots_reviewed"], 1)
+        self.assertTrue(any(item["type"] == "table" for item in media_dict.values()))
+        self.assertTrue(any(item["type"] == "image" for item in media_dict.values()))
+        self.assertIn("/download/attachments/123/sheet-row-17.png", service.confluence.requested_urls[0][0])
 
     @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
     @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
