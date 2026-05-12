@@ -684,7 +684,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
             page=page,
         )
 
-        self.assertEqual(PRD_REVIEW_PROMPT_VERSION, "v10_prd_review_table_media_expansion")
+        self.assertEqual(PRD_REVIEW_PROMPT_VERSION, "v11_prd_review_table_only_no_image_evidence")
         self.assertIn("prd-review", prompt)
         self.assertIn("Executive Verdict", prompt)
         self.assertIn("Top Must-Fix Delivery Blockers", prompt)
@@ -1639,6 +1639,43 @@ class PRDBriefingServiceTests(unittest.TestCase):
 
     @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
     @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
+    def test_anti_fraud_image_evidence_is_disabled_and_tables_remain_in_prompt(self, mock_extract, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        page = self.service.confluence.page
+        page.title = "Anti-Fraud Risk Decision PRD"
+        page.sections[1].content = "Risk Decision scenario configuration.\n[MEDIA_ID_1]"
+        self._add_prd_image(page, section_index=2)
+        page.sections[1].media_refs = ["MEDIA_ID_1", *page.sections[1].media_refs]
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeAttachmentConnector(page, b"sheet-image-v1"),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        result = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[2],
+            )
+        )
+
+        prompt = mock_generate.call_args.kwargs["prompt"]
+        mock_extract.assert_not_called()
+        self.assertNotIn("# Google Sheet Screenshot Evidence", prompt)
+        self.assertIn("[MEDIA_ID_1 table content]", prompt)
+        self.assertFalse(result["coverage"]["google_sheet_screenshot_evidence_enabled"])
+        self.assertEqual(result["coverage"]["google_sheet_screenshots_total"], 0)
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
+    @unittest.skip("Image evidence scanning is disabled; PRD review uses table media text only.")
     def test_anti_fraud_prd_google_sheet_screenshot_enters_review_prompt(self, mock_extract, mock_generate):
         mock_generate.return_value = {
             "result_markdown": "### Review",
@@ -1683,6 +1720,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
 
     @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
     @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
+    @unittest.skip("Image evidence scanning is disabled; PRD review uses table media text only.")
     def test_anti_fraud_storage_attachment_image_enters_review_prompt(self, mock_extract, mock_generate):
         mock_generate.return_value = {
             "result_markdown": "### Review",
@@ -1749,6 +1787,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
 
     @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
     @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
+    @unittest.skip("Image evidence scanning is disabled; PRD review uses table media text only.")
     def test_anti_fraud_table_embedded_image_enters_review_prompt(self, mock_extract, mock_generate):
         mock_generate.return_value = {
             "result_markdown": "### Review",
@@ -1854,6 +1893,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
 
     @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
     @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
+    @unittest.skip("Image evidence scanning is disabled; PRD review uses table media text only.")
     def test_anti_fraud_detection_uses_confluence_ancestor_path(self, mock_extract, mock_generate):
         mock_generate.return_value = {
             "result_markdown": "### Review",
@@ -1924,6 +1964,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
 
     @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
     @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
+    @unittest.skip("Image evidence scanning is disabled; PRD review uses table media text only.")
     def test_anti_fraud_detection_fallback_uses_page_title_only(self, mock_extract, mock_generate):
         mock_generate.return_value = {
             "result_markdown": "### Review",
@@ -1961,6 +2002,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
 
     @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
     @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
+    @unittest.skip("Image evidence scanning is disabled; PRD review uses table media text only.")
     def test_anti_fraud_non_google_sheet_image_is_skipped_and_not_prompted(self, mock_extract, mock_generate):
         mock_generate.return_value = {
             "result_markdown": "### Review",
@@ -2030,6 +2072,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertNotIn("# Google Sheet Screenshot Evidence", mock_generate.call_args.kwargs["prompt"])
 
     @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    @unittest.skip("Image evidence scanning is disabled; PRD review uses table media text only.")
     def test_google_sheet_screenshot_download_failure_is_coverage_gap(self, mock_generate):
         mock_generate.return_value = {
             "result_markdown": "### Review",
@@ -2062,6 +2105,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
 
     @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
     @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
+    @unittest.skip("Image evidence scanning is disabled; PRD review uses table media text only.")
     def test_google_sheet_screenshot_hash_splits_review_cache(self, mock_extract, mock_generate):
         mock_generate.return_value = {
             "result_markdown": "### Review",

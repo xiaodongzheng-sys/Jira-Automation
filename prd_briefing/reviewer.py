@@ -21,7 +21,7 @@ from .confluence import ConfluenceConnector, IngestedConfluencePage
 from .storage import BriefingStore
 
 
-PRD_REVIEW_PROMPT_VERSION = "v10_prd_review_table_media_expansion"
+PRD_REVIEW_PROMPT_VERSION = "v11_prd_review_table_only_no_image_evidence"
 PRD_SUMMARY_PROMPT_VERSION = "v2_prd_summary_hybrid_sections"
 PRD_REVIEW_MAX_SOURCE_CHARS = 90_000
 PRD_HYBRID_BATCH_SOURCE_CHARS = 45_000
@@ -1037,6 +1037,11 @@ def _resolve_google_sheet_screenshot_evidence(
     workspace_root: Path,
     progress_callback: PRDProgressCallback | None = None,
 ) -> dict[str, Any]:
+    # Image OCR/vision evidence is intentionally disabled. Confluence table media is
+    # expanded as text in the PRD source, which covers copied spreadsheet-like tables
+    # without scanning every embedded image.
+    return {"enabled": False, "artifacts": [], "cache_fingerprint": ""}
+
     if not _is_anti_fraud_prd(page):
         return {"enabled": False, "artifacts": [], "cache_fingerprint": ""}
 
