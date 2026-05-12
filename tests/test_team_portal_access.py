@@ -626,6 +626,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "prd_self_assessment_page",
                 "prd_self_assessment_latest_api",
                 "prd_self_assessment_review_api",
+                "prd_self_assessment_sections_api",
                 "prd_self_assessment_summary_api",
                 "productization_upgrade_summary_issues",
                 "productization_upgrade_summary_llm_descriptions",
