@@ -320,6 +320,43 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertIn("/prd-briefing/image-proxy?src=", html)
         self.assertEqual([item["type"] for item in media_dict.values()], ["table"])
 
+    def test_confluence_parser_registers_storage_attachment_images(self):
+        connector = ConfluenceConnector(
+            base_url="https://confluence.example",
+            email=None,
+            api_token=None,
+            bearer_token=None,
+            store=self.store,
+        )
+        media_dict = {}
+
+        sections = connector._parse_sections(
+            html="""
+            <h2>3.1 Scenario Rules</h2>
+            <p>Refer to the configuration screenshot.</p>
+            <p>
+              <ac:image ac:width="960">
+                <ri:attachment ri:filename="AF Scenario Sheet.png" />
+              </ac:image>
+            </p>
+            """,
+            base_url="https://confluence.example",
+            source_url="https://confluence.example/pages/viewpage.action?pageId=123",
+            page_id="123",
+            session_id="session-1",
+            media_dict=media_dict,
+        )
+
+        self.assertEqual(len(sections), 1)
+        self.assertEqual(len(sections[0].image_refs), 1)
+        self.assertEqual(len(sections[0].media_refs), 1)
+        image_url = sections[0].image_refs[0]
+        self.assertIn("/download/attachments/123/AF%20Scenario%20Sheet.png", image_url)
+        media = media_dict[sections[0].media_refs[0]]
+        self.assertEqual(media["type"], "image")
+        self.assertEqual(media["source_url"], image_url)
+        self.assertEqual(media["filename"], "AF Scenario Sheet.png")
+
     def test_presentation_prompts_include_language_specific_script_rules(self):
         english_prompt = build_presentation_system_prompt("en")
         chinese_prompt = build_presentation_system_prompt("zh")
@@ -644,7 +681,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
             page=page,
         )
 
-        self.assertEqual(PRD_REVIEW_PROMPT_VERSION, "v8_prd_review_af_sheet_screenshot_evidence")
+        self.assertEqual(PRD_REVIEW_PROMPT_VERSION, "v9_prd_review_identifier_typo_guard")
         self.assertIn("prd-review", prompt)
         self.assertIn("Executive Verdict", prompt)
         self.assertIn("Top Must-Fix Delivery Blockers", prompt)
@@ -661,6 +698,8 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertIn("PM Decision Checklist", prompt)
         self.assertIn("Source not found in selected sections", prompt)
         self.assertIn("不能把 `[MEDIA_ID_x]`", prompt)
+        self.assertIn("identifier 必须按 PRD 原文保留", prompt)
+        self.assertIn("exact typo", prompt)
         self.assertIn("最终得分", prompt)
         self.assertNotIn("Previous " + "PRD Evidence", prompt)
         self.assertNotIn("previous_" + "prd_url", prompt)
@@ -764,8 +803,103 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertIn("Suggested PRD patch", prompt)
         self.assertIn("Acceptance check", prompt)
         self.assertIn("Evidence basis", prompt)
+        self.assertIn("Preserve scenario names", prompt)
+        self.assertIn("exact typo", prompt)
         self.assertNotIn("Previous " + "PRD Evidence", prompt)
         self.assertNotIn("逻辑严密度评估", prompt)
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_prd_review_filters_spurious_identifier_typo_clarification(self, mock_generate):
+        page = IngestedConfluencePage(
+            page_id="af-card",
+            title="Antifraud V3.47 - ID Credit Card",
+            source_url="https://confluence.example/display/SPDB/Antifraud+V3.47_0702+-+ID+Credit+Card",
+            updated_at="2026-05-12T17:56:27.000+08:00",
+            language="en",
+            sections=[
+                ParsedSection(
+                    title="Admin spend",
+                    section_path="3.1.16 New Scenario: AdminPortalUpdateCCardSpend",
+                    content="CMS calls `AdminPortalUpdateCCardSpend` for the admin portal credit card spend scenario.",
+                )
+            ],
+            ancestor_titles=["Productization PRD - Authentication & Antifraud"],
+        )
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeConnector(page),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+        mock_generate.return_value = {
+            "result_markdown": """### Executive Verdict
+- **Final Score:** 5 / 10
+
+### Secondary Clarifications
+- **Priority:** P2
+  - **Section:** Section 3.1.16 New Scenario: A dminPortalUpdateCCardSpend
+  - **Clarification:** Fix the section title typo after scope is confirmed, so the scenario name is stable for QA traceability.
+- **Priority:** P2
+  - **Section:** Section 3.1.16 New Scenario: AdminPortalUpdateCCardSpend
+  - **Clarification:** Confirm whether maker-checker is required.
+
+### PM Decision Checklist
+- Confirm owner.
+""",
+            "model_id": "codex-cli",
+            "trace": {},
+        }
+
+        result = service.review_url(
+            PRDBriefingReviewRequest(owner_key="anon:test", prd_url=page.source_url, language="en")
+        )
+
+        markdown = result["review"]["result_markdown"]
+        self.assertNotIn("A dminPortalUpdateCCardSpend", markdown)
+        self.assertNotIn("Fix the section title typo", markdown)
+        self.assertIn("Confirm whether maker-checker is required", markdown)
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_prd_review_keeps_identifier_typo_when_exact_typo_exists_in_prd(self, mock_generate):
+        page = IngestedConfluencePage(
+            page_id="af-card-typo",
+            title="Antifraud V3.47 - ID Credit Card",
+            source_url="https://confluence.example/display/SPDB/Antifraud+V3.47_0702+-+ID+Credit+Card",
+            updated_at="2026-05-12T17:56:27.000+08:00",
+            language="en",
+            sections=[
+                ParsedSection(
+                    title="Admin spend",
+                    section_path="3.1.16 New Scenario: A dminPortalUpdateCCardSpend",
+                    content="CMS calls `A dminPortalUpdateCCardSpend` for the admin portal credit card spend scenario.",
+                )
+            ],
+            ancestor_titles=["Productization PRD - Authentication & Antifraud"],
+        )
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeConnector(page),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+        mock_generate.return_value = {
+            "result_markdown": """### Executive Verdict
+- **Final Score:** 5 / 10
+
+### Secondary Clarifications
+- **Priority:** P2
+  - **Section:** Section 3.1.16 New Scenario: A dminPortalUpdateCCardSpend
+  - **Clarification:** Fix the section title typo because the reviewed PRD text contains the exact typo `A dminPortalUpdateCCardSpend`.
+""",
+            "model_id": "codex-cli",
+            "trace": {},
+        }
+
+        result = service.review_url(
+            PRDBriefingReviewRequest(owner_key="anon:test", prd_url=page.source_url, language="en")
+        )
+
+        self.assertIn("A dminPortalUpdateCCardSpend", result["review"]["result_markdown"])
 
     def test_prd_summary_english_prompt_requests_english_output(self):
         page = self.service.confluence.page
@@ -1507,6 +1641,72 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(result["coverage"]["google_sheet_screenshots_total"], 1)
         self.assertEqual(result["coverage"]["google_sheet_screenshots_reviewed"], 1)
         self.assertEqual(result["coverage"]["google_sheet_screenshot_images"][0]["status"], "ok")
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
+    def test_anti_fraud_storage_attachment_image_enters_review_prompt(self, mock_extract, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        mock_extract.return_value = {
+            "is_google_sheet_screenshot": True,
+            "reason": "",
+            "classification": "Google Sheets screenshot from Confluence attachment",
+            "evidence_text": "Visible fields: Scenario Code, Trigger, Action.",
+        }
+        connector = ConfluenceConnector(
+            base_url="https://example.atlassian.net",
+            email=None,
+            api_token=None,
+            bearer_token=None,
+            store=self.store,
+        )
+        media_dict = {}
+        sections = connector._parse_sections(
+            html="""
+            <h2>3.1 Scenario Rules</h2>
+            <p>CMS scenario setup.</p>
+            <p><ac:image ac:width="960"><ri:attachment ri:filename="AF Scenario Sheet.png" /></ac:image></p>
+            """,
+            base_url="https://example.atlassian.net",
+            source_url="https://example.atlassian.net/pages/viewpage.action?pageId=123",
+            page_id="123",
+            session_id="session-1",
+            media_dict=media_dict,
+        )
+        page = IngestedConfluencePage(
+            page_id="123",
+            title="Anti-Fraud PRD",
+            source_url="https://example.atlassian.net/pages/viewpage.action?pageId=123",
+            updated_at="2026-05-12T17:56:27.000+08:00",
+            language="en",
+            sections=sections,
+            media_dict=media_dict,
+            ancestor_titles=["Productization PRD - Authentication & Antifraud"],
+        )
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeAttachmentConnector(page, b"sheet-image-v1"),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        result = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url=page.source_url,
+                language="en",
+                selected_section_indexes=[1],
+            )
+        )
+
+        prompt = mock_generate.call_args.kwargs["prompt"]
+        self.assertIn("# Google Sheet Screenshot Evidence", prompt)
+        self.assertIn("Visible fields: Scenario Code, Trigger, Action.", prompt)
+        self.assertEqual(result["coverage"]["google_sheet_screenshots_reviewed"], 1)
+        self.assertIn("/download/attachments/123/AF%20Scenario%20Sheet.png", service.confluence.requested_urls[0][0])
 
     @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
     @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")

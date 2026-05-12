@@ -19,7 +19,7 @@ from .confluence import ConfluenceConnector, IngestedConfluencePage
 from .storage import BriefingStore
 
 
-PRD_REVIEW_PROMPT_VERSION = "v8_prd_review_af_sheet_screenshot_evidence"
+PRD_REVIEW_PROMPT_VERSION = "v9_prd_review_identifier_typo_guard"
 PRD_SUMMARY_PROMPT_VERSION = "v2_prd_summary_hybrid_sections"
 PRD_REVIEW_MAX_SOURCE_CHARS = 90_000
 PRD_HYBRID_BATCH_SOURCE_CHARS = 45_000
@@ -421,13 +421,18 @@ class PRDReviewService:
                 linked_spreadsheet_evidence=linked_spreadsheet_evidence,
                 google_sheet_screenshot_evidence=google_sheet_screenshot_evidence,
             )
-            return generate_prd_review_with_codex(
+            generated = generate_prd_review_with_codex(
                 prompt=prompt,
                 settings=self.settings,
                 workspace_root=self.workspace_root,
                 language=language,
                 prompt_version=prompt_version,
             )
+            generated["result_markdown"] = _postprocess_prd_review_markdown(
+                generated.get("result_markdown") or "",
+                page=page,
+            )
+            return generated
 
         batch_outputs: list[dict[str, Any]] = []
         traces: list[Any] = []
@@ -473,6 +478,10 @@ class PRDReviewService:
             workspace_root=self.workspace_root,
             language=language,
             prompt_version=f"{prompt_version}_synthesis",
+        )
+        final["result_markdown"] = _postprocess_prd_review_markdown(
+            final.get("result_markdown") or "",
+            page=page,
         )
         final["trace"] = {"hybrid": True, "batch_count": len(batches), "batch_traces": traces, "final_trace": final.get("trace") or {}}
         return final
@@ -681,6 +690,110 @@ def _build_prd_source(page: IngestedConfluencePage, *, max_chars: int = PRD_REVI
     if not source:
         raise ToolError("PRD page did not contain readable text.")
     return source
+
+
+def _postprocess_prd_review_markdown(markdown: str, *, page: IngestedConfluencePage) -> str:
+    text = str(markdown or "")
+    if not text.strip() or "### Secondary Clarifications" not in text:
+        return text
+    source_text = _page_plain_text_for_postprocessing(page)
+    if not source_text.strip():
+        return text
+    source_identifier_text = _normalize_identifier_for_comparison(source_text)
+
+    lines = text.splitlines()
+    output: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not line.startswith("- **Priority") and not line.startswith("- **优先级"):
+            output.append(line)
+            index += 1
+            continue
+
+        block = [line]
+        index += 1
+        while index < len(lines) and not lines[index].startswith("- **Priority") and not lines[index].startswith("- **优先级"):
+            if lines[index].startswith("### "):
+                break
+            block.append(lines[index])
+            index += 1
+
+        block_text = "\n".join(block)
+        if not _is_spurious_identifier_typo_finding(block_text, source_text=source_text, source_identifier_text=source_identifier_text):
+            output.extend(block)
+        if index < len(lines) and lines[index].startswith("### "):
+            continue
+    return "\n".join(output).strip() + ("\n" if text.endswith("\n") else "")
+
+
+def _page_plain_text_for_postprocessing(page: IngestedConfluencePage) -> str:
+    parts = [str(page.title or "")]
+    for section in page.sections:
+        parts.append(str(section.section_path or section.title or ""))
+        parts.append(str(section.content or ""))
+    return "\n".join(parts)
+
+
+def _is_spurious_identifier_typo_finding(block_text: str, *, source_text: str, source_identifier_text: str) -> bool:
+    lowered = block_text.casefold()
+    typo_keywords = (
+        "fix typo",
+        "fix the section title typo",
+        "typo",
+        "spelling",
+        "misspell",
+        "修正拼写",
+        "拼写",
+        "错别字",
+        "文案清理",
+    )
+    if not any(keyword in lowered for keyword in typo_keywords):
+        return False
+    if not ("p2" in lowered or "priority" in lowered or "优先级" in lowered):
+        return False
+
+    source_exact = source_text.casefold()
+    for quoted in re.findall(r"`([^`]+)`", block_text):
+        if quoted.strip() and quoted.casefold() in source_exact:
+            return False
+
+    candidates = _identifier_candidates_from_text(block_text)
+    for display_value, normalized in candidates:
+        if not normalized or len(normalized) < 8:
+            continue
+        if normalized not in source_identifier_text:
+            continue
+        if display_value.casefold() in source_exact:
+            continue
+        return True
+    return False
+
+
+def _identifier_candidates_from_text(value: str) -> list[tuple[str, str]]:
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9_]*", value)
+    candidates: list[tuple[str, str]] = []
+    for window_size in range(1, 5):
+        for start in range(0, max(len(tokens) - window_size + 1, 0)):
+            window = tokens[start:start + window_size]
+            joined = "".join(window)
+            if not _looks_like_identifier(joined):
+                continue
+            display_value = " ".join(window)
+            candidates.append((display_value, _normalize_identifier_for_comparison(joined)))
+    return candidates
+
+
+def _looks_like_identifier(value: str) -> bool:
+    if len(value) < 8:
+        return False
+    if "_" in value or any(ch.isdigit() for ch in value):
+        return True
+    return sum(1 for ch in value if ch.isupper()) >= 2 and any(ch.islower() for ch in value)
+
+
+def _normalize_identifier_for_comparison(value: str) -> str:
+    return re.sub(r"[^a-z0-9_]+", "", str(value or "").casefold())
 
 
 def _build_prd_source_block(section: Any, index: int) -> str:
@@ -1987,6 +2100,7 @@ You are a senior PRD delivery-readiness reviewer using the `prd-review` skill. Y
 - Review only delivery logic: business-flow closure, role actions, ownership, approvals, handoffs, status transitions, rule precedence, exception paths, reverse paths, operational fallback, and QA/dev acceptance clarity.
 - Do not evaluate business value, ROI, KPI choice, API design, database design, code architecture, implementation approach, or engineering effort.
 - Do not invent rules. If the selected PRD sections do not contain evidence for a claim, write `Source not found in selected sections`.
+- Preserve scenario names, API names, field names, enum values, and other identifiers exactly as written in the PRD, preferably in code format. Do not create spelling/typo findings for identifiers unless you can quote the exact typo from the selected PRD text.
 - Treat linked spreadsheet evidence as part of the selected PRD section when it is listed under `# Linked Spreadsheet Evidence`. If an expected linked spreadsheet is listed as not reviewed, call out the coverage gap instead of guessing its content.
 {screenshot_boundary_en}- Never list `[MEDIA_ID_x]` placeholders themselves as PRD defects. If an image or screenshot cannot be reviewed, treat that only as an evidence coverage gap.
 {"- When report-template spreadsheet evidence is reviewed, assess whether the report format is reasonable, technically generatable, and testable by QA. This is a template feasibility review, not backend architecture or effort estimation." if include_report_sections else ""}
@@ -2077,6 +2191,7 @@ Return only concise Markdown in English. Every blocker or gap must include a sec
 - 只评审交付逻辑：业务流程闭环、角色动作、权限/归属、审批/交接、状态流转、规则优先级、异常路径、逆向路径、运营兜底、QA/研发验收清晰度。
 - 不评价商业价值、ROI、指标选择、API 设计、数据库设计、代码架构、实现方案或研发工期。
 - 不臆测 PRD 没写的规则。如果选中的 PRD Section 中没有依据，必须写 `Source not found in selected sections`。
+- 场景名、API 名、字段名、枚举值等 identifier 必须按 PRD 原文保留，优先用 code format；除非能引用选中 PRD 原文里的 exact typo，否则不要输出 identifier 拼写/typo 类 finding。
 - `# Linked Spreadsheet Evidence` 中列出的 spreadsheet evidence 属于对应 PRD Section 的评审依据；如果某个关键 spreadsheet 标记为 not reviewed，必须把它当作覆盖缺口说明，不能臆测其内容。
 {screenshot_boundary_zh}- 不能把 `[MEDIA_ID_x]` 占位符本身当作业务缺口；如果图片或截图未能读取，只能作为 evidence coverage gap 说明。
 {"- 当读取到 report-template spreadsheet evidence 时，必须评估报表格式是否合理、系统是否能稳定生成、QA 是否能按模板验收。这是模板可生成性和 PRD 映射评估，不是后端架构或工期评估。" if include_report_sections else ""}
@@ -2390,7 +2505,7 @@ def build_prd_review_batch_prompt(
     source = _build_prd_source(page, max_chars=PRD_REVIEW_MAX_SOURCE_CHARS)
     if normalize_prd_review_language(language) == "en":
         return f"""# Task
-Review this PRD section batch for delivery-readiness evidence. Identify only material P0/P1/P2 delivery gaps from these sections, with section titles and evidence basis. Keep it concise; this will be synthesized with other batches. Do not treat `[MEDIA_ID_x]` placeholders themselves as PRD defects.
+Review this PRD section batch for delivery-readiness evidence. Identify only material P0/P1/P2 delivery gaps from these sections, with section titles and evidence basis. Keep it concise; this will be synthesized with other batches. Preserve scenario/API/field identifiers exactly as written in the PRD and do not create spelling/typo findings for identifiers unless the exact typo is quoted from this batch. Do not treat `[MEDIA_ID_x]` placeholders themselves as PRD defects.
 
 # Context
 - Jira ID: {jira_id or "-"}
@@ -2403,7 +2518,7 @@ Review this PRD section batch for delivery-readiness evidence. Identify only mat
 {source}
 """
     return f"""# Task
-请评审这个 PRD section batch 的交付就绪度证据。只识别这些 section 内真正重要的 P0/P1/P2 交付缺口，必须带 section title 和 evidence basis。保持精炼，后续会和其他 batch 合成最终评审。不能把 `[MEDIA_ID_x]` 占位符本身当作 PRD 缺口。
+请评审这个 PRD section batch 的交付就绪度证据。只识别这些 section 内真正重要的 P0/P1/P2 交付缺口，必须带 section title 和 evidence basis。保持精炼，后续会和其他 batch 合成最终评审。场景名、API 名、字段名等 identifier 必须按 PRD 原文保留；除非能引用本 batch 原文里的 exact typo，否则不要输出 identifier 拼写/typo 类 finding。不能把 `[MEDIA_ID_x]` 占位符本身当作 PRD 缺口。
 
 # Context
 - Jira ID: {jira_id or "-"}
@@ -2449,6 +2564,8 @@ def build_prd_review_synthesis_prompt(
         if include_screenshot_sections
         else "Never treat `[MEDIA_ID_x]` placeholders themselves as PRD defects."
     )
+    identifier_instruction_en = "Preserve scenario/API/field identifiers exactly as written in the PRD. Do not create spelling or typo findings for identifiers unless the exact typo is quoted from the reviewed PRD text."
+    identifier_instruction_zh = "场景名、API 名、字段名、枚举值等 identifier 必须按 PRD 原文保留；除非能引用 reviewed PRD 原文里的 exact typo，否则不要输出 identifier 拼写/typo 类 finding。"
     if normalize_prd_review_language(language) == "en":
         return f"""# Role
 You are a senior PRD delivery-readiness reviewer using the `prd-review` skill.
@@ -2466,7 +2583,7 @@ Synthesize the batch reviews into one final prioritized PRD assessment. Keep onl
 ### Evidence Coverage
 ### PM Decision Checklist
 
-Every finding must include Priority, Section, Problem, Why this is important, Suggested PRD patch, Acceptance check, and Evidence basis. {report_instruction} {screenshot_instruction} If evidence is not in the reviewed sections, write `Source not found in selected sections`.
+Every finding must include Priority, Section, Problem, Why this is important, Suggested PRD patch, Acceptance check, and Evidence basis. {report_instruction} {screenshot_instruction} {identifier_instruction_en} If evidence is not in the reviewed sections, write `Source not found in selected sections`.
 
 # Context
 - Jira ID: {jira_id or "-"}
@@ -2497,7 +2614,7 @@ Every finding must include Priority, Section, Problem, Why this is important, Su
 ### Evidence Coverage
 ### PM Decision Checklist
 
-每条 finding 必须包含优先级、Section、Problem、Why this is important、Suggested PRD patch、Acceptance check、Evidence basis。{report_instruction} {screenshot_instruction} 如果 reviewed sections 没有依据，写 `Source not found in selected sections`。
+每条 finding 必须包含优先级、Section、Problem、Why this is important、Suggested PRD patch、Acceptance check、Evidence basis。{report_instruction} {screenshot_instruction} {identifier_instruction_zh} 如果 reviewed sections 没有依据，写 `Source not found in selected sections`。
 
 # Context
 - Jira ID: {jira_id or "-"}
@@ -2542,6 +2659,8 @@ def build_prd_review_system_text(language: str | None = "zh") -> str:
         "Every important blocker or gap must name the affected PRD section and include Priority, Problem, Why this is important, "
         "Suggested PRD patch, Acceptance check, and Evidence basis. If evidence is not in the selected sections, "
         "say `Source not found in selected sections`. "
+        "Preserve scenario names, API names, field names, enum values, and other identifiers exactly as written in the PRD; "
+        "do not create spelling or typo findings for identifiers unless the exact typo is quoted from the selected PRD text. "
         "Never treat `[MEDIA_ID_x]` placeholders themselves as PRD defects; only use extracted image evidence when it is provided. "
         "For report-generation PRDs, assess reviewed Google Sheet or Excel templates for report format reasonableness, "
         "generation feasibility, PRD-to-template mapping gaps, and QA acceptance checks. State whether spreadsheet evidence "

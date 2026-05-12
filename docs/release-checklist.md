@@ -47,7 +47,7 @@ Use an explicit threshold when validating release tooling changes:
 ./.venv/bin/python scripts/run_system_full_test_gate.py --coverage-fail-under 100 --skip-smoke
 ```
 
-- The Python coverage gate is strict in two layers. Governed modules must remain at 100% (`bpmis_jira_tool/config.py`, `bpmis_jira_tool/errors.py`, `bpmis_jira_tool/user_config.py`, `prd_briefing/models.py`, and `prd_briefing/text_generation.py`). The `risk_coverage_gate` then enforces `config/coverage_risk_policy.json`: `local_agent_client.py` >= 70%, `local_agent_server.py` >= 65%, `meeting_recorder.py` >= 70%, `web_meeting_recorder_routes.py` >= 75%, `web_work_memory_routes.py` >= 75%, `prd_briefing/reviewer.py` >= 75%, and combined `bpmis_jira_tool/` + `prd_briefing/` coverage >= 83%. Do not exclude business logic, permission checks, release safety checks, or read-only smoke behavior just to raise the percentage.
+- The Python coverage gate is strict in two layers. Governed modules must remain at 100% (`bpmis_jira_tool/config.py`, `bpmis_jira_tool/errors.py`, `bpmis_jira_tool/user_config.py`, `prd_briefing/models.py`, and `prd_briefing/text_generation.py`). The `risk_coverage_gate` then enforces `config/coverage_risk_policy.json`: `local_agent_client.py` >= 70%, `local_agent_server.py` >= 65%, `meeting_recorder.py` >= 75%, `web_meeting_recorder_routes.py` >= 75%, `web_work_memory_routes.py` >= 75%, `prd_briefing/reviewer.py` >= 75%, and combined `bpmis_jira_tool/` + `prd_briefing/` coverage >= 83%. Do not exclude business logic, permission checks, release safety checks, or read-only smoke behavior just to raise the percentage.
 
 - If debugging a failed step, the equivalent local commands are:
 
@@ -235,11 +235,22 @@ The deploy scripts read `GOOGLE_CLOUD_PROJECT` and `CLOUD_RUN_DEPLOY_ACCOUNT` fr
 
 - After Cloud Run UAT deploy succeeds, the script syncs the isolated UAT Mac host workspace to the same Git commit, installs host dependencies only when `requirements.txt` changed, initializes the PRD Briefing SQLite schema under the UAT data root, restarts the UAT Mac local-agent on port `7008`, and verifies public UAT local-agent health through the fixed live portal `/uat-local-agent` proxy. This keeps UAT's Cloud Run frontend and UAT local-agent-backed backend/cache code aligned without restarting the live local-agent. The UAT local-agent sync is change-aware: static assets, templates, docs/tests, `app.py`, `bpmis_jira_tool/web.py`, and split Flask web route modules (`bpmis_jira_tool/web_*.py`) skip the UAT local-agent sync/restart because they do not change local-agent-backed runtime code.
 
-For faster UAT releases, use the one-command orchestrator. It runs the release gate, builds or reuses an image, deploys UAT with the unchanged-deploy skip enabled, overlaps UAT host sync with Cloud Run deploy, and prints recent timing records:
+For faster UAT releases, use the one-command orchestrator. It reuses a recent full-gate proof when the source fingerprint still matches, otherwise runs the full release gate. In parallel, it prepares the Cloud Run image by preferring the current SHA image, then the nearest reusable image when Cloud Run runtime inputs have not changed, then a GitHub/Cloud Build workflow wait, and finally a local Cloud Build fallback. It deploys UAT with the unchanged-deploy skip enabled, overlaps UAT host sync with Cloud Run deploy, and prints recent timing records:
 
 ```bash
 ./scripts/release_uat_fast.sh
 ```
+
+The UAT fast path keeps safety checks enabled by default while avoiding source deploys for docs/tests-only commits. Disable individual accelerators only when debugging:
+
+```bash
+RELEASE_UAT_FAST_REUSE_IMAGE_WITHOUT_RUNTIME_CHANGES=0 \
+RELEASE_UAT_FAST_REUSE_VERIFIED_GATE=0 \
+RELEASE_UAT_FAST_WAIT_FOR_GITHUB_IMAGE=0 \
+./scripts/release_uat_fast.sh
+```
+
+Set `RELEASE_UAT_FAST_BUILD_IMAGE_FALLBACK=0` to fail instead of building a missing prebuilt image locally. Set `RELEASE_UAT_FAST_BUILD_IMAGE=0` to preserve the older source-deploy fallback behavior.
 
 For one-command release handling, use the window-aware orchestrator. During business hours it publishes UAT only. Outside business hours it publishes Live only by promoting the existing UAT tag to the Mac-hosted Live portal, runs the live doctor, and prints the timing report:
 

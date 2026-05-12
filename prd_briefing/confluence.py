@@ -397,6 +397,7 @@ class ConfluenceConnector:
             lines, blocks, images, media_refs = self._extract_block_content(
                 node,
                 base_url=base_url,
+                page_id=page_id,
                 media_dict=media_dict,
                 section_path=current_title,
             )
@@ -530,6 +531,60 @@ class ConfluenceConnector:
         }
         return media_id
 
+    def _register_confluence_image_media(
+        self,
+        image: Tag,
+        *,
+        image_ref: str,
+        media_dict: dict[str, dict[str, str]] | None,
+        section_path: str,
+    ) -> str | None:
+        if media_dict is None:
+            return None
+        media_id = f"MEDIA_ID_{len(media_dict) + 1}"
+        media_dict[media_id] = {
+            "type": "image",
+            "content": f"/prd-briefing/image-proxy?src={quote(image_ref, safe='')}",
+            "source_url": image_ref,
+            "section_path": section_path,
+            "filename": self._confluence_image_filename(image),
+        }
+        return media_id
+
+    def _resolve_confluence_image_ref(self, image: Tag, *, base_url: str, page_id: str) -> str:
+        url_node = image.find(self._is_url_tag)
+        url_value = str(
+            (url_node.get("ri:value") if url_node else "")
+            or (url_node.get("value") if url_node else "")
+            or ""
+        ).strip()
+        if url_value:
+            return urljoin(base_url, url_value)
+
+        filename = self._confluence_image_filename(image)
+        if filename and page_id:
+            return f"{base_url.rstrip('/')}/download/attachments/{page_id}/{quote(filename)}?api=v2"
+        return ""
+
+    @staticmethod
+    def _confluence_image_filename(image: Tag) -> str:
+        attachment = image.find(ConfluenceConnector._is_attachment_tag)
+        return str(
+            (attachment.get("ri:filename") if attachment else "")
+            or (attachment.get("filename") if attachment else "")
+            or ""
+        ).strip()
+
+    @staticmethod
+    def _is_confluence_image_tag(tag: Tag) -> bool:
+        name = str(getattr(tag, "name", "") or "").casefold()
+        return name == "ac:image" or name.endswith(":image")
+
+    @staticmethod
+    def _is_url_tag(tag: Tag) -> bool:
+        name = str(getattr(tag, "name", "") or "").casefold()
+        return name == "ri:url" or name.endswith(":url")
+
     def _register_table_media(
         self,
         table: Tag,
@@ -569,6 +624,15 @@ class ConfluenceConnector:
         if height is None:
             height_match = re.search(r"height\s*:\s*(\d+(?:\.\d+)?)px", style, flags=re.IGNORECASE)
             height = float(height_match.group(1)) if height_match else None
+        return (width is not None and width < 50) or (height is not None and height < 50)
+
+    def _is_noise_confluence_image(self, image: Tag, image_ref: str) -> bool:
+        if NOISE_IMAGE_URL_RE.search(image_ref):
+            return True
+        width = self._dimension_px(
+            image.get("width") or image.get("data-width") or image.get("ac:width") or image.get("thumbnail")
+        )
+        height = self._dimension_px(image.get("height") or image.get("data-height") or image.get("ac:height"))
         return (width is not None and width < 50) or (height is not None and height < 50)
 
     def _is_presentation_table(self, table: Tag) -> bool:
@@ -637,11 +701,25 @@ class ConfluenceConnector:
         node: Tag,
         *,
         base_url: str,
+        page_id: str = "",
         media_dict: dict[str, dict[str, str]] | None = None,
         section_path: str = "",
     ) -> tuple[list[str], list[str], list[str], list[str]]:
         if self._is_struck_node(node) or self._is_toc_block(node) or node.name in {"style", "script"}:
             return [], [], [], []
+
+        if self._is_confluence_image_tag(node):
+            image_ref = self._resolve_confluence_image_ref(node, base_url=base_url, page_id=page_id)
+            if not image_ref or self._is_noise_confluence_image(node, image_ref):
+                return [], [], [], []
+            media_ref = self._register_confluence_image_media(
+                node,
+                image_ref=image_ref,
+                media_dict=media_dict,
+                section_path=section_path,
+            )
+            lines = [f"[{media_ref}]"] if media_ref else []
+            return lines, [], [image_ref], ([media_ref] if media_ref else [])
 
         if node.name == "img":
             src = (node.get("src") or "").strip()
@@ -678,6 +756,16 @@ class ConfluenceConnector:
                         if media_ref:
                             lines.append(f"[{media_ref}]")
                             media_refs.append(media_ref)
+                nested_lines, nested_images, nested_media_refs = self._extract_nested_confluence_images(
+                    li,
+                    base_url=base_url,
+                    page_id=page_id,
+                    media_dict=media_dict,
+                    section_path=section_path,
+                )
+                lines.extend(nested_lines)
+                images.extend(nested_images)
+                media_refs.extend(nested_media_refs)
             block = self._render_html_fragment(node, base_url=base_url)
             return lines, ([block] if block else []), images, media_refs
 
@@ -714,6 +802,16 @@ class ConfluenceConnector:
                     if media_ref:
                         lines.append(f"[{media_ref}]")
                         media_refs.append(media_ref)
+            nested_lines, nested_images, nested_media_refs = self._extract_nested_confluence_images(
+                node,
+                base_url=base_url,
+                page_id=page_id,
+                media_dict=media_dict,
+                section_path=section_path,
+            )
+            lines.extend(nested_lines)
+            images.extend(nested_images)
+            media_refs.extend(nested_media_refs)
             block = self._render_html_fragment(node, base_url=base_url)
             return lines, ([block] if block else []), images, media_refs
 
@@ -732,6 +830,7 @@ class ConfluenceConnector:
             child_lines, child_blocks, child_images, child_media_refs = self._extract_block_content(
                 child,
                 base_url=base_url,
+                page_id=page_id,
                 media_dict=media_dict,
                 section_path=section_path,
             )
@@ -740,6 +839,34 @@ class ConfluenceConnector:
             images.extend(child_images)
             media_refs.extend(child_media_refs)
         return lines, blocks, images, media_refs
+
+    def _extract_nested_confluence_images(
+        self,
+        node: Tag,
+        *,
+        base_url: str,
+        page_id: str,
+        media_dict: dict[str, dict[str, str]] | None,
+        section_path: str,
+    ) -> tuple[list[str], list[str], list[str]]:
+        lines: list[str] = []
+        images: list[str] = []
+        media_refs: list[str] = []
+        for image in node.find_all(self._is_confluence_image_tag):
+            image_ref = self._resolve_confluence_image_ref(image, base_url=base_url, page_id=page_id)
+            if not image_ref or self._is_noise_confluence_image(image, image_ref):
+                continue
+            images.append(image_ref)
+            media_ref = self._register_confluence_image_media(
+                image,
+                image_ref=image_ref,
+                media_dict=media_dict,
+                section_path=section_path,
+            )
+            if media_ref:
+                lines.append(f"[{media_ref}]")
+                media_refs.append(media_ref)
+        return lines, images, media_refs
 
     def _extract_table_lines(self, table: Tag) -> list[str]:
         if not self._table_has_displayable_content(table):
@@ -838,7 +965,7 @@ class ConfluenceConnector:
             if cells and all(not self._cell_has_displayable_content(cell) for cell in cells):
                 row.decompose()
         for item in list(node.find_all(["p", "li"])):
-            if item.find(["img", "table"]) is not None:
+            if item.find(["img", "table"]) is not None or item.find(self._is_confluence_image_tag) is not None:
                 continue
             if not self._is_meaningful_cell_text(item.get_text(" ", strip=True)):
                 item.decompose()
@@ -849,7 +976,7 @@ class ConfluenceConnector:
         return any(self._cell_has_displayable_content(cell) for cell in cells)
 
     def _cell_has_displayable_content(self, cell: Tag) -> bool:
-        if cell.find("img") is not None:
+        if cell.find("img") is not None or cell.find(self._is_confluence_image_tag) is not None:
             return True
         return self._is_meaningful_cell_text(cell.get_text(" ", strip=True))
 

@@ -28,7 +28,7 @@
     },
     {
       "path": "bpmis_jira_tool/meeting_recorder.py",
-      "min_percent": 70.0
+      "min_percent": 75.0
     },
     {
       "path": "bpmis_jira_tool/web_meeting_recorder_routes.py",
