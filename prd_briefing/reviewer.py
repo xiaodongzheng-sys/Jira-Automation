@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, unquote_plus, urlparse
 
+from bs4 import BeautifulSoup
+
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.source_code_qa import CodexCliBridgeSourceCodeQALLMProvider
@@ -19,7 +21,7 @@ from .confluence import ConfluenceConnector, IngestedConfluencePage
 from .storage import BriefingStore
 
 
-PRD_REVIEW_PROMPT_VERSION = "v9_prd_review_identifier_typo_guard"
+PRD_REVIEW_PROMPT_VERSION = "v10_prd_review_table_media_expansion"
 PRD_SUMMARY_PROMPT_VERSION = "v2_prd_summary_hybrid_sections"
 PRD_REVIEW_MAX_SOURCE_CHARS = 90_000
 PRD_HYBRID_BATCH_SOURCE_CHARS = 45_000
@@ -28,6 +30,8 @@ PRD_LINKED_SPREADSHEET_MAX_SHEETS = 10
 PRD_LINKED_SPREADSHEET_MAX_ROWS_PER_SHEET = 80
 PRD_LINKED_SPREADSHEET_MAX_COLS = 20
 PRD_LINKED_SPREADSHEET_MAX_TEXT_CHARS = 60_000
+PRD_REVIEW_TABLE_MEDIA_MAX_ROWS = 120
+PRD_REVIEW_TABLE_MEDIA_MAX_CHARS = 20_000
 PRD_REPORT_SECTION_KEYWORDS = ("report", "layout", "format", "template", "register", "field name", "字段", "报表", "报告", "模板", "格式")
 PRD_GOOGLE_SHEET_ARTIFACT_CACHE_VERSION = "v1"
 PRD_GOOGLE_SHEET_SCREENSHOT_EVIDENCE_CACHE_VERSION = "v1"
@@ -675,7 +679,7 @@ def _build_prd_source(page: IngestedConfluencePage, *, max_chars: int = PRD_REVI
     sections = []
     used_chars = 0
     for index, section in enumerate(page.sections, start=1):
-        content = str(section.content or "").strip()
+        content = _build_review_section_content(page=page, section=section)
         if not content:
             continue
         block = f"## Section {index}: {section.section_path}\n{content}"
@@ -690,6 +694,57 @@ def _build_prd_source(page: IngestedConfluencePage, *, max_chars: int = PRD_REVI
     if not source:
         raise ToolError("PRD page did not contain readable text.")
     return source
+
+
+def _build_review_section_content(*, page: IngestedConfluencePage, section: Any) -> str:
+    content = str(getattr(section, "content", "") or "").strip()
+    media_blocks: list[str] = []
+    media_dict = getattr(page, "media_dict", {}) or {}
+    for media_ref in getattr(section, "media_refs", []) or []:
+        media_id = str(media_ref or "").strip()
+        if not media_id:
+            continue
+        media = media_dict.get(media_id) or {}
+        if str(media.get("type") or "") != "table":
+            continue
+        table_text = _format_table_media_for_review(media_id, media)
+        if not table_text:
+            continue
+        placeholder = f"[{media_id}]"
+        if placeholder in content:
+            content = content.replace(placeholder, table_text)
+        else:
+            media_blocks.append(table_text)
+    return "\n".join(part for part in [content, *media_blocks] if str(part or "").strip()).strip()
+
+
+def _format_table_media_for_review(media_id: str, media: dict[str, Any]) -> str:
+    html = str(media.get("content") or "")
+    if not html.strip():
+        return ""
+    soup = BeautifulSoup(html, "html.parser")
+    rows: list[str] = []
+    for row in soup.find_all("tr"):
+        cells = [
+            re.sub(r"\s+", " ", cell.get_text(" ", strip=True)).strip()
+            for cell in row.find_all(["th", "td"], recursive=False)
+        ]
+        cells = [cell for cell in cells if cell]
+        if not cells:
+            continue
+        rows.append(" | ".join(cells))
+        if len(rows) >= PRD_REVIEW_TABLE_MEDIA_MAX_ROWS:
+            rows.append("[Table truncated after 120 rows.]")
+            break
+    if not rows:
+        fallback = re.sub(r"\n{3,}", "\n\n", soup.get_text("\n", strip=True)).strip()
+        if not fallback:
+            return ""
+        rows = [fallback]
+    table_text = "\n".join(rows).strip()
+    if len(table_text) > PRD_REVIEW_TABLE_MEDIA_MAX_CHARS:
+        table_text = table_text[:PRD_REVIEW_TABLE_MEDIA_MAX_CHARS].rstrip() + "\n[Table truncated because it is long.]"
+    return f"[{media_id} table content]\n{table_text}"
 
 
 def _postprocess_prd_review_markdown(markdown: str, *, page: IngestedConfluencePage) -> str:

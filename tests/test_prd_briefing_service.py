@@ -681,7 +681,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
             page=page,
         )
 
-        self.assertEqual(PRD_REVIEW_PROMPT_VERSION, "v9_prd_review_identifier_typo_guard")
+        self.assertEqual(PRD_REVIEW_PROMPT_VERSION, "v10_prd_review_table_media_expansion")
         self.assertIn("prd-review", prompt)
         self.assertIn("Executive Verdict", prompt)
         self.assertIn("Top Must-Fix Delivery Blockers", prompt)
@@ -727,6 +727,42 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertIn("Technical generation risk", prompt)
         self.assertIn("PRD mapping gap", prompt)
         self.assertIn("Used in findings", prompt)
+
+    def test_prd_review_prompt_expands_table_media_placeholders(self):
+        page = IngestedConfluencePage(
+            page_id="table-media",
+            title="Anti-Fraud Table PRD",
+            source_url="https://example.atlassian.net/wiki/pages/table-media",
+            updated_at="2026-05-13T00:00:00Z",
+            language="en",
+            sections=[
+                ParsedSection(
+                    title="Scenario",
+                    section_path="3.1.1 New Scenario: ApplyCCard",
+                    content="CMS calls AF system.\n[MEDIA_ID_1]",
+                    media_refs=["MEDIA_ID_1"],
+                )
+            ],
+            media_dict={
+                "MEDIA_ID_1": {
+                    "type": "table",
+                    "content": "<table><tr><th>Entry points</th><td>CMS to call AF system</td></tr><tr><th>Scenario</th><td>ApplyCCard</td></tr></table>",
+                }
+            },
+        )
+
+        prompt = build_prd_review_prompt(
+            jira_id="AF-123",
+            jira_link="https://jira/browse/AF-123",
+            prd_url=page.source_url,
+            page=page,
+            language="en",
+        )
+
+        self.assertIn("[MEDIA_ID_1 table content]", prompt)
+        self.assertIn("Entry points | CMS to call AF system", prompt)
+        self.assertIn("Scenario | ApplyCCard", prompt)
+        self.assertNotIn("\n[MEDIA_ID_1]\n", prompt)
 
     def test_prd_review_result_cache_uses_prd_updated_at_and_prompt_version(self):
         saved = self.store.save_prd_review_result(
