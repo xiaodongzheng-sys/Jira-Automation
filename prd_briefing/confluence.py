@@ -58,6 +58,7 @@ class IngestedConfluencePage:
     language: str
     sections: list[ParsedSection]
     version_number: str = ""
+    ancestor_titles: list[str] = field(default_factory=list)
     media_dict: dict[str, dict[str, str]] = field(default_factory=dict)
     presentation_source_text: str = ""
 
@@ -99,6 +100,7 @@ class ConfluenceConnector:
         version = payload.get("version", {}) if isinstance(payload.get("version"), dict) else {}
         updated_at = version.get("when") or ""
         version_number = str(version.get("number") or "")
+        ancestor_titles = self._extract_ancestor_titles(payload)
         media_dict: dict[str, dict[str, str]] = {}
 
         sections = self._parse_sections(
@@ -117,6 +119,7 @@ class ConfluenceConnector:
             language="en",
             sections=sections,
             version_number=version_number,
+            ancestor_titles=ancestor_titles,
             media_dict=media_dict,
             presentation_source_text=self._build_source_text_with_media(sections),
         )
@@ -188,7 +191,7 @@ class ConfluenceConnector:
                 try:
                     response = self._request(
                         f"{rest_base}/content/{resolved.page_id}",
-                        params={"expand": "body.storage,body.export_view,version"},
+                        params={"expand": "body.storage,body.export_view,version,ancestors"},
                     )
                     return response.json()
                 except Exception as error:  # noqa: BLE001
@@ -204,7 +207,7 @@ class ConfluenceConnector:
                         params={
                             "spaceKey": resolved.space_key,
                             "title": resolved.title_hint,
-                            "expand": "body.storage,body.export_view,version",
+                            "expand": "body.storage,body.export_view,version,ancestors",
                         },
                     )
                     payload = response.json()
@@ -222,6 +225,22 @@ class ConfluenceConnector:
                 resolved.source_url = similar.source_url
                 return self._fetch_page_payload(similar)
             raise RuntimeError(f"Could not resolve Confluence display URL to a page. Last error: {last_error}")
+
+    @staticmethod
+    def _extract_ancestor_titles(payload: dict[str, Any]) -> list[str]:
+        ancestors = payload.get("ancestors") if isinstance(payload, dict) else []
+        if not isinstance(ancestors, list):
+            return []
+        titles: list[str] = []
+        seen: set[str] = set()
+        for ancestor in ancestors:
+            if not isinstance(ancestor, dict):
+                continue
+            title = str(ancestor.get("title") or "").strip()
+            if title and title not in seen:
+                titles.append(title)
+                seen.add(title)
+        return titles
 
         raise ValueError("Confluence page reference was missing both page ID and display title.")
 

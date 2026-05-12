@@ -2381,12 +2381,19 @@
       const templateLine = !isSummary && Number.isFinite(templateTotal) && templateTotal > 0
         ? `<span>Report templates reviewed: ${escapeHtml(templateReviewed)}/${escapeHtml(templateTotal)}</span>`
         : '';
+      const sheetScreenshotTotal = Number(coverage.google_sheet_screenshots_total || 0);
+      const sheetScreenshotReviewed = Number(coverage.google_sheet_screenshots_reviewed || 0);
+      const sheetScreenshotFailed = Number(coverage.google_sheet_screenshots_failed || 0);
+      const sheetScreenshotLine = !isSummary && Number.isFinite(sheetScreenshotTotal) && sheetScreenshotTotal > 0
+        ? `<span>Google Sheet screenshots reviewed: ${escapeHtml(sheetScreenshotReviewed)}/${escapeHtml(sheetScreenshotTotal)}${sheetScreenshotFailed ? ` · ${escapeHtml(sheetScreenshotFailed)} not reviewed` : ''}</span>`
+        : '';
       panel.innerHTML = `
         <div class="team-dashboard-review-meta">
           <strong>${escapeHtml(payload.cached ? `Cached PRD ${isSummary ? 'Summary' : 'Review'}` : `PRD ${isSummary ? 'Summary' : 'Review'}`)}</strong>
           <span>${escapeHtml(result.updated_at || '')}</span>
           ${coverageLine}
           ${templateLine}
+          ${sheetScreenshotLine}
         </div>
         <div class="team-dashboard-review-markdown">${renderMarkdown(result.result_markdown || '')}</div>
         <div class="team-dashboard-review-actions">

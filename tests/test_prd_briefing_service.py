@@ -541,6 +541,20 @@ class PRDBriefingServiceTests(unittest.TestCase):
             bpmis_api_access_token="token",
         )
 
+    def _add_prd_image(self, page: IngestedConfluencePage, *, section_index: int = 2, url: str = "https://example.atlassian.net/download/attachments/123/sheet.png") -> str:
+        media_id = f"MEDIA_ID_TEST_{section_index}"
+        section = page.sections[section_index - 1]
+        section.media_refs = [media_id]
+        section.image_refs = [url]
+        section.content = f"{section.content}\n[{media_id}]"
+        page.media_dict[media_id] = {
+            "type": "image",
+            "content": f"/prd-briefing/image-proxy?src={url}",
+            "source_url": url,
+            "section_path": section.section_path,
+        }
+        return media_id
+
     def tearDown(self):
         self.temp_dir.cleanup()
 
@@ -630,19 +644,15 @@ class PRDBriefingServiceTests(unittest.TestCase):
             page=page,
         )
 
-        self.assertEqual(PRD_REVIEW_PROMPT_VERSION, "v7_prd_review_report_template_feasibility")
+        self.assertEqual(PRD_REVIEW_PROMPT_VERSION, "v8_prd_review_af_sheet_screenshot_evidence")
         self.assertIn("prd-review", prompt)
         self.assertIn("Executive Verdict", prompt)
         self.assertIn("Top Must-Fix Delivery Blockers", prompt)
         self.assertIn("Section Patch Suggestions", prompt)
         self.assertIn("Evidence Coverage", prompt)
-        self.assertIn("Report Generation Feasibility", prompt)
-        self.assertIn("Report Template Risks", prompt)
-        self.assertIn("PRD-to-Template Mapping Gaps", prompt)
-        self.assertIn("Generation feasibility", prompt)
-        self.assertIn("Technical generation risk", prompt)
-        self.assertIn("PRD mapping gap", prompt)
-        self.assertIn("Used in findings", prompt)
+        self.assertNotIn("Report Generation Feasibility", prompt)
+        self.assertNotIn("Report Template Risks", prompt)
+        self.assertNotIn("PRD-to-Template Mapping Gaps", prompt)
         self.assertIn("优先级", prompt)
         self.assertIn("Suggested PRD patch", prompt)
         self.assertIn("Evidence basis", prompt)
@@ -650,6 +660,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertIn("验收检查", prompt)
         self.assertIn("PM Decision Checklist", prompt)
         self.assertIn("Source not found in selected sections", prompt)
+        self.assertIn("不能把 `[MEDIA_ID_x]`", prompt)
         self.assertIn("最终得分", prompt)
         self.assertNotIn("Previous " + "PRD Evidence", prompt)
         self.assertNotIn("previous_" + "prd_url", prompt)
@@ -657,6 +668,26 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertNotIn("逻辑严密度评估", prompt)
         self.assertIn("AF-123", prompt)
         self.assertIn("This PRD introduces approval workflow", prompt)
+
+    def test_prd_review_prompt_includes_report_sections_only_for_report_prd(self):
+        page = self.service.confluence.page
+        page.sections[1].section_path = "3.11.1 Report Layout and Field Name & Format"
+
+        prompt = build_prd_review_prompt(
+            jira_id="AF-123",
+            jira_link="https://jira/browse/AF-123",
+            prd_url=page.source_url,
+            page=page,
+            language="en",
+        )
+
+        self.assertIn("Report Generation Feasibility", prompt)
+        self.assertIn("Report Template Risks", prompt)
+        self.assertIn("PRD-to-Template Mapping Gaps", prompt)
+        self.assertIn("Generation feasibility", prompt)
+        self.assertIn("Technical generation risk", prompt)
+        self.assertIn("PRD mapping gap", prompt)
+        self.assertIn("Used in findings", prompt)
 
     def test_prd_review_result_cache_uses_prd_updated_at_and_prompt_version(self):
         saved = self.store.save_prd_review_result(
@@ -876,6 +907,22 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(sections[0].spreadsheet_links[0].title, "MAS Register format")
         self.assertIn("/download/attachments/123/MAS%20Outsourcing%20Register.xlsx", sections[0].spreadsheet_links[0].url)
         self.assertEqual(sections[1].spreadsheet_links[0].filename, "Fallback Format.xlsm")
+
+    def test_confluence_payload_extracts_ancestor_titles(self):
+        payload = {
+            "ancestors": [
+                {"title": "2. Digital Banking PRD"},
+                {"title": "2.2 Authentication & Antifraud"},
+                {"title": "[AF] Admin Portal"},
+                {"title": "[AF] Admin Portal"},
+                {"title": ""},
+            ]
+        }
+
+        self.assertEqual(
+            ConfluenceConnector._extract_ancestor_titles(payload),
+            ["2. Digital Banking PRD", "2.2 Authentication & Antifraud", "[AF] Admin Portal"],
+        )
 
     @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
     def test_prd_self_assessment_selected_sections_limit_prompt_and_cache(self, mock_generate):
@@ -1416,6 +1463,336 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertIn("analyzing_template_metadata", stages)
         self.assertIn("generating_review", stages)
         self.assertTrue(any("Reading 1 report templates" in message for message in messages))
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
+    def test_anti_fraud_prd_google_sheet_screenshot_enters_review_prompt(self, mock_extract, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        mock_extract.return_value = {
+            "is_google_sheet_screenshot": True,
+            "reason": "",
+            "classification": "Google Sheets grid with sheet tabs",
+            "evidence_text": "Visible fields: Scenario ID, Rule Name, Action. Empty duplicate header in column C.",
+        }
+        page = self.service.confluence.page
+        page.title = "Anti-Fraud Risk Decision PRD"
+        page.sections[1].content = "Risk Decision scenario configuration uses a Google Sheet screenshot."
+        media_id = self._add_prd_image(page, section_index=2)
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeAttachmentConnector(page, b"sheet-image-v1"),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        result = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[2],
+            )
+        )
+
+        prompt = mock_generate.call_args.kwargs["prompt"]
+        self.assertIn("# Google Sheet Screenshot Evidence", prompt)
+        self.assertIn("Visible fields: Scenario ID, Rule Name, Action", prompt)
+        self.assertIn("Google Sheet Screenshot Template Assessment", prompt)
+        self.assertIn("Do not treat `[MEDIA_ID_x]`", prompt)
+        self.assertIn(media_id, prompt)
+        self.assertEqual(result["coverage"]["google_sheet_screenshots_total"], 1)
+        self.assertEqual(result["coverage"]["google_sheet_screenshots_reviewed"], 1)
+        self.assertEqual(result["coverage"]["google_sheet_screenshot_images"][0]["status"], "ok")
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
+    def test_non_anti_fraud_prd_does_not_read_image_evidence(self, mock_extract, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        page = self.service.confluence.page
+        self._add_prd_image(page, section_index=2)
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeAttachmentConnector(page, b"sheet-image-v1"),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        result = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[2],
+            )
+        )
+
+        mock_extract.assert_not_called()
+        self.assertEqual(result["coverage"]["google_sheet_screenshots_total"], 0)
+        self.assertNotIn("# Google Sheet Screenshot Evidence", mock_generate.call_args.kwargs["prompt"])
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
+    def test_anti_fraud_detection_uses_confluence_ancestor_path(self, mock_extract, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        mock_extract.return_value = {
+            "is_google_sheet_screenshot": True,
+            "reason": "",
+            "classification": "Google Sheets grid",
+            "evidence_text": "Visible fields: Scenario, Action, Threshold",
+        }
+        page = self.service.confluence.page
+        page.title = "Configuration Tool for Operators"
+        page.ancestor_titles = ["2. Digital Banking PRD", "2.2 Authentication & Antifraud", "[AF] Admin Portal"]
+        self._add_prd_image(page, section_index=2)
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeAttachmentConnector(page, b"sheet-image-v1"),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        result = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[2],
+            )
+        )
+
+        self.assertEqual(result["coverage"]["google_sheet_screenshots_reviewed"], 1)
+        self.assertIn("# Google Sheet Screenshot Evidence", mock_generate.call_args.kwargs["prompt"])
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
+    def test_anti_fraud_detection_fallback_does_not_scan_section_body(self, mock_extract, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        page = self.service.confluence.page
+        page.title = "Generic Admin Portal PRD"
+        page.ancestor_titles = []
+        page.sections[1].content = "This section mentions fraud scenario text, but the title and ancestors do not identify Anti-Fraud."
+        self._add_prd_image(page, section_index=2)
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeAttachmentConnector(page, b"sheet-image-v1"),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        result = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[2],
+            )
+        )
+
+        mock_extract.assert_not_called()
+        self.assertEqual(result["coverage"]["google_sheet_screenshots_total"], 0)
+        self.assertNotIn("# Google Sheet Screenshot Evidence", mock_generate.call_args.kwargs["prompt"])
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
+    def test_anti_fraud_detection_fallback_uses_page_title_only(self, mock_extract, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        mock_extract.return_value = {
+            "is_google_sheet_screenshot": True,
+            "reason": "",
+            "classification": "Google Sheets grid",
+            "evidence_text": "Visible fields: Rule ID, Action",
+        }
+        page = self.service.confluence.page
+        page.title = "[AF] Admin Portal Configuration PRD"
+        page.ancestor_titles = []
+        self._add_prd_image(page, section_index=2)
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeAttachmentConnector(page, b"sheet-image-v1"),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        result = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[2],
+            )
+        )
+
+        self.assertEqual(result["coverage"]["google_sheet_screenshots_reviewed"], 1)
+        self.assertIn("# Google Sheet Screenshot Evidence", mock_generate.call_args.kwargs["prompt"])
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
+    def test_anti_fraud_non_google_sheet_image_is_skipped_and_not_prompted(self, mock_extract, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        mock_extract.return_value = {
+            "is_google_sheet_screenshot": False,
+            "reason": "not_google_sheet_screenshot",
+            "classification": "normal product screenshot",
+            "evidence_text": "Button labels should not enter prompt",
+        }
+        page = self.service.confluence.page
+        page.title = "Anti-Fraud PRD"
+        self._add_prd_image(page, section_index=2)
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeAttachmentConnector(page, b"normal-ui-image"),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        result = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[2],
+            )
+        )
+
+        prompt = mock_generate.call_args.kwargs["prompt"]
+        self.assertNotIn("# Google Sheet Screenshot Evidence", prompt)
+        self.assertNotIn("Button labels should not enter prompt", prompt)
+        self.assertEqual(result["coverage"]["google_sheet_screenshots_total"], 0)
+        self.assertEqual(result["coverage"]["google_sheet_screenshot_images"][0]["reason"], "not_google_sheet_screenshot")
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
+    def test_unselected_section_image_is_not_read_for_self_assessment(self, mock_extract, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        page = self.service.confluence.page
+        page.title = "Anti-Fraud PRD"
+        self._add_prd_image(page, section_index=1)
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeAttachmentConnector(page, b"sheet-image-v1"),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        result = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[2],
+            )
+        )
+
+        mock_extract.assert_not_called()
+        self.assertEqual(result["coverage"]["google_sheet_screenshots_total"], 0)
+        self.assertNotIn("# Google Sheet Screenshot Evidence", mock_generate.call_args.kwargs["prompt"])
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_google_sheet_screenshot_download_failure_is_coverage_gap(self, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        page = self.service.confluence.page
+        page.title = "Anti-Fraud PRD"
+        self._add_prd_image(page, section_index=2)
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeAttachmentConnector(page, b""),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        result = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[2],
+            )
+        )
+
+        self.assertEqual(result["coverage"]["google_sheet_screenshots_total"], 1)
+        self.assertEqual(result["coverage"]["google_sheet_screenshots_failed"], 1)
+        self.assertEqual(result["coverage"]["google_sheet_screenshot_images"][0]["reason"], "empty_download")
+        self.assertIn("Google Sheet screenshot not reviewed", mock_generate.call_args.kwargs["prompt"])
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
+    def test_google_sheet_screenshot_hash_splits_review_cache(self, mock_extract, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        mock_extract.side_effect = lambda *, image_bytes, **_kwargs: {
+            "is_google_sheet_screenshot": True,
+            "reason": "",
+            "classification": "Google Sheet screenshot",
+            "evidence_text": f"Visible marker: {image_bytes.decode('utf-8')}",
+        }
+        page = self.service.confluence.page
+        page.title = "Anti-Fraud Risk Decision PRD"
+        page.sections[1].content = "Risk Decision scenario configuration."
+        self._add_prd_image(page, section_index=2)
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeAttachmentConnector(page, b"initial"),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        first = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[2],
+            )
+        )
+        service.confluence = FakeAttachmentConnector(page, b"updated")
+        second = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[2],
+            )
+        )
+
+        self.assertFalse(first["cached"])
+        self.assertFalse(second["cached"])
+        self.assertEqual(mock_generate.call_count, 2)
+        self.assertNotEqual(first["review"]["jira_id"], second["review"]["jira_id"])
 
     @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
     def test_prd_review_persists_generation_failure_and_validates_inputs(self, mock_generate):

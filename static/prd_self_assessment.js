@@ -316,6 +316,17 @@
     const linkedArtifactLine = !isSummary && linkedArtifacts.length
       ? `<p class="help-text">${escapeHtml(linkedArtifacts.slice(0, 4).map((item) => `${item.status === 'ok' ? 'Reviewed' : 'Not reviewed'}: ${item.title || item.url || 'Report template'}${item.status === 'ok' ? ` (${item.sheet_count || 0} sheets${item.skipped_sheet_count ? `, ${item.skipped_sheet_count} skipped` : ''})` : ` - ${item.reason || 'unavailable'}`}`).join(' · '))}${linkedArtifacts.length > 4 ? ` · +${escapeHtml(linkedArtifacts.length - 4)} more` : ''}</p>`
       : '';
+    const sheetScreenshotTotal = Number(coverage.google_sheet_screenshots_total || 0);
+    const sheetScreenshotReviewed = Number(coverage.google_sheet_screenshots_reviewed || 0);
+    const sheetScreenshotFailed = Number(coverage.google_sheet_screenshots_failed || 0);
+    const sheetScreenshotLine = !isSummary && Number.isFinite(sheetScreenshotTotal) && sheetScreenshotTotal > 0
+      ? `<span>Google Sheet screenshots reviewed: ${escapeHtml(sheetScreenshotReviewed)}/${escapeHtml(sheetScreenshotTotal)}${sheetScreenshotFailed ? ` · ${escapeHtml(sheetScreenshotFailed)} not reviewed` : ''}</span>`
+      : '';
+    const sheetScreenshotImages = Array.isArray(coverage.google_sheet_screenshot_images) ? coverage.google_sheet_screenshot_images : [];
+    const sheetScreenshotVisible = sheetScreenshotImages.filter((item) => item.status !== 'skipped' || item.reason !== 'not_google_sheet_screenshot');
+    const sheetScreenshotArtifactLine = !isSummary && sheetScreenshotVisible.length
+      ? `<p class="help-text">${escapeHtml(sheetScreenshotVisible.slice(0, 4).map((item) => `${item.status === 'ok' ? 'Reviewed' : 'Not reviewed'}: ${item.image_id || 'Screenshot'}${item.status === 'ok' ? '' : ` - ${item.reason || 'unavailable'}`}`).join(' · '))}${sheetScreenshotVisible.length > 4 ? ` · +${escapeHtml(sheetScreenshotVisible.length - 4)} more` : ''}</p>`
+      : '';
     const titleLine = !isSummary && titles.length
       ? `<p class="help-text">${escapeHtml(titles.slice(0, 6).join(' · '))}${titles.length > 6 ? ` · +${escapeHtml(titles.length - 6)} more` : ''}</p>`
       : '';
@@ -329,8 +340,10 @@
           ${generationCoverageLine}
           ${coverageLine}
           ${linkedCoverageLine}
+          ${sheetScreenshotLine}
           ${titleLine}
           ${linkedArtifactLine}
+          ${sheetScreenshotArtifactLine}
         </div>
         <span>${escapeHtml(result.updated_at || '')}</span>
       </div>

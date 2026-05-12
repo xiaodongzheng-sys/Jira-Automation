@@ -4,6 +4,8 @@ import hashlib
 import io
 import json
 import os
+import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -17,7 +19,7 @@ from .confluence import ConfluenceConnector, IngestedConfluencePage
 from .storage import BriefingStore
 
 
-PRD_REVIEW_PROMPT_VERSION = "v7_prd_review_report_template_feasibility"
+PRD_REVIEW_PROMPT_VERSION = "v8_prd_review_af_sheet_screenshot_evidence"
 PRD_SUMMARY_PROMPT_VERSION = "v2_prd_summary_hybrid_sections"
 PRD_REVIEW_MAX_SOURCE_CHARS = 90_000
 PRD_HYBRID_BATCH_SOURCE_CHARS = 45_000
@@ -28,6 +30,18 @@ PRD_LINKED_SPREADSHEET_MAX_COLS = 20
 PRD_LINKED_SPREADSHEET_MAX_TEXT_CHARS = 60_000
 PRD_REPORT_SECTION_KEYWORDS = ("report", "layout", "format", "template", "register", "field name", "字段", "报表", "报告", "模板", "格式")
 PRD_GOOGLE_SHEET_ARTIFACT_CACHE_VERSION = "v1"
+PRD_GOOGLE_SHEET_SCREENSHOT_EVIDENCE_CACHE_VERSION = "v1"
+PRD_ANTI_FRAUD_KEYWORDS = (
+    "anti-fraud",
+    "antifraud",
+    "anti fraud",
+    "risk decision",
+    "fraud",
+    "blacklist",
+    "black list",
+    "whitelist",
+    "white list",
+)
 PRD_BRIEFING_REVIEW_CACHE_KEY = "__prd_briefing_url_review__"
 PRD_URL_SUMMARY_CACHE_KEY = "__prd_url_summary__"
 PRDProgressCallback = Callable[[str, str, int, int], None]
@@ -83,15 +97,24 @@ class PRDReviewService:
             google_sheet_cache_dir=_google_sheet_artifact_cache_dir(self.settings),
             progress_callback=progress_callback,
         )
-        coverage = _merge_linked_spreadsheet_coverage(
+        google_sheet_screenshot_evidence = _resolve_google_sheet_screenshot_evidence(
+            confluence=self.confluence,
+            page=page,
+            selected_section_indexes=list(range(1, len(page.sections) + 1)),
+            settings=self.settings,
+            workspace_root=self.workspace_root,
+            progress_callback=progress_callback,
+        )
+        coverage = _merge_google_sheet_screenshot_coverage(_merge_linked_spreadsheet_coverage(
             _build_generation_coverage(page, mode=_generation_mode_for_page(page)),
             linked_spreadsheet_evidence,
-        )
+        ), google_sheet_screenshot_evidence)
         cache_jira_id = _cache_key_for_section_selection(
             normalized.jira_id,
             page=page,
             selected_section_indexes=None,
             linked_artifact_fingerprint=linked_spreadsheet_evidence["cache_fingerprint"],
+            google_sheet_screenshot_fingerprint=google_sheet_screenshot_evidence["cache_fingerprint"],
         )
         cached = None if normalized.force_refresh else self.store.get_prd_review_result(
             owner_key=normalized.owner_key,
@@ -112,6 +135,7 @@ class PRDReviewService:
                 language="zh",
                 prompt_version=PRD_REVIEW_PROMPT_VERSION,
                 linked_spreadsheet_evidence=linked_spreadsheet_evidence,
+                google_sheet_screenshot_evidence=google_sheet_screenshot_evidence,
             )
         except Exception as error:  # noqa: BLE001 - persist the failure for visible retry context.
             self.store.save_prd_review_result(
@@ -156,21 +180,30 @@ class PRDReviewService:
             google_sheet_cache_dir=_google_sheet_artifact_cache_dir(self.settings),
             progress_callback=progress_callback,
         )
+        google_sheet_screenshot_evidence = _resolve_google_sheet_screenshot_evidence(
+            confluence=self.confluence,
+            page=selected_page,
+            selected_section_indexes=selection["coverage"]["selected_section_indexes"],
+            settings=self.settings,
+            workspace_root=self.workspace_root,
+            progress_callback=progress_callback,
+        )
         generation_coverage = _build_generation_coverage(
             selected_page,
             mode=_generation_mode_for_page(selected_page),
             total_sections=int(selection["coverage"].get("sections_total") or len(selected_page.sections)),
         )
-        coverage = _merge_linked_spreadsheet_coverage(
+        coverage = _merge_google_sheet_screenshot_coverage(_merge_linked_spreadsheet_coverage(
             {**selection["coverage"], **generation_coverage},
             linked_spreadsheet_evidence,
-        )
+        ), google_sheet_screenshot_evidence)
         prompt_version = prd_briefing_review_prompt_version(normalized.language)
         cache_jira_id = _cache_key_for_section_selection(
             PRD_BRIEFING_REVIEW_CACHE_KEY,
             page=page,
             selected_section_indexes=selection["cache_section_indexes"],
             linked_artifact_fingerprint=linked_spreadsheet_evidence["cache_fingerprint"],
+            google_sheet_screenshot_fingerprint=google_sheet_screenshot_evidence["cache_fingerprint"],
         )
         cached = None if normalized.force_refresh else self.store.get_prd_review_result(
             owner_key=normalized.owner_key,
@@ -199,6 +232,7 @@ class PRDReviewService:
                 language=normalized.language,
                 prompt_version=prompt_version,
                 linked_spreadsheet_evidence=linked_spreadsheet_evidence,
+                google_sheet_screenshot_evidence=google_sheet_screenshot_evidence,
             )
         except Exception as error:  # noqa: BLE001 - persist the failure for visible retry context.
             self.store.save_prd_review_result(
@@ -375,6 +409,7 @@ class PRDReviewService:
         language: str,
         prompt_version: str,
         linked_spreadsheet_evidence: dict[str, Any] | None,
+        google_sheet_screenshot_evidence: dict[str, Any] | None,
     ) -> dict[str, Any]:
         if _generation_mode_for_page(page) == "single":
             prompt = build_prd_review_prompt(
@@ -384,6 +419,7 @@ class PRDReviewService:
                 page=page,
                 language=language,
                 linked_spreadsheet_evidence=linked_spreadsheet_evidence,
+                google_sheet_screenshot_evidence=google_sheet_screenshot_evidence,
             )
             return generate_prd_review_with_codex(
                 prompt=prompt,
@@ -429,6 +465,7 @@ class PRDReviewService:
             language=language,
             batch_outputs=batch_outputs,
             linked_spreadsheet_evidence=linked_spreadsheet_evidence,
+            google_sheet_screenshot_evidence=google_sheet_screenshot_evidence,
         )
         final = generate_prd_review_with_codex(
             prompt=synthesis_prompt,
@@ -602,6 +639,7 @@ class PRDReviewService:
             language=page.language,
             sections=selected_sections,
             version_number=page.version_number,
+            ancestor_titles=list(getattr(page, "ancestor_titles", []) or []),
             media_dict=page.media_dict,
             presentation_source_text=page.presentation_source_text,
         )
@@ -614,12 +652,13 @@ class PRDReviewService:
         return selected_page, {"coverage": coverage, "cache_section_indexes": cache_section_indexes}
 
     @staticmethod
-    def _page_metadata(page: IngestedConfluencePage) -> dict[str, str]:
+    def _page_metadata(page: IngestedConfluencePage) -> dict[str, Any]:
         return {
             "title": page.title,
             "source_url": page.source_url,
             "updated_at": page.updated_at,
             "page_id": page.page_id,
+            "ancestor_titles": list(getattr(page, "ancestor_titles", []) or []),
         }
 
 
@@ -682,6 +721,7 @@ def _page_with_sections(page: IngestedConfluencePage, sections: list[Any]) -> In
         language=page.language,
         sections=sections,
         version_number=page.version_number,
+        ancestor_titles=list(getattr(page, "ancestor_titles", []) or []),
         media_dict=page.media_dict,
         presentation_source_text=page.presentation_source_text,
     )
@@ -797,6 +837,337 @@ def _resolve_linked_spreadsheet_evidence(
 def _is_report_related_section(section: Any) -> bool:
     haystack = f"{getattr(section, 'section_path', '')} {getattr(section, 'title', '')}".casefold()
     return any(keyword.casefold() in haystack for keyword in PRD_REPORT_SECTION_KEYWORDS)
+
+
+def _is_report_or_template_prd(page: IngestedConfluencePage, linked_spreadsheet_evidence: dict[str, Any] | None = None) -> bool:
+    if any(_is_report_related_section(section) for section in page.sections):
+        return True
+    return bool((linked_spreadsheet_evidence or {}).get("artifacts"))
+
+
+def _is_anti_fraud_prd(page: IngestedConfluencePage) -> bool:
+    ancestor_titles = [str(title or "") for title in (getattr(page, "ancestor_titles", []) or [])]
+    ancestor_haystack = " > ".join(ancestor_titles).casefold()
+    if _contains_anti_fraud_marker(ancestor_haystack):
+        return True
+    return _contains_anti_fraud_marker(str(page.title or "").casefold())
+
+
+def _contains_anti_fraud_marker(value: str) -> bool:
+    haystack = str(value or "").casefold()
+    if any(keyword in haystack for keyword in PRD_ANTI_FRAUD_KEYWORDS):
+        return True
+    return re.search(r"(?<![a-z0-9])af(?![a-z0-9])", haystack) is not None
+
+
+def _resolve_google_sheet_screenshot_evidence(
+    *,
+    confluence: ConfluenceConnector,
+    page: IngestedConfluencePage,
+    selected_section_indexes: list[int],
+    settings: Settings,
+    workspace_root: Path,
+    progress_callback: PRDProgressCallback | None = None,
+) -> dict[str, Any]:
+    if not _is_anti_fraud_prd(page):
+        return {"enabled": False, "artifacts": [], "cache_fingerprint": ""}
+
+    artifacts = _collect_section_image_artifacts(page=page, selected_section_indexes=selected_section_indexes)
+    if artifacts:
+        _emit_prd_progress(
+            progress_callback,
+            "reading_google_sheet_screenshots",
+            f"Reading {len(artifacts)} PRD images for Google Sheet screenshots.",
+            0,
+            max(len(artifacts), 1),
+        )
+
+    cache_dir = _google_sheet_screenshot_cache_dir(settings)
+    for index, artifact in enumerate(artifacts, start=1):
+        _emit_prd_progress(
+            progress_callback,
+            "reading_google_sheet_screenshots",
+            f"Reading image {index}/{len(artifacts)} for Google Sheet screenshot evidence.",
+            index,
+            max(len(artifacts), 1),
+        )
+        _resolve_one_google_sheet_screenshot(
+            confluence=confluence,
+            artifact=artifact,
+            cache_dir=cache_dir,
+            workspace_root=workspace_root,
+            settings=settings,
+        )
+
+    fingerprint = "|".join(
+        f"{item.get('source_section_index')}:{item.get('image_id')}:{item.get('url')}:{item.get('status')}:{item.get('reason')}:{item.get('content_hash')}:{item.get('evidence_hash')}:{item.get('is_google_sheet_screenshot')}"
+        for item in artifacts
+    )
+    return {"enabled": True, "artifacts": artifacts, "cache_fingerprint": fingerprint}
+
+
+def _collect_section_image_artifacts(*, page: IngestedConfluencePage, selected_section_indexes: list[int]) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    media_dict = page.media_dict or {}
+    for section_index, section in zip(selected_section_indexes, page.sections):
+        title = str(section.section_path or section.title or f"Section {section_index}")
+        media_refs = [str(ref or "").strip() for ref in (getattr(section, "media_refs", []) or []) if str(ref or "").strip()]
+        for media_ref in media_refs:
+            media = media_dict.get(media_ref) or {}
+            if str(media.get("type") or "") != "image":
+                continue
+            url = str(media.get("source_url") or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            artifacts.append(
+                {
+                    "image_id": media_ref,
+                    "url": url,
+                    "source_section_index": section_index,
+                    "source_section_title": title,
+                    "status": "pending",
+                    "reason": "",
+                    "is_google_sheet_screenshot": False,
+                    "evidence_text": "",
+                    "content_hash": "",
+                    "evidence_hash": "",
+                    "used_in_findings": False,
+                }
+            )
+        for image_index, url in enumerate(getattr(section, "image_refs", []) or [], start=1):
+            url = str(url or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            artifacts.append(
+                {
+                    "image_id": f"IMAGE_{section_index}_{image_index}",
+                    "url": url,
+                    "source_section_index": section_index,
+                    "source_section_title": title,
+                    "status": "pending",
+                    "reason": "",
+                    "is_google_sheet_screenshot": False,
+                    "evidence_text": "",
+                    "content_hash": "",
+                    "evidence_hash": "",
+                    "used_in_findings": False,
+                }
+            )
+    return artifacts
+
+
+def _resolve_one_google_sheet_screenshot(
+    *,
+    confluence: ConfluenceConnector,
+    artifact: dict[str, Any],
+    cache_dir: Path | None,
+    workspace_root: Path,
+    settings: Settings,
+) -> None:
+    url = str(artifact.get("url") or "")
+    try:
+        response = confluence._request(  # noqa: SLF001 - local PRD connector owns authenticated Confluence fetches.
+            url,
+            accept="image/png,image/jpeg,image/webp,image/gif,image/*,*/*;q=0.8",
+        )
+        content = bytes(getattr(response, "content", b"") or b"")
+        if not content:
+            artifact.update({"status": "failed", "reason": "empty_download"})
+            return
+        content_hash = hashlib.sha256(content).hexdigest()[:16]
+        artifact["content_hash"] = content_hash
+        cached = _load_cached_google_sheet_screenshot_evidence(
+            url=url,
+            content_hash=content_hash,
+            cache_dir=cache_dir,
+        )
+        if cached is not None:
+            artifact.update(cached, {"cache_hit": True})
+            return
+        extracted = _extract_google_sheet_screenshot_evidence_from_image(
+            image_bytes=content,
+            image_url=url,
+            image_id=str(artifact.get("image_id") or ""),
+            source_section=str(artifact.get("source_section_title") or ""),
+            settings=settings,
+            workspace_root=workspace_root,
+        )
+        evidence_text = str(extracted.get("evidence_text") or "").strip()
+        status = "ok" if bool(extracted.get("is_google_sheet_screenshot")) else "skipped"
+        reason = "" if status == "ok" else str(extracted.get("reason") or "not_google_sheet_screenshot")
+        evidence_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "is_google_sheet_screenshot": bool(extracted.get("is_google_sheet_screenshot")),
+                    "reason": reason,
+                    "evidence_text": evidence_text,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        payload = {
+            "status": status,
+            "reason": reason,
+            "is_google_sheet_screenshot": status == "ok",
+            "evidence_text": evidence_text if status == "ok" else "",
+            "evidence_hash": evidence_hash,
+            "classification": str(extracted.get("classification") or ""),
+        }
+        artifact.update(payload)
+        _store_cached_google_sheet_screenshot_evidence(
+            url=url,
+            content_hash=content_hash,
+            cache_dir=cache_dir,
+            extracted=payload,
+        )
+    except ToolError as error:
+        artifact.update({"status": "failed", "reason": str(error)})
+    except Exception as error:  # noqa: BLE001 - image evidence gaps should not block the PRD review.
+        artifact.update({"status": "failed", "reason": f"ocr_failed: {error}"})
+
+
+def _google_sheet_screenshot_cache_key(*, url: str, content_hash: str) -> str:
+    digest = hashlib.sha256(
+        json.dumps(
+            {
+                "version": PRD_GOOGLE_SHEET_SCREENSHOT_EVIDENCE_CACHE_VERSION,
+                "url": str(url or ""),
+                "content_hash": str(content_hash or ""),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return digest
+
+
+def _load_cached_google_sheet_screenshot_evidence(
+    *,
+    url: str,
+    content_hash: str,
+    cache_dir: Path | None,
+) -> dict[str, Any] | None:
+    if cache_dir is None:
+        return None
+    cache_path = cache_dir / f"{_google_sheet_screenshot_cache_key(url=url, content_hash=content_hash)}.json"
+    if not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("version") != PRD_GOOGLE_SHEET_SCREENSHOT_EVIDENCE_CACHE_VERSION:
+        return None
+    if payload.get("url") != url or payload.get("content_hash") != content_hash:
+        return None
+    extracted = payload.get("extracted")
+    return extracted if isinstance(extracted, dict) else None
+
+
+def _store_cached_google_sheet_screenshot_evidence(
+    *,
+    url: str,
+    content_hash: str,
+    cache_dir: Path | None,
+    extracted: dict[str, Any],
+) -> None:
+    if cache_dir is None:
+        return
+    payload = {
+        "version": PRD_GOOGLE_SHEET_SCREENSHOT_EVIDENCE_CACHE_VERSION,
+        "url": url,
+        "content_hash": content_hash,
+        "extracted": extracted,
+    }
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / f"{_google_sheet_screenshot_cache_key(url=url, content_hash=content_hash)}.json"
+        cache_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    except OSError:
+        return
+
+
+def _extract_google_sheet_screenshot_evidence_from_image(
+    *,
+    image_bytes: bytes,
+    image_url: str,
+    image_id: str,
+    source_section: str,
+    settings: Settings,
+    workspace_root: Path,
+) -> dict[str, Any]:
+    suffix = _image_suffix_from_url(image_url)
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as image_file:
+        image_file.write(image_bytes)
+        image_file.flush()
+        prompt = f"""# Task
+Classify this PRD image and extract evidence only if it is a screenshot of Google Sheets or a spreadsheet-like Google Sheet template.
+
+Treat the image as a Google Sheet screenshot only when visible evidence shows spreadsheet grid cells, row/column headers, sheet tabs, formula bar/toolbar, Google Sheets UI labels, or a clear table-template layout copied from Google Sheets.
+
+If it is a normal product screenshot, flow diagram, icon, avatar, decorative image, or non-spreadsheet UI, return is_google_sheet_screenshot=false and reason="not_google_sheet_screenshot".
+
+If true, extract compact evidence for PRD review: visible sheet/tab names, field/header names, column structure, sample values, empty/duplicate headers, multi-level header or merged-cell signs, formula/format risks, unclear text with uncertainty markers, and any QA/template mapping concerns. Do not invent unreadable text.
+
+Return strict JSON only:
+{{
+  "is_google_sheet_screenshot": true,
+  "reason": "",
+  "classification": "why this is or is not a Google Sheet screenshot",
+  "evidence_text": "Markdown evidence for PRD review"
+}}
+
+# Image Context
+- Image ID: {image_id or "-"}
+- Source section: {source_section or "-"}
+- Source URL: {image_url or "-"}
+"""
+        generated = _generate_with_codex(
+            prompt=prompt,
+            settings=settings,
+            workspace_root=workspace_root,
+            system_text=(
+                "You extract visible evidence from PRD images. Return strict JSON only. "
+                "Do not guess unreadable text. Classify non-Google-Sheet images as not_google_sheet_screenshot."
+            ),
+            prompt_mode=f"{PRD_REVIEW_PROMPT_VERSION}_google_sheet_screenshot_extraction",
+            image_paths=[image_file.name],
+        )
+    payload = _parse_json_object(generated.get("result_markdown") or "")
+    if not payload:
+        raise ToolError("ocr_failed")
+    return payload
+
+
+def _image_suffix_from_url(url: str) -> str:
+    path = unquote_plus(str(urlparse(str(url or "")).path or "")).casefold()
+    for suffix in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+        if path.endswith(suffix):
+            return suffix
+    return ".png"
+
+
+def _parse_json_object(value: str) -> dict[str, Any] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    elif not text.startswith("{"):
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start : end + 1]
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _resolve_one_linked_spreadsheet(
@@ -942,6 +1313,13 @@ def _google_sheet_artifact_cache_dir(settings: Settings) -> Path | None:
     if not data_dir:
         return None
     return Path(data_dir) / "prd_briefing" / "cache" / "google_sheet_artifacts"
+
+
+def _google_sheet_screenshot_cache_dir(settings: Settings) -> Path | None:
+    data_dir = getattr(settings, "team_portal_data_dir", None)
+    if not data_dir:
+        return None
+    return Path(data_dir) / "prd_briefing" / "cache" / "google_sheet_screenshot_evidence"
 
 
 def _normalize_drive_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -1211,6 +1589,48 @@ def _merge_linked_spreadsheet_coverage(coverage: dict[str, Any], linked_spreadsh
     return merged
 
 
+def _merge_google_sheet_screenshot_coverage(
+    coverage: dict[str, Any],
+    google_sheet_screenshot_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    artifacts = list(google_sheet_screenshot_evidence.get("artifacts") or [])
+    candidates = [
+        item
+        for item in artifacts
+        if item.get("status") != "skipped" or item.get("reason") != "not_google_sheet_screenshot"
+    ]
+    reviewed = [item for item in candidates if item.get("status") == "ok"]
+    failed = [item for item in candidates if item.get("status") != "ok"]
+    merged = dict(coverage)
+    public_artifacts = [_google_sheet_screenshot_public_payload(item) for item in artifacts]
+    merged.update(
+        {
+            "google_sheet_screenshot_evidence_enabled": bool(google_sheet_screenshot_evidence.get("enabled")),
+            "google_sheet_screenshots_total": len(candidates),
+            "google_sheet_screenshots_reviewed": len(reviewed),
+            "google_sheet_screenshots_failed": len(failed),
+            "google_sheet_screenshot_images": public_artifacts,
+        }
+    )
+    return merged
+
+
+def _google_sheet_screenshot_public_payload(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "image_id": str(item.get("image_id") or ""),
+        "url": str(item.get("url") or ""),
+        "source_section_index": item.get("source_section_index"),
+        "source_section_title": str(item.get("source_section_title") or ""),
+        "status": str(item.get("status") or ""),
+        "reason": str(item.get("reason") or ""),
+        "is_google_sheet_screenshot": bool(item.get("is_google_sheet_screenshot")),
+        "char_count": len(str(item.get("evidence_text") or "")),
+        "evidence_hash": str(item.get("evidence_hash") or ""),
+        "cache_hit": bool(item.get("cache_hit")),
+        "used_in_findings": bool(item.get("used_in_findings")),
+    }
+
+
 def _linked_artifact_public_payload(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "title": str(item.get("title") or ""),
@@ -1261,6 +1681,39 @@ def _build_linked_spreadsheet_prompt_section(linked_spreadsheet_evidence: dict[s
                 f"Reason: {artifact.get('reason') or 'unavailable'}\n"
                 f"Do not infer this artifact's contents."
             )
+    return "\n\n".join(blocks).strip()
+
+
+def _build_google_sheet_screenshot_prompt_section(google_sheet_screenshot_evidence: dict[str, Any]) -> str:
+    artifacts = list(google_sheet_screenshot_evidence.get("artifacts") or [])
+    reviewed = [item for item in artifacts if item.get("status") == "ok" and item.get("is_google_sheet_screenshot")]
+    failed = [
+        item
+        for item in artifacts
+        if item.get("status") == "failed" or (item.get("status") == "skipped" and item.get("reason") != "not_google_sheet_screenshot")
+    ]
+    if not reviewed and not failed:
+        return ""
+    blocks = [
+        "# Google Sheet Screenshot Evidence",
+        "Use this evidence only for the source PRD section shown on each image. These images were classified as Google Sheet screenshots or unreadable candidate screenshots. Do not treat `[MEDIA_ID_x]` placeholders themselves as PRD defects.",
+    ]
+    for index, artifact in enumerate(reviewed, start=1):
+        blocks.append(
+            f"## Google Sheet screenshot reviewed: {artifact.get('image_id') or f'Image {index}'}\n"
+            f"Source section: {artifact.get('source_section_title') or '-'}\n"
+            f"Source URL: {artifact.get('url') or '-'}\n"
+            f"Use this screenshot evidence for template/configuration feasibility, field mapping, QA acceptance, and PRD patch suggestions.\n"
+            f"{str(artifact.get('evidence_text') or '').strip()}"
+        )
+    for artifact in failed:
+        blocks.append(
+            f"## Google Sheet screenshot not reviewed: {artifact.get('image_id') or 'Image'}\n"
+            f"Source section: {artifact.get('source_section_title') or '-'}\n"
+            f"Source URL: {artifact.get('url') or '-'}\n"
+            f"Reason: {artifact.get('reason') or 'unavailable'}\n"
+            "Do not infer this screenshot's contents."
+        )
     return "\n\n".join(blocks).strip()
 
 
@@ -1371,6 +1824,7 @@ def _cache_key_for_section_selection(
     page: IngestedConfluencePage,
     selected_section_indexes: list[int] | None,
     linked_artifact_fingerprint: str = "",
+    google_sheet_screenshot_fingerprint: str = "",
 ) -> str:
     cache_key = prefix
     if selected_section_indexes:
@@ -1383,6 +1837,9 @@ def _cache_key_for_section_selection(
     if linked_artifact_fingerprint:
         linked_hash = hashlib.sha256(linked_artifact_fingerprint.encode("utf-8")).hexdigest()[:16]
         cache_key = f"{cache_key}:linked:{linked_hash}"
+    if google_sheet_screenshot_fingerprint:
+        screenshot_hash = hashlib.sha256(google_sheet_screenshot_fingerprint.encode("utf-8")).hexdigest()[:16]
+        cache_key = f"{cache_key}:sheetshots:{screenshot_hash}"
     return cache_key
 
 
@@ -1399,6 +1856,78 @@ def prd_summary_prompt_version(language: str | None) -> str:
     return f"{PRD_SUMMARY_PROMPT_VERSION}_{normalize_prd_review_language(language)}"
 
 
+def _report_output_structure_en() -> str:
+    return """
+### Report Generation Feasibility
+1. **Template / Sheet:** [template title / sheet name, or Cannot assess report template feasibility because linked artifact was not reviewed.]
+   - **Generation feasibility:** [Ready / Risky / Not Ready]
+   - **Format issue:** [Header, merged-cell, formula, hidden row/column, duplicate field, dynamic row, or layout issue.]
+   - **Technical generation risk:** [Why system-generated XLSX may be unstable or ambiguous.]
+   - **PRD mapping gap:** [Missing PRD field definition, source rule, row duplication rule, snapshot rule, or fallback.]
+   - **Suggested PRD patch:** [Concrete PRD wording/table/rule the PM should add.]
+   - **QA acceptance check:** [How QA can verify generated report against the template.]
+   - **Evidence basis:** [Spreadsheet evidence reviewed / Linked artifact not reviewed]
+   - **Used in findings:** [Yes/No]
+   - **Related finding:** [P0/P1/P2 item id or "-"]
+   - **Reason:** [What changed in the assessment because of this artifact.]
+
+### Report Template Risks
+- [Prioritized risks from reviewed templates, or coverage gap if no report template was readable.]
+
+### PRD-to-Template Mapping Gaps
+- [Fields, rows, statuses, dates, source systems, snapshot timing, or fallback rules that the PRD must define for template generation.]
+"""
+
+
+def _report_output_structure_zh() -> str:
+    return """
+### Report Generation Feasibility / 报表生成可行性
+1. **Template / Sheet：** [template title / sheet name，或 Cannot assess report template feasibility because linked artifact was not reviewed.]
+   - **Generation feasibility：** [Ready / Risky / Not Ready]
+   - **Format issue：** [表头、合并单元格、公式、隐藏行列、重复字段、动态行或版式问题。]
+   - **Technical generation risk：** [为什么系统生成 XLSX 会不稳定或有歧义。]
+   - **PRD mapping gap：** [缺失的 PRD 字段定义、来源规则、行复制规则、快照规则或 fallback。]
+   - **Suggested PRD patch：** [PM 应补进 PRD 的具体文案/表格/规则。]
+   - **QA acceptance check：** [QA 如何按模板验收生成结果。]
+   - **Evidence basis：** [Spreadsheet evidence reviewed / Linked artifact not reviewed]
+   - **Used in findings：** [Yes/No]
+   - **Related finding：** [P0/P1/P2 item id 或 "-"]
+   - **Reason：** [这个模板证据如何改变了评审结论。]
+
+### Report Template Risks / 报表模板风险
+- [来自已读模板的优先级风险；如果没有可读模板，说明 coverage gap。]
+
+### PRD-to-Template Mapping Gaps / PRD 到模板映射缺口
+- [PRD 为支持模板生成必须定义的字段、行规则、状态、日期、数据源、快照时间或兜底规则。]
+"""
+
+
+def _google_sheet_screenshot_output_structure_en() -> str:
+    return """
+### Google Sheet Screenshot Template Assessment
+1. **Template / Screenshot:** [image id or screenshot title]
+   - **Generation / configuration feasibility:** [Ready / Risky / Not Ready]
+   - **Format issue:** [Visible field/header/layout issue from the screenshot.]
+   - **PRD mapping gap:** [Missing PRD rule or mapping needed to use this screenshot as delivery evidence.]
+   - **Suggested PRD patch:** [Concrete wording/table/rule the PM should add.]
+   - **QA acceptance check:** [How QA can validate the template/configuration against the screenshot.]
+   - **Evidence basis:** [Google Sheet screenshot evidence reviewed / Google Sheet screenshot not reviewed]
+"""
+
+
+def _google_sheet_screenshot_output_structure_zh() -> str:
+    return """
+### Google Sheet Screenshot Template Assessment / Google Sheet 截图模板评估
+1. **Template / Screenshot：** [image id 或截图标题]
+   - **Generation / configuration feasibility：** [Ready / Risky / Not Ready]
+   - **Format issue：** [截图中可见的字段/表头/版式问题。]
+   - **PRD mapping gap：** [要把截图作为交付依据时，PRD 缺失的规则或映射。]
+   - **Suggested PRD patch：** [PM 应补进 PRD 的具体文案/表格/规则。]
+   - **QA acceptance check：** [QA 如何按截图验收模板/配置。]
+   - **Evidence basis：** [Google Sheet screenshot evidence reviewed / Google Sheet screenshot not reviewed]
+"""
+
+
 def build_prd_review_prompt(
     *,
     jira_id: str,
@@ -1407,9 +1936,49 @@ def build_prd_review_prompt(
     page: IngestedConfluencePage,
     language: str = "zh",
     linked_spreadsheet_evidence: dict[str, Any] | None = None,
+    google_sheet_screenshot_evidence: dict[str, Any] | None = None,
 ) -> str:
     source = _build_prd_source(page)
     linked_source = _build_linked_spreadsheet_prompt_section(linked_spreadsheet_evidence or {})
+    screenshot_source = _build_google_sheet_screenshot_prompt_section(google_sheet_screenshot_evidence or {})
+    include_report_sections = _is_report_or_template_prd(page, linked_spreadsheet_evidence)
+    include_screenshot_sections = bool(screenshot_source)
+    report_required_check_en = (
+        "6. **Report generation feasibility:** For report/template/register sections, do reviewed Google Sheet or Excel templates have clear headers, stable columns, avoid risky merged/multi-level headers or formula dependencies, and map cleanly back to PRD field definitions?"
+        if include_report_sections
+        else ""
+    )
+    report_required_check_zh = (
+        "6. **Report 生成可行性：** 对 report/template/register 类 section，已读取的 Google Sheet 或 Excel 模板是否有清晰表头、稳定列结构，是否避免高风险合并单元格/多层表头/公式依赖，并能和 PRD 字段定义清楚映射？"
+        if include_report_sections
+        else ""
+    )
+    report_output_en = _report_output_structure_en() if include_report_sections else ""
+    report_output_zh = _report_output_structure_zh() if include_report_sections else ""
+    screenshot_boundary_en = (
+        "- Treat Google Sheet screenshot evidence as part of the source PRD section when it is listed under `# Google Sheet Screenshot Evidence`. Use it for template/configuration feasibility, field mapping, QA acceptance, and PRD patch suggestions.\n"
+        if include_screenshot_sections
+        else ""
+    )
+    screenshot_boundary_zh = (
+        "- `# Google Sheet Screenshot Evidence` 中列出的截图 evidence 属于对应 PRD Section 的评审依据；用于评估模板/配置可行性、字段映射、QA 验收和 PRD 补写建议。\n"
+        if include_screenshot_sections
+        else ""
+    )
+    screenshot_output_en = _google_sheet_screenshot_output_structure_en() if include_screenshot_sections else ""
+    screenshot_output_zh = _google_sheet_screenshot_output_structure_zh() if include_screenshot_sections else ""
+    report_coverage_en = "- **Report templates:** [Reviewed count and unreadable artifacts with reasons]" if include_report_sections else ""
+    report_coverage_zh = "- **Report templates：** [已读数量和未读模板及原因]" if include_report_sections else ""
+    screenshot_coverage_en = (
+        "- **Google Sheet screenshots:** [Reviewed count and unreadable screenshot reasons]"
+        if include_screenshot_sections
+        else ""
+    )
+    screenshot_coverage_zh = (
+        "- **Google Sheet screenshots：** [已读数量和未读截图原因]"
+        if include_screenshot_sections
+        else ""
+    )
     if normalize_prd_review_language(language) == "en":
         return f"""# Role
 You are a senior PRD delivery-readiness reviewer using the `prd-review` skill. Your job is to help the PM identify the few delivery blockers that matter most and turn them into concrete PRD patches.
@@ -1419,7 +1988,8 @@ You are a senior PRD delivery-readiness reviewer using the `prd-review` skill. Y
 - Do not evaluate business value, ROI, KPI choice, API design, database design, code architecture, implementation approach, or engineering effort.
 - Do not invent rules. If the selected PRD sections do not contain evidence for a claim, write `Source not found in selected sections`.
 - Treat linked spreadsheet evidence as part of the selected PRD section when it is listed under `# Linked Spreadsheet Evidence`. If an expected linked spreadsheet is listed as not reviewed, call out the coverage gap instead of guessing its content.
-- When report-template spreadsheet evidence is reviewed, assess whether the report format is reasonable, technically generatable, and testable by QA. This is a template feasibility review, not backend architecture or effort estimation.
+{screenshot_boundary_en}- Never list `[MEDIA_ID_x]` placeholders themselves as PRD defects. If an image or screenshot cannot be reviewed, treat that only as an evidence coverage gap.
+{"- When report-template spreadsheet evidence is reviewed, assess whether the report format is reasonable, technically generatable, and testable by QA. This is a template feasibility review, not backend architecture or effort estimation." if include_report_sections else ""}
 
 # Task
 Assess the selected PRD sections for delivery readiness. Prioritize only the issues that would materially block development, QA, UAT, release, operations, or support. Every important blocker must name the PRD section that should be changed and include text the PM can add back to the PRD.
@@ -1435,6 +2005,7 @@ Assess the selected PRD sections for delivery readiness. Prioritize only the iss
 - Use `P1` for important rule, exception, access, status, or evidence gaps that can cause rework or failed acceptance.
 - Use `P2` only for useful clarifications. Put P2 items under `Secondary Clarifications`, not in the blocker list.
 - `Top Must-Fix Delivery Blockers` must contain at most 5 items total. Merge duplicate symptoms into one blocker.
+- Avoid duplication between `Top Must-Fix Delivery Blockers` and `Section Patch Suggestions`: blockers explain the issue and priority; patch suggestions provide copy-ready PRD changes without restating the full problem.
 - Do not create more than 2 main findings for the same selected section unless there is a true P0 contradiction.
 - Keep the whole answer concise, roughly 800-1200 words unless the selected section is extremely complex.
 
@@ -1444,7 +2015,7 @@ Assess the selected PRD sections for delivery readiness. Prioritize only the iss
 3. **Role and ownership clarity:** Is it clear who can act, approve, reject, withdraw, edit, retry, or override at each step?
 4. **Exception and reverse paths:** Are timeout, interruption, retry, rejection, rollback, cancellation, blacklist, permission failure, and manual fallback handled?
 5. **Acceptance clarity:** Can QA/dev verify the expected behavior after the PRD is updated?
-6. **Report generation feasibility:** For report/template/register sections, do reviewed Google Sheet or Excel templates have clear headers, stable columns, avoid risky merged/multi-level headers or formula dependencies, and map cleanly back to PRD field definitions?
+{report_required_check_en}
 
 # Output Format
 Return only concise Markdown in English. Every blocker or gap must include a section name and evidence basis.
@@ -1475,29 +2046,12 @@ Return only concise Markdown in English. Every blocker or gap must include a sec
 - **Priority:** P2
   - **Section:** [section title]
   - **Clarification:** [Non-blocking question or cleanup.]
-
-### Report Generation Feasibility
-1. **Template / Sheet:** [template title / sheet name, or Cannot assess report template feasibility because linked artifact was not reviewed.]
-   - **Generation feasibility:** [Ready / Risky / Not Ready]
-   - **Format issue:** [Header, merged-cell, formula, hidden row/column, duplicate field, dynamic row, or layout issue.]
-   - **Technical generation risk:** [Why system-generated XLSX may be unstable or ambiguous.]
-   - **PRD mapping gap:** [Missing PRD field definition, source rule, row duplication rule, snapshot rule, or fallback.]
-   - **Suggested PRD patch:** [Concrete PRD wording/table/rule the PM should add.]
-   - **QA acceptance check:** [How QA can verify generated report against the template.]
-   - **Evidence basis:** [Spreadsheet evidence reviewed / Linked artifact not reviewed]
-   - **Used in findings:** [Yes/No]
-   - **Related finding:** [P0/P1/P2 item id or "-"]
-   - **Reason:** [What changed in the assessment because of this artifact.]
-
-### Report Template Risks
-- [Prioritized risks from reviewed templates, or coverage gap if no report template was readable.]
-
-### PRD-to-Template Mapping Gaps
-- [Fields, rows, statuses, dates, source systems, snapshot timing, or fallback rules that the PRD must define for template generation.]
+{screenshot_output_en}{report_output_en}
 
 ### Evidence Coverage
 - **Current PRD sections reviewed:** [brief coverage]
-- **Report templates:** [Reviewed count and unreadable artifacts with reasons]
+{report_coverage_en}
+{screenshot_coverage_en}
 
 ### PM Decision Checklist
 - [Concrete yes/no or rule-choice question the PM should answer, ordered by priority.]
@@ -1514,6 +2068,7 @@ Return only concise Markdown in English. Every blocker or gap must include a sec
 {source}
 
 {linked_source}
+{screenshot_source}
 """
     return f"""# Role
 你是一位资深 PRD 交付就绪度评审专家，使用 `prd-review` Skill 的方法论工作。你的目标不是评价产品想法，而是帮 PM 找出真正最重要的交付阻塞点，并转成可直接写回 PRD 的修改建议。
@@ -1523,7 +2078,8 @@ Return only concise Markdown in English. Every blocker or gap must include a sec
 - 不评价商业价值、ROI、指标选择、API 设计、数据库设计、代码架构、实现方案或研发工期。
 - 不臆测 PRD 没写的规则。如果选中的 PRD Section 中没有依据，必须写 `Source not found in selected sections`。
 - `# Linked Spreadsheet Evidence` 中列出的 spreadsheet evidence 属于对应 PRD Section 的评审依据；如果某个关键 spreadsheet 标记为 not reviewed，必须把它当作覆盖缺口说明，不能臆测其内容。
-- 当读取到 report-template spreadsheet evidence 时，必须评估报表格式是否合理、系统是否能稳定生成、QA 是否能按模板验收。这是模板可生成性和 PRD 映射评估，不是后端架构或工期评估。
+{screenshot_boundary_zh}- 不能把 `[MEDIA_ID_x]` 占位符本身当作业务缺口；如果图片或截图未能读取，只能作为 evidence coverage gap 说明。
+{"- 当读取到 report-template spreadsheet evidence 时，必须评估报表格式是否合理、系统是否能稳定生成、QA 是否能按模板验收。这是模板可生成性和 PRD 映射评估，不是后端架构或工期评估。" if include_report_sections else ""}
 
 # Task
 请评估选中的 PRD Section 是否具备交付就绪度。优先输出真正会阻塞研发、QA、UAT、上线、运营或客服承接的问题。每个关键 blocker 都必须指出应该修改哪个 PRD Section，并给出 PM 可直接写回 PRD 的补写文本。
@@ -1539,6 +2095,7 @@ Return only concise Markdown in English. Every blocker or gap must include a sec
 - `P1` 用于重要规则、异常、权限、状态或证据缺口，会导致返工或验收失败。
 - `P2` 只用于有价值但不阻塞的问题，必须放到 `Secondary Clarifications / 次要澄清项`，不要混进 blocker。
 - `Top Must-Fix Delivery Blockers` 最多 5 条。相同类型问题必须合并，不能平铺刷屏。
+- 避免 `Top Must-Fix Delivery Blockers` 和 `Section Patch Suggestions` 重复：blocker 说明问题和优先级，patch suggestions 只给可写回 PRD 的补写文本，不重复完整问题描述。
 - 同一个 selected section 最多输出 2 条主建议，除非存在真正 P0 矛盾。
 - 输出要压缩，默认约 800-1200 words 的中文等价长度。
 
@@ -1548,7 +2105,7 @@ Return only concise Markdown in English. Every blocker or gap must include a sec
 3. **角色与权限：** 谁能提交、审批、拒绝、撤回、编辑、重试、覆盖或人工介入是否明确？
 4. **异常与逆向：** 超时、中断、重试、拒绝、回滚、取消、拉黑、权限失败、人工兜底是否有处理方式？
 5. **验收清晰度：** PRD 补完后，QA/研发是否能验证行为正确？
-6. **Report 生成可行性：** 对 report/template/register 类 section，已读取的 Google Sheet 或 Excel 模板是否有清晰表头、稳定列结构，是否避免高风险合并单元格/多层表头/公式依赖，并能和 PRD 字段定义清楚映射？
+{report_required_check_zh}
 
 # Output Format
 请严格按以下结构输出精炼 Markdown。每个 blocker 或 gap 都必须包含 Section 名称和证据依据。
@@ -1579,29 +2136,12 @@ Return only concise Markdown in English. Every blocker or gap must include a sec
 - **优先级：** P2
   - **Section：** [section title]
   - **Clarification：** [非阻塞澄清问题或文案清理。]
-
-### Report Generation Feasibility / 报表生成可行性
-1. **Template / Sheet：** [template title / sheet name，或 Cannot assess report template feasibility because linked artifact was not reviewed.]
-   - **Generation feasibility：** [Ready / Risky / Not Ready]
-   - **Format issue：** [表头、合并单元格、公式、隐藏行列、重复字段、动态行或版式问题。]
-   - **Technical generation risk：** [为什么系统生成 XLSX 会不稳定或有歧义。]
-   - **PRD mapping gap：** [缺失的 PRD 字段定义、来源规则、行复制规则、快照规则或 fallback。]
-   - **Suggested PRD patch：** [PM 应补进 PRD 的具体文案/表格/规则。]
-   - **QA acceptance check：** [QA 如何按模板验收生成结果。]
-   - **Evidence basis：** [Spreadsheet evidence reviewed / Linked artifact not reviewed]
-   - **Used in findings：** [Yes/No]
-   - **Related finding：** [P0/P1/P2 item id 或 "-"]
-   - **Reason：** [这个模板证据如何改变了评审结论。]
-
-### Report Template Risks / 报表模板风险
-- [来自已读模板的优先级风险；如果没有可读模板，说明 coverage gap。]
-
-### PRD-to-Template Mapping Gaps / PRD 到模板映射缺口
-- [PRD 为支持模板生成必须定义的字段、行规则、状态、日期、数据源、快照时间或兜底规则。]
+{screenshot_output_zh}{report_output_zh}
 
 ### Evidence Coverage / 证据覆盖
 - **Current PRD sections reviewed：** [简要覆盖范围]
-- **Report templates：** [已读数量和未读模板及原因]
+{report_coverage_zh}
+{screenshot_coverage_zh}
 
 ### PM Decision Checklist
 - [PM 需要回答的具体 yes/no 或规则选择问题，按优先级排序。]
@@ -1618,6 +2158,7 @@ Return only concise Markdown in English. Every blocker or gap must include a sec
 {source}
 
 {linked_source}
+{screenshot_source}
 """
 
 
@@ -1849,7 +2390,7 @@ def build_prd_review_batch_prompt(
     source = _build_prd_source(page, max_chars=PRD_REVIEW_MAX_SOURCE_CHARS)
     if normalize_prd_review_language(language) == "en":
         return f"""# Task
-Review this PRD section batch for delivery-readiness evidence. Identify only material P0/P1/P2 delivery gaps from these sections, with section titles and evidence basis. Keep it concise; this will be synthesized with other batches.
+Review this PRD section batch for delivery-readiness evidence. Identify only material P0/P1/P2 delivery gaps from these sections, with section titles and evidence basis. Keep it concise; this will be synthesized with other batches. Do not treat `[MEDIA_ID_x]` placeholders themselves as PRD defects.
 
 # Context
 - Jira ID: {jira_id or "-"}
@@ -1862,7 +2403,7 @@ Review this PRD section batch for delivery-readiness evidence. Identify only mat
 {source}
 """
     return f"""# Task
-请评审这个 PRD section batch 的交付就绪度证据。只识别这些 section 内真正重要的 P0/P1/P2 交付缺口，必须带 section title 和 evidence basis。保持精炼，后续会和其他 batch 合成最终评审。
+请评审这个 PRD section batch 的交付就绪度证据。只识别这些 section 内真正重要的 P0/P1/P2 交付缺口，必须带 section title 和 evidence basis。保持精炼，后续会和其他 batch 合成最终评审。不能把 `[MEDIA_ID_x]` 占位符本身当作 PRD 缺口。
 
 # Context
 - Jira ID: {jira_id or "-"}
@@ -1885,9 +2426,29 @@ def build_prd_review_synthesis_prompt(
     language: str,
     batch_outputs: list[dict[str, Any]],
     linked_spreadsheet_evidence: dict[str, Any] | None,
+    google_sheet_screenshot_evidence: dict[str, Any] | None = None,
 ) -> str:
     batch_reviews = _batch_outputs_markdown(batch_outputs)
     linked_source = _build_linked_spreadsheet_prompt_section(linked_spreadsheet_evidence or {})
+    screenshot_source = _build_google_sheet_screenshot_prompt_section(google_sheet_screenshot_evidence or {})
+    include_report_sections = _is_report_or_template_prd(page, linked_spreadsheet_evidence)
+    include_screenshot_sections = bool(screenshot_source)
+    report_headings = (
+        "### Report Generation Feasibility\n### Report Template Risks\n### PRD-to-Template Mapping Gaps"
+        if include_report_sections
+        else ""
+    )
+    screenshot_headings = "### Google Sheet Screenshot Template Assessment" if include_screenshot_sections else ""
+    report_instruction = (
+        "Report-template findings must include Template / Sheet, Generation feasibility, Format issue, Technical generation risk, PRD mapping gap, QA acceptance check, Used in findings, Related finding, and Reason. If a linked report template was not readable, write `Cannot assess report template feasibility because linked artifact was not reviewed.`"
+        if include_report_sections
+        else ""
+    )
+    screenshot_instruction = (
+        "Google Sheet screenshot findings must include Template / Screenshot, Generation / configuration feasibility, Format issue, PRD mapping gap, Suggested PRD patch, QA acceptance check, and Evidence basis. Never treat `[MEDIA_ID_x]` placeholders themselves as PRD defects."
+        if include_screenshot_sections
+        else "Never treat `[MEDIA_ID_x]` placeholders themselves as PRD defects."
+    )
     if normalize_prd_review_language(language) == "en":
         return f"""# Role
 You are a senior PRD delivery-readiness reviewer using the `prd-review` skill.
@@ -1900,13 +2461,12 @@ Synthesize the batch reviews into one final prioritized PRD assessment. Keep onl
 ### Top Must-Fix Delivery Blockers
 ### Section Patch Suggestions
 ### Secondary Clarifications
-### Report Generation Feasibility
-### Report Template Risks
-### PRD-to-Template Mapping Gaps
+{screenshot_headings}
+{report_headings}
 ### Evidence Coverage
 ### PM Decision Checklist
 
-Every finding must include Priority, Section, Problem, Why this is important, Suggested PRD patch, Acceptance check, and Evidence basis. Report-template findings must include Template / Sheet, Generation feasibility, Format issue, Technical generation risk, PRD mapping gap, QA acceptance check, Used in findings, Related finding, and Reason. If evidence is not in the reviewed sections, write `Source not found in selected sections`. If a linked report template was not readable, write `Cannot assess report template feasibility because linked artifact was not reviewed.`
+Every finding must include Priority, Section, Problem, Why this is important, Suggested PRD patch, Acceptance check, and Evidence basis. {report_instruction} {screenshot_instruction} If evidence is not in the reviewed sections, write `Source not found in selected sections`.
 
 # Context
 - Jira ID: {jira_id or "-"}
@@ -1919,6 +2479,7 @@ Every finding must include Priority, Section, Problem, Why this is important, Su
 {batch_reviews}
 
 {linked_source}
+{screenshot_source}
 """
     return f"""# Role
 你是一位资深 PRD 交付就绪度评审专家，使用 `prd-review` Skill 的方法论工作。
@@ -1931,13 +2492,12 @@ Every finding must include Priority, Section, Problem, Why this is important, Su
 ### Top Must-Fix Delivery Blockers
 ### Section Patch Suggestions
 ### Secondary Clarifications
-### Report Generation Feasibility
-### Report Template Risks
-### PRD-to-Template Mapping Gaps
+{screenshot_headings}
+{report_headings}
 ### Evidence Coverage
 ### PM Decision Checklist
 
-每条 finding 必须包含优先级、Section、Problem、Why this is important、Suggested PRD patch、Acceptance check、Evidence basis。Report-template finding 必须包含 Template / Sheet、Generation feasibility、Format issue、Technical generation risk、PRD mapping gap、QA acceptance check、Used in findings、Related finding、Reason。如果 reviewed sections 没有依据，写 `Source not found in selected sections`。如果 linked report template 不可读，写 `Cannot assess report template feasibility because linked artifact was not reviewed.`
+每条 finding 必须包含优先级、Section、Problem、Why this is important、Suggested PRD patch、Acceptance check、Evidence basis。{report_instruction} {screenshot_instruction} 如果 reviewed sections 没有依据，写 `Source not found in selected sections`。
 
 # Context
 - Jira ID: {jira_id or "-"}
@@ -1950,6 +2510,7 @@ Every finding must include Priority, Section, Problem, Why this is important, Su
 {batch_reviews}
 
 {linked_source}
+{screenshot_source}
 """
 
 
@@ -1981,6 +2542,7 @@ def build_prd_review_system_text(language: str | None = "zh") -> str:
         "Every important blocker or gap must name the affected PRD section and include Priority, Problem, Why this is important, "
         "Suggested PRD patch, Acceptance check, and Evidence basis. If evidence is not in the selected sections, "
         "say `Source not found in selected sections`. "
+        "Never treat `[MEDIA_ID_x]` placeholders themselves as PRD defects; only use extracted image evidence when it is provided. "
         "For report-generation PRDs, assess reviewed Google Sheet or Excel templates for report format reasonableness, "
         "generation feasibility, PRD-to-template mapping gaps, and QA acceptance checks. State whether spreadsheet evidence "
         "was used in findings and which finding it changed. "
@@ -2016,6 +2578,7 @@ def _generate_with_codex(
     workspace_root: Path,
     system_text: str,
     prompt_mode: str,
+    image_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     provider = CodexCliBridgeSourceCodeQALLMProvider(
         workspace_root=workspace_root,
@@ -2029,6 +2592,7 @@ def _generate_with_codex(
             "systemInstruction": {"parts": [{"text": system_text}]},
             "contents": [{"parts": [{"text": prompt}]}],
             "codex_prompt_mode": prompt_mode,
+            **({"_codex_image_paths": list(image_paths)} if image_paths else {}),
         },
         primary_model=os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"),
         fallback_model=os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"),
