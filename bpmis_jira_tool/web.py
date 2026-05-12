@@ -2908,30 +2908,35 @@ def _run_prd_generation_job(
         def progress_callback(stage: str, message: str, current: int, total: int) -> None:
             job_store.update(job_id, state="running", stage=stage, message=message, current=current, total=total)
 
+        def call_prd_service(method: Any, request_model: Any) -> dict[str, Any]:
+            try:
+                return method(request_model, progress_callback=progress_callback)
+            except TypeError as error:
+                if "progress_callback" not in str(error):
+                    raise
+                return method(request_model)
+
         try:
-            progress_callback("reading_prd", "Reading PRD content.", 0, 2)
+            progress_callback("reading_prd", "Reading PRD.", 0, 4)
             if action == "team_review":
                 if _local_agent_source_code_qa_enabled(settings):
                     data = _build_local_agent_client(settings).prd_review(request_payload, progress_callback=progress_callback)
                 else:
-                    progress_callback("generating_review", "Generating AI PRD review.", 1, 2)
-                    data = _build_prd_review_service(settings).review(PRDReviewRequest(**request_payload))
+                    data = call_prd_service(_build_prd_review_service(settings).review, PRDReviewRequest(**request_payload))
                 result_action = "review"
                 title = "PRD Review"
             elif action == "team_summary":
                 if _local_agent_source_code_qa_enabled(settings):
                     data = _build_local_agent_client(settings).prd_summary(request_payload, progress_callback=progress_callback)
                 else:
-                    progress_callback("generating_summary", "Generating PRD summary.", 1, 2)
-                    data = _build_prd_review_service(settings).summarize(PRDReviewRequest(**request_payload))
+                    data = call_prd_service(_build_prd_review_service(settings).summarize, PRDReviewRequest(**request_payload))
                 result_action = "summary"
                 title = "PRD Summary"
             elif action == "self_review":
                 if _local_agent_source_code_qa_enabled(settings):
                     data = _build_local_agent_client(settings).prd_self_assessment_review(request_payload, progress_callback=progress_callback)
                 else:
-                    progress_callback("generating_review", "Generating AI PRD review.", 1, 2)
-                    data = _build_prd_review_service(settings).review_url(PRDBriefingReviewRequest(**request_payload))
+                    data = call_prd_service(_build_prd_review_service(settings).review_url, PRDBriefingReviewRequest(**request_payload))
                 result_action = "review"
                 title = "AI PRD Review"
                 _save_prd_latest_result(
@@ -2943,8 +2948,7 @@ def _run_prd_generation_job(
                 if _local_agent_source_code_qa_enabled(settings):
                     data = _build_local_agent_client(settings).prd_self_assessment_summary(request_payload, progress_callback=progress_callback)
                 else:
-                    progress_callback("generating_summary", "Generating PRD summary.", 1, 2)
-                    data = _build_prd_review_service(settings).summarize_url(PRDBriefingReviewRequest(**request_payload))
+                    data = call_prd_service(_build_prd_review_service(settings).summarize_url, PRDBriefingReviewRequest(**request_payload))
                 result_action = "summary"
                 title = "PRD Summary"
                 _save_prd_latest_result(

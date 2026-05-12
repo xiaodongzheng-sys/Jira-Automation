@@ -2014,11 +2014,20 @@ def _run_prd_job(app: Flask, job_id: str, payload: dict[str, Any], action: str) 
         def progress(stage: str, message: str, current: int, total: int) -> None:
             job_store.update(job_id, state="running", stage=stage, message=message, current=current, total=total)
 
+        def call_prd_service(method: Any, request_model: Any) -> dict[str, Any]:
+            try:
+                return method(request_model, progress_callback=progress)
+            except TypeError as error:
+                if "progress_callback" not in str(error):
+                    raise
+                return method(request_model)
+
         try:
-            progress("reading_prd", "Reading PRD content on Mac local-agent.", 0, 2)
+            progress("reading_prd", "Reading PRD.", 0, 4)
             service = _build_prd_review_service(current_app.config["SETTINGS"])
             if action == "team_review":
-                result = service.review(
+                result = call_prd_service(
+                    service.review,
                     PRDReviewRequest(
                         owner_key=str(payload.get("owner_key") or ""),
                         jira_id=str(payload.get("jira_id") or ""),
@@ -2026,24 +2035,25 @@ def _run_prd_job(app: Flask, job_id: str, payload: dict[str, Any], action: str) 
                         prd_url=str(payload.get("prd_url") or ""),
                         force_refresh=bool(payload.get("force_refresh")),
                         google_credentials=payload.get("google_credentials") if isinstance(payload.get("google_credentials"), dict) else None,
-                    )
+                    ),
                 )
                 notice_title = "PRD Review"
             elif action == "team_summary":
-                result = service.summarize(
+                result = call_prd_service(
+                    service.summarize,
                     PRDReviewRequest(
                         owner_key=str(payload.get("owner_key") or ""),
                         jira_id=str(payload.get("jira_id") or ""),
                         jira_link=str(payload.get("jira_link") or ""),
                         prd_url=str(payload.get("prd_url") or ""),
                         force_refresh=bool(payload.get("force_refresh")),
-                    )
+                    ),
                 )
                 notice_title = "PRD Summary"
             elif action == "self_review":
                 owner_key = str(payload.get("owner_key") or "")
-                progress("generating_review", "Generating AI PRD review on Mac local-agent.", 1, 2)
-                result = service.review_url(
+                result = call_prd_service(
+                    service.review_url,
                     PRDBriefingReviewRequest(
                         owner_key=owner_key,
                         prd_url=str(payload.get("prd_url") or ""),
@@ -2052,20 +2062,20 @@ def _run_prd_job(app: Flask, job_id: str, payload: dict[str, Any], action: str) 
                         selected_section_indexes=payload.get("selected_section_indexes"),
                         include_linked_spreadsheets=bool(payload.get("include_linked_spreadsheets", True)),
                         google_credentials=payload.get("google_credentials") if isinstance(payload.get("google_credentials"), dict) else None,
-                    )
+                    ),
                 )
                 _save_prd_latest_result(current_app.config["SETTINGS"], owner_key=owner_key, tool_key="prd_self_assessment", payload={"action": "review", "payload": result})
                 notice_title = "AI PRD Review"
             elif action == "self_summary":
                 owner_key = str(payload.get("owner_key") or "")
-                progress("generating_summary", "Generating PRD summary on Mac local-agent.", 1, 2)
-                result = service.summarize_url(
+                result = call_prd_service(
+                    service.summarize_url,
                     PRDBriefingReviewRequest(
                         owner_key=owner_key,
                         prd_url=str(payload.get("prd_url") or ""),
                         language=str(payload.get("language") or "zh"),
                         force_refresh=bool(payload.get("force_refresh")),
-                    )
+                    ),
                 )
                 _save_prd_latest_result(current_app.config["SETTINGS"], owner_key=owner_key, tool_key="prd_self_assessment", payload={"action": "summary", "payload": result})
                 notice_title = "PRD Summary"

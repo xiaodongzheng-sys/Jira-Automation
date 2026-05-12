@@ -121,28 +121,38 @@ class FakeDriveExecute:
 
 
 class FakeDriveFiles:
-    def __init__(self, workbook_content: bytes):
+    def __init__(self, workbook_content: bytes, *, modified_time: str = "2026-05-12T10:00:00.000Z"):
         self.workbook_content = workbook_content
+        self.modified_time = modified_time
+        self.get_calls = 0
+        self.export_calls = 0
 
     def get(self, **_kwargs):
+        self.get_calls += 1
         return FakeDriveExecute(
             {
                 "id": "sheet123",
                 "name": "MAS Outsourcing Register",
                 "mimeType": "application/vnd.google-apps.spreadsheet",
+                "modifiedTime": self.modified_time,
             }
         )
 
     def export_media(self, **_kwargs):
+        self.export_calls += 1
+        return FakeDriveExecute(self.workbook_content)
+
+    def get_media(self, **_kwargs):
+        self.export_calls += 1
         return FakeDriveExecute(self.workbook_content)
 
 
 class FakeDriveService:
-    def __init__(self, workbook_content: bytes):
-        self.workbook_content = workbook_content
+    def __init__(self, workbook_content: bytes, *, modified_time: str = "2026-05-12T10:00:00.000Z"):
+        self.files_resource = FakeDriveFiles(workbook_content, modified_time=modified_time)
 
     def files(self):
-        return FakeDriveFiles(self.workbook_content)
+        return self.files_resource
 
 
 def _xlsx_bytes(*, sheet_count: int = 1, marker: str = "MAS format") -> bytes:
@@ -1318,6 +1328,94 @@ class PRDBriefingServiceTests(unittest.TestCase):
 
         self.assertEqual(result["coverage"]["linked_artifacts_reviewed"], 1)
         self.assertIn("Google Sheet format", mock_generate.call_args.kwargs["prompt"])
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_prd_self_assessment_google_sheet_artifact_cache_skips_second_export_when_unchanged(self, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        page = self.service.confluence.page
+        page.sections[1].section_path = "3.11.1 Report Layout and Field Name & Format"
+        page.sections[1].spreadsheet_links = [
+            SpreadsheetLink(
+                title="MAS Outsourcing Register Google Sheet",
+                url="https://docs.google.com/spreadsheets/d/sheet123/edit#gid=0",
+                source_section="Rollout",
+                filename="",
+            )
+        ]
+        drive_service = FakeDriveService(_xlsx_bytes(marker="Cached Google Sheet format"))
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeConnector(page),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+        request = PRDBriefingReviewRequest(
+            owner_key="anon:test",
+            prd_url="https://example.atlassian.net/wiki/pages/123",
+            language="en",
+            selected_section_indexes=[2],
+            force_refresh=True,
+            google_credentials={
+                "token": "x",
+                "scopes": ["https://www.googleapis.com/auth/drive.readonly"],
+            },
+        )
+
+        with patch("bpmis_jira_tool.gmail_dashboard.build_drive_api_service", return_value=drive_service):
+            first = service.review_url(request)
+            second = service.review_url(request)
+
+        self.assertEqual(drive_service.files_resource.export_calls, 1)
+        self.assertFalse(first["coverage"]["linked_artifacts"][0]["cache_hit"])
+        self.assertTrue(second["coverage"]["linked_artifacts"][0]["cache_hit"])
+        self.assertIn("Cached Google Sheet format", mock_generate.call_args.kwargs["prompt"])
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_prd_review_progress_reports_prd_template_metadata_and_generation_stages(self, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        page = self.service.confluence.page
+        page.sections[1].section_path = "3.11.1 Report Layout and Field Name & Format"
+        page.sections[1].spreadsheet_links = [
+            SpreadsheetLink(
+                title="MAS Outsourcing Register.xlsx",
+                url="https://example.atlassian.net/download/attachments/123/MAS%20Outsourcing%20Register.xlsx",
+                source_section="Rollout",
+                filename="MAS Outsourcing Register.xlsx",
+            )
+        ]
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeAttachmentConnector(page, _xlsx_bytes(marker="progress format")),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+        progress_events = []
+
+        service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[2],
+            ),
+            progress_callback=lambda stage, message, current, total: progress_events.append((stage, message, current, total)),
+        )
+
+        stages = [event[0] for event in progress_events]
+        messages = [event[1] for event in progress_events]
+        self.assertIn("reading_prd", stages)
+        self.assertIn("reading_report_templates", stages)
+        self.assertIn("analyzing_template_metadata", stages)
+        self.assertIn("generating_review", stages)
+        self.assertTrue(any("Reading 1 report templates" in message for message in messages))
 
     @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
     def test_prd_review_persists_generation_failure_and_validates_inputs(self, mock_generate):

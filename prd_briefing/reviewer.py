@@ -6,7 +6,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, unquote_plus, urlparse
 
 from bpmis_jira_tool.config import Settings
@@ -27,8 +27,10 @@ PRD_LINKED_SPREADSHEET_MAX_ROWS_PER_SHEET = 80
 PRD_LINKED_SPREADSHEET_MAX_COLS = 20
 PRD_LINKED_SPREADSHEET_MAX_TEXT_CHARS = 60_000
 PRD_REPORT_SECTION_KEYWORDS = ("report", "layout", "format", "template", "register", "field name", "字段", "报表", "报告", "模板", "格式")
+PRD_GOOGLE_SHEET_ARTIFACT_CACHE_VERSION = "v1"
 PRD_BRIEFING_REVIEW_CACHE_KEY = "__prd_briefing_url_review__"
 PRD_URL_SUMMARY_CACHE_KEY = "__prd_url_summary__"
+PRDProgressCallback = Callable[[str, str, int, int], None]
 
 
 @dataclass(frozen=True)
@@ -66,8 +68,9 @@ class PRDReviewService:
         self.settings = settings
         self.workspace_root = Path(workspace_root)
 
-    def review(self, request: PRDReviewRequest) -> dict[str, Any]:
+    def review(self, request: PRDReviewRequest, *, progress_callback: PRDProgressCallback | None = None) -> dict[str, Any]:
         normalized = self._normalize_request(request)
+        _emit_prd_progress(progress_callback, "reading_prd", "Reading PRD.", 0, 4)
         page = self.confluence.ingest_page(normalized.prd_url, "prd-review")
         if not page.sections:
             raise ToolError("PRD page did not contain readable sections.")
@@ -77,6 +80,8 @@ class PRDReviewService:
             selected_section_indexes=list(range(1, len(page.sections) + 1)),
             google_credentials=normalized.google_credentials,
             include_linked_spreadsheets=True,
+            google_sheet_cache_dir=_google_sheet_artifact_cache_dir(self.settings),
+            progress_callback=progress_callback,
         )
         coverage = _merge_linked_spreadsheet_coverage(
             _build_generation_coverage(page, mode=_generation_mode_for_page(page)),
@@ -98,6 +103,7 @@ class PRDReviewService:
         if cached and cached.get("status") == "completed" and cached.get("result_markdown"):
             return {"status": "ok", "cached": True, "review": cached, "prd": self._page_metadata(page), "coverage": coverage}
         try:
+            _emit_prd_progress(progress_callback, "generating_review", "Generating review.", 3, 4)
             generated = self._generate_prd_review(
                 jira_id=normalized.jira_id,
                 jira_link=normalized.jira_link,
@@ -134,8 +140,9 @@ class PRDReviewService:
         )
         return {"status": "ok", "cached": False, "review": review, "prd": self._page_metadata(page), "coverage": coverage}
 
-    def review_url(self, request: PRDBriefingReviewRequest) -> dict[str, Any]:
+    def review_url(self, request: PRDBriefingReviewRequest, *, progress_callback: PRDProgressCallback | None = None) -> dict[str, Any]:
         normalized = self._normalize_briefing_review_request(request)
+        _emit_prd_progress(progress_callback, "reading_prd", "Reading PRD.", 0, 4)
         page = self.confluence.ingest_page(normalized.prd_url, "prd-briefing-review")
         if not page.sections:
             raise ToolError("PRD page did not contain readable sections.")
@@ -146,6 +153,8 @@ class PRDReviewService:
             selected_section_indexes=selection["coverage"]["selected_section_indexes"],
             google_credentials=normalized.google_credentials,
             include_linked_spreadsheets=normalized.include_linked_spreadsheets,
+            google_sheet_cache_dir=_google_sheet_artifact_cache_dir(self.settings),
+            progress_callback=progress_callback,
         )
         generation_coverage = _build_generation_coverage(
             selected_page,
@@ -181,6 +190,7 @@ class PRDReviewService:
             }
 
         try:
+            _emit_prd_progress(progress_callback, "generating_review", "Generating review.", 3, 4)
             generated = self._generate_prd_review(
                 jira_id="",
                 jira_link="",
@@ -224,8 +234,9 @@ class PRDReviewService:
             "coverage": coverage,
         }
 
-    def summarize(self, request: PRDReviewRequest) -> dict[str, Any]:
+    def summarize(self, request: PRDReviewRequest, *, progress_callback: PRDProgressCallback | None = None) -> dict[str, Any]:
         normalized = self._normalize_request(request)
+        _emit_prd_progress(progress_callback, "reading_prd", "Reading PRD.", 0, 2)
         page = self.confluence.ingest_page(normalized.prd_url, "prd-summary")
         if not page.sections:
             raise ToolError("PRD page did not contain readable sections.")
@@ -245,6 +256,7 @@ class PRDReviewService:
                 "coverage": _build_generation_coverage(page, mode=_generation_mode_for_page(page)),
             }
         try:
+            _emit_prd_progress(progress_callback, "generating_summary", "Generating summary.", 1, 2)
             generated = self._generate_prd_summary(
                 jira_id=normalized.jira_id,
                 jira_link=normalized.jira_link,
@@ -286,8 +298,9 @@ class PRDReviewService:
             "coverage": _build_generation_coverage(page, mode=_generation_mode_for_page(page)),
         }
 
-    def summarize_url(self, request: PRDBriefingReviewRequest) -> dict[str, Any]:
+    def summarize_url(self, request: PRDBriefingReviewRequest, *, progress_callback: PRDProgressCallback | None = None) -> dict[str, Any]:
         normalized = self._normalize_briefing_review_request(request)
+        _emit_prd_progress(progress_callback, "reading_prd", "Reading PRD.", 0, 2)
         page = self.confluence.ingest_page(normalized.prd_url, "prd-self-assessment-summary")
         if not page.sections:
             raise ToolError("PRD page did not contain readable sections.")
@@ -309,6 +322,7 @@ class PRDReviewService:
                 "coverage": _build_generation_coverage(page, mode=_generation_mode_for_page(page)),
             }
         try:
+            _emit_prd_progress(progress_callback, "generating_summary", "Generating summary.", 1, 2)
             generated = self._generate_prd_summary(
                 jira_id="",
                 jira_link="",
@@ -692,6 +706,18 @@ def _split_prd_page_batches(page: IngestedConfluencePage, *, max_chars: int = PR
     return [_page_with_sections(page, sections) for sections in batches]
 
 
+def _emit_prd_progress(
+    progress_callback: PRDProgressCallback | None,
+    stage: str,
+    message: str,
+    current: int,
+    total: int,
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(stage, message, current, total)
+
+
 def _resolve_linked_spreadsheet_evidence(
     *,
     confluence: ConfluenceConnector,
@@ -699,6 +725,8 @@ def _resolve_linked_spreadsheet_evidence(
     selected_section_indexes: list[int],
     google_credentials: dict[str, Any] | None,
     include_linked_spreadsheets: bool,
+    google_sheet_cache_dir: Path | None = None,
+    progress_callback: PRDProgressCallback | None = None,
 ) -> dict[str, Any]:
     if not include_linked_spreadsheets:
         return {"artifacts": [], "cache_fingerprint": ""}
@@ -733,15 +761,31 @@ def _resolve_linked_spreadsheet_evidence(
             )
 
     remaining_text_chars = PRD_LINKED_SPREADSHEET_MAX_TEXT_CHARS
-    for artifact in artifacts:
+    total = len(artifacts)
+    if total:
+        _emit_prd_progress(progress_callback, "reading_report_templates", f"Reading {total} report templates.", 1, 4)
+    for index, artifact in enumerate(artifacts, start=1):
+        _emit_prd_progress(
+            progress_callback,
+            "reading_report_templates",
+            f"Reading {index}/{total} report templates.",
+            min(index, total),
+            max(total, 1),
+        )
         _resolve_one_linked_spreadsheet(
             confluence=confluence,
             artifact=artifact,
             google_credentials=google_credentials,
             remaining_text_chars=max(remaining_text_chars, 0),
+            google_sheet_cache_dir=google_sheet_cache_dir,
+            progress_callback=progress_callback,
+            artifact_index=index,
+            artifact_total=total,
         )
         if artifact.get("status") == "ok":
             remaining_text_chars -= len(str(artifact.get("text") or ""))
+    if total:
+        _emit_prd_progress(progress_callback, "analyzing_template_metadata", "Analyzing template metadata.", 2, 4)
 
     fingerprint = "|".join(
         f"{item.get('source_section_index')}:{item.get('url')}:{item.get('status')}:{item.get('reason')}:{item.get('content_hash')}:{item.get('metadata_hash')}:{item.get('sheet_count')}:{item.get('skipped_sheet_count')}"
@@ -761,6 +805,10 @@ def _resolve_one_linked_spreadsheet(
     artifact: dict[str, Any],
     google_credentials: dict[str, Any] | None,
     remaining_text_chars: int,
+    google_sheet_cache_dir: Path | None = None,
+    progress_callback: PRDProgressCallback | None = None,
+    artifact_index: int = 0,
+    artifact_total: int = 0,
 ) -> None:
     url = str(artifact.get("url") or "")
     lowered = f"{url} {artifact.get('filename') or ''} {artifact.get('title') or ''}".casefold()
@@ -769,22 +817,52 @@ def _resolve_one_linked_spreadsheet(
         return
     try:
         if _is_google_spreadsheet_url(url):
-            content = _download_google_spreadsheet(url=url, google_credentials=google_credentials)
+            cached = _load_cached_google_spreadsheet_artifact(
+                url=url,
+                google_credentials=google_credentials,
+                cache_dir=google_sheet_cache_dir,
+                max_chars=remaining_text_chars,
+            )
+            if cached is not None:
+                artifact.update({"status": "ok", "reason": "", **cached, "cache_hit": True})
+                return
+            content, drive_metadata = _download_google_spreadsheet(url=url, google_credentials=google_credentials)
         elif _is_confluence_spreadsheet_url(url):
             response = confluence._request(  # noqa: SLF001 - local PRD connector owns authenticated Confluence fetches.
                 url,
                 accept="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12,*/*;q=0.8",
             )
             content = bytes(getattr(response, "content", b"") or b"")
+            drive_metadata = {}
         else:
             artifact.update({"status": "failed", "reason": "unsupported_link"})
             return
         if not content:
             artifact.update({"status": "failed", "reason": "empty_download"})
             return
-        artifact["content_hash"] = hashlib.sha256(content).hexdigest()[:16]
-        extracted = _extract_workbook_text(content, max_chars=remaining_text_chars)
+        _emit_prd_progress(
+            progress_callback,
+            "analyzing_template_metadata",
+            f"Analyzing template metadata {artifact_index}/{artifact_total}." if artifact_total else "Analyzing template metadata.",
+            min(max(artifact_index, 1), max(artifact_total, 1)),
+            max(artifact_total, 1),
+        )
+        content_hash = hashlib.sha256(content).hexdigest()[:16]
+        artifact["content_hash"] = content_hash
+        is_google = _is_google_spreadsheet_url(url)
+        extract_max_chars = PRD_LINKED_SPREADSHEET_MAX_TEXT_CHARS if is_google else remaining_text_chars
+        extracted_full = _extract_workbook_text(content, max_chars=extract_max_chars)
+        extracted = dict(extracted_full)
+        if is_google:
+            extracted = _limit_extracted_workbook_text(extracted, max_chars=remaining_text_chars)
         artifact.update({"status": "ok", "reason": "", **extracted})
+        if is_google:
+            _store_cached_google_spreadsheet_artifact(
+                url=url,
+                drive_metadata=drive_metadata,
+                cache_dir=google_sheet_cache_dir,
+                extracted={**extracted_full, "content_hash": content_hash},
+            )
     except ToolError as error:
         artifact.update({"status": "failed", "reason": str(error)})
     except Exception as error:  # noqa: BLE001 - artifact coverage should not block the PRD review.
@@ -805,7 +883,7 @@ def _is_confluence_spreadsheet_url(url: str) -> bool:
     return "/download/attachments/" in path and (path.endswith(".xlsx") or path.endswith(".xlsm") or ".xlsx" in path or ".xlsm" in path)
 
 
-def _download_google_spreadsheet(*, url: str, google_credentials: dict[str, Any] | None) -> bytes:
+def _download_google_spreadsheet(*, url: str, google_credentials: dict[str, Any] | None) -> tuple[bytes, dict[str, Any]]:
     if not google_credentials:
         raise ToolError("missing_google_credentials")
     try:
@@ -820,7 +898,7 @@ def _download_google_spreadsheet(*, url: str, google_credentials: dict[str, Any]
         raise ToolError("google_file_id_not_found")
     service = build_drive_api_service(Credentials(**google_credentials))
     try:
-        metadata = service.files().get(fileId=file_id, fields="id,name,mimeType").execute()
+        metadata = service.files().get(fileId=file_id, fields="id,name,mimeType,modifiedTime,md5Checksum,size").execute()
         mime_type = str(metadata.get("mimeType") or "")
         if mime_type == "application/vnd.google-apps.spreadsheet":
             content = (
@@ -831,13 +909,13 @@ def _download_google_spreadsheet(*, url: str, google_credentials: dict[str, Any]
                 )
                 .execute()
             )
-            return _coerce_download_bytes(content)
+            return _coerce_download_bytes(content), _normalize_drive_metadata(metadata)
         if mime_type in {
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "application/vnd.ms-excel.sheet.macroEnabled.12",
         }:
             content = service.files().get_media(fileId=file_id).execute()
-            return _coerce_download_bytes(content)
+            return _coerce_download_bytes(content), _normalize_drive_metadata(metadata)
         raise ToolError(f"unsupported_google_drive_mime_type:{mime_type or 'unknown'}")
     except HttpError as error:
         status = int(getattr(getattr(error, "resp", None), "status", 0) or 0)
@@ -857,6 +935,126 @@ def _google_drive_file_id_from_url(url: str) -> str:
     if query.get("id"):
         return str(query["id"][0] or "").strip()
     return ""
+
+
+def _google_sheet_artifact_cache_dir(settings: Settings) -> Path | None:
+    data_dir = getattr(settings, "team_portal_data_dir", None)
+    if not data_dir:
+        return None
+    return Path(data_dir) / "prd_briefing" / "cache" / "google_sheet_artifacts"
+
+
+def _normalize_drive_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(metadata.get("id") or ""),
+        "name": str(metadata.get("name") or ""),
+        "mimeType": str(metadata.get("mimeType") or ""),
+        "modifiedTime": str(metadata.get("modifiedTime") or ""),
+        "md5Checksum": str(metadata.get("md5Checksum") or ""),
+        "size": str(metadata.get("size") or ""),
+    }
+
+
+def _google_sheet_artifact_cache_key(*, url: str, drive_metadata: dict[str, Any]) -> str:
+    file_id = str(drive_metadata.get("id") or _google_drive_file_id_from_url(url) or "")
+    modified_time = str(drive_metadata.get("modifiedTime") or "")
+    mime_type = str(drive_metadata.get("mimeType") or "")
+    digest = hashlib.sha256(
+        json.dumps(
+            {
+                "version": PRD_GOOGLE_SHEET_ARTIFACT_CACHE_VERSION,
+                "file_id": file_id,
+                "modified_time": modified_time,
+                "mime_type": mime_type,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return digest
+
+
+def _load_cached_google_spreadsheet_artifact(
+    *,
+    url: str,
+    google_credentials: dict[str, Any] | None,
+    cache_dir: Path | None,
+    max_chars: int,
+) -> dict[str, Any] | None:
+    if not google_credentials or cache_dir is None:
+        return None
+    try:
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.errors import HttpError
+
+        from bpmis_jira_tool.gmail_dashboard import build_drive_api_service
+    except ImportError as error:
+        raise ToolError("google_drive_reader_unavailable") from error
+    file_id = _google_drive_file_id_from_url(url)
+    if not file_id:
+        raise ToolError("google_file_id_not_found")
+    service = build_drive_api_service(Credentials(**google_credentials))
+    try:
+        metadata = _normalize_drive_metadata(
+            service.files().get(fileId=file_id, fields="id,name,mimeType,modifiedTime,md5Checksum,size").execute()
+        )
+    except HttpError as error:
+        status = int(getattr(getattr(error, "resp", None), "status", 0) or 0)
+        if status in {401, 403, 404}:
+            raise ToolError("permission_denied") from error
+        raise ToolError(f"google_drive_metadata_failed:{status or 'unknown'}") from error
+    cache_path = cache_dir / f"{_google_sheet_artifact_cache_key(url=url, drive_metadata=metadata)}.json"
+    if not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("version") != PRD_GOOGLE_SHEET_ARTIFACT_CACHE_VERSION:
+        return None
+    if payload.get("drive_metadata") != metadata:
+        return None
+    extracted = payload.get("extracted")
+    if not isinstance(extracted, dict):
+        return None
+    return _limit_extracted_workbook_text({**extracted, "drive_metadata": metadata}, max_chars=max_chars)
+
+
+def _store_cached_google_spreadsheet_artifact(
+    *,
+    url: str,
+    drive_metadata: dict[str, Any],
+    cache_dir: Path | None,
+    extracted: dict[str, Any],
+) -> None:
+    if cache_dir is None:
+        return
+    metadata = _normalize_drive_metadata(drive_metadata)
+    if not metadata.get("id") or not metadata.get("modifiedTime"):
+        return
+    payload = {
+        "version": PRD_GOOGLE_SHEET_ARTIFACT_CACHE_VERSION,
+        "url": url,
+        "drive_metadata": metadata,
+        "extracted": extracted,
+    }
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / f"{_google_sheet_artifact_cache_key(url=url, drive_metadata=metadata)}.json"
+        cache_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    except OSError:
+        return
+
+
+def _limit_extracted_workbook_text(extracted: dict[str, Any], *, max_chars: int) -> dict[str, Any]:
+    payload = dict(extracted)
+    text = str(payload.get("text") or "")
+    if max_chars <= 0:
+        payload["text"] = "[Linked spreadsheet text omitted because the linked artifact text limit was reached.]"
+        return payload
+    if len(text) > max_chars:
+        payload["text"] = text[:max_chars]
+    return payload
 
 
 def _coerce_download_bytes(content: Any) -> bytes:
@@ -1026,6 +1224,7 @@ def _linked_artifact_public_payload(item: dict[str, Any]) -> dict[str, Any]:
         "skipped_sheet_count": int(item.get("skipped_sheet_count") or 0),
         "char_count": len(str(item.get("text") or "")),
         "metadata_hash": str(item.get("metadata_hash") or ""),
+        "cache_hit": bool(item.get("cache_hit")),
         "template_metadata": item.get("template_metadata") if isinstance(item.get("template_metadata"), dict) else {},
     }
 
