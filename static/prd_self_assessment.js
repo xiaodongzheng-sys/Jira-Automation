@@ -8,9 +8,19 @@
   const statusNode = root.querySelector('[data-prd-self-assessment-status]');
   const resultPanel = root.querySelector('[data-prd-self-assessment-result]');
   const buttons = [...root.querySelectorAll('[data-prd-self-assessment-action]')];
+  const loadSectionsButton = root.querySelector('[data-prd-self-assessment-load-sections]');
+  const selectAllButton = root.querySelector('[data-prd-self-assessment-select-all]');
+  const clearAllButton = root.querySelector('[data-prd-self-assessment-clear-all]');
+  const sectionSummary = root.querySelector('[data-prd-self-assessment-section-summary]');
+  const sectionList = root.querySelector('[data-prd-self-assessment-section-list]');
 
   const STORAGE_KEY = 'prd-self-assessment:last-form:v1';
   let lastAction = 'summary';
+  let sectionState = {
+    loadedUrl: '',
+    prdTitle: '',
+    sections: [],
+  };
 
   const escapeHtml = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -51,6 +61,12 @@
     if (!statusNode) return;
     statusNode.innerHTML = `<p>${escapeHtml(message)}</p>`;
     statusNode.dataset.tone = tone;
+  };
+
+  const setSectionSummary = (message, tone = 'neutral') => {
+    if (!sectionSummary) return;
+    sectionSummary.textContent = message;
+    sectionSummary.dataset.tone = tone;
   };
 
   const renderMarkdown = (value) => {
@@ -104,9 +120,33 @@
     throw new Error(`Unexpected API response format (${contentType || 'unknown'}).`);
   };
 
+  const selectedSectionIndexes = () => {
+    if (!sectionState.sections.length || !sectionList) return null;
+    return [...sectionList.querySelectorAll('input[type="checkbox"][data-section-index]:checked')]
+      .map((input) => Number(input.dataset.sectionIndex))
+      .filter((index) => Number.isInteger(index) && index > 0);
+  };
+
+  const updateReviewButtonState = () => {
+    const reviewButton = buttons.find((button) => button.dataset.prdSelfAssessmentAction === 'review');
+    if (!reviewButton || reviewButton.dataset.loading === 'true') return;
+    const selected = selectedSectionIndexes();
+    const hasLoadedSections = Array.isArray(selected);
+    reviewButton.disabled = hasLoadedSections && selected.length === 0;
+    if (hasLoadedSections && selected.length === 0) {
+      reviewButton.title = 'Select at least one PRD section to review.';
+    } else {
+      reviewButton.removeAttribute('title');
+    }
+    if (hasLoadedSections && sectionState.sections.length) {
+      setSectionSummary(`${selected.length}/${sectionState.sections.length} sections selected for AI PRD Review.`);
+    }
+  };
+
   const setLoading = (action, isLoading) => {
     buttons.forEach((button) => {
       const buttonAction = button.dataset.prdSelfAssessmentAction;
+      button.dataset.loading = isLoading ? 'true' : 'false';
       button.disabled = isLoading;
       if (!isLoading) {
         button.textContent = buttonAction === 'summary' ? 'Generate PRD Summary' : 'Generate AI PRD Review';
@@ -114,6 +154,10 @@
         button.textContent = action === 'summary' ? 'Summarizing...' : 'Reviewing...';
       }
     });
+    if (loadSectionsButton) loadSectionsButton.disabled = isLoading;
+    if (selectAllButton) selectAllButton.disabled = isLoading;
+    if (clearAllButton) clearAllButton.disabled = isLoading;
+    if (!isLoading) updateReviewButtonState();
   };
 
   const endpointFor = (action) => (
@@ -123,6 +167,90 @@
   );
 
   const latestEndpoint = () => root.dataset.latestUrl || '/api/prd-self-assessment/latest';
+  const sectionsEndpoint = () => root.dataset.sectionsUrl || '/api/prd-self-assessment/sections';
+
+  const clearSections = ({ message = 'Load sections to choose which PRD areas need review.' } = {}) => {
+    sectionState = { loadedUrl: '', prdTitle: '', sections: [] };
+    if (sectionList) {
+      sectionList.hidden = true;
+      sectionList.innerHTML = '';
+    }
+    if (selectAllButton) selectAllButton.hidden = true;
+    if (clearAllButton) clearAllButton.hidden = true;
+    setSectionSummary(message);
+    updateReviewButtonState();
+  };
+
+  const renderSections = (payload) => {
+    const sections = Array.isArray(payload.sections) ? payload.sections : [];
+    sectionState = {
+      loadedUrl: String(urlInput?.value || '').trim(),
+      prdTitle: payload.prd?.title || 'PRD',
+      sections,
+    };
+    if (!sectionList) return;
+    sectionList.hidden = false;
+    sectionList.innerHTML = sections.map((section) => {
+      const index = Number(section.index);
+      const title = section.title || `Section ${index}`;
+      const charCount = Number(section.char_count || 0);
+      return `
+        <label class="prd-section-option">
+          <input type="checkbox" data-section-index="${escapeHtml(index)}" checked>
+          <span>
+            <strong>${escapeHtml(index)}. ${escapeHtml(title)}</strong>
+            <span>${escapeHtml(charCount.toLocaleString())} chars</span>
+          </span>
+          ${section.long ? '<span class="prd-section-badge">Long</span>' : ''}
+        </label>
+      `;
+    }).join('');
+    sectionList.querySelectorAll('input[type="checkbox"][data-section-index]').forEach((input) => {
+      input.addEventListener('change', updateReviewButtonState);
+    });
+    if (selectAllButton) selectAllButton.hidden = false;
+    if (clearAllButton) clearAllButton.hidden = false;
+    setSectionSummary(`${sections.length}/${sections.length} sections selected for AI PRD Review.`);
+    updateReviewButtonState();
+  };
+
+  const loadSections = async () => {
+    const prdUrl = String(urlInput?.value || '').trim();
+    const language = languageSelect?.value === 'en' ? 'en' : 'zh';
+    saveForm();
+    if (!isValidHttpUrl(prdUrl)) {
+      const message = 'Enter a valid Confluence page URL before loading sections.';
+      setSectionSummary(message, 'error');
+      setStatus(message, 'error');
+      return;
+    }
+    if (loadSectionsButton) {
+      loadSectionsButton.disabled = true;
+      loadSectionsButton.textContent = 'Loading...';
+    }
+    setSectionSummary('Reading PRD sections...');
+    try {
+      const response = await fetch(sectionsEndpoint(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ prd_url: prdUrl, language }),
+      });
+      const payload = await parseJsonResponse(response);
+      if (!response.ok || payload.status === 'error') throw new Error(payload.message || 'Could not load PRD sections.');
+      renderSections(payload);
+      setStatus(`Loaded ${payload.sections?.length || 0} PRD sections.`, 'success');
+    } catch (error) {
+      const message = error.message || 'Could not load PRD sections.';
+      clearSections({ message });
+      setStatus(message, 'error');
+    } finally {
+      if (loadSectionsButton) {
+        loadSectionsButton.disabled = false;
+        loadSectionsButton.textContent = 'Load Sections';
+      }
+    }
+  };
 
   const renderResult = (action, payload) => {
     if (!resultPanel) return;
@@ -130,6 +258,14 @@
     const result = isSummary ? (payload.summary || {}) : (payload.review || {});
     const prd = payload.prd || {};
     const language = payload.language === 'en' ? 'English' : 'Chinese';
+    const coverage = payload.coverage || {};
+    const titles = Array.isArray(coverage.selected_section_titles) ? coverage.selected_section_titles : [];
+    const coverageLine = !isSummary && coverage.sections_assessed
+      ? `<span>Reviewed sections: ${escapeHtml(coverage.sections_assessed)}/${escapeHtml(coverage.selected_sections_total || coverage.sections_assessed)} selected${coverage.sections_total ? ` · ${escapeHtml(coverage.sections_total)} total` : ''}</span>`
+      : '';
+    const titleLine = !isSummary && titles.length
+      ? `<p class="help-text">${escapeHtml(titles.slice(0, 6).join(' · '))}${titles.length > 6 ? ` · +${escapeHtml(titles.length - 6)} more` : ''}</p>`
+      : '';
     resultPanel.hidden = false;
     resultPanel.dataset.tone = 'success';
     resultPanel.innerHTML = `
@@ -137,6 +273,8 @@
         <div>
           <strong>${escapeHtml(payload.cached ? `Cached PRD ${isSummary ? 'Summary' : 'Review'}` : `PRD ${isSummary ? 'Summary' : 'Review'}`)}</strong>
           <span>${escapeHtml(language)} · ${escapeHtml(prd.title || 'PRD')}</span>
+          ${coverageLine}
+          ${titleLine}
         </div>
         <span>${escapeHtml(result.updated_at || '')}</span>
       </div>
@@ -161,11 +299,19 @@
     lastAction = action === 'review' ? 'review' : 'summary';
     const prdUrl = String(urlInput?.value || '').trim();
     const language = languageSelect?.value === 'en' ? 'en' : 'zh';
+    const selected = lastAction === 'review' ? selectedSectionIndexes() : null;
     saveForm();
     if (!isValidHttpUrl(prdUrl)) {
       const message = 'Enter a valid Confluence page URL.';
       setStatus(message, 'error');
       renderError(message);
+      return;
+    }
+    if (Array.isArray(selected) && selected.length === 0) {
+      const message = 'Select at least one PRD section to review.';
+      setStatus(message, 'error');
+      renderError(message);
+      updateReviewButtonState();
       return;
     }
     setLoading(lastAction, true);
@@ -180,7 +326,12 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         credentials: 'same-origin',
-        body: JSON.stringify({ prd_url: prdUrl, language, force_refresh: forceRefresh }),
+        body: JSON.stringify({
+          prd_url: prdUrl,
+          language,
+          force_refresh: forceRefresh,
+          ...(Array.isArray(selected) ? { selected_section_indexes: selected } : {}),
+        }),
       });
       const payload = await parseJsonResponse(response);
       if (!response.ok) throw new Error(payload.message || 'Could not generate PRD output right now.');
@@ -222,8 +373,26 @@
 
   restoreForm();
   restoreLatestResult();
-  urlInput?.addEventListener('input', saveForm);
+  urlInput?.addEventListener('input', () => {
+    saveForm();
+    if (sectionState.loadedUrl && String(urlInput.value || '').trim() !== sectionState.loadedUrl) {
+      clearSections({ message: 'PRD URL changed. Load sections again before choosing review scope.' });
+    }
+  });
   languageSelect?.addEventListener('change', saveForm);
+  loadSectionsButton?.addEventListener('click', loadSections);
+  selectAllButton?.addEventListener('click', () => {
+    sectionList?.querySelectorAll('input[type="checkbox"][data-section-index]').forEach((input) => {
+      input.checked = true;
+    });
+    updateReviewButtonState();
+  });
+  clearAllButton?.addEventListener('click', () => {
+    sectionList?.querySelectorAll('input[type="checkbox"][data-section-index]').forEach((input) => {
+      input.checked = false;
+    });
+    updateReviewButtonState();
+  });
   form?.addEventListener('submit', (event) => {
     event.preventDefault();
     generate(lastAction);

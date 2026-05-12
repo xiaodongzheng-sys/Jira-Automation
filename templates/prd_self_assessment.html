@@ -8,6 +8,7 @@
     data-prd-self-assessment
     data-review-url="{{ review_url }}"
     data-summary-url="{{ summary_url }}"
+    data-sections-url="{{ url_for('prd_self_assessment_sections_api') }}"
     data-latest-url="{{ url_for('prd_self_assessment_latest_api') }}"
   >
     <div class="portal-compact-hero briefing-compact-hero">
@@ -35,6 +36,20 @@
             <label for="prd_self_assessment_url">Confluence Page URL</label>
             <input id="prd_self_assessment_url" name="prd_url" value="https://confluence.shopee.io/display/SPDB/V3.03+%5BPRD%5D+SME+RCF+Drawdown+Underwriting" placeholder="https://your-domain.atlassian.net/wiki/spaces/..." required data-prd-self-assessment-url>
             <p class="help-text briefing-form-help">Long PRDs may take 30-40 seconds while Codex reads the Confluence content.</p>
+          </div>
+          <div class="prd-section-picker" data-prd-self-assessment-section-picker>
+            <div class="prd-section-picker-head">
+              <div>
+                <label>Review Sections</label>
+                <p class="help-text" data-prd-self-assessment-section-summary>Load sections to choose which PRD areas need review.</p>
+              </div>
+              <div class="button-row">
+                <button class="button button-secondary" type="button" data-prd-self-assessment-load-sections>Load Sections</button>
+                <button class="button button-secondary" type="button" data-prd-self-assessment-select-all hidden>Select all</button>
+                <button class="button button-secondary" type="button" data-prd-self-assessment-clear-all hidden>Clear all</button>
+              </div>
+            </div>
+            <div class="prd-section-list" data-prd-self-assessment-section-list hidden></div>
           </div>
           <div>
             <label for="prd_self_assessment_language">Output Language</label>

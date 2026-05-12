@@ -955,6 +955,7 @@ def create_app() -> Flask:
                 _get_user_identity=_get_user_identity,
                 _current_release_revision=_current_release_revision,
                 _run_prd_self_assessment_action=_run_prd_self_assessment_action,
+                _run_prd_self_assessment_sections=_run_prd_self_assessment_sections,
                 _local_agent_source_code_qa_enabled=_local_agent_source_code_qa_enabled,
                 _build_local_agent_client=_build_local_agent_client,
                 _get_prd_latest_result=_get_prd_latest_result,
@@ -2789,6 +2790,8 @@ def _run_prd_self_assessment_action(settings: Settings, *, action: str):
         "language": str(payload.get("language") or "zh"),
         "force_refresh": bool(payload.get("force_refresh")),
     }
+    if "selected_section_indexes" in payload:
+        request_payload["selected_section_indexes"] = payload.get("selected_section_indexes")
     event_prefix = f"prd_self_assessment_{action}"
     try:
         if _local_agent_source_code_qa_enabled(settings):
@@ -2844,6 +2847,62 @@ def _run_prd_self_assessment_action(settings: Settings, *, action: str):
                 {
                     "status": "error",
                     "message": f"PRD {action} failed unexpectedly. Please retry or share the request ID.",
+                    **_classify_portal_error(error),
+                }
+            ),
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+        )
+
+
+def _run_prd_self_assessment_sections(settings: Settings):
+    access_gate = _require_prd_self_assessment_access(settings, api=True)
+    if access_gate is not None:
+        return access_gate
+    payload = request.get_json(silent=True) or {}
+    user_identity = _get_user_identity(settings)
+    request_payload = {
+        "owner_key": str(user_identity.get("config_key") or ""),
+        "prd_url": str(payload.get("prd_url") or payload.get("page_ref") or ""),
+        "language": str(payload.get("language") or "zh"),
+    }
+    try:
+        if _local_agent_source_code_qa_enabled(settings):
+            data = _build_local_agent_client(settings).prd_self_assessment_sections(request_payload)
+        else:
+            service = _build_prd_review_service(settings)
+            data = service.list_url_sections(PRDBriefingReviewRequest(**request_payload))
+        _log_portal_event(
+            "prd_self_assessment_sections_success",
+            **_build_request_log_context(
+                settings,
+                user_identity=user_identity,
+                extra={
+                    "prd_url_hash": hashlib.sha256(request_payload["prd_url"].encode("utf-8")).hexdigest()[:12],
+                    "section_count": len(data.get("sections") or []),
+                },
+            ),
+        )
+        return jsonify(data)
+    except ToolError as error:
+        error_details = _classify_portal_error(error)
+        _log_portal_event(
+            "prd_self_assessment_sections_tool_error",
+            level=logging.WARNING,
+            **_build_request_log_context(settings, user_identity=user_identity, extra=error_details),
+        )
+        return jsonify({"status": "error", "message": str(error), **error_details}), HTTPStatus.BAD_REQUEST
+    except Exception as error:  # noqa: BLE001
+        _log_portal_event(
+            "prd_self_assessment_sections_unexpected_error",
+            level=logging.ERROR,
+            **_build_request_log_context(settings, user_identity=user_identity, extra=_classify_portal_error(error)),
+        )
+        current_app.logger.exception("PRD Self-Assessment section load failed.")
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": "Could not load PRD sections. Please retry or share the request ID.",
                     **_classify_portal_error(error),
                 }
             ),

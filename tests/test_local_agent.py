@@ -1232,6 +1232,7 @@ class LocalAgentClientTests(unittest.TestCase):
             self.assertEqual(client.prd_briefing_review({"session_id": "s"})["status"], "ok")
             self.assertEqual(client.prd_self_assessment_review({"prd": "text"})["status"], "ok")
             self.assertEqual(client.prd_self_assessment_summary({"prd": "text"})["status"], "ok")
+            self.assertEqual(client.prd_self_assessment_sections({"prd_url": "https://c"})["status"], "ok")
             self.assertEqual(client.prd_self_assessment_latest(owner_key="owner")["status"], "ok")
             self.assertEqual(client.prd_briefing_process_prd({"page_ref": "123"})["status"], "ok")
             self.assertEqual(client.prd_briefing_latest(owner_key="owner")["status"], "ok")

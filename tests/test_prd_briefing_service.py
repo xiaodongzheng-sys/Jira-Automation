@@ -516,7 +516,18 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(answer["groundedness"], "grounded")
         self.assertGreaterEqual(len(answer["citations"]), 1)
 
-    def test_prd_review_prompt_contains_review_dimensions_and_prd_sections(self):
+    def test_prd_review_skill_artifact_contains_section_guidance(self):
+        skill_path = Path("/Users/NPTSG0388/.codex/skills/prd-review/SKILL.md")
+        content = skill_path.read_text(encoding="utf-8")
+
+        self.assertIn("name: prd-review", content)
+        self.assertIn("description:", content)
+        self.assertIn("Section-by-Section Improvement Suggestions", content)
+        self.assertIn("Suggested PRD update", content)
+        self.assertIn("Acceptance check", content)
+        self.assertIn("Source not found in selected sections", content)
+
+    def test_prd_review_prompt_contains_section_improvement_guidance_and_prd_sections(self):
         page = self.service.confluence.page
 
         prompt = build_prd_review_prompt(
@@ -526,18 +537,18 @@ class PRDBriefingServiceTests(unittest.TestCase):
             page=page,
         )
 
-        self.assertIn("不问商业价值", prompt)
-        self.assertIn("不管技术细节", prompt)
-        self.assertIn("实事求是，拉开分差", prompt)
-        self.assertIn("Scoring Rubric", prompt)
-        self.assertIn("主流程闭环", prompt)
-        self.assertIn("异常分支与逆向", prompt)
-        self.assertIn("规则冲突", prompt)
-        self.assertIn("逻辑严密度评估", prompt)
+        self.assertEqual(PRD_REVIEW_PROMPT_VERSION, "v4_prd_review_skill_section_guidance")
+        self.assertIn("prd-review", prompt)
+        self.assertIn("交付逻辑评估", prompt)
+        self.assertIn("关键 Section 缺口", prompt)
+        self.assertIn("Section-by-Section 修改建议", prompt)
+        self.assertIn("建议补写", prompt)
+        self.assertIn("验收检查", prompt)
+        self.assertIn("PM 待澄清清单", prompt)
+        self.assertIn("Source not found in selected sections", prompt)
         self.assertIn("最终得分", prompt)
-        self.assertIn("Critical Blockers", prompt)
-        self.assertIn("必须补齐的异常分支", prompt)
-        self.assertIn("后勤与兜底确认", prompt)
+        self.assertNotIn("毒舌", prompt)
+        self.assertNotIn("逻辑严密度评估", prompt)
         self.assertIn("AF-123", prompt)
         self.assertIn("This PRD introduces approval workflow", prompt)
 
@@ -569,10 +580,18 @@ class PRDBriefingServiceTests(unittest.TestCase):
             prd_updated_at="2026-04-29T00:00:00Z",
             prompt_version=PRD_REVIEW_PROMPT_VERSION,
         )
+        old_prompt_cached = self.store.get_prd_review_result(
+            owner_key="anon:test",
+            jira_id="AF-123",
+            prd_url="https://example/prd",
+            prd_updated_at="2026-04-28T00:00:00Z",
+            prompt_version="v3_strict_delivery_logic_review_codex",
+        )
 
         self.assertEqual(saved["result_markdown"], "### Review")
         self.assertEqual(cached["trace"]["session_id"], "s1")
         self.assertIsNone(stale)
+        self.assertIsNone(old_prompt_cached)
 
     def test_prd_briefing_review_prompt_can_be_url_only(self):
         page = self.service.confluence.page
@@ -585,7 +604,8 @@ class PRDBriefingServiceTests(unittest.TestCase):
         )
 
         self.assertIn("Jira ID: -", prompt)
-        self.assertIn("逻辑严密度评估", prompt)
+        self.assertIn("交付逻辑评估", prompt)
+        self.assertIn("Section-by-Section 修改建议", prompt)
         self.assertIn("This PRD introduces approval workflow", prompt)
 
     def test_prd_briefing_review_english_prompt_requests_english_output(self):
@@ -600,7 +620,10 @@ class PRDBriefingServiceTests(unittest.TestCase):
         )
 
         self.assertIn("Return only concise Markdown in English", prompt)
-        self.assertIn("Logic Rigor Assessment", prompt)
+        self.assertIn("Delivery Logic Assessment", prompt)
+        self.assertIn("Section-by-Section Improvement Suggestions", prompt)
+        self.assertIn("Suggested PRD update", prompt)
+        self.assertIn("Acceptance check", prompt)
         self.assertNotIn("逻辑严密度评估", prompt)
 
     def test_prd_summary_english_prompt_requests_english_output(self):
@@ -671,6 +694,148 @@ class PRDBriefingServiceTests(unittest.TestCase):
             prompt_version=prd_briefing_review_prompt_version("zh"),
         )
         self.assertIsNone(stale)
+
+    def test_prd_self_assessment_lists_sections_in_source_order(self):
+        service = PRDReviewService(
+            store=self.store,
+            confluence=self.service.confluence,
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        payload = service.list_url_sections(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+            )
+        )
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["prd"]["title"], "Payments PRD")
+        self.assertEqual([section["index"] for section in payload["sections"]], [1, 2])
+        self.assertEqual(payload["sections"][0]["title"], "Overview")
+        self.assertGreater(payload["sections"][0]["char_count"], 0)
+        self.assertFalse(payload["sections"][0]["long"])
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_prd_self_assessment_selected_sections_limit_prompt_and_cache(self, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        service = PRDReviewService(
+            store=self.store,
+            confluence=self.service.confluence,
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        first = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[2],
+            )
+        )
+        second = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[2],
+            )
+        )
+        different_selection = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[1],
+            )
+        )
+
+        first_prompt = mock_generate.call_args_list[0].kwargs["prompt"]
+        self.assertIn("Rollout will happen", first_prompt)
+        self.assertNotIn("approval workflow", first_prompt)
+        self.assertFalse(first["cached"])
+        self.assertTrue(second["cached"])
+        self.assertFalse(different_selection["cached"])
+        self.assertEqual(mock_generate.call_count, 2)
+        self.assertTrue(first["review"]["jira_id"].startswith(f"{PRD_BRIEFING_REVIEW_CACHE_KEY}:sections:"))
+        self.assertEqual(first["coverage"]["sections_total"], 2)
+        self.assertEqual(first["coverage"]["selected_section_indexes"], [2])
+        self.assertEqual(first["coverage"]["selected_section_titles"], ["Rollout"])
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_prd_self_assessment_all_selected_reuses_full_review_cache_key(self, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        service = PRDReviewService(
+            store=self.store,
+            confluence=self.service.confluence,
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        first = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="zh",
+                selected_section_indexes=[1, 2],
+            )
+        )
+        cached = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="zh",
+            )
+        )
+
+        self.assertFalse(first["cached"])
+        self.assertTrue(cached["cached"])
+        self.assertEqual(first["review"]["jira_id"], PRD_BRIEFING_REVIEW_CACHE_KEY)
+        self.assertEqual(mock_generate.call_count, 1)
+
+    def test_prd_self_assessment_selected_sections_validate_indexes(self):
+        service = PRDReviewService(
+            store=self.store,
+            confluence=self.service.confluence,
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        with self.assertRaisesRegex(ToolError, "at least one"):
+            service.review_url(
+                PRDBriefingReviewRequest(
+                    owner_key="anon:test",
+                    prd_url="https://example.atlassian.net/wiki/pages/123",
+                    selected_section_indexes=[],
+                )
+            )
+        with self.assertRaisesRegex(ToolError, "out of range"):
+            service.review_url(
+                PRDBriefingReviewRequest(
+                    owner_key="anon:test",
+                    prd_url="https://example.atlassian.net/wiki/pages/123",
+                    selected_section_indexes=[3],
+                )
+            )
+        with self.assertRaisesRegex(ToolError, "must be a list"):
+            service.review_url(
+                PRDBriefingReviewRequest(
+                    owner_key="anon:test",
+                    prd_url="https://example.atlassian.net/wiki/pages/123",
+                    selected_section_indexes="2",
+                )
+            )
 
     @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
     def test_prd_review_persists_generation_failure_and_validates_inputs(self, mock_generate):

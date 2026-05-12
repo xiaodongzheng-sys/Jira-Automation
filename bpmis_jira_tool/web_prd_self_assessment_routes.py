@@ -24,6 +24,7 @@ def build_prd_self_assessment_handlers(ctx: Any) -> Any:
     _get_user_identity = ctx._get_user_identity
     _current_release_revision = ctx._current_release_revision
     _run_prd_self_assessment_action = ctx._run_prd_self_assessment_action
+    _run_prd_self_assessment_sections = ctx._run_prd_self_assessment_sections
 
     def prd_self_assessment_page():
         access_gate = _require_prd_self_assessment_access(settings)
@@ -43,6 +44,9 @@ def build_prd_self_assessment_handlers(ctx: Any) -> Any:
 
     def prd_self_assessment_summary_api():
         return _run_prd_self_assessment_action(settings, action="summary")
+
+    def prd_self_assessment_sections_api():
+        return _run_prd_self_assessment_sections(settings)
 
     def prd_self_assessment_latest_api():
         access_gate = _require_prd_self_assessment_access(settings, api=True)
@@ -68,6 +72,7 @@ def build_prd_self_assessment_handlers(ctx: Any) -> Any:
     handlers.prd_self_assessment_page = prd_self_assessment_page
     handlers.prd_self_assessment_review_api = prd_self_assessment_review_api
     handlers.prd_self_assessment_summary_api = prd_self_assessment_summary_api
+    handlers.prd_self_assessment_sections_api = prd_self_assessment_sections_api
     handlers.prd_self_assessment_latest_api = prd_self_assessment_latest_api
     return handlers
 
@@ -77,4 +82,5 @@ def register_prd_self_assessment_routes(app: Any, handlers: Any) -> None:
     _add_route(app, "/prd-self-assessment/", handlers.prd_self_assessment_page)
     _add_route(app, "/api/prd-self-assessment/review", handlers.prd_self_assessment_review_api, methods=["POST"])
     _add_route(app, "/api/prd-self-assessment/summary", handlers.prd_self_assessment_summary_api, methods=["POST"])
+    _add_route(app, "/api/prd-self-assessment/sections", handlers.prd_self_assessment_sections_api, methods=["POST"])
     _add_route(app, "/api/prd-self-assessment/latest", handlers.prd_self_assessment_latest_api)

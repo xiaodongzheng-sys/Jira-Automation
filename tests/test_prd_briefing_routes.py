@@ -167,6 +167,21 @@ class FakePRDReviewService:
             "prd": {"title": "PRD"},
         }
 
+    def list_url_sections(self, request):
+        self.requests.append(request)
+        if not request.prd_url:
+            from bpmis_jira_tool.errors import ToolError
+
+            raise ToolError("PRD link is required.")
+        return {
+            "status": "ok",
+            "prd": {"title": "PRD", "updated_at": "2026-04-30T00:00:00Z"},
+            "sections": [
+                {"index": 1, "title": "Overview", "char_count": 1200, "long": False},
+                {"index": 2, "title": "Workflow", "char_count": 9200, "long": True},
+            ],
+        }
+
 
 class FakePRDReviewLocalAgentClient:
     def __init__(self):
@@ -213,6 +228,14 @@ class FakePRDReviewLocalAgentClient:
                 "updated_at": "2026-04-30T00:00:00Z",
             },
             "prd": {"title": "Remote PRD"},
+        }
+
+    def prd_self_assessment_sections(self, payload):
+        self.payload = payload
+        return {
+            "status": "ok",
+            "prd": {"title": "Remote PRD"},
+            "sections": [{"index": 1, "title": "Remote Section", "char_count": 100, "long": False}],
         }
 
     def prd_self_assessment_latest(self, *, owner_key):
@@ -693,6 +716,43 @@ class PRDBriefingRouteTests(unittest.TestCase):
         self.assertIn("### Review", payload["review"]["result_markdown"])
 
     @patch("bpmis_jira_tool.web._build_prd_review_service", return_value=FakePRDReviewService())
+    def test_prd_self_assessment_sections_endpoint_returns_metadata(self, mock_service):
+        service = mock_service.return_value
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                session["google_credentials"] = {"token": "x"}
+            response = client.post(
+                "/api/prd-self-assessment/sections",
+                json={"prd_url": "https://example.atlassian.net/wiki/pages/123", "language": "en"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual([section["index"] for section in payload["sections"]], [1, 2])
+        self.assertTrue(payload["sections"][1]["long"])
+        self.assertEqual(service.requests[-1].language, "en")
+
+    @patch("bpmis_jira_tool.web._build_prd_review_service", return_value=FakePRDReviewService())
+    def test_prd_self_assessment_review_endpoint_passes_selected_sections(self, mock_service):
+        service = mock_service.return_value
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                session["google_credentials"] = {"token": "x"}
+            response = client.post(
+                "/api/prd-self-assessment/review",
+                json={
+                    "prd_url": "https://example.atlassian.net/wiki/pages/123",
+                    "language": "en",
+                    "selected_section_indexes": [2, 2, 1],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(service.requests[-1].selected_section_indexes, [2, 2, 1])
+
+    @patch("bpmis_jira_tool.web._build_prd_review_service", return_value=FakePRDReviewService())
     def test_prd_self_assessment_summary_endpoint_passes_english_language(self, mock_service):
         service = mock_service.return_value
         with self.app.test_client() as client:
@@ -757,6 +817,24 @@ class PRDBriefingRouteTests(unittest.TestCase):
         self.assertTrue(payload["cached"])
         self.assertEqual(payload["review"]["result_markdown"], "### Remote Review")
         self.assertEqual(fake_client.payload["language"], "en")
+
+    @patch("bpmis_jira_tool.web._local_agent_source_code_qa_enabled", return_value=True)
+    def test_prd_self_assessment_sections_endpoint_can_route_to_local_agent(self, _mock_enabled):
+        fake_client = FakePRDReviewLocalAgentClient()
+        with patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client):
+            with self.app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.post(
+                    "/api/prd-self-assessment/sections",
+                    json={"prd_url": "https://example.atlassian.net/wiki/pages/123", "language": "en"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["sections"][0]["title"], "Remote Section")
+        self.assertEqual(fake_client.payload["owner_key"], "google:teammate@npt.sg")
 
     @patch("bpmis_jira_tool.web._local_agent_source_code_qa_enabled", return_value=True)
     def test_prd_self_assessment_latest_endpoint_can_route_to_local_agent(self, _mock_enabled):
