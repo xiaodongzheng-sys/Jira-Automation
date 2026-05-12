@@ -395,6 +395,41 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertEqual(fake_service.request.selected_section_indexes, [27])
         self.assertEqual(fake_service.request.google_credentials["token"], "drive-token")
 
+    def test_signed_prd_self_assessment_review_async_completes_job(self):
+        class FakePRDReviewService:
+            def review_url(self, request):
+                return {
+                    "status": "ok",
+                    "cached": False,
+                    "language": request.language,
+                    "review": {"result_markdown": "### Async Review"},
+                    "prd": {"title": "PRD"},
+                    "coverage": {"selected_section_indexes": request.selected_section_indexes},
+                }
+
+        with patch("bpmis_jira_tool.local_agent_server._build_prd_review_service", return_value=FakePRDReviewService()):
+            response = self._post_signed(
+                "/api/local-agent/prd-self-assessment/review-async",
+                {
+                    "owner_key": "google:teammate@npt.sg",
+                    "prd_url": "https://confluence.shopee.io/display/SPDB/PRD",
+                    "language": "en",
+                    "selected_section_indexes": [27],
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            job_id = response.get_json()["job_id"]
+            payload = {}
+            for _ in range(20):
+                payload = self._get_signed(f"/api/local-agent/prd-jobs/{job_id}").get_json()
+                if payload.get("state") == "completed":
+                    break
+                time.sleep(0.05)
+
+        self.assertEqual(payload["state"], "completed")
+        self.assertEqual(payload["results"][0]["review"]["result_markdown"], "### Async Review")
+        self.assertEqual(payload["results"][0]["coverage"]["selected_section_indexes"], [27])
+
     def test_seatalk_service_uses_agent_daily_cache_dir(self):
         from bpmis_jira_tool.local_agent_server import _build_seatalk_service
 

@@ -25,6 +25,33 @@
     return payload;
   };
 
+  const jobUrl = (jobId) => jobsUrlTemplate.replace('__JOB_ID__', encodeURIComponent(jobId));
+  const pollJobResult = async (jobId, { fallbackMessage, onProgress } = {}) => {
+    let lastMessage = '';
+    while (true) {
+      const response = await fetch(jobUrl(jobId), {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        credentials: 'same-origin',
+      });
+      const payload = await readJson(response, fallbackMessage || 'Could not load job status.');
+      const message = payload.message || payload.progress?.message || '';
+      if (message && message !== lastMessage) {
+        lastMessage = message;
+        if (typeof onProgress === 'function') onProgress(message, payload);
+      }
+      if (payload.state === 'completed') {
+        const result = Array.isArray(payload.results) && payload.results[0] ? payload.results[0] : {};
+        if (!result || result.status === 'error') throw new Error(result.message || fallbackMessage || 'Job finished without a result.');
+        return result;
+      }
+      if (payload.state === 'failed') {
+        throw new Error(payload.error || payload.message || fallbackMessage || 'Job failed.');
+      }
+      await sleep(1200);
+    }
+  };
+
   const externalHref = (value) => {
     const text = String(value || '').trim();
     if (!text) return '';
@@ -2333,14 +2360,27 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         credentials: 'same-origin',
-        body: JSON.stringify({ jira_id: jiraId, jira_link: jiraLink, prd_url: prdUrl, force_refresh: forceRefresh }),
+        body: JSON.stringify({ jira_id: jiraId, jira_link: jiraLink, prd_url: prdUrl, force_refresh: forceRefresh, async: true }),
       });
-      const payload = await readJson(response, isSummary ? 'Could not summarize PRD.' : 'Could not review PRD.');
+      let payload = await readJson(response, isSummary ? 'Could not summarize PRD.' : 'Could not review PRD.');
+      if (payload.status === 'queued' && payload.job_id) {
+        payload = await pollJobResult(payload.job_id, {
+          fallbackMessage: isSummary ? 'Could not summarize PRD.' : 'Could not review PRD.',
+          onProgress: (message) => {
+            panel.innerHTML = `<div class="team-dashboard-review-loading">${escapeHtml(message)}</div>`;
+          },
+        });
+      }
       const result = isSummary ? (payload.summary || {}) : (payload.review || {});
+      const coverage = payload.coverage || {};
+      const coverageLine = coverage.mode
+        ? `<span>Coverage: ${escapeHtml(coverage.mode)} · ${escapeHtml(coverage.sections_covered || coverage.sections_assessed || 0)}/${escapeHtml(coverage.sections_total || coverage.selected_sections_total || 0)} sections${coverage.truncated ? ' · truncated' : ''}</span>`
+        : '';
       panel.innerHTML = `
         <div class="team-dashboard-review-meta">
           <strong>${escapeHtml(payload.cached ? `Cached PRD ${isSummary ? 'Summary' : 'Review'}` : `PRD ${isSummary ? 'Summary' : 'Review'}`)}</strong>
           <span>${escapeHtml(result.updated_at || '')}</span>
+          ${coverageLine}
         </div>
         <div class="team-dashboard-review-markdown">${renderMarkdown(result.result_markdown || '')}</div>
         <div class="team-dashboard-review-actions">

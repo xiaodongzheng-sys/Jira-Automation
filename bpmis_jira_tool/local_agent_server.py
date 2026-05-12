@@ -294,6 +294,15 @@ def create_local_agent_app() -> Flask:
         )
         return jsonify(result)
 
+    @app.post("/api/local-agent/prd-review-async")
+    def prd_review_async():
+        payload = request.get_json(silent=True) or {}
+        job_store: JobStore = current_app.config["TEAM_DASHBOARD_JOB_STORE"]
+        job = job_store.create("prd-review", title="Generate PRD Review")
+        thread = threading.Thread(target=_run_prd_job, args=(app, job.job_id, payload, "team_review"), daemon=True)
+        thread.start()
+        return jsonify({"status": "ok", "job_id": job.job_id})
+
     @app.post("/api/local-agent/prd-summary")
     def prd_summary():
         payload = request.get_json(silent=True) or {}
@@ -308,6 +317,15 @@ def create_local_agent_app() -> Flask:
             )
         )
         return jsonify(result)
+
+    @app.post("/api/local-agent/prd-summary-async")
+    def prd_summary_async():
+        payload = request.get_json(silent=True) or {}
+        job_store: JobStore = current_app.config["TEAM_DASHBOARD_JOB_STORE"]
+        job = job_store.create("prd-summary", title="Generate PRD Summary")
+        thread = threading.Thread(target=_run_prd_job, args=(app, job.job_id, payload, "team_summary"), daemon=True)
+        thread.start()
+        return jsonify({"status": "ok", "job_id": job.job_id})
 
     @app.post("/api/local-agent/prd-briefing-review")
     def prd_briefing_review():
@@ -341,6 +359,15 @@ def create_local_agent_app() -> Flask:
         _save_prd_latest_result(settings, owner_key=owner_key, tool_key="prd_self_assessment", payload={"action": "review", "payload": result})
         return jsonify(result)
 
+    @app.post("/api/local-agent/prd-self-assessment/review-async")
+    def prd_self_assessment_review_async():
+        payload = request.get_json(silent=True) or {}
+        job_store: JobStore = current_app.config["TEAM_DASHBOARD_JOB_STORE"]
+        job = job_store.create("prd-self-assessment-review", title="Generate AI PRD Review")
+        thread = threading.Thread(target=_run_prd_job, args=(app, job.job_id, payload, "self_review"), daemon=True)
+        thread.start()
+        return jsonify({"status": "ok", "job_id": job.job_id})
+
     @app.post("/api/local-agent/prd-self-assessment/summary")
     def prd_self_assessment_summary():
         payload = request.get_json(silent=True) or {}
@@ -356,6 +383,37 @@ def create_local_agent_app() -> Flask:
         )
         _save_prd_latest_result(settings, owner_key=owner_key, tool_key="prd_self_assessment", payload={"action": "summary", "payload": result})
         return jsonify(result)
+
+    @app.post("/api/local-agent/prd-self-assessment/summary-async")
+    def prd_self_assessment_summary_async():
+        payload = request.get_json(silent=True) or {}
+        job_store: JobStore = current_app.config["TEAM_DASHBOARD_JOB_STORE"]
+        job = job_store.create("prd-self-assessment-summary", title="Generate PRD Summary")
+        thread = threading.Thread(target=_run_prd_job, args=(app, job.job_id, payload, "self_summary"), daemon=True)
+        thread.start()
+        return jsonify({"status": "ok", "job_id": job.job_id})
+
+    @app.get("/api/local-agent/prd-jobs/<job_id>")
+    def prd_job_status(job_id: str):
+        job_store: JobStore = current_app.config["TEAM_DASHBOARD_JOB_STORE"]
+        snapshot = job_store.snapshot(job_id)
+        if snapshot is None:
+            message = "PRD local-agent job was interrupted by a server restart. Please start it again."
+            return jsonify(
+                {
+                    "status": "ok",
+                    "job_id": job_id,
+                    "state": "failed",
+                    "stage": "failed",
+                    "message": message,
+                    "error": message,
+                    "error_category": "server_restart",
+                    "error_code": "prd_job_interrupted",
+                    "error_retryable": True,
+                    "progress": {"stage": "failed", "current": 0, "total": 0, "message": message},
+                }
+            )
+        return jsonify({"status": "ok", **snapshot})
 
     @app.post("/api/local-agent/prd-self-assessment/sections")
     def prd_self_assessment_sections():
@@ -1946,6 +2004,82 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                 current=0,
                 total=0,
             )
+
+
+def _run_prd_job(app: Flask, job_id: str, payload: dict[str, Any], action: str) -> None:
+    with app.app_context():
+        job_store: JobStore = current_app.config["TEAM_DASHBOARD_JOB_STORE"]
+
+        def progress(stage: str, message: str, current: int, total: int) -> None:
+            job_store.update(job_id, state="running", stage=stage, message=message, current=current, total=total)
+
+        try:
+            progress("reading_prd", "Reading PRD content on Mac local-agent.", 0, 2)
+            service = _build_prd_review_service(current_app.config["SETTINGS"])
+            if action == "team_review":
+                result = service.review(
+                    PRDReviewRequest(
+                        owner_key=str(payload.get("owner_key") or ""),
+                        jira_id=str(payload.get("jira_id") or ""),
+                        jira_link=str(payload.get("jira_link") or ""),
+                        prd_url=str(payload.get("prd_url") or ""),
+                        force_refresh=bool(payload.get("force_refresh")),
+                    )
+                )
+                notice_title = "PRD Review"
+            elif action == "team_summary":
+                result = service.summarize(
+                    PRDReviewRequest(
+                        owner_key=str(payload.get("owner_key") or ""),
+                        jira_id=str(payload.get("jira_id") or ""),
+                        jira_link=str(payload.get("jira_link") or ""),
+                        prd_url=str(payload.get("prd_url") or ""),
+                        force_refresh=bool(payload.get("force_refresh")),
+                    )
+                )
+                notice_title = "PRD Summary"
+            elif action == "self_review":
+                owner_key = str(payload.get("owner_key") or "")
+                progress("generating_review", "Generating AI PRD review on Mac local-agent.", 1, 2)
+                result = service.review_url(
+                    PRDBriefingReviewRequest(
+                        owner_key=owner_key,
+                        prd_url=str(payload.get("prd_url") or ""),
+                        language=str(payload.get("language") or "zh"),
+                        force_refresh=bool(payload.get("force_refresh")),
+                        selected_section_indexes=payload.get("selected_section_indexes"),
+                        include_linked_spreadsheets=bool(payload.get("include_linked_spreadsheets", True)),
+                        google_credentials=payload.get("google_credentials") if isinstance(payload.get("google_credentials"), dict) else None,
+                    )
+                )
+                _save_prd_latest_result(current_app.config["SETTINGS"], owner_key=owner_key, tool_key="prd_self_assessment", payload={"action": "review", "payload": result})
+                notice_title = "AI PRD Review"
+            elif action == "self_summary":
+                owner_key = str(payload.get("owner_key") or "")
+                progress("generating_summary", "Generating PRD summary on Mac local-agent.", 1, 2)
+                result = service.summarize_url(
+                    PRDBriefingReviewRequest(
+                        owner_key=owner_key,
+                        prd_url=str(payload.get("prd_url") or ""),
+                        language=str(payload.get("language") or "zh"),
+                        force_refresh=bool(payload.get("force_refresh")),
+                    )
+                )
+                _save_prd_latest_result(current_app.config["SETTINGS"], owner_key=owner_key, tool_key="prd_self_assessment", payload={"action": "summary", "payload": result})
+                notice_title = "PRD Summary"
+            else:
+                raise ToolError(f"Unsupported PRD job action: {action}")
+            progress("completed", "PRD job completed on Mac local-agent.", 2, 2)
+            job_store.complete(
+                job_id,
+                results=[result],
+                notice={"title": notice_title, "tone": "success", "summary": "PRD generation completed.", "details": []},
+            )
+        except ToolError as error:
+            job_store.fail(job_id, str(error), error_category="prd_job_failed", error_code="prd_job_failed", error_retryable=True)
+        except Exception as error:  # noqa: BLE001 - keep async status JSON-readable for Cloud Run.
+            current_app.logger.exception("PRD local-agent async job failed unexpectedly.")
+            job_store.fail(job_id, f"Mac local-agent PRD job failed unexpectedly: {error}", error_category="prd_job_failed", error_code="prd_job_unexpected_error", error_retryable=True)
 
 
 def _run_monthly_report_draft_job(app: Flask, job_id: str, payload: dict[str, Any]) -> None:

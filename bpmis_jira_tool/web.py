@@ -1239,6 +1239,7 @@ def create_app() -> Flask:
                 _get_work_memory_store=lambda *args, **kwargs: _get_work_memory_store(*args, **kwargs),
                 _local_agent_source_code_qa_enabled=lambda *args, **kwargs: _local_agent_source_code_qa_enabled(*args, **kwargs),
                 _build_prd_review_service=lambda *args, **kwargs: _build_prd_review_service(*args, **kwargs),
+                _queue_prd_generation_job=lambda *args, **kwargs: _queue_prd_generation_job(*args, **kwargs),
                 resolve_monthly_report_period=lambda *args, **kwargs: resolve_monthly_report_period(*args, **kwargs),
                 send_monthly_report_email=lambda *args, **kwargs: send_monthly_report_email(*args, **kwargs),
             )
@@ -2796,6 +2797,14 @@ def _run_prd_self_assessment_action(settings: Settings, *, action: str):
         credentials_payload = dict(session.get("google_credentials") or {})
         if credentials_payload:
             request_payload["google_credentials"] = credentials_payload
+    if bool(payload.get("async")):
+        return _queue_prd_generation_job(
+            settings,
+            action=f"self_{action}",
+            request_payload=request_payload,
+            user_identity=user_identity,
+            title="Generate AI PRD Review" if action == "review" else "Generate PRD Summary",
+        )
     event_prefix = f"prd_self_assessment_{action}"
     try:
         if _local_agent_source_code_qa_enabled(settings):
@@ -2856,6 +2865,135 @@ def _run_prd_self_assessment_action(settings: Settings, *, action: str):
             ),
             HTTPStatus.INTERNAL_SERVER_ERROR,
         )
+
+
+def _queue_prd_generation_job(
+    settings: Settings,
+    *,
+    action: str,
+    request_payload: dict[str, Any],
+    user_identity: dict[str, str | None],
+    title: str,
+):
+    job_store: JobStore = current_app.config["JOB_STORE"]
+    job = job_store.create(f"prd-{action.replace('_', '-')}", title=title)
+    thread = threading.Thread(
+        target=_run_prd_generation_job,
+        args=(current_app._get_current_object(), job.job_id, settings, action, dict(request_payload), dict(user_identity)),
+        daemon=True,
+    )
+    thread.start()
+    _log_portal_event(
+        "prd_generation_job_queued",
+        **_build_request_log_context(
+            settings,
+            user_identity=user_identity,
+            extra={"job_id": job.job_id, "action": action},
+        ),
+    )
+    return jsonify({"status": "queued", "job_id": job.job_id})
+
+
+def _run_prd_generation_job(
+    app: Flask,
+    job_id: str,
+    settings: Settings,
+    action: str,
+    request_payload: dict[str, Any],
+    user_identity: dict[str, str | None],
+) -> None:
+    with app.app_context():
+        job_store: JobStore = app.config["JOB_STORE"]
+
+        def progress_callback(stage: str, message: str, current: int, total: int) -> None:
+            job_store.update(job_id, state="running", stage=stage, message=message, current=current, total=total)
+
+        try:
+            progress_callback("reading_prd", "Reading PRD content.", 0, 2)
+            if action == "team_review":
+                if _local_agent_source_code_qa_enabled(settings):
+                    data = _build_local_agent_client(settings).prd_review(request_payload, progress_callback=progress_callback)
+                else:
+                    progress_callback("generating_review", "Generating AI PRD review.", 1, 2)
+                    data = _build_prd_review_service(settings).review(PRDReviewRequest(**request_payload))
+                result_action = "review"
+                title = "PRD Review"
+            elif action == "team_summary":
+                if _local_agent_source_code_qa_enabled(settings):
+                    data = _build_local_agent_client(settings).prd_summary(request_payload, progress_callback=progress_callback)
+                else:
+                    progress_callback("generating_summary", "Generating PRD summary.", 1, 2)
+                    data = _build_prd_review_service(settings).summarize(PRDReviewRequest(**request_payload))
+                result_action = "summary"
+                title = "PRD Summary"
+            elif action == "self_review":
+                if _local_agent_source_code_qa_enabled(settings):
+                    data = _build_local_agent_client(settings).prd_self_assessment_review(request_payload, progress_callback=progress_callback)
+                else:
+                    progress_callback("generating_review", "Generating AI PRD review.", 1, 2)
+                    data = _build_prd_review_service(settings).review_url(PRDBriefingReviewRequest(**request_payload))
+                result_action = "review"
+                title = "AI PRD Review"
+                _save_prd_latest_result(
+                    owner_key=str(request_payload.get("owner_key") or ""),
+                    tool_key="prd_self_assessment",
+                    payload={"action": result_action, "payload": data},
+                )
+            elif action == "self_summary":
+                if _local_agent_source_code_qa_enabled(settings):
+                    data = _build_local_agent_client(settings).prd_self_assessment_summary(request_payload, progress_callback=progress_callback)
+                else:
+                    progress_callback("generating_summary", "Generating PRD summary.", 1, 2)
+                    data = _build_prd_review_service(settings).summarize_url(PRDBriefingReviewRequest(**request_payload))
+                result_action = "summary"
+                title = "PRD Summary"
+                _save_prd_latest_result(
+                    owner_key=str(request_payload.get("owner_key") or ""),
+                    tool_key="prd_self_assessment",
+                    payload={"action": result_action, "payload": data},
+                )
+            else:
+                raise ToolError(f"Unsupported PRD generation job action: {action}")
+            progress_callback("completed", "PRD generation completed.", 2, 2)
+            job_store.complete(
+                job_id,
+                results=[data],
+                notice={"title": title, "tone": "success", "summary": "PRD generation completed.", "details": []},
+            )
+            _log_portal_event(
+                "prd_generation_job_success",
+                user=_safe_email_identity(user_identity),
+                job_id=job_id,
+                action=action,
+                cached=bool(data.get("cached")),
+            )
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "prd_generation_job_tool_error",
+                level=logging.WARNING,
+                user=_safe_email_identity(user_identity),
+                job_id=job_id,
+                action=action,
+                **error_details,
+            )
+            job_store.fail(
+                job_id,
+                str(error),
+                error_category=str(error_details.get("error_category") or "tool_error"),
+                error_code=str(error_details.get("error_code") or "tool_error"),
+                error_retryable=bool(error_details.get("error_retryable", True)),
+            )
+        except Exception as error:  # pragma: no cover - defensive guard for background worker failures.
+            _log_portal_event(
+                "prd_generation_job_unexpected_error",
+                level=logging.ERROR,
+                user=_safe_email_identity(user_identity),
+                job_id=job_id,
+                action=action,
+            )
+            app.logger.exception("PRD generation job failed unexpectedly.")
+            job_store.fail(job_id, f"Unexpected error: {error}")
 
 
 def _run_prd_self_assessment_sections(settings: Settings):

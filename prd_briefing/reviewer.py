@@ -17,8 +17,9 @@ from .storage import BriefingStore
 
 
 PRD_REVIEW_PROMPT_VERSION = "v6_prd_review_prioritized_actionable_guidance"
-PRD_SUMMARY_PROMPT_VERSION = "v1_prd_summary_codex"
+PRD_SUMMARY_PROMPT_VERSION = "v2_prd_summary_hybrid_sections"
 PRD_REVIEW_MAX_SOURCE_CHARS = 90_000
+PRD_HYBRID_BATCH_SOURCE_CHARS = 45_000
 PRD_SECTION_LONG_CHAR_THRESHOLD = 8_000
 PRD_LINKED_SPREADSHEET_MAX_FILES = 5
 PRD_LINKED_SPREADSHEET_MAX_SHEETS = 10
@@ -68,32 +69,46 @@ class PRDReviewService:
         page = self.confluence.ingest_page(normalized.prd_url, "prd-review")
         if not page.sections:
             raise ToolError("PRD page did not contain readable sections.")
+        linked_spreadsheet_evidence = _resolve_linked_spreadsheet_evidence(
+            confluence=self.confluence,
+            page=page,
+            selected_section_indexes=list(range(1, len(page.sections) + 1)),
+            google_credentials=None,
+            include_linked_spreadsheets=True,
+        )
+        coverage = _merge_linked_spreadsheet_coverage(
+            _build_generation_coverage(page, mode=_generation_mode_for_page(page)),
+            linked_spreadsheet_evidence,
+        )
+        cache_jira_id = _cache_key_for_section_selection(
+            normalized.jira_id,
+            page=page,
+            selected_section_indexes=None,
+            linked_artifact_fingerprint=linked_spreadsheet_evidence["cache_fingerprint"],
+        )
         cached = None if normalized.force_refresh else self.store.get_prd_review_result(
             owner_key=normalized.owner_key,
-            jira_id=normalized.jira_id,
+            jira_id=cache_jira_id,
             prd_url=page.source_url,
             prd_updated_at=page.updated_at,
             prompt_version=PRD_REVIEW_PROMPT_VERSION,
         )
         if cached and cached.get("status") == "completed" and cached.get("result_markdown"):
-            return {"status": "ok", "cached": True, "review": cached, "prd": self._page_metadata(page)}
-
-        prompt = build_prd_review_prompt(
-            jira_id=normalized.jira_id,
-            jira_link=normalized.jira_link,
-            prd_url=page.source_url,
-            page=page,
-        )
+            return {"status": "ok", "cached": True, "review": cached, "prd": self._page_metadata(page), "coverage": coverage}
         try:
-            generated = generate_prd_review_with_codex(
-                prompt=prompt,
-                settings=self.settings,
-                workspace_root=self.workspace_root,
+            generated = self._generate_prd_review(
+                jira_id=normalized.jira_id,
+                jira_link=normalized.jira_link,
+                prd_url=page.source_url,
+                page=page,
+                language="zh",
+                prompt_version=PRD_REVIEW_PROMPT_VERSION,
+                linked_spreadsheet_evidence=linked_spreadsheet_evidence,
             )
         except Exception as error:  # noqa: BLE001 - persist the failure for visible retry context.
             self.store.save_prd_review_result(
                 owner_key=normalized.owner_key,
-                jira_id=normalized.jira_id,
+                jira_id=cache_jira_id,
                 jira_link=normalized.jira_link,
                 prd_url=page.source_url,
                 prd_updated_at=page.updated_at,
@@ -105,7 +120,7 @@ class PRDReviewService:
 
         review = self.store.save_prd_review_result(
             owner_key=normalized.owner_key,
-            jira_id=normalized.jira_id,
+            jira_id=cache_jira_id,
             jira_link=normalized.jira_link,
             prd_url=page.source_url,
             prd_updated_at=page.updated_at,
@@ -115,7 +130,7 @@ class PRDReviewService:
             model_id=generated["model_id"],
             trace=generated["trace"],
         )
-        return {"status": "ok", "cached": False, "review": review, "prd": self._page_metadata(page)}
+        return {"status": "ok", "cached": False, "review": review, "prd": self._page_metadata(page), "coverage": coverage}
 
     def review_url(self, request: PRDBriefingReviewRequest) -> dict[str, Any]:
         normalized = self._normalize_briefing_review_request(request)
@@ -130,7 +145,15 @@ class PRDReviewService:
             google_credentials=normalized.google_credentials,
             include_linked_spreadsheets=normalized.include_linked_spreadsheets,
         )
-        coverage = _merge_linked_spreadsheet_coverage(selection["coverage"], linked_spreadsheet_evidence)
+        generation_coverage = _build_generation_coverage(
+            selected_page,
+            mode=_generation_mode_for_page(selected_page),
+            total_sections=int(selection["coverage"].get("sections_total") or len(selected_page.sections)),
+        )
+        coverage = _merge_linked_spreadsheet_coverage(
+            {**selection["coverage"], **generation_coverage},
+            linked_spreadsheet_evidence,
+        )
         prompt_version = prd_briefing_review_prompt_version(normalized.language)
         cache_jira_id = _cache_key_for_section_selection(
             PRD_BRIEFING_REVIEW_CACHE_KEY,
@@ -155,21 +178,15 @@ class PRDReviewService:
                 "coverage": coverage,
             }
 
-        prompt = build_prd_review_prompt(
-            jira_id="",
-            jira_link="",
-            prd_url=page.source_url,
-            page=selected_page,
-            language=normalized.language,
-            linked_spreadsheet_evidence=linked_spreadsheet_evidence,
-        )
         try:
-            generated = generate_prd_review_with_codex(
-                prompt=prompt,
-                settings=self.settings,
-                workspace_root=self.workspace_root,
+            generated = self._generate_prd_review(
+                jira_id="",
+                jira_link="",
+                prd_url=page.source_url,
+                page=selected_page,
                 language=normalized.language,
                 prompt_version=prompt_version,
+                linked_spreadsheet_evidence=linked_spreadsheet_evidence,
             )
         except Exception as error:  # noqa: BLE001 - persist the failure for visible retry context.
             self.store.save_prd_review_result(
@@ -218,19 +235,21 @@ class PRDReviewService:
             prompt_version=PRD_SUMMARY_PROMPT_VERSION,
         )
         if cached and cached.get("status") == "completed" and cached.get("result_markdown"):
-            return {"status": "ok", "cached": True, "summary": cached, "prd": self._page_metadata(page)}
-
-        prompt = build_prd_summary_prompt(
-            jira_id=normalized.jira_id,
-            jira_link=normalized.jira_link,
-            prd_url=page.source_url,
-            page=page,
-        )
+            return {
+                "status": "ok",
+                "cached": True,
+                "summary": cached,
+                "prd": self._page_metadata(page),
+                "coverage": _build_generation_coverage(page, mode=_generation_mode_for_page(page)),
+            }
         try:
-            generated = generate_prd_summary_with_codex(
-                prompt=prompt,
-                settings=self.settings,
-                workspace_root=self.workspace_root,
+            generated = self._generate_prd_summary(
+                jira_id=normalized.jira_id,
+                jira_link=normalized.jira_link,
+                prd_url=page.source_url,
+                page=page,
+                language="zh",
+                prompt_version=PRD_SUMMARY_PROMPT_VERSION,
             )
         except Exception as error:  # noqa: BLE001 - persist the failure for visible retry context.
             self.store.save_prd_review_result(
@@ -257,7 +276,13 @@ class PRDReviewService:
             model_id=generated["model_id"],
             trace=generated["trace"],
         )
-        return {"status": "ok", "cached": False, "summary": summary, "prd": self._page_metadata(page)}
+        return {
+            "status": "ok",
+            "cached": False,
+            "summary": summary,
+            "prd": self._page_metadata(page),
+            "coverage": _build_generation_coverage(page, mode=_generation_mode_for_page(page)),
+        }
 
     def summarize_url(self, request: PRDBriefingReviewRequest) -> dict[str, Any]:
         normalized = self._normalize_briefing_review_request(request)
@@ -273,20 +298,20 @@ class PRDReviewService:
             prompt_version=prompt_version,
         )
         if cached and cached.get("status") == "completed" and cached.get("result_markdown"):
-            return {"status": "ok", "cached": True, "summary": cached, "prd": self._page_metadata(page), "language": normalized.language}
-
-        prompt = build_prd_summary_prompt(
-            jira_id="",
-            jira_link="",
-            prd_url=page.source_url,
-            page=page,
-            language=normalized.language,
-        )
+            return {
+                "status": "ok",
+                "cached": True,
+                "summary": cached,
+                "prd": self._page_metadata(page),
+                "language": normalized.language,
+                "coverage": _build_generation_coverage(page, mode=_generation_mode_for_page(page)),
+            }
         try:
-            generated = generate_prd_summary_with_codex(
-                prompt=prompt,
-                settings=self.settings,
-                workspace_root=self.workspace_root,
+            generated = self._generate_prd_summary(
+                jira_id="",
+                jira_link="",
+                prd_url=page.source_url,
+                page=page,
                 language=normalized.language,
                 prompt_version=prompt_version,
             )
@@ -315,7 +340,161 @@ class PRDReviewService:
             model_id=generated["model_id"],
             trace=generated["trace"],
         )
-        return {"status": "ok", "cached": False, "summary": summary, "prd": self._page_metadata(page), "language": normalized.language}
+        return {
+            "status": "ok",
+            "cached": False,
+            "summary": summary,
+            "prd": self._page_metadata(page),
+            "language": normalized.language,
+            "coverage": _build_generation_coverage(page, mode=_generation_mode_for_page(page)),
+        }
+
+    def _generate_prd_review(
+        self,
+        *,
+        jira_id: str,
+        jira_link: str,
+        prd_url: str,
+        page: IngestedConfluencePage,
+        language: str,
+        prompt_version: str,
+        linked_spreadsheet_evidence: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if _generation_mode_for_page(page) == "single":
+            prompt = build_prd_review_prompt(
+                jira_id=jira_id,
+                jira_link=jira_link,
+                prd_url=prd_url,
+                page=page,
+                language=language,
+                linked_spreadsheet_evidence=linked_spreadsheet_evidence,
+            )
+            return generate_prd_review_with_codex(
+                prompt=prompt,
+                settings=self.settings,
+                workspace_root=self.workspace_root,
+                language=language,
+                prompt_version=prompt_version,
+            )
+
+        batch_outputs: list[dict[str, Any]] = []
+        traces: list[Any] = []
+        batches = _split_prd_page_batches(page)
+        for batch_index, batch_page in enumerate(batches, start=1):
+            prompt = build_prd_review_batch_prompt(
+                jira_id=jira_id,
+                jira_link=jira_link,
+                prd_url=prd_url,
+                page=batch_page,
+                language=language,
+                batch_index=batch_index,
+                batch_total=len(batches),
+            )
+            generated = generate_prd_review_with_codex(
+                prompt=prompt,
+                settings=self.settings,
+                workspace_root=self.workspace_root,
+                language=language,
+                prompt_version=f"{prompt_version}_batch",
+            )
+            batch_outputs.append(
+                {
+                    "batch_index": batch_index,
+                    "section_titles": [section.section_path or section.title for section in batch_page.sections],
+                    "result_markdown": generated["result_markdown"],
+                }
+            )
+            traces.append(generated.get("trace") or {})
+        synthesis_prompt = build_prd_review_synthesis_prompt(
+            jira_id=jira_id,
+            jira_link=jira_link,
+            prd_url=prd_url,
+            page=page,
+            language=language,
+            batch_outputs=batch_outputs,
+            linked_spreadsheet_evidence=linked_spreadsheet_evidence,
+        )
+        final = generate_prd_review_with_codex(
+            prompt=synthesis_prompt,
+            settings=self.settings,
+            workspace_root=self.workspace_root,
+            language=language,
+            prompt_version=f"{prompt_version}_synthesis",
+        )
+        final["trace"] = {"hybrid": True, "batch_count": len(batches), "batch_traces": traces, "final_trace": final.get("trace") or {}}
+        return final
+
+    def _generate_prd_summary(
+        self,
+        *,
+        jira_id: str,
+        jira_link: str,
+        prd_url: str,
+        page: IngestedConfluencePage,
+        language: str,
+        prompt_version: str,
+    ) -> dict[str, Any]:
+        if _generation_mode_for_page(page) == "single":
+            prompt = build_prd_summary_prompt(
+                jira_id=jira_id,
+                jira_link=jira_link,
+                prd_url=prd_url,
+                page=page,
+                language=language,
+            )
+            return generate_prd_summary_with_codex(
+                prompt=prompt,
+                settings=self.settings,
+                workspace_root=self.workspace_root,
+                language=language,
+                prompt_version=prompt_version,
+            )
+
+        batch_outputs: list[dict[str, Any]] = []
+        traces: list[Any] = []
+        batches = _split_prd_page_batches(page)
+        for batch_index, batch_page in enumerate(batches, start=1):
+            prompt = build_prd_summary_batch_prompt(
+                jira_id=jira_id,
+                jira_link=jira_link,
+                prd_url=prd_url,
+                page=batch_page,
+                language=language,
+                batch_index=batch_index,
+                batch_total=len(batches),
+            )
+            generated = generate_prd_summary_with_codex(
+                prompt=prompt,
+                settings=self.settings,
+                workspace_root=self.workspace_root,
+                language=language,
+                prompt_version=f"{prompt_version}_batch",
+            )
+            batch_outputs.append(
+                {
+                    "batch_index": batch_index,
+                    "section_titles": [section.section_path or section.title for section in batch_page.sections],
+                    "result_markdown": generated["result_markdown"],
+                }
+            )
+            traces.append(generated.get("trace") or {})
+        synthesis_prompt = build_prd_summary_synthesis_prompt(
+            jira_id=jira_id,
+            jira_link=jira_link,
+            prd_url=prd_url,
+            page=page,
+            language=language,
+            batch_outputs=batch_outputs,
+        )
+        final = generate_prd_summary_with_codex(
+            prompt=synthesis_prompt,
+            settings=self.settings,
+            workspace_root=self.workspace_root,
+            language=language,
+            prompt_version=f"{prompt_version}_synthesis",
+        )
+        final["trace"] = {"hybrid": True, "batch_count": len(batches), "batch_traces": traces, "final_trace": final.get("trace") or {}}
+        return final
 
     def list_url_sections(self, request: PRDBriefingReviewRequest) -> dict[str, Any]:
         normalized = self._normalize_briefing_review_request(request)
@@ -427,7 +606,7 @@ class PRDReviewService:
         }
 
 
-def _build_prd_source(page: IngestedConfluencePage) -> str:
+def _build_prd_source(page: IngestedConfluencePage, *, max_chars: int = PRD_REVIEW_MAX_SOURCE_CHARS) -> str:
     sections = []
     used_chars = 0
     for index, section in enumerate(page.sections, start=1):
@@ -435,7 +614,7 @@ def _build_prd_source(page: IngestedConfluencePage) -> str:
         if not content:
             continue
         block = f"## Section {index}: {section.section_path}\n{content}"
-        remaining = PRD_REVIEW_MAX_SOURCE_CHARS - used_chars
+        remaining = max_chars - used_chars
         if remaining <= 0:
             break
         if len(block) > remaining:
@@ -446,6 +625,68 @@ def _build_prd_source(page: IngestedConfluencePage) -> str:
     if not source:
         raise ToolError("PRD page did not contain readable text.")
     return source
+
+
+def _build_prd_source_block(section: Any, index: int) -> str:
+    content = str(getattr(section, "content", "") or "").strip()
+    title = str(getattr(section, "section_path", "") or getattr(section, "title", "") or f"Section {index}")
+    return f"## Section {index}: {title}\n{content}" if content else ""
+
+
+def _prd_source_char_count(page: IngestedConfluencePage) -> int:
+    return sum(len(_build_prd_source_block(section, index)) for index, section in enumerate(page.sections, start=1))
+
+
+def _generation_mode_for_page(page: IngestedConfluencePage) -> str:
+    return "hybrid" if _prd_source_char_count(page) > PRD_REVIEW_MAX_SOURCE_CHARS else "single"
+
+
+def _build_generation_coverage(
+    page: IngestedConfluencePage,
+    *,
+    mode: str,
+    total_sections: int | None = None,
+) -> dict[str, Any]:
+    covered_sections = sum(1 for section in page.sections if str(section.content or "").strip())
+    return {
+        "mode": "hybrid" if mode == "hybrid" else "single",
+        "sections_total": int(total_sections if total_sections is not None else len(page.sections)),
+        "sections_covered": covered_sections,
+        "truncated": False if mode == "hybrid" else _prd_source_char_count(page) > PRD_REVIEW_MAX_SOURCE_CHARS,
+    }
+
+
+def _page_with_sections(page: IngestedConfluencePage, sections: list[Any]) -> IngestedConfluencePage:
+    return IngestedConfluencePage(
+        page_id=page.page_id,
+        title=page.title,
+        source_url=page.source_url,
+        updated_at=page.updated_at,
+        language=page.language,
+        sections=sections,
+        version_number=page.version_number,
+        media_dict=page.media_dict,
+        presentation_source_text=page.presentation_source_text,
+    )
+
+
+def _split_prd_page_batches(page: IngestedConfluencePage, *, max_chars: int = PRD_HYBRID_BATCH_SOURCE_CHARS) -> list[IngestedConfluencePage]:
+    batches: list[list[Any]] = []
+    current: list[Any] = []
+    current_chars = 0
+    for index, section in enumerate(page.sections, start=1):
+        block_chars = len(_build_prd_source_block(section, index))
+        if current and current_chars + block_chars > max_chars:
+            batches.append(current)
+            current = []
+            current_chars = 0
+        current.append(section)
+        current_chars += block_chars
+    if current:
+        batches.append(current)
+    if not batches:
+        raise ToolError("PRD page did not contain readable text.")
+    return [_page_with_sections(page, sections) for sections in batches]
 
 
 def _resolve_linked_spreadsheet_evidence(
@@ -1089,6 +1330,246 @@ Return only Markdown:
 
 # PRD Content
 {source}
+"""
+
+
+def _batch_outputs_markdown(batch_outputs: list[dict[str, Any]]) -> str:
+    blocks = []
+    for item in batch_outputs:
+        titles = ", ".join(str(title or "-") for title in item.get("section_titles") or [])
+        blocks.append(
+            f"## Batch {item.get('batch_index')}\n"
+            f"Sections: {titles or '-'}\n\n"
+            f"{str(item.get('result_markdown') or '').strip()}"
+        )
+    return "\n\n".join(blocks).strip()
+
+
+def build_prd_summary_batch_prompt(
+    *,
+    jira_id: str,
+    jira_link: str,
+    prd_url: str,
+    page: IngestedConfluencePage,
+    language: str,
+    batch_index: int,
+    batch_total: int,
+) -> str:
+    source = _build_prd_source(page, max_chars=PRD_REVIEW_MAX_SOURCE_CHARS)
+    if normalize_prd_review_language(language) == "en":
+        return f"""# Task
+Summarize this PRD section batch for a later whole-PRD synthesis. Preserve important scope, flow, rules, data definitions, status transitions, dependencies, and open questions. Do not omit details just because they appear late in the document.
+
+# Context
+- Jira ID: {jira_id or "-"}
+- Jira Link: {jira_link or "-"}
+- PRD Title: {page.title}
+- PRD Link: {prd_url}
+- Batch: {batch_index}/{batch_total}
+
+# PRD Batch Content
+{source}
+"""
+    return f"""# Task
+请总结这个 PRD section batch，供后续整份 PRD synthesis 使用。保留重要范围、流程、规则、数据口径、状态流转、依赖和待确认事项。不要因为内容在文档后半段就省略。
+
+# Context
+- Jira ID: {jira_id or "-"}
+- Jira Link: {jira_link or "-"}
+- PRD Title: {page.title}
+- PRD Link: {prd_url}
+- Batch: {batch_index}/{batch_total}
+
+# PRD Batch Content
+{source}
+"""
+
+
+def build_prd_summary_synthesis_prompt(
+    *,
+    jira_id: str,
+    jira_link: str,
+    prd_url: str,
+    page: IngestedConfluencePage,
+    language: str,
+    batch_outputs: list[dict[str, Any]],
+) -> str:
+    batches = _batch_outputs_markdown(batch_outputs)
+    if normalize_prd_review_language(language) == "en":
+        return f"""# Role
+You are a senior product manager synthesizing a full PRD summary from complete section-batch notes.
+
+# Task
+Produce one concise but complete English summary of the whole PRD. Cover all batches, including late sections. Do not mention the batching process.
+
+# Output Format
+Return only Markdown:
+---
+### PRD Summary
+[3-5 sentence overview]
+
+### Scope
+- ...
+
+### Key Logic
+- ...
+
+### Dependencies / Open Questions
+- ...
+---
+
+# Context
+- Jira ID: {jira_id or "-"}
+- Jira Link: {jira_link or "-"}
+- PRD Title: {page.title}
+- PRD Link: {prd_url}
+- PRD Updated At: {page.updated_at or "-"}
+
+# Batch Summaries
+{batches}
+"""
+    return f"""# Role
+你是一位资深产品经理，正在基于完整的 section batch notes 合成整份 PRD 摘要。
+
+# Task
+请输出一份简洁但完整的中文整份 PRD 摘要。必须覆盖所有 batch，包括文档后半段 section。不要提及 batch 处理过程。
+
+# Output Format
+请严格按 Markdown 输出：
+---
+### PRD Summary
+[3-5 句话概括]
+
+### Scope
+- ...
+
+### Key Logic
+- ...
+
+### Dependencies / Open Questions
+- ...
+---
+
+# Context
+- Jira ID: {jira_id or "-"}
+- Jira Link: {jira_link or "-"}
+- PRD Title: {page.title}
+- PRD Link: {prd_url}
+- PRD Updated At: {page.updated_at or "-"}
+
+# Batch Summaries
+{batches}
+"""
+
+
+def build_prd_review_batch_prompt(
+    *,
+    jira_id: str,
+    jira_link: str,
+    prd_url: str,
+    page: IngestedConfluencePage,
+    language: str,
+    batch_index: int,
+    batch_total: int,
+) -> str:
+    source = _build_prd_source(page, max_chars=PRD_REVIEW_MAX_SOURCE_CHARS)
+    if normalize_prd_review_language(language) == "en":
+        return f"""# Task
+Review this PRD section batch for delivery-readiness evidence. Identify only material P0/P1/P2 delivery gaps from these sections, with section titles and evidence basis. Keep it concise; this will be synthesized with other batches.
+
+# Context
+- Jira ID: {jira_id or "-"}
+- Jira Link: {jira_link or "-"}
+- PRD Title: {page.title}
+- PRD Link: {prd_url}
+- Batch: {batch_index}/{batch_total}
+
+# PRD Batch Content
+{source}
+"""
+    return f"""# Task
+请评审这个 PRD section batch 的交付就绪度证据。只识别这些 section 内真正重要的 P0/P1/P2 交付缺口，必须带 section title 和 evidence basis。保持精炼，后续会和其他 batch 合成最终评审。
+
+# Context
+- Jira ID: {jira_id or "-"}
+- Jira Link: {jira_link or "-"}
+- PRD Title: {page.title}
+- PRD Link: {prd_url}
+- Batch: {batch_index}/{batch_total}
+
+# PRD Batch Content
+{source}
+"""
+
+
+def build_prd_review_synthesis_prompt(
+    *,
+    jira_id: str,
+    jira_link: str,
+    prd_url: str,
+    page: IngestedConfluencePage,
+    language: str,
+    batch_outputs: list[dict[str, Any]],
+    linked_spreadsheet_evidence: dict[str, Any] | None,
+) -> str:
+    batch_reviews = _batch_outputs_markdown(batch_outputs)
+    linked_source = _build_linked_spreadsheet_prompt_section(linked_spreadsheet_evidence or {})
+    if normalize_prd_review_language(language) == "en":
+        return f"""# Role
+You are a senior PRD delivery-readiness reviewer using the `prd-review` skill.
+
+# Task
+Synthesize the batch reviews into one final prioritized PRD assessment. Keep only the most important blockers. P0/P1 must be at most 5 items total. Merge duplicates across batches. Use linked spreadsheet evidence if provided. Do not mention the batching process.
+
+# Required Output Structure
+### Executive Verdict
+### Top Must-Fix Delivery Blockers
+### Section Patch Suggestions
+### Secondary Clarifications
+### Evidence Coverage
+### PM Decision Checklist
+
+Every finding must include Priority, Section, Problem, Why this is important, Suggested PRD patch, Acceptance check, and Evidence basis. If evidence is not in the reviewed sections, write `Source not found in selected sections`.
+
+# Context
+- Jira ID: {jira_id or "-"}
+- Jira Link: {jira_link or "-"}
+- PRD Title: {page.title}
+- PRD Link: {prd_url}
+- PRD Updated At: {page.updated_at or "-"}
+
+# Batch Reviews
+{batch_reviews}
+
+{linked_source}
+"""
+    return f"""# Role
+你是一位资深 PRD 交付就绪度评审专家，使用 `prd-review` Skill 的方法论工作。
+
+# Task
+请把 batch reviews 合成为一份最终的高优先级 PRD Assessment。只保留最重要的阻塞点，P0/P1 总数最多 5 条，跨 batch 重复问题必须合并。如有 linked spreadsheet evidence，必须纳入证据依据。不要提及 batch 处理过程。
+
+# Required Output Structure
+### Executive Verdict
+### Top Must-Fix Delivery Blockers
+### Section Patch Suggestions
+### Secondary Clarifications
+### Evidence Coverage
+### PM Decision Checklist
+
+每条 finding 必须包含优先级、Section、Problem、Why this is important、Suggested PRD patch、Acceptance check、Evidence basis。如果 reviewed sections 没有依据，写 `Source not found in selected sections`。
+
+# Context
+- Jira ID: {jira_id or "-"}
+- Jira Link: {jira_link or "-"}
+- PRD Title: {page.title}
+- PRD Link: {prd_url}
+- PRD Updated At: {page.updated_at or "-"}
+
+# Batch Reviews
+{batch_reviews}
+
+{linked_source}
 """
 
 

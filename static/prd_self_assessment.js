@@ -13,6 +13,7 @@
   const clearAllButton = root.querySelector('[data-prd-self-assessment-clear-all]');
   const sectionSummary = root.querySelector('[data-prd-self-assessment-section-summary]');
   const sectionList = root.querySelector('[data-prd-self-assessment-section-list]');
+  const jobsUrlTemplate = root.dataset.jobsUrl || '/api/jobs/__JOB_ID__';
 
   const STORAGE_KEY = 'prd-self-assessment:last-form:v1';
   let lastAction = 'summary';
@@ -118,6 +119,40 @@
       throw new Error('Your session expired or requires sign-in. Refresh the page and try again.');
     }
     throw new Error(`Unexpected API response format (${contentType || 'unknown'}).`);
+  };
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const jobUrl = (jobId) => jobsUrlTemplate.replace('__JOB_ID__', encodeURIComponent(jobId));
+
+  const pollJobResult = async (jobId, action) => {
+    let lastMessage = '';
+    while (true) {
+      const response = await fetch(jobUrl(jobId), {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        credentials: 'same-origin',
+      });
+      const payload = await parseJsonResponse(response);
+      if (!response.ok || payload.status === 'error') throw new Error(payload.message || 'Could not load PRD job status.');
+      const message = payload.message || payload.progress?.message || '';
+      if (message && message !== lastMessage) {
+        lastMessage = message;
+        setStatus(message);
+        if (resultPanel) {
+          resultPanel.innerHTML = `<div class="briefing-review-loading">${escapeHtml(message)}</div>`;
+        }
+      }
+      if (payload.state === 'completed') {
+        const result = Array.isArray(payload.results) && payload.results[0] ? payload.results[0] : {};
+        if (!result || result.status === 'error') throw new Error(result.message || 'PRD job finished without a result.');
+        return result;
+      }
+      if (payload.state === 'failed') {
+        throw new Error(payload.error || payload.message || 'PRD job failed.');
+      }
+      await sleep(1200);
+    }
   };
 
   const selectedSectionIndexes = () => {
@@ -268,6 +303,9 @@
     const coverageLine = !isSummary && coverage.sections_assessed
       ? `<span>Reviewed sections: ${escapeHtml(coverage.sections_assessed)}/${escapeHtml(coverage.selected_sections_total || coverage.sections_assessed)} selected${coverage.sections_total ? ` · ${escapeHtml(coverage.sections_total)} total` : ''}</span>`
       : '';
+    const generationCoverageLine = coverage.mode
+      ? `<span>Coverage: ${escapeHtml(coverage.mode)} · ${escapeHtml(coverage.sections_covered || coverage.sections_assessed || 0)}/${escapeHtml(coverage.sections_total || coverage.selected_sections_total || 0)} sections${coverage.truncated ? ' · truncated' : ''}</span>`
+      : '';
     const linkedCoverageLine = !isSummary && Number.isFinite(Number(coverage.linked_artifacts_total)) && Number(coverage.linked_artifacts_total) > 0
       ? `<span>Linked artifacts reviewed: ${escapeHtml(coverage.linked_artifacts_reviewed || 0)}/${escapeHtml(coverage.linked_artifacts_total || 0)}${Number(coverage.linked_artifacts_failed || 0) ? ` · ${escapeHtml(coverage.linked_artifacts_failed)} not reviewed` : ''}</span>`
       : '';
@@ -285,6 +323,7 @@
         <div>
           <strong>${escapeHtml(payload.cached ? `Cached PRD ${isSummary ? 'Summary' : 'Review'}` : `PRD ${isSummary ? 'Summary' : 'Review'}`)}</strong>
           <span>${escapeHtml(language)} · ${escapeHtml(prd.title || 'PRD')}</span>
+          ${generationCoverageLine}
           ${coverageLine}
           ${linkedCoverageLine}
           ${titleLine}
@@ -344,11 +383,15 @@
           prd_url: prdUrl,
           language,
           force_refresh: forceRefresh,
+          async: true,
           ...(Array.isArray(selected) ? { selected_section_indexes: selected } : {}),
         }),
       });
-      const payload = await parseJsonResponse(response);
+      let payload = await parseJsonResponse(response);
       if (!response.ok) throw new Error(payload.message || 'Could not generate PRD output right now.');
+      if (payload.status === 'queued' && payload.job_id) {
+        payload = await pollJobResult(payload.job_id, lastAction);
+      }
       setStatus(lastAction === 'summary' ? 'PRD summary generated.' : 'AI PRD review generated.', 'success');
       renderResult(lastAction, payload);
     } catch (error) {

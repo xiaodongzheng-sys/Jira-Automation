@@ -1319,6 +1319,83 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(failed["status"], "failed")
         self.assertIn("summary failed", failed["error"])
 
+    @patch("prd_briefing.reviewer.generate_prd_summary_with_codex")
+    def test_long_prd_summary_uses_hybrid_batches_and_covers_late_sections(self, mock_generate):
+        long_page = IngestedConfluencePage(
+            page_id="long",
+            title="Long PRD",
+            source_url="https://example.atlassian.net/wiki/pages/long",
+            updated_at="2026-05-10T00:00:00Z",
+            language="en",
+            sections=[
+                ParsedSection(title="Early", section_path="1 Early", content="A" * 95_000),
+                ParsedSection(title="Late", section_path="2 Late", content="LATE_SECTION_MARKER"),
+            ],
+        )
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeConnector(long_page),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        def generate_side_effect(*, prompt, **kwargs):
+            if "# Batch Summaries" in prompt:
+                self.assertIn("late batch summary", prompt)
+                return {"result_markdown": "### Final Summary", "model_id": "codex-cli", "trace": {"mode": "final"}}
+            if "LATE_SECTION_MARKER" in prompt:
+                return {"result_markdown": "late batch summary", "model_id": "codex-cli", "trace": {"mode": "batch"}}
+            return {"result_markdown": "early batch summary", "model_id": "codex-cli", "trace": {"mode": "batch"}}
+
+        mock_generate.side_effect = generate_side_effect
+        result = service.summarize(
+            PRDReviewRequest(owner_key="anon:test", jira_id="AF-999", jira_link="", prd_url=long_page.source_url)
+        )
+
+        self.assertEqual(result["coverage"]["mode"], "hybrid")
+        self.assertEqual(result["coverage"]["sections_covered"], 2)
+        self.assertFalse(result["coverage"]["truncated"])
+        self.assertEqual(result["summary"]["result_markdown"], "### Final Summary")
+        self.assertGreaterEqual(mock_generate.call_count, 3)
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_long_prd_review_uses_hybrid_batches_and_synthesizes_priorities(self, mock_generate):
+        long_page = IngestedConfluencePage(
+            page_id="long-review",
+            title="Long PRD Review",
+            source_url="https://example.atlassian.net/wiki/pages/long-review",
+            updated_at="2026-05-10T00:00:00Z",
+            language="en",
+            sections=[
+                ParsedSection(title="Early", section_path="1 Early", content="A" * 95_000),
+                ParsedSection(title="Late", section_path="2 Late", content="LATE_REVIEW_MARKER"),
+            ],
+        )
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeConnector(long_page),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        def generate_side_effect(*, prompt, **kwargs):
+            if "# Batch Reviews" in prompt:
+                self.assertIn("late review gap", prompt)
+                return {"result_markdown": "### Executive Verdict", "model_id": "codex-cli", "trace": {"mode": "final"}}
+            if "LATE_REVIEW_MARKER" in prompt:
+                return {"result_markdown": "late review gap", "model_id": "codex-cli", "trace": {"mode": "batch"}}
+            return {"result_markdown": "early review gap", "model_id": "codex-cli", "trace": {"mode": "batch"}}
+
+        mock_generate.side_effect = generate_side_effect
+        result = service.review_url(
+            PRDBriefingReviewRequest(owner_key="anon:test", prd_url=long_page.source_url, language="en")
+        )
+
+        self.assertEqual(result["coverage"]["mode"], "hybrid")
+        self.assertEqual(result["coverage"]["sections_covered"], 2)
+        self.assertEqual(result["review"]["result_markdown"], "### Executive Verdict")
+        self.assertGreaterEqual(mock_generate.call_count, 3)
+
     def test_unsupported_question_is_declined(self):
         payload = self.service.create_session(
             owner_key="anon:test",

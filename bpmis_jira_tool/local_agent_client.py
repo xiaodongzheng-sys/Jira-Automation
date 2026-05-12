@@ -145,11 +145,49 @@ class LocalAgentClient:
         generated = payload.get("items")
         return generated if isinstance(generated, list) else []
 
-    def prd_review(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _poll_prd_job(self, job_id: str, *, progress_callback: Callable[[str, str, int, int], None] | None = None) -> dict[str, Any]:
+        last_progress: tuple[str, str, int, int] | None = None
+        while True:
+            status = self._request("GET", f"/api/local-agent/prd-jobs/{job_id}", signed=True)
+            stage = str(status.get("stage") or "")
+            message = str(status.get("message") or "")
+            current = int(status.get("current") or 0)
+            total = int(status.get("total") or 0)
+            progress = (stage, message, current, total)
+            if progress_callback is not None and message and progress != last_progress:
+                progress_callback(stage, message, current, total)
+                last_progress = progress
+            state = str(status.get("state") or "")
+            if state == "completed":
+                results = status.get("results")
+                result = results[0] if isinstance(results, list) and results and isinstance(results[0], dict) else {}
+                return result if isinstance(result, dict) else {}
+            if state == "failed":
+                raise ToolError(str(status.get("error") or message or "Mac local-agent PRD job failed."))
+            time.sleep(0.7)
+
+    def _start_prd_job(
+        self,
+        endpoint: str,
+        payload: dict[str, Any],
+        *,
+        progress_callback: Callable[[str, str, int, int], None] | None,
+    ) -> dict[str, Any]:
+        initial = self._request("POST", endpoint, payload)
+        job_id = str(initial.get("job_id") or "").strip()
+        if not job_id:
+            raise ToolError("Mac local-agent did not return a PRD job id.")
+        return self._poll_prd_job(job_id, progress_callback=progress_callback)
+
+    def prd_review(self, payload: dict[str, Any], *, progress_callback: Callable[[str, str, int, int], None] | None = None) -> dict[str, Any]:
+        if progress_callback is not None:
+            return self._start_prd_job("/api/local-agent/prd-review-async", payload, progress_callback=progress_callback)
         result = self._request("POST", "/api/local-agent/prd-review", payload)
         return result if isinstance(result, dict) else {}
 
-    def prd_summary(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def prd_summary(self, payload: dict[str, Any], *, progress_callback: Callable[[str, str, int, int], None] | None = None) -> dict[str, Any]:
+        if progress_callback is not None:
+            return self._start_prd_job("/api/local-agent/prd-summary-async", payload, progress_callback=progress_callback)
         result = self._request("POST", "/api/local-agent/prd-summary", payload)
         return result if isinstance(result, dict) else {}
 
@@ -157,11 +195,15 @@ class LocalAgentClient:
         result = self._request("POST", "/api/local-agent/prd-briefing-review", payload)
         return result if isinstance(result, dict) else {}
 
-    def prd_self_assessment_review(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def prd_self_assessment_review(self, payload: dict[str, Any], *, progress_callback: Callable[[str, str, int, int], None] | None = None) -> dict[str, Any]:
+        if progress_callback is not None:
+            return self._start_prd_job("/api/local-agent/prd-self-assessment/review-async", payload, progress_callback=progress_callback)
         result = self._request("POST", "/api/local-agent/prd-self-assessment/review", payload)
         return result if isinstance(result, dict) else {}
 
-    def prd_self_assessment_summary(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def prd_self_assessment_summary(self, payload: dict[str, Any], *, progress_callback: Callable[[str, str, int, int], None] | None = None) -> dict[str, Any]:
+        if progress_callback is not None:
+            return self._start_prd_job("/api/local-agent/prd-self-assessment/summary-async", payload, progress_callback=progress_callback)
         result = self._request("POST", "/api/local-agent/prd-self-assessment/summary", payload)
         return result if isinstance(result, dict) else {}
 

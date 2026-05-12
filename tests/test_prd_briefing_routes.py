@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -720,6 +721,29 @@ class PRDBriefingRouteTests(unittest.TestCase):
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["language"], "zh")
         self.assertIn("### Review", payload["review"]["result_markdown"])
+
+    @patch("bpmis_jira_tool.web._build_prd_review_service", return_value=FakePRDReviewService())
+    def test_prd_self_assessment_review_endpoint_can_queue_async_job(self, _mock_service):
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                session["google_credentials"] = {"token": "x"}
+            response = client.post(
+                "/api/prd-self-assessment/review",
+                json={"prd_url": "https://example.atlassian.net/wiki/pages/123", "language": "zh", "async": True},
+            )
+            self.assertEqual(response.status_code, 200)
+            queued = response.get_json()
+            self.assertEqual(queued["status"], "queued")
+            job_payload = {}
+            for _ in range(20):
+                job_payload = client.get(f"/api/jobs/{queued['job_id']}").get_json()
+                if job_payload.get("state") == "completed":
+                    break
+                time.sleep(0.05)
+
+        self.assertEqual(job_payload["state"], "completed")
+        self.assertEqual(job_payload["results"][0]["review"]["result_markdown"], "### Review\n- Good")
 
     @patch("bpmis_jira_tool.web._build_prd_review_service", return_value=FakePRDReviewService())
     def test_prd_self_assessment_sections_endpoint_returns_metadata(self, mock_service):

@@ -4805,6 +4805,47 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(payload["review"]["jira_id"], "AF-1")
         self.assertIn("### Review", payload["review"]["result_markdown"])
 
+    @patch("bpmis_jira_tool.web._build_prd_review_service", return_value=_FakePRDReviewService())
+    def test_team_dashboard_prd_review_can_queue_async_job(self, _mock_service):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "ENV_FILE": os.devnull,
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.post(
+                    "/api/team-dashboard/prd-review",
+                    json={
+                        "jira_id": "AF-1",
+                        "jira_link": "https://jira/browse/AF-1",
+                        "prd_url": "https://confluence/prd",
+                        "async": True,
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                queued = response.get_json()
+                self.assertEqual(queued["status"], "queued")
+                job_payload = {}
+                for _ in range(20):
+                    job_payload = client.get(f"/api/jobs/{queued['job_id']}").get_json()
+                    if job_payload.get("state") == "completed":
+                        break
+                    time.sleep(0.05)
+
+        self.assertEqual(job_payload["state"], "completed")
+        self.assertEqual(job_payload["results"][0]["review"]["jira_id"], "AF-1")
+
     @patch("bpmis_jira_tool.web._load_all_team_dashboard_task_payloads", return_value=[{"team_key": "AF"}])
     @patch("bpmis_jira_tool.web._build_monthly_report_service", return_value=_FakeMonthlyReportService())
     def test_team_dashboard_monthly_report_draft_returns_portal_result(self, _mock_service, _mock_payloads):
@@ -5152,6 +5193,42 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["summary"]["jira_id"], "AF-1")
         self.assertIn("### PRD Summary", payload["summary"]["result_markdown"])
+
+    @patch("bpmis_jira_tool.web._build_prd_review_service", return_value=_FakePRDReviewService())
+    def test_team_dashboard_prd_summary_can_queue_async_job(self, _mock_service):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "ENV_FILE": os.devnull,
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.post(
+                    "/api/team-dashboard/prd-summary",
+                    json={"jira_id": "AF-1", "jira_link": "https://jira/browse/AF-1", "prd_url": "https://confluence/prd", "async": True},
+                )
+                self.assertEqual(response.status_code, 200)
+                queued = response.get_json()
+                self.assertEqual(queued["status"], "queued")
+                job_payload = {}
+                for _ in range(20):
+                    job_payload = client.get(f"/api/jobs/{queued['job_id']}").get_json()
+                    if job_payload.get("state") == "completed":
+                        break
+                    time.sleep(0.05)
+
+        self.assertEqual(job_payload["state"], "completed")
+        self.assertEqual(job_payload["results"][0]["summary"]["jira_id"], "AF-1")
 
     @patch("bpmis_jira_tool.web._build_prd_review_service", return_value=_FakePRDReviewService())
     def test_team_dashboard_prd_review_validates_required_prd_link(self, _mock_service):

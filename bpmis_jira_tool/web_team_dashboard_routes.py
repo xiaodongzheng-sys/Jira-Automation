@@ -92,6 +92,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
     _get_work_memory_store = ctx._get_work_memory_store
     _local_agent_source_code_qa_enabled = ctx._local_agent_source_code_qa_enabled
     _build_prd_review_service = ctx._build_prd_review_service
+    _queue_prd_generation_job = ctx._queue_prd_generation_job
     resolve_monthly_report_period = ctx.resolve_monthly_report_period
     send_monthly_report_email = ctx.send_monthly_report_email
 
@@ -1078,6 +1079,14 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             "prd_url": str(payload.get("prd_url") or ""),
             "force_refresh": bool(payload.get("force_refresh")),
         }
+        if bool(payload.get("async")):
+            return _queue_prd_generation_job(
+                settings,
+                action="team_review",
+                request_payload=review_payload,
+                user_identity=user_identity,
+                title="Generate PRD Review",
+            )
         try:
             if _local_agent_source_code_qa_enabled(settings):
                 data = _build_local_agent_client(settings).prd_review(review_payload)
@@ -1140,6 +1149,14 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             "prd_url": str(payload.get("prd_url") or ""),
             "force_refresh": bool(payload.get("force_refresh")),
         }
+        if bool(payload.get("async")):
+            return _queue_prd_generation_job(
+                settings,
+                action="team_summary",
+                request_payload=summary_payload,
+                user_identity=user_identity,
+                title="Generate PRD Summary",
+            )
         try:
             if _local_agent_source_code_qa_enabled(settings):
                 data = _build_local_agent_client(settings).prd_summary(summary_payload)
