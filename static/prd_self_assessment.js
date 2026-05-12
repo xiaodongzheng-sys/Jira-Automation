@@ -194,14 +194,19 @@
       const index = Number(section.index);
       const title = section.title || `Section ${index}`;
       const charCount = Number(section.char_count || 0);
+      const linkedSpreadsheetCount = Number(section.linked_spreadsheet_count || 0);
+      const linkedLabel = linkedSpreadsheetCount
+        ? `${linkedSpreadsheetCount.toLocaleString()} linked spreadsheet${linkedSpreadsheetCount === 1 ? '' : 's'}`
+        : '';
       return `
         <label class="prd-section-option">
           <input type="checkbox" data-section-index="${escapeHtml(index)}" checked>
           <span>
             <strong>${escapeHtml(index)}. ${escapeHtml(title)}</strong>
-            <span>${escapeHtml(charCount.toLocaleString())} chars</span>
+            <span>${escapeHtml(charCount.toLocaleString())} chars${linkedLabel ? ` · ${escapeHtml(linkedLabel)}` : ''}</span>
           </span>
           ${section.long ? '<span class="prd-section-badge">Long</span>' : ''}
+          ${linkedSpreadsheetCount ? '<span class="prd-section-badge">Spreadsheet</span>' : ''}
         </label>
       `;
     }).join('');
@@ -263,6 +268,13 @@
     const coverageLine = !isSummary && coverage.sections_assessed
       ? `<span>Reviewed sections: ${escapeHtml(coverage.sections_assessed)}/${escapeHtml(coverage.selected_sections_total || coverage.sections_assessed)} selected${coverage.sections_total ? ` · ${escapeHtml(coverage.sections_total)} total` : ''}</span>`
       : '';
+    const linkedCoverageLine = !isSummary && Number.isFinite(Number(coverage.linked_artifacts_total)) && Number(coverage.linked_artifacts_total) > 0
+      ? `<span>Linked artifacts reviewed: ${escapeHtml(coverage.linked_artifacts_reviewed || 0)}/${escapeHtml(coverage.linked_artifacts_total || 0)}${Number(coverage.linked_artifacts_failed || 0) ? ` · ${escapeHtml(coverage.linked_artifacts_failed)} not reviewed` : ''}</span>`
+      : '';
+    const linkedArtifacts = Array.isArray(coverage.linked_artifacts) ? coverage.linked_artifacts : [];
+    const linkedArtifactLine = !isSummary && linkedArtifacts.length
+      ? `<p class="help-text">${escapeHtml(linkedArtifacts.slice(0, 4).map((item) => `${item.status === 'ok' ? 'Reviewed' : 'Not reviewed'}: ${item.title || item.url || 'Linked spreadsheet'}`).join(' · '))}${linkedArtifacts.length > 4 ? ` · +${escapeHtml(linkedArtifacts.length - 4)} more` : ''}</p>`
+      : '';
     const titleLine = !isSummary && titles.length
       ? `<p class="help-text">${escapeHtml(titles.slice(0, 6).join(' · '))}${titles.length > 6 ? ` · +${escapeHtml(titles.length - 6)} more` : ''}</p>`
       : '';
@@ -274,7 +286,9 @@
           <strong>${escapeHtml(payload.cached ? `Cached PRD ${isSummary ? 'Summary' : 'Review'}` : `PRD ${isSummary ? 'Summary' : 'Review'}`)}</strong>
           <span>${escapeHtml(language)} · ${escapeHtml(prd.title || 'PRD')}</span>
           ${coverageLine}
+          ${linkedCoverageLine}
           ${titleLine}
+          ${linkedArtifactLine}
         </div>
         <span>${escapeHtml(result.updated_at || '')}</span>
       </div>

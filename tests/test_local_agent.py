@@ -386,12 +386,14 @@ class LocalAgentServerTests(unittest.TestCase):
                     "prd_url": "https://confluence.shopee.io/display/SPDB/PRD",
                     "language": "en",
                     "selected_section_indexes": [27],
+                    "google_credentials": {"token": "drive-token", "scopes": ["https://www.googleapis.com/auth/drive.readonly"]},
                 },
             )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["coverage"]["selected_section_indexes"], [27])
         self.assertEqual(fake_service.request.selected_section_indexes, [27])
+        self.assertEqual(fake_service.request.google_credentials["token"], "drive-token")
 
     def test_seatalk_service_uses_agent_daily_cache_dir(self):
         from bpmis_jira_tool.local_agent_server import _build_seatalk_service

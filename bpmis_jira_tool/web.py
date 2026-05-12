@@ -2792,6 +2792,10 @@ def _run_prd_self_assessment_action(settings: Settings, *, action: str):
     }
     if "selected_section_indexes" in payload:
         request_payload["selected_section_indexes"] = payload.get("selected_section_indexes")
+    if action == "review" and _google_credentials_have_scopes(GOOGLE_DRIVE_READONLY_SCOPE):
+        credentials_payload = dict(session.get("google_credentials") or {})
+        if credentials_payload:
+            request_payload["google_credentials"] = credentials_payload
     event_prefix = f"prd_self_assessment_{action}"
     try:
         if _local_agent_source_code_qa_enabled(settings):

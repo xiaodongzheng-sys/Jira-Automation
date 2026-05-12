@@ -30,6 +30,15 @@ NOISE_IMAGE_URL_RE = re.compile(
 
 
 @dataclass
+class SpreadsheetLink:
+    title: str
+    url: str
+    source_section: str
+    kind: str = "link"
+    filename: str = ""
+
+
+@dataclass
 class ParsedSection:
     title: str
     section_path: str
@@ -37,6 +46,7 @@ class ParsedSection:
     html_content: str = ""
     image_refs: list[str] = field(default_factory=list)
     media_refs: list[str] = field(default_factory=list)
+    spreadsheet_links: list[SpreadsheetLink] = field(default_factory=list)
 
 
 @dataclass
@@ -95,6 +105,7 @@ class ConfluenceConnector:
             html=html,
             base_url=resolved.base_url,
             source_url=resolved.source_url,
+            page_id=page_id,
             session_id=session_id,
             media_dict=media_dict,
         )
@@ -313,6 +324,7 @@ class ConfluenceConnector:
         base_url: str,
         source_url: str,
         session_id: str,
+        page_id: str = "",
         media_dict: dict[str, dict[str, str]] | None = None,
     ) -> list[ParsedSection]:
         soup = BeautifulSoup(html, "html.parser")
@@ -325,11 +337,12 @@ class ConfluenceConnector:
         current_blocks: list[str] = []
         current_images: list[str] = []
         current_media_refs: list[str] = []
+        current_spreadsheet_links: list[SpreadsheetLink] = []
 
         def flush_section() -> None:
             body = "\n".join(self._dedupe_lines(current_lines)).strip()
             html_body = "\n".join(block for block in current_blocks if block).strip()
-            if not body and not current_images and not html_body and not current_media_refs:
+            if not body and not current_images and not html_body and not current_media_refs and not current_spreadsheet_links:
                 return
             sections.append(
                 ParsedSection(
@@ -339,12 +352,14 @@ class ConfluenceConnector:
                     html_content=html_body,
                     image_refs=list(dict.fromkeys(current_images)),
                     media_refs=list(dict.fromkeys(current_media_refs)),
+                    spreadsheet_links=self._dedupe_spreadsheet_links(current_spreadsheet_links),
                 )
             )
             current_lines.clear()
             current_blocks.clear()
             current_images.clear()
             current_media_refs.clear()
+            current_spreadsheet_links.clear()
 
         for node in wrapper.children:
             if isinstance(node, NavigableString):
@@ -370,9 +385,17 @@ class ConfluenceConnector:
             current_blocks.extend(blocks)
             current_images.extend(images)
             current_media_refs.extend(media_refs)
+            current_spreadsheet_links.extend(
+                self._extract_spreadsheet_links(
+                    node,
+                    base_url=base_url,
+                    page_id=page_id,
+                    section_path=current_title,
+                )
+            )
 
         flush_section()
-        filtered = [section for section in sections if section.content.strip() or section.image_refs]
+        filtered = [section for section in sections if section.content.strip() or section.image_refs or section.spreadsheet_links]
         return filtered or [
             ParsedSection(
                 title="Overview",
@@ -381,11 +404,89 @@ class ConfluenceConnector:
                 html_content="".join(str(child) for child in wrapper.contents).strip(),
                 image_refs=[],
                 media_refs=[],
+                spreadsheet_links=[],
             )
         ]
 
     def _resolve_image_ref(self, src: str, *, base_url: str) -> str:
         return urljoin(base_url, src)
+
+    def _extract_spreadsheet_links(
+        self,
+        node: Tag,
+        *,
+        base_url: str,
+        page_id: str,
+        section_path: str,
+    ) -> list[SpreadsheetLink]:
+        links: list[SpreadsheetLink] = []
+        for anchor in node.find_all("a", href=True):
+            href = str(anchor.get("href") or "").strip()
+            title = self._clean_text(anchor.get_text(" ", strip=True)) or href
+            resolved = urljoin(base_url, href)
+            if self._is_spreadsheet_url_or_title(resolved, title):
+                links.append(
+                    SpreadsheetLink(
+                        title=title,
+                        url=resolved,
+                        source_section=section_path,
+                        kind="link",
+                        filename=self._filename_from_url_or_title(resolved, title),
+                    )
+                )
+        if page_id:
+            for attachment in node.find_all(self._is_attachment_tag):
+                filename = str(attachment.get("ri:filename") or attachment.get("filename") or "").strip()
+                if not filename or not self._is_spreadsheet_url_or_title("", filename):
+                    continue
+                url = f"{base_url.rstrip('/')}/download/attachments/{page_id}/{quote(filename)}?api=v2"
+                links.append(
+                    SpreadsheetLink(
+                        title=filename,
+                        url=url,
+                        source_section=section_path,
+                        kind="confluence_attachment",
+                        filename=filename,
+                    )
+                )
+        return self._dedupe_spreadsheet_links(links)
+
+    @staticmethod
+    def _is_attachment_tag(tag: Tag) -> bool:
+        name = str(getattr(tag, "name", "") or "").casefold()
+        return name == "ri:attachment" or name.endswith(":attachment")
+
+    @staticmethod
+    def _is_spreadsheet_url_or_title(url: str, title: str) -> bool:
+        value = f"{url} {title}".casefold()
+        return (
+            ".xlsx" in value
+            or ".xlsm" in value
+            or ".xls" in value
+            or "docs.google.com/spreadsheets/" in value
+            or "application/vnd.google-apps.spreadsheet" in value
+        )
+
+    @staticmethod
+    def _filename_from_url_or_title(url: str, title: str) -> str:
+        parsed = urlparse(str(url or ""))
+        path_name = unquote_plus(Path(parsed.path).name or "")
+        for candidate in (path_name, str(title or "").strip()):
+            if candidate and any(candidate.casefold().endswith(suffix) for suffix in (".xlsx", ".xlsm", ".xls")):
+                return candidate
+        return str(title or path_name or "").strip()
+
+    @staticmethod
+    def _dedupe_spreadsheet_links(links: list[SpreadsheetLink]) -> list[SpreadsheetLink]:
+        deduped: list[SpreadsheetLink] = []
+        seen: set[str] = set()
+        for link in links:
+            key = str(link.url or link.filename or link.title).strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(link)
+        return deduped
 
     def _register_image_media(
         self,

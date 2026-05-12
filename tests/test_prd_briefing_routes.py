@@ -631,7 +631,10 @@ class PRDBriefingRouteTests(unittest.TestCase):
         with self.app.test_client() as client:
             with client.session_transaction() as session:
                 session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
-                session["google_credentials"] = {"token": "x"}
+                session["google_credentials"] = {
+                    "token": "x",
+                    "scopes": ["https://www.googleapis.com/auth/drive.readonly"],
+                }
 
             response = client.get("/prd-briefing/", follow_redirects=False)
             self.assertEqual(response.status_code, 200)
@@ -667,7 +670,10 @@ class PRDBriefingRouteTests(unittest.TestCase):
         with self.app.test_client() as client:
             with client.session_transaction() as session:
                 session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
-                session["google_credentials"] = {"token": "x"}
+                session["google_credentials"] = {
+                    "token": "x",
+                    "scopes": ["https://www.googleapis.com/auth/drive.readonly"],
+                }
 
             response = client.get("/prd-self-assessment/", follow_redirects=False)
             self.assertEqual(response.status_code, 200)
@@ -739,7 +745,10 @@ class PRDBriefingRouteTests(unittest.TestCase):
         with self.app.test_client() as client:
             with client.session_transaction() as session:
                 session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
-                session["google_credentials"] = {"token": "x"}
+                session["google_credentials"] = {
+                    "token": "x",
+                    "scopes": ["https://www.googleapis.com/auth/drive.readonly"],
+                }
             response = client.post(
                 "/api/prd-self-assessment/review",
                 json={
@@ -751,6 +760,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(service.requests[-1].selected_section_indexes, [2, 2, 1])
+        self.assertEqual(service.requests[-1].google_credentials["token"], "x")
 
     @patch("bpmis_jira_tool.web._build_prd_review_service", return_value=FakePRDReviewService())
     def test_prd_self_assessment_summary_endpoint_passes_english_language(self, mock_service):

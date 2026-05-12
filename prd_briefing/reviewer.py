@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, unquote_plus, urlparse
 
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ToolError
@@ -14,10 +16,15 @@ from .confluence import ConfluenceConnector, IngestedConfluencePage
 from .storage import BriefingStore
 
 
-PRD_REVIEW_PROMPT_VERSION = "v4_prd_review_skill_section_guidance"
+PRD_REVIEW_PROMPT_VERSION = "v6_prd_review_prioritized_actionable_guidance"
 PRD_SUMMARY_PROMPT_VERSION = "v1_prd_summary_codex"
 PRD_REVIEW_MAX_SOURCE_CHARS = 90_000
 PRD_SECTION_LONG_CHAR_THRESHOLD = 8_000
+PRD_LINKED_SPREADSHEET_MAX_FILES = 5
+PRD_LINKED_SPREADSHEET_MAX_SHEETS = 10
+PRD_LINKED_SPREADSHEET_MAX_ROWS_PER_SHEET = 80
+PRD_LINKED_SPREADSHEET_MAX_COLS = 20
+PRD_LINKED_SPREADSHEET_MAX_TEXT_CHARS = 60_000
 PRD_BRIEFING_REVIEW_CACHE_KEY = "__prd_briefing_url_review__"
 PRD_URL_SUMMARY_CACHE_KEY = "__prd_url_summary__"
 
@@ -38,6 +45,8 @@ class PRDBriefingReviewRequest:
     language: str = "zh"
     force_refresh: bool = False
     selected_section_indexes: list[int] | None = None
+    include_linked_spreadsheets: bool = True
+    google_credentials: dict[str, Any] | None = None
 
 
 class PRDReviewService:
@@ -114,11 +123,20 @@ class PRDReviewService:
         if not page.sections:
             raise ToolError("PRD page did not contain readable sections.")
         selected_page, selection = self._select_sections(page, normalized.selected_section_indexes)
+        linked_spreadsheet_evidence = _resolve_linked_spreadsheet_evidence(
+            confluence=self.confluence,
+            page=selected_page,
+            selected_section_indexes=selection["coverage"]["selected_section_indexes"],
+            google_credentials=normalized.google_credentials,
+            include_linked_spreadsheets=normalized.include_linked_spreadsheets,
+        )
+        coverage = _merge_linked_spreadsheet_coverage(selection["coverage"], linked_spreadsheet_evidence)
         prompt_version = prd_briefing_review_prompt_version(normalized.language)
         cache_jira_id = _cache_key_for_section_selection(
             PRD_BRIEFING_REVIEW_CACHE_KEY,
             page=page,
             selected_section_indexes=selection["cache_section_indexes"],
+            linked_artifact_fingerprint=linked_spreadsheet_evidence["cache_fingerprint"],
         )
         cached = None if normalized.force_refresh else self.store.get_prd_review_result(
             owner_key=normalized.owner_key,
@@ -134,7 +152,7 @@ class PRDReviewService:
                 "review": cached,
                 "prd": self._page_metadata(page),
                 "language": normalized.language,
-                "coverage": selection["coverage"],
+                "coverage": coverage,
             }
 
         prompt = build_prd_review_prompt(
@@ -143,6 +161,7 @@ class PRDReviewService:
             prd_url=page.source_url,
             page=selected_page,
             language=normalized.language,
+            linked_spreadsheet_evidence=linked_spreadsheet_evidence,
         )
         try:
             generated = generate_prd_review_with_codex(
@@ -183,7 +202,7 @@ class PRDReviewService:
             "review": review,
             "prd": self._page_metadata(page),
             "language": normalized.language,
-            "coverage": selection["coverage"],
+            "coverage": coverage,
         }
 
     def summarize(self, request: PRDReviewRequest) -> dict[str, Any]:
@@ -312,6 +331,7 @@ class PRDReviewService:
                     "title": section.section_path or section.title or f"Section {index}",
                     "char_count": len(str(section.content or "")),
                     "long": len(str(section.content or "")) >= PRD_SECTION_LONG_CHAR_THRESHOLD,
+                    "linked_spreadsheet_count": len(getattr(section, "spreadsheet_links", []) or []),
                 }
                 for index, section in enumerate(page.sections, start=1)
             ],
@@ -357,6 +377,8 @@ class PRDReviewService:
             language=language,
             force_refresh=bool(request.force_refresh),
             selected_section_indexes=selected_section_indexes,
+            include_linked_spreadsheets=bool(request.include_linked_spreadsheets),
+            google_credentials=dict(request.google_credentials or {}) or None,
         )
 
     @staticmethod
@@ -424,6 +446,281 @@ def _build_prd_source(page: IngestedConfluencePage) -> str:
     if not source:
         raise ToolError("PRD page did not contain readable text.")
     return source
+
+
+def _resolve_linked_spreadsheet_evidence(
+    *,
+    confluence: ConfluenceConnector,
+    page: IngestedConfluencePage,
+    selected_section_indexes: list[int],
+    google_credentials: dict[str, Any] | None,
+    include_linked_spreadsheets: bool,
+) -> dict[str, Any]:
+    if not include_linked_spreadsheets:
+        return {"artifacts": [], "cache_fingerprint": ""}
+
+    artifacts: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for section_index, section in zip(selected_section_indexes, page.sections):
+        for raw_link in getattr(section, "spreadsheet_links", []) or []:
+            url = str(getattr(raw_link, "url", "") or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            artifacts.append(
+                {
+                    "title": str(getattr(raw_link, "title", "") or getattr(raw_link, "filename", "") or url),
+                    "url": url,
+                    "filename": str(getattr(raw_link, "filename", "") or ""),
+                    "source_section_index": section_index,
+                    "source_section_title": section.section_path or section.title or f"Section {section_index}",
+                    "status": "pending",
+                    "reason": "",
+                    "text": "",
+                    "content_hash": "",
+                    "sheet_count": 0,
+                    "sheets_extracted": [],
+                    "skipped_sheet_count": 0,
+                }
+            )
+
+    remaining_text_chars = PRD_LINKED_SPREADSHEET_MAX_TEXT_CHARS
+    for index, artifact in enumerate(artifacts):
+        if index >= PRD_LINKED_SPREADSHEET_MAX_FILES:
+            artifact.update({"status": "failed", "reason": "max_linked_spreadsheet_limit"})
+            continue
+        _resolve_one_linked_spreadsheet(
+            confluence=confluence,
+            artifact=artifact,
+            google_credentials=google_credentials,
+            remaining_text_chars=max(remaining_text_chars, 0),
+        )
+        if artifact.get("status") == "ok":
+            remaining_text_chars -= len(str(artifact.get("text") or ""))
+
+    fingerprint = "|".join(
+        f"{item.get('source_section_index')}:{item.get('url')}:{item.get('status')}:{item.get('reason')}:{item.get('content_hash')}:{item.get('sheet_count')}:{item.get('skipped_sheet_count')}"
+        for item in artifacts
+    )
+    return {"artifacts": artifacts, "cache_fingerprint": fingerprint}
+
+
+def _resolve_one_linked_spreadsheet(
+    *,
+    confluence: ConfluenceConnector,
+    artifact: dict[str, Any],
+    google_credentials: dict[str, Any] | None,
+    remaining_text_chars: int,
+) -> None:
+    url = str(artifact.get("url") or "")
+    lowered = f"{url} {artifact.get('filename') or ''} {artifact.get('title') or ''}".casefold()
+    if ".xls" in lowered and not (".xlsx" in lowered or ".xlsm" in lowered):
+        artifact.update({"status": "failed", "reason": "unsupported_xls_format"})
+        return
+    try:
+        if _is_google_spreadsheet_url(url):
+            content = _download_google_spreadsheet(url=url, google_credentials=google_credentials)
+        elif _is_confluence_spreadsheet_url(url):
+            response = confluence._request(  # noqa: SLF001 - local PRD connector owns authenticated Confluence fetches.
+                url,
+                accept="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12,*/*;q=0.8",
+            )
+            content = bytes(getattr(response, "content", b"") or b"")
+        else:
+            artifact.update({"status": "failed", "reason": "unsupported_link"})
+            return
+        if not content:
+            artifact.update({"status": "failed", "reason": "empty_download"})
+            return
+        artifact["content_hash"] = hashlib.sha256(content).hexdigest()[:16]
+        extracted = _extract_workbook_text(content, max_chars=remaining_text_chars)
+        artifact.update({"status": "ok", "reason": "", **extracted})
+    except ToolError as error:
+        artifact.update({"status": "failed", "reason": str(error)})
+    except Exception as error:  # noqa: BLE001 - artifact coverage should not block the PRD review.
+        artifact.update({"status": "failed", "reason": f"download_or_parse_failed: {error}"})
+
+
+def _is_google_spreadsheet_url(url: str) -> bool:
+    parsed = urlparse(str(url or ""))
+    host = str(parsed.netloc or "").casefold()
+    return host in {"docs.google.com", "drive.google.com"} and (
+        "/spreadsheets/" in parsed.path or parsed.path.startswith("/file/") or parsed.path.startswith("/open")
+    )
+
+
+def _is_confluence_spreadsheet_url(url: str) -> bool:
+    parsed = urlparse(str(url or ""))
+    path = unquote_plus(str(parsed.path or "")).casefold()
+    return "/download/attachments/" in path and (path.endswith(".xlsx") or path.endswith(".xlsm") or ".xlsx" in path or ".xlsm" in path)
+
+
+def _download_google_spreadsheet(*, url: str, google_credentials: dict[str, Any] | None) -> bytes:
+    if not google_credentials:
+        raise ToolError("missing_google_credentials")
+    try:
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.errors import HttpError
+
+        from bpmis_jira_tool.gmail_dashboard import build_drive_api_service
+    except ImportError as error:
+        raise ToolError("google_drive_reader_unavailable") from error
+    file_id = _google_drive_file_id_from_url(url)
+    if not file_id:
+        raise ToolError("google_file_id_not_found")
+    service = build_drive_api_service(Credentials(**google_credentials))
+    try:
+        metadata = service.files().get(fileId=file_id, fields="id,name,mimeType").execute()
+        mime_type = str(metadata.get("mimeType") or "")
+        if mime_type == "application/vnd.google-apps.spreadsheet":
+            content = (
+                service.files()
+                .export_media(
+                    fileId=file_id,
+                    mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+                .execute()
+            )
+            return _coerce_download_bytes(content)
+        if mime_type in {
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.ms-excel.sheet.macroEnabled.12",
+        }:
+            content = service.files().get_media(fileId=file_id).execute()
+            return _coerce_download_bytes(content)
+        raise ToolError(f"unsupported_google_drive_mime_type:{mime_type or 'unknown'}")
+    except HttpError as error:
+        status = int(getattr(getattr(error, "resp", None), "status", 0) or 0)
+        if status in {401, 403, 404}:
+            raise ToolError("permission_denied") from error
+        raise ToolError(f"google_drive_download_failed:{status or 'unknown'}") from error
+
+
+def _google_drive_file_id_from_url(url: str) -> str:
+    parsed = urlparse(str(url or ""))
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if "d" in path_parts:
+        index = path_parts.index("d")
+        if index + 1 < len(path_parts):
+            return path_parts[index + 1]
+    query = parse_qs(parsed.query)
+    if query.get("id"):
+        return str(query["id"][0] or "").strip()
+    return ""
+
+
+def _coerce_download_bytes(content: Any) -> bytes:
+    if isinstance(content, bytes):
+        return content
+    if isinstance(content, str):
+        return content.encode("utf-8")
+    return bytes(content)
+
+
+def _extract_workbook_text(content: bytes, *, max_chars: int) -> dict[str, Any]:
+    if max_chars <= 0:
+        return {
+            "text": "[Linked spreadsheet text omitted because the linked artifact text limit was reached.]",
+            "sheet_count": 0,
+            "sheets_extracted": [],
+            "skipped_sheet_count": 0,
+        }
+    try:
+        from openpyxl import load_workbook
+    except ImportError as error:
+        raise ToolError("openpyxl_unavailable") from error
+    workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    lines: list[str] = []
+    sheets = workbook.worksheets[:PRD_LINKED_SPREADSHEET_MAX_SHEETS]
+    for worksheet in sheets:
+        lines.append(f"[Sheet: {worksheet.title}]")
+        for row in worksheet.iter_rows(
+            max_row=PRD_LINKED_SPREADSHEET_MAX_ROWS_PER_SHEET,
+            max_col=PRD_LINKED_SPREADSHEET_MAX_COLS,
+            values_only=True,
+        ):
+            values = ["" if value is None else str(value).strip().replace("\r\n", "\n").replace("\r", "\n") for value in row]
+            if any(values):
+                lines.append("\t".join(values).rstrip())
+            if sum(len(line) for line in lines) >= max_chars:
+                lines.append("...[linked spreadsheet text truncated]")
+                text = "\n".join(lines).strip()[:max_chars]
+                return {
+                    "text": text,
+                    "sheet_count": len(workbook.worksheets),
+                    "sheets_extracted": [sheet.title for sheet in sheets],
+                    "skipped_sheet_count": max(len(workbook.worksheets) - len(sheets), 0),
+                }
+    text = "\n".join(lines).strip()
+    if not text:
+        raise ToolError("empty_workbook")
+    return {
+        "text": text[:max_chars],
+        "sheet_count": len(workbook.worksheets),
+        "sheets_extracted": [sheet.title for sheet in sheets],
+        "skipped_sheet_count": max(len(workbook.worksheets) - len(sheets), 0),
+    }
+
+
+def _merge_linked_spreadsheet_coverage(coverage: dict[str, Any], linked_spreadsheet_evidence: dict[str, Any]) -> dict[str, Any]:
+    artifacts = list(linked_spreadsheet_evidence.get("artifacts") or [])
+    reviewed = [item for item in artifacts if item.get("status") == "ok"]
+    failed = [item for item in artifacts if item.get("status") != "ok"]
+    merged = dict(coverage)
+    merged.update(
+        {
+            "linked_artifacts_total": len(artifacts),
+            "linked_artifacts_reviewed": len(reviewed),
+            "linked_artifacts_failed": len(failed),
+            "linked_artifacts": [_linked_artifact_public_payload(item) for item in artifacts],
+        }
+    )
+    return merged
+
+
+def _linked_artifact_public_payload(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "title": str(item.get("title") or ""),
+        "url": str(item.get("url") or ""),
+        "source_section_index": item.get("source_section_index"),
+        "source_section_title": str(item.get("source_section_title") or ""),
+        "status": str(item.get("status") or ""),
+        "reason": str(item.get("reason") or ""),
+        "sheet_count": int(item.get("sheet_count") or 0),
+        "sheets_extracted": list(item.get("sheets_extracted") or []),
+        "skipped_sheet_count": int(item.get("skipped_sheet_count") or 0),
+        "char_count": len(str(item.get("text") or "")),
+    }
+
+
+def _build_linked_spreadsheet_prompt_section(linked_spreadsheet_evidence: dict[str, Any]) -> str:
+    artifacts = list(linked_spreadsheet_evidence.get("artifacts") or [])
+    if not artifacts:
+        return "# Linked Spreadsheet Evidence\nNo linked spreadsheet links were found in the selected PRD sections."
+    blocks = ["# Linked Spreadsheet Evidence"]
+    for index, artifact in enumerate(artifacts, start=1):
+        title = str(artifact.get("title") or artifact.get("url") or f"Linked spreadsheet {index}")
+        section = str(artifact.get("source_section_title") or f"Section {artifact.get('source_section_index') or '-'}")
+        status = str(artifact.get("status") or "failed")
+        if status == "ok":
+            sheets = ", ".join(str(sheet) for sheet in (artifact.get("sheets_extracted") or []))
+            skipped = int(artifact.get("skipped_sheet_count") or 0)
+            skipped_line = f"\nSkipped sheets: {skipped}" if skipped else ""
+            blocks.append(
+                f"## Linked artifact reviewed: {title}\n"
+                f"Source section: {section}\n"
+                f"Sheets extracted: {sheets or '-'}{skipped_line}\n"
+                f"Use this artifact as evidence only for the linked source section.\n"
+                f"{str(artifact.get('text') or '').strip()}"
+            )
+        else:
+            blocks.append(
+                f"## Linked artifact not reviewed: {title}\n"
+                f"Source section: {section}\n"
+                f"Reason: {artifact.get('reason') or 'unavailable'}\n"
+                f"Do not infer this artifact's contents."
+            )
+    return "\n\n".join(blocks).strip()
 
 
 def _build_section_coverage(
@@ -495,15 +792,25 @@ def _section_selection_hash(selected_section_indexes: list[int]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def _cache_key_for_section_selection(prefix: str, *, page: IngestedConfluencePage, selected_section_indexes: list[int] | None) -> str:
-    if not selected_section_indexes:
-        return prefix
-    section_fingerprint = "|".join(
-        f"{index}:{page.sections[index - 1].section_path}:{hashlib.sha256(str(page.sections[index - 1].content or '').encode('utf-8')).hexdigest()[:12]}"
-        for index in selected_section_indexes
-    )
-    selection_hash = hashlib.sha256(section_fingerprint.encode("utf-8")).hexdigest()[:16]
-    return f"{prefix}:sections:{selection_hash}"
+def _cache_key_for_section_selection(
+    prefix: str,
+    *,
+    page: IngestedConfluencePage,
+    selected_section_indexes: list[int] | None,
+    linked_artifact_fingerprint: str = "",
+) -> str:
+    cache_key = prefix
+    if selected_section_indexes:
+        section_fingerprint = "|".join(
+            f"{index}:{page.sections[index - 1].section_path}:{hashlib.sha256(str(page.sections[index - 1].content or '').encode('utf-8')).hexdigest()[:12]}"
+            for index in selected_section_indexes
+        )
+        selection_hash = hashlib.sha256(section_fingerprint.encode("utf-8")).hexdigest()[:16]
+        cache_key = f"{cache_key}:sections:{selection_hash}"
+    if linked_artifact_fingerprint:
+        linked_hash = hashlib.sha256(linked_artifact_fingerprint.encode("utf-8")).hexdigest()[:16]
+        cache_key = f"{cache_key}:linked:{linked_hash}"
+    return cache_key
 
 
 def normalize_prd_review_language(language: str | None) -> str:
@@ -526,25 +833,36 @@ def build_prd_review_prompt(
     prd_url: str,
     page: IngestedConfluencePage,
     language: str = "zh",
+    linked_spreadsheet_evidence: dict[str, Any] | None = None,
 ) -> str:
     source = _build_prd_source(page)
+    linked_source = _build_linked_spreadsheet_prompt_section(linked_spreadsheet_evidence or {})
     if normalize_prd_review_language(language) == "en":
         return f"""# Role
-You are a senior PRD delivery-readiness reviewer using the `prd-review` skill. Your job is to help the PM improve the PRD section by section so engineering, QA, release, operations, and support can execute without guessing.
+You are a senior PRD delivery-readiness reviewer using the `prd-review` skill. Your job is to help the PM identify the few delivery blockers that matter most and turn them into concrete PRD patches.
 
 # Review Boundary
 - Review only delivery logic: business-flow closure, role actions, ownership, approvals, handoffs, status transitions, rule precedence, exception paths, reverse paths, operational fallback, and QA/dev acceptance clarity.
 - Do not evaluate business value, ROI, KPI choice, API design, database design, code architecture, implementation approach, or engineering effort.
 - Do not invent rules. If the selected PRD sections do not contain evidence for a claim, write `Source not found in selected sections`.
+- Treat linked spreadsheet evidence as part of the selected PRD section when it is listed under `# Linked Spreadsheet Evidence`. If an expected linked spreadsheet is listed as not reviewed, call out the coverage gap instead of guessing its content.
 
 # Task
-Assess the selected PRD sections for delivery readiness and provide concrete section-level improvement guidance. Every important blocker or gap must name the PRD section that should be changed and tell the PM exactly what to add or rewrite.
+Assess the selected PRD sections for delivery readiness. Prioritize only the issues that would materially block development, QA, UAT, release, operations, or support. Every important blocker must name the PRD section that should be changed and include text the PM can add back to the PRD.
 
 # Scoring Rubric
 - **9 - 10 (Ready):** Main flow, exception paths, reverse paths, rule precedence, role actions, and fallback are clear enough for dev and QA.
 - **7 - 8 (Needs Minor Clarification):** Happy path is clear, with only minor non-blocking clarifications.
 - **4 - 6 (Needs Major Clarification):** Development, QA, release, operations, or support will likely be blocked by missing logic or unclear rules.
 - **1 - 3 (Not Ready):** Core flow is broken, contradictory, or impossible to validate from the PRD.
+
+# Prioritization Rules
+- Use `P0` only when dev/QA/UAT/release/operations cannot proceed or would likely implement inconsistent behavior.
+- Use `P1` for important rule, exception, access, status, or evidence gaps that can cause rework or failed acceptance.
+- Use `P2` only for useful clarifications. Put P2 items under `Secondary Clarifications`, not in the blocker list.
+- `Top Must-Fix Delivery Blockers` must contain at most 5 items total. Merge duplicate symptoms into one blocker.
+- Do not create more than 2 main findings for the same selected section unless there is a true P0 contradiction.
+- Keep the whole answer concise, roughly 800-1200 words unless the selected section is extremely complex.
 
 # Required Review Checks
 1. **Flow closure:** Can each user/system role move from trigger to terminal state without an undefined next step?
@@ -554,33 +872,41 @@ Assess the selected PRD sections for delivery readiness and provide concrete sec
 5. **Acceptance clarity:** Can QA/dev verify the expected behavior after the PRD is updated?
 
 # Output Format
-Return only concise Markdown in English. Every blocker or gap must include a section name.
+Return only concise Markdown in English. Every blocker or gap must include a section name and evidence basis.
 ---
-### Delivery Logic Assessment
+### Executive Verdict
 - **Final Score:** [X] / 10
 - **Dev-Readiness Verdict:** [Ready / Needs Clarification / Not Ready]
-- **Reason:** [One concise reason grounded in the PRD.]
+- **Bottom line:** [One concise reason grounded in the PRD.]
+- **Top 3 attention points:** [At most 3 short bullets.]
 
-### Critical Section Gaps
-- **Section:** [section title, or Source not found in selected sections]
-  - **Gap:** [What is missing, contradictory, or undefined.]
-  - **Impact:** [Why this blocks development, QA, release, operations, or support.]
+### Top Must-Fix Delivery Blockers
+1. **Priority:** [P0/P1]
+   - **Section:** [section title, or Source not found in selected sections]
+   - **Problem:** [What is missing, contradictory, or undefined.]
+   - **Why this is important:** [Why this blocks dev, QA, UAT, release, ops, or support.]
+   - **Suggested PRD patch:** [Specific rule/state/fallback/wording the PM can add.]
+   - **Acceptance check:** [What QA/dev should be able to verify.]
+   - **Evidence basis:** [Current PRD section / Spreadsheet evidence reviewed / Linked artifact not reviewed / Source not found in selected sections]
 
-### Section-by-Section Improvement Suggestions
+### Section Patch Suggestions
 1. **Section: [section title]**
-   - **Gap:** [What the current section does not define.]
-   - **Why it matters:** [Delivery, QA, release, ops, or support impact.]
-   - **Suggested PRD update:** [Specific rule, state, fallback, wording, or acceptance condition to add.]
-   - **Acceptance check:** [What QA/dev should be able to verify after the PRD is updated.]
-2. ...
+   - **Priority:** [P0/P1/P2]
+   - **Suggested PRD patch:** [Copy-ready sentence/table/rule to add or rewrite.]
+   - **Acceptance check:** [Expected observable validation.]
+   - **Evidence basis:** [One of the allowed evidence labels.]
 
-### Missing Exception / Reverse Paths
-- **Section:** [section title]
-  - **Scenario:** [Concrete exception or reverse-path scenario.]
-  - **Suggested PRD update:** [What the PM should add.]
+### Secondary Clarifications
+- **Priority:** P2
+  - **Section:** [section title]
+  - **Clarification:** [Non-blocking question or cleanup.]
 
-### PM Clarification Checklist
-- [Concrete yes/no or rule-choice question the PM should answer.]
+### Evidence Coverage
+- **Current PRD sections reviewed:** [brief coverage]
+- **Linked artifacts:** [Reviewed count and unreadable artifacts if any]
+
+### PM Decision Checklist
+- [Concrete yes/no or rule-choice question the PM should answer, ordered by priority.]
 ---
 
 # Review Context
@@ -592,23 +918,34 @@ Return only concise Markdown in English. Every blocker or gap must include a sec
 
 # PRD Content
 {source}
+
+{linked_source}
 """
     return f"""# Role
-你是一位资深 PRD 交付就绪度评审专家，使用 `prd-review` Skill 的方法论工作。你的目标不是评价产品想法，而是帮助 PM 逐个 Section 把 PRD 改到研发、QA、上线、运营和客服都能执行。
+你是一位资深 PRD 交付就绪度评审专家，使用 `prd-review` Skill 的方法论工作。你的目标不是评价产品想法，而是帮 PM 找出真正最重要的交付阻塞点，并转成可直接写回 PRD 的修改建议。
 
 # 评审边界
 - 只评审交付逻辑：业务流程闭环、角色动作、权限/归属、审批/交接、状态流转、规则优先级、异常路径、逆向路径、运营兜底、QA/研发验收清晰度。
 - 不评价商业价值、ROI、指标选择、API 设计、数据库设计、代码架构、实现方案或研发工期。
 - 不臆测 PRD 没写的规则。如果选中的 PRD Section 中没有依据，必须写 `Source not found in selected sections`。
+- `# Linked Spreadsheet Evidence` 中列出的 spreadsheet evidence 属于对应 PRD Section 的评审依据；如果某个关键 spreadsheet 标记为 not reviewed，必须把它当作覆盖缺口说明，不能臆测其内容。
 
 # Task
-请评估选中的 PRD Section 是否具备交付就绪度，并输出可直接帮助 PM 修改 PRD 的 Section 级建议。每个关键 blocker 或 gap 都必须指出应该修改哪个 PRD Section，并说明 PM 具体要补写或改写什么。
+请评估选中的 PRD Section 是否具备交付就绪度。优先输出真正会阻塞研发、QA、UAT、上线、运营或客服承接的问题。每个关键 blocker 都必须指出应该修改哪个 PRD Section，并给出 PM 可直接写回 PRD 的补写文本。
 
 # 评分标准
 - **9 - 10 分 (Ready)：** 主流程、异常、逆向、规则优先级、角色动作、运营兜底都足够清晰，研发和 QA 可以直接接手。
 - **7 - 8 分 (Needs Minor Clarification)：** 主流程清楚，仅有少量不阻断交付的澄清项。
 - **4 - 6 分 (Needs Major Clarification)：** 存在会阻塞研发、QA、上线、运营或客服承接的流程/规则缺口。
 - **1 - 3 分 (Not Ready)：** 核心流程断裂、规则自相矛盾，或无法从 PRD 判断用户/系统下一步。
+
+# 优先级规则
+- `P0` 只用于研发/QA/UAT/上线/运营无法继续，或极可能导致实现不一致的问题。
+- `P1` 用于重要规则、异常、权限、状态或证据缺口，会导致返工或验收失败。
+- `P2` 只用于有价值但不阻塞的问题，必须放到 `Secondary Clarifications / 次要澄清项`，不要混进 blocker。
+- `Top Must-Fix Delivery Blockers` 最多 5 条。相同类型问题必须合并，不能平铺刷屏。
+- 同一个 selected section 最多输出 2 条主建议，除非存在真正 P0 矛盾。
+- 输出要压缩，默认约 800-1200 words 的中文等价长度。
 
 # 必查维度
 1. **流程闭环：** 每个用户/系统角色是否能从触发条件走到终态，没有未定义的下一步？
@@ -618,33 +955,41 @@ Return only concise Markdown in English. Every blocker or gap must include a sec
 5. **验收清晰度：** PRD 补完后，QA/研发是否能验证行为正确？
 
 # Output Format
-请严格按以下结构输出精炼 Markdown。每个 blocker 或 gap 都必须包含 Section 名称。
+请严格按以下结构输出精炼 Markdown。每个 blocker 或 gap 都必须包含 Section 名称和证据依据。
 ---
-### 交付逻辑评估
+### Executive Verdict
 - **最终得分：** [X] / 10
 - **Dev-Readiness Verdict：** [Ready / Needs Clarification / Not Ready]
-- **判分理由：** [一句话说明，必须基于 PRD 内容。]
+- **Bottom line：** [一句话说明，必须基于 PRD 内容。]
+- **Top 3 attention points：** [最多 3 个短 bullet。]
 
-### 关键 Section 缺口
-- **Section：** [section title，或 Source not found in selected sections]
-  - **当前缺口：** [缺什么、哪里矛盾、哪里未定义。]
-  - **交付影响：** [为什么会阻塞研发、QA、上线、运营或客服。]
+### Top Must-Fix Delivery Blockers
+1. **优先级：** [P0/P1]
+   - **Section：** [section title，或 Source not found in selected sections]
+   - **Problem：** [缺什么、哪里矛盾、哪里未定义。]
+   - **Why this is important：** [为什么会阻塞研发、QA、UAT、上线、运营或客服。]
+   - **Suggested PRD patch：** [PM 可直接补进 PRD 的规则/状态/fallback/文案。]
+   - **Acceptance check：** [QA/研发应该能验证什么。]
+   - **Evidence basis：** [Current PRD section / Spreadsheet evidence reviewed / Linked artifact not reviewed / Source not found in selected sections]
 
-### Section-by-Section 修改建议
+### Section Patch Suggestions
 1. **Section：[section title]**
-   - **当前缺口：** [当前 Section 没有定义什么。]
-   - **交付影响：** [对研发、QA、上线、运营或客服的影响。]
-   - **建议补写：** [建议 PM 具体补哪条规则、哪个状态、哪个 fallback、哪句说明或哪个验收条件。]
-   - **验收检查：** [补完后 QA/研发应该能验证什么。]
-2. ...
+   - **优先级：** [P0/P1/P2]
+   - **建议补写：** [可直接复制的句子/表格/规则。]
+   - **验收检查：** [可观察的验收结果。]
+   - **证据依据：** [上述证据标签之一。]
 
-### 缺失的异常 / 逆向路径
-- **Section：** [section title]
-  - **场景：** [具体异常或逆向流程场景。]
-  - **建议补写：** [PM 应该补充的处理方式。]
+### Secondary Clarifications / 次要澄清项
+- **优先级：** P2
+  - **Section：** [section title]
+  - **Clarification：** [非阻塞澄清问题或文案清理。]
 
-### PM 待澄清清单
-- [PM 需要回答的具体 yes/no 或规则选择问题。]
+### Evidence Coverage / 证据覆盖
+- **Current PRD sections reviewed：** [简要覆盖范围]
+- **Linked artifacts：** [已读数量和未读附件]
+
+### PM Decision Checklist
+- [PM 需要回答的具体 yes/no 或规则选择问题，按优先级排序。]
 ---
 
 # Review Context
@@ -656,6 +1001,8 @@ Return only concise Markdown in English. Every blocker or gap must include a sec
 
 # PRD Content
 {source}
+
+{linked_source}
 """
 
 
@@ -769,8 +1116,10 @@ def build_prd_review_system_text(language: str | None = "zh") -> str:
         "Review only delivery logic: flow closure, role actions, ownership, status transitions, rule rigor, "
         "exception and reverse paths, operational fallback, and QA/dev acceptance clarity. "
         "Do not evaluate business value, metrics, architecture, APIs, databases, code, implementation effort, or ROI. "
-        "Every important blocker or gap must name the affected PRD section and include a concrete Suggested PRD update "
-        "plus an Acceptance check. If evidence is not in the selected sections, say `Source not found in selected sections`. "
+        "Prioritize the few issues that materially block delivery; do not flatten all findings into equal severity. "
+        "Every important blocker or gap must name the affected PRD section and include Priority, Problem, Why this is important, "
+        "Suggested PRD patch, Acceptance check, and Evidence basis. If evidence is not in the selected sections, "
+        "say `Source not found in selected sections`. "
         f"Return only the requested Markdown review in {output_language}. Do not include tool logs."
     )
 

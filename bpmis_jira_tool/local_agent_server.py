@@ -335,6 +335,7 @@ def create_local_agent_app() -> Flask:
                 language=str(payload.get("language") or "zh"),
                 force_refresh=bool(payload.get("force_refresh")),
                 selected_section_indexes=payload.get("selected_section_indexes"),
+                google_credentials=payload.get("google_credentials") if isinstance(payload.get("google_credentials"), dict) else None,
             )
         )
         _save_prd_latest_result(settings, owner_key=owner_key, tool_key="prd_self_assessment", payload={"action": "review", "payload": result})

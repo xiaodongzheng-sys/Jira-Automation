@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from dataclasses import dataclass
+import io
 from pathlib import Path
 from unittest.mock import patch
 import json
@@ -8,7 +9,7 @@ import json
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ToolError
 
-from prd_briefing.confluence import ConfluenceConnector, IngestedConfluencePage, ParsedSection
+from prd_briefing.confluence import ConfluenceConnector, IngestedConfluencePage, ParsedSection, SpreadsheetLink
 from prd_briefing.reviewer import (
     PRD_BRIEFING_REVIEW_CACHE_KEY,
     PRD_REVIEW_PROMPT_VERSION,
@@ -93,6 +94,72 @@ class FakeConnector:
     def ingest_page(self, page_ref, session_id):
         self.calls += 1
         return self.page
+
+
+class FakeConfluenceResponse:
+    def __init__(self, content: bytes):
+        self.content = content
+
+
+class FakeAttachmentConnector(FakeConnector):
+    def __init__(self, page: IngestedConfluencePage, attachment_content: bytes):
+        super().__init__(page)
+        self.attachment_content = attachment_content
+        self.requested_urls = []
+
+    def _request(self, url, accept=None, **_kwargs):
+        self.requested_urls.append((url, accept))
+        return FakeConfluenceResponse(self.attachment_content)
+
+
+class FakeDriveExecute:
+    def __init__(self, value):
+        self.value = value
+
+    def execute(self):
+        return self.value
+
+
+class FakeDriveFiles:
+    def __init__(self, workbook_content: bytes):
+        self.workbook_content = workbook_content
+
+    def get(self, **_kwargs):
+        return FakeDriveExecute(
+            {
+                "id": "sheet123",
+                "name": "MAS Outsourcing Register",
+                "mimeType": "application/vnd.google-apps.spreadsheet",
+            }
+        )
+
+    def export_media(self, **_kwargs):
+        return FakeDriveExecute(self.workbook_content)
+
+
+class FakeDriveService:
+    def __init__(self, workbook_content: bytes):
+        self.workbook_content = workbook_content
+
+    def files(self):
+        return FakeDriveFiles(self.workbook_content)
+
+
+def _xlsx_bytes(*, sheet_count: int = 1, marker: str = "MAS format") -> bytes:
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    first = workbook.active
+    first.title = "Register Format"
+    first.append(["Field", "Required", "Format"])
+    first.append(["Outsourcing Arrangement ID", "Yes", marker])
+    for index in range(2, sheet_count + 1):
+        sheet = workbook.create_sheet(f"Sheet {index}")
+        sheet.append(["Column", "Rule"])
+        sheet.append([f"field_{index}", f"rule_{index}"])
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
 
 
 class PRDBriefingServiceTests(unittest.TestCase):
@@ -537,16 +604,22 @@ class PRDBriefingServiceTests(unittest.TestCase):
             page=page,
         )
 
-        self.assertEqual(PRD_REVIEW_PROMPT_VERSION, "v4_prd_review_skill_section_guidance")
+        self.assertEqual(PRD_REVIEW_PROMPT_VERSION, "v6_prd_review_prioritized_actionable_guidance")
         self.assertIn("prd-review", prompt)
-        self.assertIn("交付逻辑评估", prompt)
-        self.assertIn("关键 Section 缺口", prompt)
-        self.assertIn("Section-by-Section 修改建议", prompt)
+        self.assertIn("Executive Verdict", prompt)
+        self.assertIn("Top Must-Fix Delivery Blockers", prompt)
+        self.assertIn("Section Patch Suggestions", prompt)
+        self.assertIn("Evidence Coverage", prompt)
+        self.assertIn("优先级", prompt)
+        self.assertIn("Suggested PRD patch", prompt)
+        self.assertIn("Evidence basis", prompt)
         self.assertIn("建议补写", prompt)
         self.assertIn("验收检查", prompt)
-        self.assertIn("PM 待澄清清单", prompt)
+        self.assertIn("PM Decision Checklist", prompt)
         self.assertIn("Source not found in selected sections", prompt)
         self.assertIn("最终得分", prompt)
+        self.assertNotIn("Previous " + "PRD Evidence", prompt)
+        self.assertNotIn("previous_" + "prd_url", prompt)
         self.assertNotIn("毒舌", prompt)
         self.assertNotIn("逻辑严密度评估", prompt)
         self.assertIn("AF-123", prompt)
@@ -604,8 +677,9 @@ class PRDBriefingServiceTests(unittest.TestCase):
         )
 
         self.assertIn("Jira ID: -", prompt)
-        self.assertIn("交付逻辑评估", prompt)
-        self.assertIn("Section-by-Section 修改建议", prompt)
+        self.assertIn("Executive Verdict", prompt)
+        self.assertIn("Top Must-Fix Delivery Blockers", prompt)
+        self.assertIn("Section Patch Suggestions", prompt)
         self.assertIn("This PRD introduces approval workflow", prompt)
 
     def test_prd_briefing_review_english_prompt_requests_english_output(self):
@@ -620,10 +694,13 @@ class PRDBriefingServiceTests(unittest.TestCase):
         )
 
         self.assertIn("Return only concise Markdown in English", prompt)
-        self.assertIn("Delivery Logic Assessment", prompt)
-        self.assertIn("Section-by-Section Improvement Suggestions", prompt)
-        self.assertIn("Suggested PRD update", prompt)
+        self.assertIn("Executive Verdict", prompt)
+        self.assertIn("Top Must-Fix Delivery Blockers", prompt)
+        self.assertIn("Section Patch Suggestions", prompt)
+        self.assertIn("Suggested PRD patch", prompt)
         self.assertIn("Acceptance check", prompt)
+        self.assertIn("Evidence basis", prompt)
+        self.assertNotIn("Previous " + "PRD Evidence", prompt)
         self.assertNotIn("逻辑严密度评估", prompt)
 
     def test_prd_summary_english_prompt_requests_english_output(self):
@@ -717,6 +794,55 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(payload["sections"][0]["title"], "Overview")
         self.assertGreater(payload["sections"][0]["char_count"], 0)
         self.assertFalse(payload["sections"][0]["long"])
+
+    def test_prd_self_assessment_lists_spreadsheet_link_counts(self):
+        page = self.service.confluence.page
+        page.sections[1].spreadsheet_links = [
+            SpreadsheetLink(
+                title="MAS Outsourcing Register.xlsx",
+                url="https://example.atlassian.net/download/attachments/123/MAS%20Outsourcing%20Register.xlsx",
+                source_section="Rollout",
+                filename="MAS Outsourcing Register.xlsx",
+            )
+        ]
+        service = PRDReviewService(
+            store=self.store,
+            confluence=self.service.confluence,
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        payload = service.list_url_sections(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+            )
+        )
+
+        self.assertEqual(payload["sections"][0]["linked_spreadsheet_count"], 0)
+        self.assertEqual(payload["sections"][1]["linked_spreadsheet_count"], 1)
+
+    def test_confluence_parser_extracts_spreadsheet_links_by_section(self):
+        connector = ConfluenceConnector(base_url="", email="", api_token="", bearer_token="", store=self.store)
+
+        sections = connector._parse_sections(
+            html="""
+            <h2>Register</h2>
+            <p><a href="/download/attachments/123/MAS%20Outsourcing%20Register.xlsx">MAS Register format</a></p>
+            <h2>Appendix</h2>
+            <ac:link><ri:attachment ri:filename="Fallback Format.xlsm" /></ac:link>
+            """,
+            base_url="https://confluence.shopee.io",
+            source_url="https://confluence.shopee.io/pages/viewpage.action?pageId=123",
+            page_id="123",
+            session_id="s1",
+            media_dict={},
+        )
+
+        self.assertEqual(sections[0].spreadsheet_links[0].title, "MAS Register format")
+        self.assertIn("/download/attachments/123/MAS%20Outsourcing%20Register.xlsx", sections[0].spreadsheet_links[0].url)
+        self.assertEqual(sections[1].spreadsheet_links[0].filename, "Fallback Format.xlsm")
 
     @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
     def test_prd_self_assessment_selected_sections_limit_prompt_and_cache(self, mock_generate):
@@ -836,6 +962,213 @@ class PRDBriefingServiceTests(unittest.TestCase):
                     selected_section_indexes="2",
                 )
             )
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_prd_self_assessment_includes_selected_linked_spreadsheet_evidence(self, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        page = self.service.confluence.page
+        page.sections[1].spreadsheet_links = [
+            SpreadsheetLink(
+                title="MAS Outsourcing Register.xlsx",
+                url="https://example.atlassian.net/download/attachments/123/MAS%20Outsourcing%20Register.xlsx",
+                source_section="Rollout",
+                filename="MAS Outsourcing Register.xlsx",
+            )
+        ]
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeAttachmentConnector(page, _xlsx_bytes(marker="MAS field format")),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        result = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[2],
+            )
+        )
+
+        prompt = mock_generate.call_args.kwargs["prompt"]
+        self.assertIn("# Linked Spreadsheet Evidence", prompt)
+        self.assertIn("MAS Outsourcing Register.xlsx", prompt)
+        self.assertIn("Outsourcing Arrangement ID", prompt)
+        self.assertIn("MAS field format", prompt)
+        self.assertNotIn("approval workflow", prompt)
+        self.assertEqual(result["coverage"]["linked_artifacts_total"], 1)
+        self.assertEqual(result["coverage"]["linked_artifacts_reviewed"], 1)
+        self.assertEqual(result["coverage"]["linked_artifacts"][0]["sheets_extracted"], ["Register Format"])
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_prd_self_assessment_linked_workbook_extracts_first_ten_sheets(self, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        page = self.service.confluence.page
+        page.sections[1].spreadsheet_links = [
+            SpreadsheetLink(
+                title="Large Register.xlsx",
+                url="https://example.atlassian.net/download/attachments/123/Large%20Register.xlsx",
+                source_section="Rollout",
+                filename="Large Register.xlsx",
+            )
+        ]
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeAttachmentConnector(page, _xlsx_bytes(sheet_count=12)),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        result = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[2],
+            )
+        )
+
+        artifact = result["coverage"]["linked_artifacts"][0]
+        self.assertEqual(len(artifact["sheets_extracted"]), 10)
+        self.assertEqual(artifact["skipped_sheet_count"], 2)
+        prompt = mock_generate.call_args.kwargs["prompt"]
+        self.assertIn("[Sheet: Sheet 10]", prompt)
+        self.assertNotIn("[Sheet: Sheet 11]", prompt)
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_prd_self_assessment_linked_spreadsheet_hash_splits_cache(self, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        page = self.service.confluence.page
+        page.sections[1].spreadsheet_links = [
+            SpreadsheetLink(
+                title="MAS Outsourcing Register.xlsx",
+                url="https://example.atlassian.net/download/attachments/123/MAS%20Outsourcing%20Register.xlsx",
+                source_section="Rollout",
+                filename="MAS Outsourcing Register.xlsx",
+            )
+        ]
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeAttachmentConnector(page, _xlsx_bytes(marker="initial format")),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        first = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[2],
+            )
+        )
+        service.confluence = FakeAttachmentConnector(page, _xlsx_bytes(marker="updated format"))
+        second = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[2],
+            )
+        )
+
+        self.assertFalse(first["cached"])
+        self.assertFalse(second["cached"])
+        self.assertEqual(mock_generate.call_count, 2)
+        self.assertNotEqual(first["review"]["jira_id"], second["review"]["jira_id"])
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_prd_self_assessment_linked_spreadsheet_failure_is_coverage_gap(self, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        page = self.service.confluence.page
+        page.sections[1].spreadsheet_links = [
+            SpreadsheetLink(
+                title="Legacy Register.xls",
+                url="https://example.atlassian.net/download/attachments/123/Legacy%20Register.xls",
+                source_section="Rollout",
+                filename="Legacy Register.xls",
+            )
+        ]
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeAttachmentConnector(page, b"not-used"),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        result = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+                selected_section_indexes=[2],
+            )
+        )
+
+        self.assertEqual(result["coverage"]["linked_artifacts_reviewed"], 0)
+        self.assertEqual(result["coverage"]["linked_artifacts_failed"], 1)
+        self.assertEqual(result["coverage"]["linked_artifacts"][0]["reason"], "unsupported_xls_format")
+        self.assertIn("Linked artifact not reviewed", mock_generate.call_args.kwargs["prompt"])
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_prd_self_assessment_google_sheet_link_uses_google_credentials(self, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        page = self.service.confluence.page
+        page.sections[1].spreadsheet_links = [
+            SpreadsheetLink(
+                title="MAS Outsourcing Register Google Sheet",
+                url="https://docs.google.com/spreadsheets/d/sheet123/edit#gid=0",
+                source_section="Rollout",
+                filename="",
+            )
+        ]
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeConnector(page),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        with patch(
+            "bpmis_jira_tool.gmail_dashboard.build_drive_api_service",
+            return_value=FakeDriveService(_xlsx_bytes(marker="Google Sheet format")),
+        ):
+            result = service.review_url(
+                PRDBriefingReviewRequest(
+                    owner_key="anon:test",
+                    prd_url="https://example.atlassian.net/wiki/pages/123",
+                    language="en",
+                    selected_section_indexes=[2],
+                    google_credentials={
+                        "token": "x",
+                        "scopes": ["https://www.googleapis.com/auth/drive.readonly"],
+                    },
+                )
+            )
+
+        self.assertEqual(result["coverage"]["linked_artifacts_reviewed"], 1)
+        self.assertIn("Google Sheet format", mock_generate.call_args.kwargs["prompt"])
 
     @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
     def test_prd_review_persists_generation_failure_and_validates_inputs(self, mock_generate):
