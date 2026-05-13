@@ -291,6 +291,19 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("service._codex_initial_answer_result(", codex_answer_source)
         self.assertIn("service._codex_repair_answer_context(", codex_answer_source)
 
+    def test_answer_generation_prelude_is_split_from_main_service(self):
+        service_source = Path("bpmis_jira_tool/source_code_qa.py").read_text(encoding="utf-8")
+        component_source = Path("bpmis_jira_tool/source_code_qa_components.py").read_text(encoding="utf-8")
+        answer_generation_source = Path("bpmis_jira_tool/source_code_qa_answer_generation.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("def _build_llm_answer_impl", service_source)
+        self.assertIn("from bpmis_jira_tool.source_code_qa_answer_generation import build_llm_answer", component_source)
+        self.assertIn("def build_llm_answer(", answer_generation_source)
+        self.assertIn("service._resolve_llm_budget(", answer_generation_source)
+        self.assertIn("service._llm_answer_evidence_context(", answer_generation_source)
+        self.assertIn("COMPACT_DEEP_BUDGET_MODE", answer_generation_source)
+        self.assertIn("service._build_codex_llm_answer(", answer_generation_source)
+
     def test_removed_fast_query_mode_normalizes_to_deep(self):
         self.assertEqual(SourceCodeQAService.normalize_query_mode("fast"), "deep")
         self.assertEqual(SourceCodeQAService.normalize_query_mode("deep"), "deep")
