@@ -276,6 +276,11 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} SGT", script)
         self.assertIn("formatSingaporeTimestamp(item.created_at || '')", script)
         self.assertNotIn("(item.created_at || '').replace('T', ' ').replace('Z', '')", script)
+        self.assertIn("data-source-runtime-delete-team", script)
+        self.assertIn("data-source-runtime-delete-country", script)
+        self.assertIn("const deleteRuntimeEvidence = async (evidenceId, itemScope = {}) =>", script)
+        self.assertIn("pm_team: itemScope.pm_team || scope.pm_team", script)
+        self.assertIn("await loadRuntimeEvidence();", script)
         self.assertIn("data-source-message-role", script)
         self.assertIn("data-source-message-live", script)
         self.assertNotIn("Continue with Deep Mode", script)
@@ -1231,7 +1236,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
                     "/api/source-code-qa/query",
                     json={
                         "pm_team": "AF",
-                        "country": "All",
+                        "country": "SG",
                         "question": "compare runtime config",
                         "llm_provider": "codex_cli_bridge",
                     },
@@ -1243,9 +1248,77 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(listed.get_json()["evidence"][0]["country"], "SG")
         self.assertEqual(response.status_code, 200)
         countries = {item["country"] for item in captured["runtime_evidence"]}
-        self.assertEqual(countries, {"SG", "PH"})
+        self.assertEqual(countries, {"SG"})
         self.assertTrue(any("apollo.sg.rule.enabled" in item.get("text", "") for item in captured["runtime_evidence"]))
         self.assertEqual(response.get_json()["runtime_evidence"][0]["pm_team"], "AF")
+
+    def test_runtime_evidence_all_scope_does_not_merge_country_evidence(self):
+        with self.app.test_client() as client:
+            self._login(client, "xiaodong.zheng@npt.sg")
+            for country, filename in [("SG", "sg.txt"), ("PH", "ph.txt"), ("ID", "id.txt"), ("All", "all.txt")]:
+                response = client.post(
+                    "/api/source-code-qa/runtime-evidence",
+                    data={
+                        "pm_team": "AF",
+                        "country": country,
+                        "source_type": "db",
+                        "file": (io.BytesIO(f"{country} runtime evidence".encode("utf-8")), filename),
+                    },
+                    content_type="multipart/form-data",
+                )
+                self.assertEqual(response.status_code, 200)
+                time.sleep(0.01)
+            listed = client.get("/api/source-code-qa/runtime-evidence?pm_team=AF&country=All")
+
+        self.assertEqual(listed.status_code, 200)
+        payload = listed.get_json()
+        self.assertEqual({(item["pm_team"], item["country"]) for item in payload["evidence"]}, {("AF", "All")})
+
+    def test_all_country_query_ignores_runtime_evidence_and_uses_code_only(self):
+        captured = {}
+
+        def fake_query(**kwargs):
+            captured.update(kwargs)
+            return {
+                "status": "ok",
+                "answer_mode": "auto",
+                "summary": "code-only answer",
+                "llm_answer": "code-only answer",
+                "llm_provider": "codex_cli_bridge",
+                "llm_model": "codex-cli",
+                "trace_id": "trace-all-code-only",
+                "matches": [],
+            }
+
+        with self.app.test_client() as client:
+            self._login(client, "xiaodong.zheng@npt.sg")
+            for country, filename, content in [
+                ("SG", "apollo-sg.properties", b"apollo.sg.rule.enabled=true"),
+                ("All", "apollo-all.properties", b"apollo.all.rule.enabled=true"),
+            ]:
+                upload = client.post(
+                    "/api/source-code-qa/runtime-evidence",
+                    data={
+                        "pm_team": "AF",
+                        "country": country,
+                        "source_type": "apollo",
+                        "file": (io.BytesIO(content), filename),
+                    },
+                    content_type="multipart/form-data",
+                )
+                self.assertEqual(upload.status_code, 200)
+            with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today", return_value={"attempted": False, "status": "fresh"}), patch(
+                "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
+                side_effect=fake_query,
+            ):
+                response = client.post(
+                    "/api/source-code-qa/query",
+                    json={"pm_team": "AF", "country": "All", "question": "check all-country code path", "llm_provider": "codex_cli_bridge"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured["runtime_evidence"], [])
+        self.assertEqual(response.get_json()["runtime_evidence"], [])
 
     def test_grc_and_af_country_query_uses_all_country_data_dictionary(self):
         captured = {}

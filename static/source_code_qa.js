@@ -1459,12 +1459,15 @@
         </div>
         <div class="source-qa-runtime-meta">
           <span>${escapeHtml(formatSingaporeTimestamp(item.created_at || ''))}</span>
-          <button class="button button-secondary" type="button" data-source-runtime-delete="${escapeHtml(item.id || '')}">Delete</button>
+          <button class="button button-secondary" type="button" data-source-runtime-delete="${escapeHtml(item.id || '')}" data-source-runtime-delete-team="${escapeHtml(item.pm_team || '')}" data-source-runtime-delete-country="${escapeHtml(item.country || '')}">Delete</button>
         </div>
       </div>
     `).join('');
     runtimeEvidenceList.querySelectorAll('[data-source-runtime-delete]').forEach((button) => {
-      button.addEventListener('click', () => deleteRuntimeEvidence(button.dataset.sourceRuntimeDelete || ''));
+      button.addEventListener('click', () => deleteRuntimeEvidence(button.dataset.sourceRuntimeDelete || '', {
+        pm_team: button.dataset.sourceRuntimeDeleteTeam || '',
+        country: button.dataset.sourceRuntimeDeleteCountry || '',
+      }));
     });
   };
 
@@ -1499,23 +1502,27 @@
         method: 'POST',
         body: formData,
       }, { attempts: 3 });
-      renderRuntimeEvidence(payload.items || (payload.evidence ? [payload.evidence] : []));
+      await loadRuntimeEvidence();
       if (runtimeEvidenceStatus) runtimeEvidenceStatus.textContent = `Uploaded ${payload.evidence?.filename || file.name || 'runtime evidence'} for ${scope.pm_team}:${scope.country}.`;
     } catch (error) {
       if (runtimeEvidenceStatus) runtimeEvidenceStatus.textContent = error.message || 'Upload failed.';
     }
   };
 
-  const deleteRuntimeEvidence = async (evidenceId) => {
+  const deleteRuntimeEvidence = async (evidenceId, itemScope = {}) => {
     if (!canManage || !runtimeEvidenceUrl || !evidenceId) return;
     const scope = runtimeEvidenceScope();
+    const deleteScope = {
+      pm_team: itemScope.pm_team || scope.pm_team,
+      country: itemScope.country || scope.country,
+    };
     const url = new URL(`${runtimeEvidenceUrl}/${encodeURIComponent(evidenceId)}`, window.location.origin);
-    url.searchParams.set('pm_team', scope.pm_team);
-    url.searchParams.set('country', scope.country);
+    url.searchParams.set('pm_team', deleteScope.pm_team);
+    url.searchParams.set('country', deleteScope.country);
     if (runtimeEvidenceStatus) runtimeEvidenceStatus.textContent = 'Deleting runtime evidence...';
     try {
       const payload = await apiFetchJson(url.toString(), { method: 'DELETE' }, { attempts: 3 });
-      renderRuntimeEvidence(payload.evidence || []);
+      await loadRuntimeEvidence();
       if (runtimeEvidenceStatus) runtimeEvidenceStatus.textContent = payload.deleted ? 'Runtime evidence deleted.' : 'Runtime evidence was already removed.';
     } catch (error) {
       if (runtimeEvidenceStatus) runtimeEvidenceStatus.textContent = error.message || 'Delete failed.';

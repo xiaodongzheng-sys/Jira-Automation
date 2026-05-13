@@ -308,6 +308,9 @@ def _source_code_qa_public_attachments(attachments: list[dict[str, Any]]) -> lis
 
 
 def _resolve_source_code_qa_runtime_evidence(*, pm_team: str, country: str) -> list[dict[str, Any]]:
+    normalized_country = str(country or "").strip().upper()
+    if normalized_country in {"", ALL_COUNTRY.upper()}:
+        return []
     try:
         return _get_source_code_qa_runtime_evidence_store().resolve_scope(pm_team=pm_team, country=country)
     except ToolError:
