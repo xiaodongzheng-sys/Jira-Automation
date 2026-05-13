@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from bpmis_jira_tool.source_code_qa_codex_answer import build_codex_llm_answer
+
 
 class _SourceCodeQAComponent:
     def __init__(self, service: Any) -> None:
@@ -77,7 +79,7 @@ class SourceCodeQAAnswerGenerationComponent(_SourceCodeQAComponent):
         return self._service._build_llm_answer_impl(**kwargs)
 
     def build_codex_llm_answer(self, **kwargs: Any) -> dict[str, Any]:
-        return self._service._build_codex_llm_answer_impl(**kwargs)
+        return build_codex_llm_answer(self._service, **kwargs)
 
 
 class SourceCodeQAQualityJudgeComponent(_SourceCodeQAComponent):

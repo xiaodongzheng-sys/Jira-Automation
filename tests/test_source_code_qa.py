@@ -280,6 +280,17 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("data-source-message-live", script)
         self.assertNotIn("Continue with Deep Mode", script)
 
+    def test_codex_answer_path_is_split_from_main_service(self):
+        service_source = Path("bpmis_jira_tool/source_code_qa.py").read_text(encoding="utf-8")
+        component_source = Path("bpmis_jira_tool/source_code_qa_components.py").read_text(encoding="utf-8")
+        codex_answer_source = Path("bpmis_jira_tool/source_code_qa_codex_answer.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("def _build_codex_llm_answer_impl", service_source)
+        self.assertIn("from bpmis_jira_tool.source_code_qa_codex_answer import build_codex_llm_answer", component_source)
+        self.assertIn("def build_codex_llm_answer(", codex_answer_source)
+        self.assertIn("service._codex_initial_answer_result(", codex_answer_source)
+        self.assertIn("service._codex_repair_answer_context(", codex_answer_source)
+
     def test_removed_fast_query_mode_normalizes_to_deep(self):
         self.assertEqual(SourceCodeQAService.normalize_query_mode("fast"), "deep")
         self.assertEqual(SourceCodeQAService.normalize_query_mode("deep"), "deep")
