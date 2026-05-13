@@ -26,6 +26,14 @@ from bpmis_jira_tool.web_work_memory_routes import register_work_memory_routes
 
 
 class WorkMemoryStoreTests(unittest.TestCase):
+    def test_frontend_formats_memory_timestamps_in_singapore_time(self):
+        template = Path("templates/work_memory.html").read_text(encoding="utf-8")
+
+        self.assertIn("timeZone: 'Asia/Singapore'", template)
+        self.assertIn("${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} SGT", template)
+        self.assertIn("formatSingaporeTimestamp(item.observed_at || item.updated_at || '')", template)
+        self.assertIn("formatSingaporeTimestamp(run.completed_at || '')", template)
+
     def test_private_items_are_owner_scoped_and_corrections_win(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = WorkMemoryStore(Path(temp_dir) / "memory.db")

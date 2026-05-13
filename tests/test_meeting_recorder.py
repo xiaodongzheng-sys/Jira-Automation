@@ -35,6 +35,13 @@ from bpmis_jira_tool.meeting_recorder import (
 
 
 class MeetingRecorderParsingTests(unittest.TestCase):
+    def test_frontend_formats_recording_timestamps_in_singapore_time(self):
+        script = Path("static/meeting_recorder.js").read_text(encoding="utf-8")
+
+        self.assertIn("timeZone: 'Asia/Singapore'", script)
+        self.assertIn("${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} SGT", script)
+        self.assertNotIn("new Intl.DateTimeFormat(undefined, {\n      month: 'short'", script)
+
     def test_extract_meeting_links_dedupes_meet_and_zoom_links(self):
         links = extract_meeting_links(
             "Join https://meet.google.com/abc-defg-hij",

@@ -10,6 +10,26 @@
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 
+  const formatSingaporeTimestamp = (value) => {
+    if (!value) return '';
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Singapore',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(date).reduce((acc, part) => {
+      acc[part.type] = part.value;
+      return acc;
+    }, {});
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} SGT`;
+  };
+
   const readJson = async (response, fallbackMessage) => {
     let payload = {};
     try {
@@ -899,7 +919,7 @@
     if (treeFallback > 0) bottlenecks.push(`tree fallback ${treeFallback}`);
     if (releaseFilterUsed > 0) bottlenecks.push('release filter on');
     if (bottlenecks.length) parts.push(bottlenecks.slice(0, 6).join(' / '));
-    if (!parts.length && team.cached_at) parts.push(`Restored ${team.cached_at}`);
+    if (!parts.length && team.cached_at) parts.push(`Restored ${formatSingaporeTimestamp(team.cached_at)}`);
     return parts.length ? `<p class="productization-inline-status" data-tone="neutral">${escapeHtml(parts.join(' · '))}</p>` : '';
   };
 
@@ -1090,7 +1110,7 @@
       linkBizProjectSelectOptions = [];
       renderLinkBizRows(linkBizProjectRowsState);
       if (linkBizProjectSuggest) linkBizProjectSuggest.disabled = !linkBizProjectRowsState.length;
-      const refreshedAt = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const refreshedAt = formatSingaporeTimestamp(new Date());
       setStatus(
         linkBizProjectStatus,
         `Refreshed at ${refreshedAt}. ${linkBizProjectRowsState.length} unlinked Jira tickets found from ${cachedTeams.length} loaded Task List team${cachedTeams.length === 1 ? '' : 's'}.`,
@@ -2395,7 +2415,7 @@
       panel.innerHTML = `
         <div class="team-dashboard-review-meta">
           <strong>${escapeHtml(payload.cached ? `Cached PRD ${isSummary ? 'Summary' : 'Review'}` : `PRD ${isSummary ? 'Summary' : 'Review'}`)}</strong>
-          <span>${escapeHtml(result.updated_at || '')}</span>
+          <span>${escapeHtml(formatSingaporeTimestamp(result.updated_at || ''))}</span>
           ${coverageLine}
           ${confluenceTableLine}
           ${templateLine}

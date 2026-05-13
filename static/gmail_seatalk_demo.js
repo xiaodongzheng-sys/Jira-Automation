@@ -22,12 +22,20 @@
     if (!value) return 'Unknown';
     const parsed = new Date(value);
     if (Number.isNaN(parsed.getTime())) return String(value);
-    return new Intl.DateTimeFormat('en-US', {
-      month: 'short',
-      day: 'numeric',
-      hour: 'numeric',
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Singapore',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
       minute: '2-digit',
-    }).format(parsed);
+      second: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(parsed).reduce((acc, part) => {
+      acc[part.type] = part.value;
+      return acc;
+    }, {});
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} SGT`;
   };
 
   const parseDashboardResponse = async (response) => {

@@ -626,10 +626,27 @@
   };
 
   const formatSessionTime = (value) => {
+    return formatSingaporeTimestamp(value);
+  };
+
+  const formatSingaporeTimestamp = (value) => {
     if (!value) return '';
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return value;
-    return date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Singapore',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(date).reduce((acc, part) => {
+      acc[part.type] = part.value;
+      return acc;
+    }, {});
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} SGT`;
   };
 
   const effortAssessmentScope = () => ({
@@ -953,7 +970,7 @@
     `;
   };
 
-  const renderSessionMessages = (session) => {
+  const renderSessionMessages = (session, options = {}) => {
     if (!sessionMessages) return;
     const messages = [...(session?.messages || [])];
     if (pendingUserMessage?.text) {
@@ -1027,7 +1044,9 @@
         </article>
       `;
     }).join('');
-    scrollLatestAssistantAnswerToStart();
+    if (options.autoScroll) {
+      scrollLatestAssistantAnswerToStart();
+    }
   };
 
   const renderOptimisticUserMessage = (question, attachments = []) => {
@@ -1039,7 +1058,7 @@
       created_at: new Date().toISOString(),
       attachments: attachments.map((item) => ({ ...item })),
     };
-    renderSessionMessages(activeSession);
+    renderSessionMessages(activeSession, { autoScroll: true });
   };
 
   const pendingJobFromSession = (session) => {
@@ -1058,7 +1077,7 @@
     return null;
   };
 
-  const applyActiveSession = (session) => {
+  const applyActiveSession = (session, options = {}) => {
     activeSession = session || null;
     activeSessionId = session?.id || '';
     if (sessionTitle) sessionTitle.textContent = session?.title || 'New Source Code Chat';
@@ -1076,7 +1095,7 @@
     } else if (!session) {
       conversationContext = null;
     }
-    renderSessionMessages(session);
+    renderSessionMessages(session, { autoScroll: Boolean(options.autoScroll) });
     renderSessionList();
   };
 
@@ -1105,7 +1124,7 @@
       const payload = await fetch(`${sessionsUrl}/${encodeURIComponent(sessionId)}`).then(readJson);
       if (!options.preserveLive) liveAssistantMessage = null;
       if (!options.preservePending) pendingUserMessage = null;
-      applyActiveSession(payload.session || null);
+      applyActiveSession(payload.session || null, { autoScroll: Boolean(options.autoScroll) });
       if (!options.skipJobResume) {
         resumePendingJobFromSession(payload.session || null);
       }
@@ -1439,7 +1458,7 @@
           <small>${escapeHtml(runtimeEvidenceTypeLabel(item.source_type))} · ${escapeHtml(item.pm_team || '')}:${escapeHtml(item.country || '')} · ${escapeHtml(formatAttachmentSize(item.size))}</small>
         </div>
         <div class="source-qa-runtime-meta">
-          <span>${escapeHtml((item.created_at || '').replace('T', ' ').replace('Z', ''))}</span>
+          <span>${escapeHtml(formatSingaporeTimestamp(item.created_at || ''))}</span>
           <button class="button button-secondary" type="button" data-source-runtime-delete="${escapeHtml(item.id || '')}">Delete</button>
         </div>
       </div>
@@ -1897,7 +1916,7 @@
       liveAnswer.hidden = true;
       liveAnswer.innerHTML = '';
     }
-    renderSessionMessages(activeSession);
+    renderSessionMessages(activeSession, { autoScroll: options.autoScroll !== false });
   };
 
   const countAssistantMessages = (session) =>
@@ -1921,7 +1940,7 @@
     let refreshedSession = activeSession;
     if (activeSessionId && countAssistantMessages(refreshedSession) <= previousAssistantCount) {
       await sleep(300);
-      refreshedSession = await loadSession(activeSessionId, { preserveLive: true, preservePending: true });
+      refreshedSession = await loadSession(activeSessionId, { preserveLive: true, preservePending: true, autoScroll: true });
     }
     if (countAssistantMessages(refreshedSession) > previousAssistantCount) {
       pendingUserMessage = null;
@@ -2117,9 +2136,9 @@
         activeSession = payload.session;
         activeSessionId = payload.session.id || activeSessionId;
         sourceSessions = [payload.session, ...sourceSessions.filter((item) => item.id !== payload.session.id)].slice(0, 30);
-        applyActiveSession(payload.session);
+        applyActiveSession(payload.session, { autoScroll: true });
       } else if (activeSessionId) {
-        await loadSession(activeSessionId, { skipJobResume: true });
+        await loadSession(activeSessionId, { skipJobResume: true, autoScroll: true });
       }
       conversationContext = buildConversationContext(payload, question || conversationContext?.question || '');
       if (queryStatus) queryStatus.textContent = `Reconnected and completed in ${formatElapsed(progress.startedAt)}.`;
@@ -2585,10 +2604,10 @@
         activeSessionId = payload.session.id || activeSessionId;
         sourceSessions = [payload.session, ...sourceSessions.filter((item) => item.id !== payload.session.id)].slice(0, 30);
         pendingUserMessage = null;
-        applyActiveSession(payload.session);
+        applyActiveSession(payload.session, { autoScroll: true });
       } else if (activeSessionId) {
         pendingUserMessage = null;
-        await loadSession(activeSessionId, { preserveLive: true });
+        await loadSession(activeSessionId, { preserveLive: true, autoScroll: true });
       }
       rememberLastQueryConfig(effectiveAnswerMode, selectedProvider);
       summary.textContent = payload.summary || 'Search completed.';

@@ -120,6 +120,26 @@
         .replaceAll('"', '&quot;')
         .replaceAll("'", '&#39;');
 
+      const formatSingaporeTimestamp = (value) => {
+        if (!value) return '';
+        const date = value instanceof Date ? value : new Date(value);
+        if (Number.isNaN(date.getTime())) return String(value);
+        const parts = new Intl.DateTimeFormat('en-CA', {
+          timeZone: 'Asia/Singapore',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hourCycle: 'h23',
+        }).formatToParts(date).reduce((acc, part) => {
+          acc[part.type] = part.value;
+          return acc;
+        }, {});
+        return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} SGT`;
+      };
+
       const setStatus = (message) => {
         if (status) status.textContent = message;
       };
@@ -146,7 +166,7 @@
             <div>
               <p class="eyebrow">${escapeHtml(item.source_type)} · ${escapeHtml(item.item_type)} · ${escapeHtml(item.visibility)}</p>
               <h3>${escapeHtml(item.summary)}</h3>
-              <p>${escapeHtml(item.observed_at || item.updated_at || '')}</p>
+              <p>${escapeHtml(formatSingaporeTimestamp(item.observed_at || item.updated_at || ''))}</p>
               ${item.metadata?.attribution_scope === 'meeting' ? `
                 <p class="card-help">Meeting-level fact · speaker unknown · not attributed to the memory owner personally</p>
               ` : ''}
@@ -186,7 +206,7 @@
             <article class="work-memory-item compact">
               <div>
                 <p class="eyebrow">${escapeHtml(run.source_type)} · ${escapeHtml(run.status)}</p>
-                <h3>${escapeHtml(run.completed_at || '')}</h3>
+                <h3>${escapeHtml(formatSingaporeTimestamp(run.completed_at || ''))}</h3>
                 <p>scanned ${escapeHtml(run.scanned_count || 0)} · matched ${escapeHtml(run.matched_count || 0)} · recorded ${escapeHtml(run.recorded_count || 0)} · duplicate ${escapeHtml(run.duplicate_count || 0)} · failed ${escapeHtml(run.failed_count || 0)}</p>
                 ${run.error ? `<p class="card-help">${escapeHtml(run.error)}</p>` : ''}
               </div>
@@ -356,7 +376,7 @@
                 <div>
                   <p class="eyebrow">${escapeHtml(item.source_type)} · ${escapeHtml(item.item_type)} · ${escapeHtml(item.visibility)}</p>
                   <h3>${escapeHtml(item.summary)}</h3>
-                  <p>${escapeHtml(item.excerpt || item.observed_at || '')}</p>
+                  <p>${escapeHtml(item.excerpt || formatSingaporeTimestamp(item.observed_at || ''))}</p>
                 </div>
               </article>
             `).join('') : '<p class="empty-state">No evidence returned.</p>'}

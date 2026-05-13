@@ -287,6 +287,10 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertEqual(js_response.headers.get("Pragma"), "no-cache")
         self.assertEqual(css_response.headers.get("Expires"), "0")
         self.assertEqual(js_response.headers.get("Expires"), "0")
+        js_text = js_response.get_data(as_text=True)
+        self.assertIn("timeZone: 'Asia/Singapore'", js_text)
+        self.assertIn("${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} SGT", js_text)
+        self.assertIn("formatSingaporeTimestamp(result.updated_at || '')", js_text)
 
     def test_uat_stage_renders_environment_banner(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

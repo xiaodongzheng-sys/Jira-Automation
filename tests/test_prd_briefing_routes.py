@@ -395,6 +395,8 @@ class PRDBriefingRouteTests(unittest.TestCase):
         self.assertIn("prd-self-assessment:last-form:v1", self_assessment_js)
         self.assertIn("/prd-briefing/api/latest", briefing_js)
         self.assertIn("/api/prd-self-assessment/latest", self_assessment_js)
+        self.assertIn("timeZone: 'Asia/Singapore'", self_assessment_js)
+        self.assertIn("formatSingaporeTimestamp(result.updated_at || '')", self_assessment_js)
         self.assertNotIn("prd-self-assessment:last-form:v1", briefing_js)
         self.assertNotIn("prd-briefing:last-form:v1", self_assessment_js)
 

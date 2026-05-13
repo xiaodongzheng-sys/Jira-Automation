@@ -30,6 +30,13 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
             web_module._gmail_export_active_users.clear()
         self.temp_dir.cleanup()
 
+    def test_demo_frontend_formats_display_timestamps_in_singapore_time(self):
+        script = Path("static/gmail_seatalk_demo.js").read_text(encoding="utf-8")
+
+        self.assertIn("timeZone: 'Asia/Singapore'", script)
+        self.assertIn("${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} SGT", script)
+        self.assertNotIn("new Intl.DateTimeFormat('en-US', {\n      month: 'short'", script)
+
     @staticmethod
     def _login_owner(client, *, scopes=None):
         with client.session_transaction() as session:

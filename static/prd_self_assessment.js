@@ -31,6 +31,26 @@
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 
+  const formatSingaporeTimestamp = (value) => {
+    if (!value) return '';
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Singapore',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(date).reduce((acc, part) => {
+      acc[part.type] = part.value;
+      return acc;
+    }, {});
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} SGT`;
+  };
+
   const isValidHttpUrl = (value) => /^https?:\/\/\S+/i.test(String(value || '').trim());
 
   const readSavedForm = () => {
@@ -357,7 +377,7 @@
           ${linkedArtifactLine}
           ${sheetScreenshotArtifactLine}
         </div>
-        <span>${escapeHtml(result.updated_at || '')}</span>
+        <span>${escapeHtml(formatSingaporeTimestamp(result.updated_at || ''))}</span>
       </div>
       <div class="briefing-review-markdown">${renderMarkdown(result.result_markdown || '')}</div>
       <div class="briefing-review-actions">
