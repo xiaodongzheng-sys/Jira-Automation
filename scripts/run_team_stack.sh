@@ -7,7 +7,7 @@ source "$ROOT_DIR/scripts/lib/team_env.sh"
 GUARD_DAEMON_SCRIPT="$ROOT_DIR/scripts/run_team_stack_guard_daemon.sh"
 
 usage() {
-  echo "Usage: $0 {start|stop|restart|restart-guard|restart-portal|status|logs|doctor} [--caffeinate|--no-caffeinate]"
+  echo "Usage: $0 {start|stop|restart|restart-guard|restart-portal|status|logs|doctor|release-status} [--caffeinate|--no-caffeinate]"
 }
 
 resolve_guard_env() {
@@ -212,6 +212,9 @@ doctor() {
   fi
   echo
 
+  release_status
+  echo
+
   echo "== Status Files =="
   if [[ -f "$status_file" ]]; then
     echo "status summary present: $status_file"
@@ -303,6 +306,15 @@ PY
   return "$ok"
 }
 
+release_status() {
+  if [[ -x "$PYTHON_BIN" && -f "$ROOT_DIR/scripts/release_status.py" ]]; then
+    "$PYTHON_BIN" "$ROOT_DIR/scripts/release_status.py" || true
+  else
+    echo "== Release Status =="
+    echo "release status unavailable"
+  fi
+}
+
 start() {
   local guard_env="$1"
   env "$guard_env" "$GUARD_DAEMON_SCRIPT" start
@@ -384,6 +396,7 @@ case "$ACTION" in
   restart-guard) restart_guard "$GUARD_ENV" ;;
   restart-portal) restart_portal ;;
   status) status ;;
+  release-status) release_status ;;
   logs) logs ;;
   doctor) doctor ;;
   *)

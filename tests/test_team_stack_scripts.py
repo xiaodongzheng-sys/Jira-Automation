@@ -1875,6 +1875,121 @@ fi
         self.assertNotIn("== Source Code QA Eval", stack_script)
         self.assertNotIn("source_code_qa" + "_eval_status.json", stack_script)
 
+    def test_release_status_script_separates_cloud_run_and_mac_live(self):
+        from scripts.release_status import build_status_lines
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            gcloud_path = Path(temp_dir) / "gcloud"
+            gcloud_path.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+
+            def fake_run(command, *, env):
+                joined = " ".join(command)
+                if command[0] == "git":
+                    return subprocess.CompletedProcess(command, 0, stdout="d8fb5fb59c743dadfce1f8a106a7846c8ebe2fbc\n", stderr="")
+                if command[0] == str(gcloud_path) and "run services describe" in joined:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout=json.dumps(
+                            {
+                                "status": {
+                                    "traffic": [
+                                        {
+                                            "tag": "uat",
+                                            "revisionName": "team-portal-00301-viv",
+                                            "url": "https://uat---team-portal-ekaykywtvq-as.a.run.app",
+                                        },
+                                        {"revisionName": "team-portal-00200-n7q", "percent": 100},
+                                    ]
+                                }
+                            }
+                        ),
+                        stderr="",
+                    )
+                if command[0] == str(gcloud_path) and "run revisions describe team-portal-00301-viv" in joined:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout=json.dumps(
+                            {
+                                "spec": {
+                                    "containers": [
+                                        {
+                                            "env": [
+                                                {
+                                                    "name": "TEAM_PORTAL_RELEASE_REVISION",
+                                                    "value": "d8fb5fb59c743dadfce1f8a106a7846c8ebe2fbc",
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            }
+                        ),
+                        stderr="",
+                    )
+                if command[0] == str(gcloud_path) and "run revisions describe team-portal-00200-n7q" in joined:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout=json.dumps(
+                            {
+                                "spec": {
+                                    "containers": [
+                                        {
+                                            "env": [
+                                                {
+                                                    "name": "TEAM_PORTAL_RELEASE_REVISION",
+                                                    "value": "1e19bfd647b0a60a1284aaaad8d2411cf17bca77",
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            }
+                        ),
+                        stderr="",
+                    )
+                if command[0] == "curl":
+                    url = command[-1]
+                    if url.endswith("/api/local-agent/healthz") or url.endswith(":7007/healthz"):
+                        payload = {"status": "ok", "capabilities": {"source_code_qa": True, "codex_ready": True}}
+                    else:
+                        payload = {"status": "ok", "revision": "d8fb5fb59c743dadfce1f8a106a7846c8ebe2fbc"}
+                    return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="unexpected command")
+
+            lines = build_status_lines(
+                env={
+                    "GCLOUD_BIN": str(gcloud_path),
+                    "GOOGLE_CLOUD_PROJECT": "civil-partition-492805-v7",
+                    "CLOUD_RUN_SERVICE": "team-portal",
+                    "CLOUD_RUN_REGION": "asia-southeast1",
+                    "CLOUD_RUN_UAT_TAG": "uat",
+                    "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                    "TEAM_PORTAL_PORT": "5000",
+                    "LOCAL_AGENT_BASE_URL": "http://127.0.0.1:7007",
+                },
+                runner=fake_run,
+            )
+
+        output = "\n".join(lines)
+        self.assertIn("Cloud Run UAT tag: tag=uat revision=team-portal-00301-viv", output)
+        self.assertIn("git_revision=d8fb5fb59c743dadfce1f8a106a7846c8ebe2fbc", output)
+        self.assertIn("Cloud Run service live traffic: revision=team-portal-00200-n7q percent=100", output)
+        self.assertIn("(Cloud Run traffic, not Mac public Live)", output)
+        self.assertIn("Public Live URL (Mac/Cloudflare): url=https://app.bankpmtool.uk/healthz status=ok revision=d8fb5fb59c743dadfce1f8a106a7846c8ebe2fbc", output)
+        self.assertIn("Local portal: url=http://127.0.0.1:5000/healthz status=ok revision=d8fb5fb59c743dadfce1f8a106a7846c8ebe2fbc", output)
+        self.assertIn("Direct local-agent: url=http://127.0.0.1:7007/healthz status=ok source_code_qa=True codex_ready=True", output)
+        self.assertIn("Public local-agent proxy: url=https://app.bankpmtool.uk/api/local-agent/healthz status=ok source_code_qa=True codex_ready=True", output)
+
+    def test_stack_doctor_exposes_release_status_command(self):
+        stack_script = (PROJECT_ROOT / "scripts/run_team_stack.sh").read_text(encoding="utf-8")
+
+        self.assertIn("release-status", stack_script)
+        self.assertIn("release_status()", stack_script)
+        self.assertIn('"$PYTHON_BIN" "$ROOT_DIR/scripts/release_status.py"', stack_script)
+
     def test_stack_doctor_reports_cloudflare_tunnel_provider(self):
         stack_script = PROJECT_ROOT / "scripts/run_team_stack.sh"
 
