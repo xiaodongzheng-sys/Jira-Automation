@@ -381,7 +381,10 @@ class PRDBriefingRouteTests(unittest.TestCase):
 
         self.assertIsInstance(service.text_client, FakeCodexTextGenerationClient)
         self.assertEqual(FakeCodexTextGenerationClient.init_kwargs["prompt_mode"], "prd_briefing_presentation_chunks_codex")
-        self.assertEqual(FakeCodexTextGenerationClient.init_kwargs["codex_model"], "gpt-5.5")
+        self.assertEqual(
+            FakeCodexTextGenerationClient.init_kwargs["codex_model"],
+            self.app.config["SETTINGS"].prd_briefing_codex_model,
+        )
 
     def test_prd_pages_use_distinct_local_storage_keys(self):
         root = Path(__file__).resolve().parent.parent
@@ -628,7 +631,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
         self.assertEqual(payload["latest"]["payload"]["payload"]["session"]["session_id"], "session-remote")
         self.assertEqual(fake_client.payload["owner_key"], "google:xiaodong.zheng@npt.sg")
 
-    def test_portal_route_allows_non_admin_npt_google_user(self):
+    def test_portal_route_blocks_non_admin_npt_google_user(self):
         with self.app.test_client() as client:
             with client.session_transaction() as session:
                 session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
@@ -638,18 +641,18 @@ class PRDBriefingRouteTests(unittest.TestCase):
                 }
 
             response = client.get("/prd-briefing/", follow_redirects=False)
-            self.assertEqual(response.status_code, 200)
-            self.assertIn(b"PRD Briefing Tool", response.data)
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers["Location"], "/access-denied")
 
-    def test_portal_route_allows_test_gmail_user(self):
+    def test_portal_route_blocks_test_gmail_user(self):
         with self.app.test_client() as client:
             with client.session_transaction() as session:
                 session["google_profile"] = {"email": "xiaodong.zheng1991@gmail.com", "name": "Test User"}
                 session["google_credentials"] = {"token": "x"}
 
             response = client.get("/prd-briefing/", follow_redirects=False)
-            self.assertEqual(response.status_code, 200)
-            self.assertIn(b"PRD Briefing Tool", response.data)
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers["Location"], "/access-denied")
 
     def test_portal_route_blocks_unapproved_google_user(self):
         with self.app.test_client() as client:
@@ -681,7 +684,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
             self.assertIn(b"PRD Self-Assessment", response.data)
             self.assertIn(b"data-prd-self-assessment-url", response.data)
             self.assertIn(b"data-prd-self-assessment-language", response.data)
-            self.assertIn(b"Generate PRD Summary", response.data)
+            self.assertNotIn(b"Generate PRD Summary", response.data)
             self.assertIn(b"Generate AI PRD Review", response.data)
             self.assertIn(b"data-latest-url", response.data)
 
@@ -791,7 +794,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
         service = mock_service.return_value
         with self.app.test_client() as client:
             with client.session_transaction() as session:
-                session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
                 session["google_credentials"] = {"token": "x"}
             response = client.post(
                 "/api/prd-self-assessment/summary",
@@ -808,7 +811,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
     def test_prd_self_assessment_endpoint_saves_latest_result(self, _mock_service):
         with self.app.test_client() as client:
             with client.session_transaction() as session:
-                session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
                 session["google_credentials"] = {"token": "x"}
             response = client.post(
                 "/api/prd-self-assessment/summary",
@@ -826,12 +829,25 @@ class PRDBriefingRouteTests(unittest.TestCase):
     def test_prd_self_assessment_endpoint_validates_http_prd_link(self, _mock_service):
         with self.app.test_client() as client:
             with client.session_transaction() as session:
-                session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
                 session["google_credentials"] = {"token": "x"}
             response = client.post("/api/prd-self-assessment/summary", json={"prd_url": "not-a-url"})
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("HTTP or HTTPS", response.get_json()["message"])
+
+    def test_prd_self_assessment_summary_endpoint_blocks_non_admin_user(self):
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                session["google_credentials"] = {"token": "x"}
+            response = client.post(
+                "/api/prd-self-assessment/summary",
+                json={"prd_url": "https://example.atlassian.net/wiki/pages/123", "language": "en"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json()["status"], "error")
 
     @patch("bpmis_jira_tool.web._local_agent_source_code_qa_enabled", return_value=True)
     def test_prd_self_assessment_endpoint_can_route_to_local_agent(self, _mock_enabled):
@@ -908,7 +924,9 @@ class PRDBriefingRouteTests(unittest.TestCase):
             ):
                 with self.app.test_client() as client:
                     with client.session_transaction() as session:
-                        session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                        email = "xiaodong.zheng@npt.sg" if action == "summary" else "teammate@npt.sg"
+                        name = "Xiaodong Zheng" if action == "summary" else "Teammate"
+                        session["google_profile"] = {"email": email, "name": name}
                         session["google_credentials"] = {"token": "x"}
                     response = client.post(path, json={"prd_url": "https://example.atlassian.net/wiki/pages/123", "language": "en"})
 

@@ -2381,6 +2381,11 @@
       const templateLine = !isSummary && Number.isFinite(templateTotal) && templateTotal > 0
         ? `<span>Report templates reviewed: ${escapeHtml(templateReviewed)}/${escapeHtml(templateTotal)}</span>`
         : '';
+      const confluenceTablesTotal = Number(coverage.confluence_tables_total || 0);
+      const confluenceTablesReviewed = Number(coverage.confluence_tables_reviewed || 0);
+      const confluenceTableLine = !isSummary && Number.isFinite(confluenceTablesTotal) && confluenceTablesTotal > 0
+        ? `<span>Confluence tables reviewed: ${escapeHtml(confluenceTablesReviewed)}/${escapeHtml(confluenceTablesTotal)}</span>`
+        : '';
       const sheetScreenshotTotal = Number(coverage.google_sheet_screenshots_total || 0);
       const sheetScreenshotReviewed = Number(coverage.google_sheet_screenshots_reviewed || 0);
       const sheetScreenshotFailed = Number(coverage.google_sheet_screenshots_failed || 0);
@@ -2392,6 +2397,7 @@
           <strong>${escapeHtml(payload.cached ? `Cached PRD ${isSummary ? 'Summary' : 'Review'}` : `PRD ${isSummary ? 'Summary' : 'Review'}`)}</strong>
           <span>${escapeHtml(result.updated_at || '')}</span>
           ${coverageLine}
+          ${confluenceTableLine}
           ${templateLine}
           ${sheetScreenshotLine}
         </div>

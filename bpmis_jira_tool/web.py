@@ -95,6 +95,7 @@ from bpmis_jira_tool.monthly_report import (
 from bpmis_jira_tool.report_intelligence import (
     normalize_report_intelligence_config,
 )
+from bpmis_jira_tool.codex_model_router import CODEX_ROUTE_CHEAP, resolve_codex_model
 from bpmis_jira_tool.productization_codex import (
     clean_codex_productization_detailed_feature as _clean_codex_productization_detailed_feature,
     format_productization_description_text as _format_productization_description_text,
@@ -2113,7 +2114,10 @@ def _build_seatalk_dashboard_service(settings: Settings) -> SeaTalkDashboardServ
         seatalk_app_path=settings.seatalk_local_app_path,
         seatalk_data_dir=settings.seatalk_local_data_dir,
         codex_workspace_root=PROJECT_ROOT,
-        codex_model=os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"),
+        codex_model=resolve_codex_model(
+            CODEX_ROUTE_CHEAP,
+            legacy_env_names=("SEATALK_CODEX_MODEL", "SOURCE_CODE_QA_CODEX_MODEL"),
+        ),
         codex_timeout_seconds=settings.source_code_qa_codex_timeout_seconds,
         codex_concurrency=settings.source_code_qa_codex_concurrency,
         name_overrides_path=name_overrides_path,
@@ -2316,7 +2320,7 @@ def _google_session_is_connected() -> bool:
 
 
 def _can_access_prd_briefing(settings: Settings) -> bool:
-    return _is_portal_user()
+    return _is_portal_admin()
 
 
 def _can_access_prd_self_assessment(settings: Settings) -> bool:
@@ -2783,6 +2787,16 @@ def _run_prd_self_assessment_action(settings: Settings, *, action: str):
     access_gate = _require_prd_self_assessment_access(settings, api=True)
     if access_gate is not None:
         return access_gate
+    if action == "summary" and not _is_portal_admin():
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": f"Generate PRD Summary is restricted to {PORTAL_ADMIN_EMAIL}.",
+                }
+            ),
+            HTTPStatus.FORBIDDEN,
+        )
     payload = request.get_json(silent=True) or {}
     user_identity = _get_user_identity(settings)
     request_payload = {

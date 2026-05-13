@@ -15,6 +15,7 @@ from typing import Any
 
 from google.oauth2.credentials import Credentials
 
+from bpmis_jira_tool.codex_model_router import CODEX_ROUTE_BALANCED, resolve_codex_model, resolve_codex_reasoning_effort
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ConfigError, ToolError
 from bpmis_jira_tool.gmail_dashboard import GMAIL_READONLY_SCOPE, GmailDashboardService
@@ -2564,6 +2565,10 @@ def generate_monthly_report_with_codex(
         session_mode="ephemeral",
         codex_binary=os.getenv("SOURCE_CODE_QA_CODEX_BINARY") or None,
     )
+    codex_model = resolve_codex_model(
+        CODEX_ROUTE_BALANCED,
+        legacy_env_names=("MONTHLY_REPORT_CODEX_MODEL", "SOURCE_CODE_QA_CODEX_MODEL"),
+    )
     result = provider.generate(
         payload={
             "systemInstruction": {
@@ -2579,9 +2584,10 @@ def generate_monthly_report_with_codex(
             "contents": [{"parts": [{"text": prompt}]}],
             "codex_prompt_mode": prompt_mode,
             "_progress_callback": progress_callback,
+            "_codex_reasoning_effort": resolve_codex_reasoning_effort(CODEX_ROUTE_BALANCED),
         },
-        primary_model=os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"),
-        fallback_model=os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"),
+        primary_model=codex_model,
+        fallback_model=codex_model,
     )
     return {
         "result_markdown": provider.extract_text(result.payload),

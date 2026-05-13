@@ -14,9 +14,10 @@
   const sectionSummary = root.querySelector('[data-prd-self-assessment-section-summary]');
   const sectionList = root.querySelector('[data-prd-self-assessment-section-list]');
   const jobsUrlTemplate = root.dataset.jobsUrl || '/api/jobs/__JOB_ID__';
+  const canGenerateSummary = buttons.some((button) => button.dataset.prdSelfAssessmentAction === 'summary');
 
   const STORAGE_KEY = 'prd-self-assessment:last-form:v1';
-  let lastAction = 'summary';
+  let lastAction = canGenerateSummary ? 'summary' : 'review';
   let sectionState = {
     loadedUrl: '',
     prdTitle: '',
@@ -316,6 +317,15 @@
     const linkedArtifactLine = !isSummary && linkedArtifacts.length
       ? `<p class="help-text">${escapeHtml(linkedArtifacts.slice(0, 4).map((item) => `${item.status === 'ok' ? 'Reviewed' : 'Not reviewed'}: ${item.title || item.url || 'Report template'}${item.status === 'ok' ? ` (${item.sheet_count || 0} sheets${item.skipped_sheet_count ? `, ${item.skipped_sheet_count} skipped` : ''})` : ` - ${item.reason || 'unavailable'}`}`).join(' · '))}${linkedArtifacts.length > 4 ? ` · +${escapeHtml(linkedArtifacts.length - 4)} more` : ''}</p>`
       : '';
+    const confluenceTablesTotal = Number(coverage.confluence_tables_total || 0);
+    const confluenceTablesReviewed = Number(coverage.confluence_tables_reviewed || 0);
+    const confluenceTableLine = !isSummary && Number.isFinite(confluenceTablesTotal) && confluenceTablesTotal > 0
+      ? `<span>Confluence tables reviewed: ${escapeHtml(confluenceTablesReviewed)}/${escapeHtml(confluenceTablesTotal)}</span>`
+      : '';
+    const confluenceTables = Array.isArray(coverage.confluence_tables) ? coverage.confluence_tables : [];
+    const confluenceTableDetailLine = !isSummary && confluenceTables.length
+      ? `<p class="help-text">${escapeHtml(confluenceTables.slice(0, 4).map((item) => `${item.media_id || 'Table'}: ${item.source_section_title || 'PRD section'}${item.row_count ? ` (${item.row_count} rows)` : ''}`).join(' · '))}${confluenceTables.length > 4 ? ` · +${escapeHtml(confluenceTables.length - 4)} more` : ''}</p>`
+      : '';
     const sheetScreenshotTotal = Number(coverage.google_sheet_screenshots_total || 0);
     const sheetScreenshotReviewed = Number(coverage.google_sheet_screenshots_reviewed || 0);
     const sheetScreenshotFailed = Number(coverage.google_sheet_screenshots_failed || 0);
@@ -339,9 +349,11 @@
           <span>${escapeHtml(language)} · ${escapeHtml(prd.title || 'PRD')}</span>
           ${generationCoverageLine}
           ${coverageLine}
+          ${confluenceTableLine}
           ${linkedCoverageLine}
           ${sheetScreenshotLine}
           ${titleLine}
+          ${confluenceTableDetailLine}
           ${linkedArtifactLine}
           ${sheetScreenshotArtifactLine}
         </div>
@@ -431,6 +443,7 @@
       const latest = payload.latest || {};
       const latestPayload = latest.payload || {};
       const action = latestPayload.action === 'review' ? 'review' : (latestPayload.action === 'summary' ? 'summary' : '');
+      if (action === 'summary' && !canGenerateSummary) return;
       const resultPayload = latestPayload.payload || {};
       if (!action || !resultPayload || resultPayload.status !== 'ok') return;
       lastAction = action;

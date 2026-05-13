@@ -59,7 +59,9 @@
             </select>
           </div>
           <div class="button-row briefing-action-buttons">
-            <button class="button" type="button" data-prd-self-assessment-action="summary">Generate PRD Summary</button>
+            {% if can_generate_prd_summary %}
+              <button class="button" type="button" data-prd-self-assessment-action="summary">Generate PRD Summary</button>
+            {% endif %}
             <button class="button button-secondary" type="button" data-prd-self-assessment-action="review">Generate AI PRD Review</button>
           </div>
         </form>

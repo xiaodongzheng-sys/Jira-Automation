@@ -399,7 +399,7 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertEqual(record["media"]["recording_background_nice"], 10)
         self.assertEqual(record["media"]["capture_status_every_buffers"], 250)
 
-    def test_calendar_meeting_schedules_auto_stop_ten_minutes_after_planned_end(self):
+    def test_calendar_meeting_schedules_auto_stop_twenty_minutes_after_planned_end(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             store = MeetingRecordStore(root)
@@ -441,8 +441,8 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         auto_stop = record["scheduled_auto_stop"]
         self.assertEqual(auto_stop["status"], "scheduled")
         self.assertEqual(auto_stop["mode"], "scheduled_end_plus_grace")
-        self.assertEqual(auto_stop["grace_seconds"], 600)
-        self.assertEqual(auto_stop["scheduled_for"], "2099-05-04T01:40:00+00:00")
+        self.assertEqual(auto_stop["grace_seconds"], 1200)
+        self.assertEqual(auto_stop["scheduled_for"], "2099-05-04T01:50:00+00:00")
         self.assertEqual(len(self._FakeTimer.instances), 1)
         self.assertTrue(self._FakeTimer.instances[0].started)
         self.assertTrue(self._FakeTimer.instances[0].daemon)
@@ -466,28 +466,28 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
             record["scheduled_auto_stop"] = {
                 "status": "scheduled",
                 "mode": "scheduled_end_plus_grace",
-                "grace_seconds": 600,
-                "scheduled_for": "2026-05-04T01:40:00+00:00",
+                "grace_seconds": 1200,
+                "scheduled_for": "2026-05-04T01:50:00+00:00",
             }
             store.save_record(record)
 
-            with patch("bpmis_jira_tool.meeting_recorder._utc_now", return_value="2026-05-04T01:40:00+00:00"), patch.object(
+            with patch("bpmis_jira_tool.meeting_recorder._utc_now", return_value="2026-05-04T01:50:00+00:00"), patch.object(
                 runtime,
                 "_terminate_persisted_recorder_process",
             ) as terminate:
                 runtime._scheduled_auto_stop_callback(
                     record_id=record["record_id"],
                     owner_email="owner@npt.sg",
-                    scheduled_for="2026-05-04T01:40:00+00:00",
+                    scheduled_for="2026-05-04T01:50:00+00:00",
                 )
 
             updated = store.get_record(record["record_id"])
 
         self.assertEqual(updated["status"], "recorded")
         self.assertEqual(updated["recording_stop_reason"], "scheduled_auto_stop")
-        self.assertEqual(updated["recording_stopped_at"], "2026-05-04T01:40:00+00:00")
+        self.assertEqual(updated["recording_stopped_at"], "2026-05-04T01:50:00+00:00")
         self.assertEqual(updated["scheduled_auto_stop"]["status"], "completed")
-        self.assertEqual(updated["scheduled_auto_stop"]["stopped_at"], "2026-05-04T01:40:00+00:00")
+        self.assertEqual(updated["scheduled_auto_stop"]["stopped_at"], "2026-05-04T01:50:00+00:00")
         terminate.assert_called_once()
 
     def test_scheduled_auto_stop_callback_queues_post_stop_work(self):
@@ -519,19 +519,19 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
             record["scheduled_auto_stop"] = {
                 "status": "scheduled",
                 "mode": "scheduled_end_plus_grace",
-                "grace_seconds": 600,
-                "scheduled_for": "2026-05-04T01:40:00+00:00",
+                "grace_seconds": 1200,
+                "scheduled_for": "2026-05-04T01:50:00+00:00",
             }
             store.save_record(record)
 
-            with patch("bpmis_jira_tool.meeting_recorder._utc_now", return_value="2026-05-04T01:40:00+00:00"), patch.object(
+            with patch("bpmis_jira_tool.meeting_recorder._utc_now", return_value="2026-05-04T01:50:00+00:00"), patch.object(
                 runtime,
                 "_terminate_persisted_recorder_process",
             ):
                 runtime._scheduled_auto_stop_callback(
                     record_id=record["record_id"],
                     owner_email="owner@npt.sg",
-                    scheduled_for="2026-05-04T01:40:00+00:00",
+                    scheduled_for="2026-05-04T01:50:00+00:00",
                 )
 
             updated = store.get_record(record["record_id"])
@@ -558,9 +558,9 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
             )
             record["status"] = "recording"
             record["recording_started_at"] = "2026-05-04T01:00:00+00:00"
-            record["scheduled_auto_stop"] = {"status": "scheduled", "scheduled_for": "2026-05-04T01:40:00+00:00"}
+            record["scheduled_auto_stop"] = {"status": "scheduled", "scheduled_for": "2026-05-04T01:50:00+00:00"}
             store.save_record(record)
-            timer = self._FakeTimer(600, lambda: None)
+            timer = self._FakeTimer(1200, lambda: None)
             runtime._auto_stop_timers[record["record_id"]] = timer
 
             with patch("bpmis_jira_tool.meeting_recorder._utc_now", return_value="2026-05-04T01:20:00+00:00"), patch.object(
@@ -598,7 +598,7 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
                 runtime._scheduled_auto_stop_callback(
                     record_id=failing["record_id"],
                     owner_email="owner@npt.sg",
-                    scheduled_for="2026-05-04T01:40:00+00:00",
+                    scheduled_for="2026-05-04T01:50:00+00:00",
                 )
             failed = store.get_record(failing["record_id"])
 
@@ -2691,8 +2691,8 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         record["scheduled_auto_stop"] = {
             "status": "scheduled",
             "mode": "scheduled_end_plus_grace",
-            "grace_seconds": 600,
-            "scheduled_for": "2026-05-04T01:40:00+00:00",
+            "grace_seconds": 1200,
+            "scheduled_for": "2026-05-04T01:50:00+00:00",
         }
         store.save_record(record)
         fake_processing = Mock()
@@ -2720,7 +2720,7 @@ class MeetingRecorderRouteTests(unittest.TestCase):
                 self.app.config["MEETING_RECORDER_RUNTIME"]._scheduled_auto_stop_callback(
                     record_id=record["record_id"],
                     owner_email="xiaodong.zheng@npt.sg",
-                    scheduled_for="2026-05-04T01:40:00+00:00",
+                    scheduled_for="2026-05-04T01:50:00+00:00",
                 )
                 updated = store.get_record(record["record_id"])
                 completed = self._wait_for_process_job(client, updated["scheduled_auto_stop"]["process_job_id"])

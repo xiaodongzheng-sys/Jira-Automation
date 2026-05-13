@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, unquote_plus, urlparse
 from bs4 import BeautifulSoup
 
 from bpmis_jira_tool.config import Settings
+from bpmis_jira_tool.codex_model_router import CODEX_ROUTE_DEEP, resolve_codex_model, resolve_codex_reasoning_effort
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.source_code_qa import CodexCliBridgeSourceCodeQALLMProvider
 
@@ -196,6 +197,7 @@ class PRDReviewService:
             selected_page,
             mode=_generation_mode_for_page(selected_page),
             total_sections=int(selection["coverage"].get("sections_total") or len(selected_page.sections)),
+            section_indexes=selection["coverage"]["selected_section_indexes"],
         )
         coverage = _merge_google_sheet_screenshot_coverage(_merge_linked_spreadsheet_coverage(
             {**selection["coverage"], **generation_coverage},
@@ -870,14 +872,49 @@ def _build_generation_coverage(
     *,
     mode: str,
     total_sections: int | None = None,
+    section_indexes: list[int] | None = None,
 ) -> dict[str, Any]:
     covered_sections = sum(1 for section in page.sections if str(section.content or "").strip())
+    table_media = _collect_table_media_coverage(page, section_indexes=section_indexes)
     return {
         "mode": "hybrid" if mode == "hybrid" else "single",
         "sections_total": int(total_sections if total_sections is not None else len(page.sections)),
         "sections_covered": covered_sections,
         "truncated": False if mode == "hybrid" else _prd_source_char_count(page) > PRD_REVIEW_MAX_SOURCE_CHARS,
+        "confluence_tables_total": len(table_media),
+        "confluence_tables_reviewed": len(table_media),
+        "confluence_tables": table_media,
     }
+
+
+def _collect_table_media_coverage(page: IngestedConfluencePage, *, section_indexes: list[int] | None = None) -> list[dict[str, Any]]:
+    media_dict = getattr(page, "media_dict", {}) or {}
+    seen: set[str] = set()
+    tables: list[dict[str, Any]] = []
+    effective_indexes = section_indexes if section_indexes and len(section_indexes) == len(page.sections) else list(range(1, len(page.sections) + 1))
+    for section_index, section in zip(effective_indexes, page.sections):
+        for media_ref in getattr(section, "media_refs", []) or []:
+            media_id = str(media_ref or "").strip()
+            if not media_id or media_id in seen:
+                continue
+            media = media_dict.get(media_id) or {}
+            if str(media.get("type") or "") != "table":
+                continue
+            table_text = _format_table_media_for_review(media_id, media)
+            if not table_text:
+                continue
+            seen.add(media_id)
+            row_count = max(len(table_text.splitlines()) - 1, 0)
+            tables.append(
+                {
+                    "media_id": media_id,
+                    "source_section_index": section_index,
+                    "source_section_title": str(getattr(section, "section_path", "") or getattr(section, "title", "") or f"Section {section_index}"),
+                    "row_count": row_count,
+                    "char_count": len(table_text),
+                }
+            )
+    return tables
 
 
 def _page_with_sections(page: IngestedConfluencePage, sections: list[Any]) -> IngestedConfluencePage:
@@ -2766,15 +2803,20 @@ def _generate_with_codex(
         session_mode="ephemeral",
         codex_binary=os.getenv("SOURCE_CODE_QA_CODEX_BINARY") or None,
     )
+    codex_model = resolve_codex_model(
+        CODEX_ROUTE_DEEP,
+        legacy_env_names=("PRD_REVIEWER_CODEX_MODEL", "SOURCE_CODE_QA_CODEX_MODEL"),
+    )
     result = provider.generate(
         payload={
             "systemInstruction": {"parts": [{"text": system_text}]},
             "contents": [{"parts": [{"text": prompt}]}],
             "codex_prompt_mode": prompt_mode,
+            "_codex_reasoning_effort": resolve_codex_reasoning_effort(CODEX_ROUTE_DEEP),
             **({"_codex_image_paths": list(image_paths)} if image_paths else {}),
         },
-        primary_model=os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"),
-        fallback_model=os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"),
+        primary_model=codex_model,
+        fallback_model=codex_model,
     )
     return {
         "result_markdown": provider.extract_text(result.payload),

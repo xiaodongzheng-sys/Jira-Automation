@@ -127,6 +127,7 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
         started_at = time.time()
         attempt_started = time.time()
         model = str(primary_model or "codex-cli").strip() or "codex-cli"
+        reasoning_effort = self._reasoning_effort_from_payload(payload)
         timeout_seconds = max(10, int(payload.get("_timeout_seconds") or self.timeout_seconds))
         with tempfile.NamedTemporaryFile("w+", encoding="utf-8", delete=True) as output_file:
             prompt_mode = str(payload.get("codex_prompt_mode") or "").strip()
@@ -134,6 +135,7 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
             command, command_mode = self._build_codex_command(
                 output_file=output_file.name,
                 model=model,
+                reasoning_effort=reasoning_effort,
                 session_id=codex_cli_session_id,
                 image_paths=image_paths,
             )
@@ -293,6 +295,7 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                     "timeout": False,
                     "workspace_root": str(self.workspace_root),
                     "prompt_mode": prompt_mode,
+                    "reasoning_effort": reasoning_effort,
                     "concurrency_limit": self.concurrency_limit,
                     "queue_wait_ms": queue_wait_ms,
                     "session_mode": self.session_mode,
@@ -308,14 +311,17 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
         *,
         output_file: str,
         model: str,
+        reasoning_effort: str = "",
         session_id: str = "",
         image_paths: list[str] | None = None,
     ) -> tuple[list[str], str]:
         image_args: list[str] = []
         for image_path in image_paths or []:
             image_args.extend(["--image", str(image_path)])
+        reasoning_args = self._reasoning_config_args(reasoning_effort)
         if self.session_mode == CODEX_SESSION_MODE_RESUME:
             command = [self.codex_binary, "exec"]
+            command.extend(reasoning_args)
             if model not in {"codex-cli", "codex"}:
                 command.extend(["--model", model])
             command.extend(image_args)
@@ -360,14 +366,30 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
             output_file,
             "-",
         ]
+        if reasoning_args:
+            command[2:2] = reasoning_args
         if model not in {"codex-cli", "codex"}:
             command[2:2] = ["--model", model]
         if image_args:
             insert_at = 2
             if model not in {"codex-cli", "codex"}:
                 insert_at = 4
+            if reasoning_args:
+                insert_at += len(reasoning_args)
             command[insert_at:insert_at] = image_args
         return command, "ephemeral"
+
+    @staticmethod
+    def _reasoning_effort_from_payload(payload: dict[str, Any]) -> str:
+        effort = str(payload.get("_codex_reasoning_effort") or "").strip().lower()
+        return effort if effort in {"low", "medium", "high", "xhigh"} else ""
+
+    @classmethod
+    def _reasoning_config_args(cls, reasoning_effort: str) -> list[str]:
+        effort = cls._reasoning_effort_from_payload({"_codex_reasoning_effort": reasoning_effort})
+        if not effort:
+            return []
+        return ["-c", f'model_reasoning_effort="{effort}"']
 
     def _run_codex_streaming(self, *, command: list[str], prompt: str, progress_callback: Any, timeout_seconds: int | None = None) -> Any:
         process = subprocess.Popen(

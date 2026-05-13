@@ -94,7 +94,7 @@ class Settings:
     source_code_qa_semantic_index_enabled: bool = True
     source_code_qa_llm_cache_ttl_seconds: int = 1800
     source_code_qa_llm_timeout_seconds: int = 90
-    source_code_qa_codex_timeout_seconds: int = 240
+    source_code_qa_codex_timeout_seconds: int = 360
     source_code_qa_effort_codex_timeout_seconds: int = 600
     source_code_qa_query_deadline_seconds: int = 180
     source_code_qa_codex_repair_deadline_seconds: int = 150
@@ -116,7 +116,7 @@ class Settings:
     confluence_api_token: str | None = None
     confluence_bearer_token: str | None = None
     confluence_base_url: str | None = None
-    prd_briefing_codex_model: str = "gpt-5.5"
+    prd_briefing_codex_model: str | None = None
     prd_briefing_tts_provider: str = "edge"
     prd_briefing_edge_mandarin_voice: str = "zh-CN-XiaoxiaoNeural"
     prd_briefing_edge_english_voice: str = "en-SG-LunaNeural"
@@ -201,7 +201,7 @@ class Settings:
             source_code_qa_semantic_index_enabled=_env_bool("SOURCE_CODE_QA_SEMANTIC_INDEX_ENABLED", True),
             source_code_qa_llm_cache_ttl_seconds=int(_env_str("SOURCE_CODE_QA_LLM_CACHE_TTL_SECONDS", "1800")),
             source_code_qa_llm_timeout_seconds=int(_env_str("SOURCE_CODE_QA_LLM_TIMEOUT_SECONDS", "90")),
-            source_code_qa_codex_timeout_seconds=int(_env_str("SOURCE_CODE_QA_CODEX_TIMEOUT_SECONDS", "240")),
+            source_code_qa_codex_timeout_seconds=int(_env_str("SOURCE_CODE_QA_CODEX_TIMEOUT_SECONDS", "360")),
             source_code_qa_effort_codex_timeout_seconds=int(_env_str("SOURCE_CODE_QA_EFFORT_CODEX_TIMEOUT_SECONDS", "600")),
             source_code_qa_query_deadline_seconds=int(_env_str("SOURCE_CODE_QA_QUERY_DEADLINE_SECONDS", "180")),
             source_code_qa_codex_repair_deadline_seconds=int(_env_str("SOURCE_CODE_QA_CODEX_REPAIR_DEADLINE_SECONDS", "150")),
@@ -228,7 +228,7 @@ class Settings:
             confluence_api_token=_env_str("CONFLUENCE_API_TOKEN"),
             confluence_bearer_token=_env_str("CONFLUENCE_BEARER_TOKEN"),
             confluence_base_url=_env_str("CONFLUENCE_BASE_URL"),
-            prd_briefing_codex_model=_env_str("PRD_BRIEFING_CODEX_MODEL", "gpt-5.5"),
+            prd_briefing_codex_model=_env_str("PRD_BRIEFING_CODEX_MODEL"),
             prd_briefing_tts_provider="edge",
             prd_briefing_edge_mandarin_voice=_env_str("PRD_BRIEFING_EDGE_MANDARIN_VOICE", "zh-CN-XiaoxiaoNeural"),
             prd_briefing_edge_english_voice=_env_str("PRD_BRIEFING_EDGE_ENGLISH_VOICE", "en-SG-LunaNeural"),

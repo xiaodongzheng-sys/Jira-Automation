@@ -1982,11 +1982,14 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertFalse(payload["llm_ready"])
         self.assertEqual(payload["llm_provider"], "codex_cli_bridge")
         self.assertEqual(payload["llm_policy"]["provider"]["provider"], "codex_cli_bridge")
-        self.assertEqual(payload["llm_policy"]["router"]["version"], 7)
+        self.assertEqual(payload["llm_policy"]["router"]["version"], 8)
         self.assertEqual(payload["llm_policy"]["versions"]["cache"], 16)
         self.assertEqual(payload["llm_policy"]["versions"]["runtime"], 2)
         self.assertNotIn("max_retries", payload["llm_policy"]["runtime"])
-        self.assertEqual(payload["llm_policy"]["model_policy"]["answer"]["model"], os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"))
+        self.assertEqual(payload["llm_policy"]["model_policy"]["answer"]["model"], payload["llm_model"])
+        self.assertIn("codex_model_routes", payload["llm_policy"])
+        self.assertEqual(payload["llm_policy"]["codex_model_routes"]["routes"]["cheap"]["reasoning_effort"], "low")
+        self.assertEqual(payload["llm_policy"]["codex_model_routes"]["reasoning_control"], "codex_cli_model_reasoning_effort")
         self.assertTrue(payload["llm_policy"]["judge"]["enabled"])
         self.assertEqual(payload["llm_policy"]["judge"]["mode"], "deterministic_evidence_judge")
         self.assertNotIn("cache", payload["llm_policy"]["judge"])
@@ -2671,7 +2674,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         tuned = self.service.with_codex_timeout_seconds(600)
 
         self.assertIsNot(tuned, self.service)
-        self.assertEqual(self.service.codex_timeout_seconds, 240)
+        self.assertEqual(self.service.codex_timeout_seconds, 360)
         self.assertEqual(tuned.codex_timeout_seconds, 600)
         self.assertEqual(tuned.base_data_root, self.service.base_data_root)
 
@@ -8155,12 +8158,13 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+        expected_model = service.llm_budgets["balanced"]["model"]
         result = self._llm_result(
             '{"direct_answer":"Short answer: batchCreateJiraIssue is in BPMISClient.",'
             '"claims":[{"text":"BPMISClient defines batchCreateJiraIssue","citations":["S1"]}],'
             '"missing_evidence":[],"confidence":"high"}',
             usage={"promptTokenCount": 123, "candidatesTokenCount": 45, "totalTokenCount": 168},
-            model=service.codex_model,
+            model=expected_model,
         )
         with patch.object(service.llm_provider, "ready", return_value=True), patch.object(
             service.llm_provider,
@@ -8180,8 +8184,9 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("Short answer", payload["llm_answer"])
         self.assertEqual(payload["llm_usage"]["promptTokenCount"], 123)
         self.assertEqual(payload["llm_provider"], "codex_cli_bridge")
-        self.assertEqual(payload["llm_model"], os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"))
+        self.assertEqual(payload["llm_model"], expected_model)
         self.assertFalse(payload["llm_cached"])
+        self.assertEqual(mocked_generate.call_args_list[0].kwargs["primary_model"], expected_model)
         request_payload = mocked_generate.call_args_list[0].kwargs["payload"]
         self.assertEqual(request_payload["generationConfig"]["responseMimeType"], "application/json")
         self.assertNotIn("responseSchema", request_payload["generationConfig"])
@@ -8190,7 +8195,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(payload["llm_route"]["mode"], "manual")
         telemetry = json.loads(service.telemetry_path.read_text(encoding="utf-8").strip().splitlines()[-1])
         self.assertEqual(telemetry["llm_provider"], "codex_cli_bridge")
-        self.assertEqual(telemetry["llm_model"], os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"))
+        self.assertEqual(telemetry["llm_model"], expected_model)
         self.assertEqual(telemetry["llm_thinking_budget"], 0)
         self.assertEqual(telemetry["llm_route"]["mode"], "manual")
         self.assertEqual(telemetry["versions"]["cache"], 16)
@@ -8481,10 +8486,10 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(service.llm_provider.name, "codex_cli_bridge")
         self.assertEqual(service.llm_policy_payload()["semantic_retrieval"]["embedding_provider"]["provider"], "local_token_hybrid")
         self.assertNotIn("judge", service.model_policy)
-        self.assertEqual(service._llm_fallback_model(), os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"))
+        self.assertEqual(service._llm_fallback_model(), service._codex_model_for_route("repair"))
         routed_mode, routed_budget, route = service._resolve_llm_budget("cheap", "where is createIssue", [])
         self.assertEqual(routed_mode, "cheap")
-        self.assertEqual(routed_budget["model"], os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"))
+        self.assertEqual(routed_budget["model"], service._codex_model_for_route("cheap"))
         self.assertEqual(route["mode"], "manual")
 
     def test_codex_cli_bridge_provider_returns_answer(self):
@@ -8534,6 +8539,45 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(result.attempt_log[0]["concurrency_limit"], 1)
         self.assertIn("queue_wait_ms", result.attempt_log[0])
         self.assertIn("--sandbox", result.attempt_log[0]["command"])
+
+    def test_codex_cli_bridge_provider_passes_selected_model_to_cli(self):
+        provider = CodexCliBridgeSourceCodeQALLMProvider(
+            workspace_root=Path(self.temp_dir.name),
+            timeout_seconds=20,
+            codex_binary="codex",
+        )
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text(
+                '{"direct_answer":"ok","claims":[],"missing_evidence":[],"confidence":"high"}',
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
+            side_effect=fake_run,
+        ):
+            result = provider.generate(
+                payload={
+                    "contents": [{"parts": [{"text": "hi"}]}],
+                    "_codex_reasoning_effort": "low",
+                },
+                primary_model="gpt-5.4-mini",
+                fallback_model="gpt-5.5",
+            )
+
+        exec_command = calls[-1][0]
+        self.assertIn("--model", exec_command)
+        self.assertIn("gpt-5.4-mini", exec_command)
+        self.assertIn("-c", exec_command)
+        self.assertIn('model_reasoning_effort="low"', exec_command)
+        self.assertEqual(result.model, "gpt-5.4-mini")
 
     def test_codex_cli_bridge_provider_rejects_successful_bad_request_payload(self):
         provider = CodexCliBridgeSourceCodeQALLMProvider(
@@ -8730,7 +8774,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("Final answer", provider.extract_text(result.payload))
 
     def test_codex_cli_provider_uses_configured_model(self):
-        with patch.dict(os.environ, {"SOURCE_CODE_QA_CODEX_MODEL": "gpt-5.5"}, clear=False):
+        with patch.dict(os.environ, {"SOURCE_CODE_QA_CODEX_MODEL": "gpt-5.5"}, clear=True):
             service = SourceCodeQAService(
                 data_root=Path(self.temp_dir.name),
                 team_profiles=TEAM_PROFILE_DEFAULTS,
@@ -8744,6 +8788,32 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(service.llm_budgets["balanced"]["model"], "gpt-5.5")
         self.assertEqual(service.llm_budgets["deep"]["model"], "gpt-5.5")
         self.assertEqual(service._llm_fallback_model(), "gpt-5.5")
+
+    def test_codex_provider_uses_route_specific_models(self):
+        with patch.dict(
+            os.environ,
+            {
+                "SOURCE_CODE_QA_CODEX_MODEL_CHEAP": "cheap-model",
+                "SOURCE_CODE_QA_CODEX_MODEL_BALANCED": "balanced-model",
+                "SOURCE_CODE_QA_CODEX_MODEL_DEEP": "deep-model",
+                "SOURCE_CODE_QA_CODEX_MODEL_REPAIR": "repair-model",
+            },
+            clear=True,
+        ):
+            service = SourceCodeQAService(
+                data_root=Path(self.temp_dir.name),
+                team_profiles=TEAM_PROFILE_DEFAULTS,
+                llm_provider="codex_cli_bridge",
+                gitlab_token="secret-token",
+                git_timeout_seconds=5,
+                max_file_bytes=200_000,
+            )
+
+        self.assertEqual(service.llm_budgets["cheap"]["model"], "cheap-model")
+        self.assertEqual(service.llm_budgets["balanced"]["model"], "balanced-model")
+        self.assertEqual(service.llm_budgets["deep"]["model"], "deep-model")
+        self.assertEqual(service.llm_budgets["compact_deep"]["model"], "gpt-5.4")
+        self.assertEqual(service.model_policy["repair"]["model"], "repair-model")
 
     def test_codex_cli_provider_uses_codex_specific_timeout(self):
         service = SourceCodeQAService(
@@ -9555,6 +9625,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         exec_calls = [item for item in calls if "exec" in item[0]]
         self.assertEqual(len(exec_calls), 2)
+        self.assertIn(service._model_for_role("repair"), exec_calls[1][0])
         self.assertEqual(payload["llm_route"]["task"], "effort_assessment")
         self.assertTrue(payload["llm_route"]["codex_repair_attempted"])
         self.assertIn("out_of_scope_citations", payload["llm_route"]["codex_repair_reason"])
@@ -9788,12 +9859,13 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "        return self.post('/api/v1/issues/batchCreateJiraIssue')\n",
             encoding="utf-8",
         )
+        expected_model = service.llm_budgets["cheap"]["model"]
         result = self._llm_result(
             '{"direct_answer":"batchCreateJiraIssue is in BPMISClient.",'
             '"claims":[{"text":"BPMISClient defines batchCreateJiraIssue","citations":["S1"]}],'
             '"missing_evidence":[],"confidence":"high"}',
             usage={"promptTokenCount": 20, "candidatesTokenCount": 8, "totalTokenCount": 28},
-            model=service.codex_model,
+            model=expected_model,
         )
 
         with patch.object(service.llm_provider, "ready", return_value=True), patch.object(
@@ -9811,7 +9883,9 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             )
 
         self.assertEqual(payload["llm_budget_mode"], "cheap")
-        self.assertEqual(payload["llm_model"], os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"))
+        self.assertEqual(payload["llm_model"], expected_model)
+        self.assertEqual(mocked_generate.call_args.kwargs["primary_model"], expected_model)
+        self.assertEqual(mocked_generate.call_args.kwargs["payload"]["_codex_reasoning_effort"], "low")
         self.assertEqual(payload["llm_thinking_budget"], 0)
         self.assertNotIn("thinkingConfig", mocked_generate.call_args.kwargs["payload"]["generationConfig"])
 
@@ -9841,11 +9915,13 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "}\n",
             encoding="utf-8",
         )
+        expected_model = service.llm_budgets["compact_deep"]["model"]
         result = self._llm_result(
             '{"direct_answer":"IssueRepository reads issue_table.",'
             '"claims":[{"text":"IssueRepository reads issue_table","citations":["S1"]}],'
             '"missing_evidence":[],"confidence":"high"}',
             usage={"promptTokenCount": 12000, "candidatesTokenCount": 50, "totalTokenCount": 12050},
+            model=expected_model,
         )
 
         with patch.object(service.llm_provider, "ready", return_value=True), patch.object(
@@ -9855,7 +9931,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         ) as mocked_generate, patch.object(
             service,
             "_estimate_llm_tokens",
-            side_effect=[25000, 12000],
+            side_effect=[25000, 12000, 12000],
         ):
             self._build_all_indexes(service)
             payload = service.query(
@@ -9866,8 +9942,11 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 llm_budget_mode="auto",
             )
 
-        self.assertEqual(payload["llm_budget_mode"], "deep")
-        self.assertNotIn("token_pressure", payload["llm_route"])
+        self.assertEqual(payload["llm_budget_mode"], "compact_deep")
+        self.assertTrue(payload["llm_route"]["token_pressure"])
+        self.assertEqual(payload["llm_route"]["original_selected"], "deep")
+        self.assertEqual(payload["llm_model"], expected_model)
+        self.assertEqual(mocked_generate.call_args_list[0].kwargs["primary_model"], expected_model)
         request_payload = mocked_generate.call_args_list[0].kwargs["payload"]
         self.assertNotIn("thinkingConfig", request_payload["generationConfig"])
         self.assertEqual(payload["llm_thinking_budget"], 0)
@@ -9898,10 +9977,12 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "}\n",
             encoding="utf-8",
         )
+        expected_model = service.llm_budgets["deep"]["model"]
         result = self._llm_result(
             '{"direct_answer":"IssueRepository reads issue_table.",'
             '"claims":[{"text":"IssueRepository reads issue_table","citations":["S1"]}],'
             '"missing_evidence":[],"confidence":"high"}',
+            model=expected_model,
         )
 
         with patch.object(service.llm_provider, "ready", return_value=True), patch.object(
@@ -9920,6 +10001,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertEqual(payload["answer_mode"], "auto")
         self.assertEqual(payload["llm_budget_mode"], "deep")
+        self.assertEqual(payload["llm_model"], expected_model)
+        self.assertEqual(mocked_generate.call_args_list[0].kwargs["primary_model"], expected_model)
         self.assertEqual(payload["llm_route"]["mode"], "auto")
         self.assertIn("data_source_trace", payload["llm_route"]["reason"])
         self.assertIn("IssueRepository reads issue_table", payload["llm_answer"])

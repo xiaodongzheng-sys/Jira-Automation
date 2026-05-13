@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 import re
 
+from bpmis_jira_tool.codex_model_router import CODEX_ROUTE_CHEAP, resolve_codex_model
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.daily_brief_archive import DailyBriefArchiveStore, daily_brief_archive_path
 from bpmis_jira_tool.errors import ConfigError
@@ -61,6 +62,7 @@ MAX_OTHER_UPDATES = 8
 MAX_TEAM_MEMBER_REMINDERS = 8
 MAX_USEFUL_AWARENESS_OTHER_UPDATES = 5
 MAX_UNANSWERED_SEATALK_QUESTION_HINTS = 10
+MAX_TEAM_MEMBER_REMINDER_HINTS = 12
 MAX_TOP_FOCUS_ITEMS = 3
 LOW_SIGNAL_EMAIL_SUMMARY = "No clear action, blocker, key project update, or team follow-up was found in this window."
 EMPTY_TODO_SECTION_SUMMARY = "No Xiaodong-owned action or watch/delegate item found."
@@ -313,7 +315,10 @@ def build_seatalk_service(settings: Settings, *, data_root: Path) -> SeaTalkDash
         seatalk_app_path=settings.seatalk_local_app_path,
         seatalk_data_dir=settings.seatalk_local_data_dir,
         codex_workspace_root=Path(__file__).resolve().parent.parent,
-        codex_model=os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"),
+        codex_model=resolve_codex_model(
+            CODEX_ROUTE_CHEAP,
+            legacy_env_names=("SEATALK_CODEX_MODEL", "SOURCE_CODE_QA_CODEX_MODEL"),
+        ),
         codex_timeout_seconds=settings.source_code_qa_codex_timeout_seconds,
         codex_concurrency=settings.source_code_qa_codex_concurrency,
         name_overrides_path=seatalk_name_overrides_path(data_root=data_root),
@@ -507,6 +512,8 @@ def build_daily_briefing(
     if gmail_history_text:
         gmail_history_text = gmail_history_text[:360_000]
     unanswered_question_hints = _build_unanswered_seatalk_question_hints(history_text)
+    team_member_reminder_candidates = _build_team_member_reminder_candidates(history_text)
+    team_member_reminder_hints = _format_team_member_reminder_hints(team_member_reminder_candidates)
     daily_matches = match_report_intelligence(
         f"{history_text}\n\n{gmail_history_text}",
         config=intelligence_config,
@@ -523,6 +530,7 @@ def build_daily_briefing(
             window_label=window_label,
             match_summary=daily_match_summary,
             unanswered_question_hints=unanswered_question_hints,
+            team_member_reminder_hints=team_member_reminder_hints,
         ),
     )
     name_mappings = _load_seatalk_name_mappings(service)
@@ -538,7 +546,8 @@ def build_daily_briefing(
     )[:MAX_MY_TODOS]
     reminders = _dedupe_brief_items(
         _filter_seatalk_reminders(
-            _normalize_brief_items(parsed.get("team_member_reminders", []), default_source_type="seatalk", name_mappings=name_mappings)
+            _normalize_brief_items(parsed.get("team_member_reminders", []), default_source_type="seatalk", name_mappings=name_mappings),
+            reminder_candidates=team_member_reminder_candidates,
         ),
         text_fields=("person", "reminder"),
     )[:MAX_TEAM_MEMBER_REMINDERS]
@@ -1101,6 +1110,7 @@ def _daily_brief_user_prompt(
     window_label: str = "",
     match_summary: str = "",
     unanswered_question_hints: str = "",
+    team_member_reminder_hints: str = "",
 ) -> str:
     window_text = window_label or f"previous {hours} hours"
     match_block = (
@@ -1118,6 +1128,14 @@ def _daily_brief_user_prompt(
         "Prioritize them as my_todos watch_delegate items, project_updates with blocked/unknown status, or team_member_reminders when the named owner is in the allowed reminder list. "
         "Do not include a candidate if the surrounding source text shows it was already answered or is only low-value chatter.\n\n"
         if str(unanswered_question_hints or "").strip()
+        else ""
+    )
+    team_member_reminder_block = (
+        "## Valid Team Member Follow-up Candidates\n"
+        f"{team_member_reminder_hints}\n"
+        "Only create team_member_reminders from these deterministic candidates. "
+        "If this block says there are no valid unresolved candidates, team_member_reminders must be an empty array.\n\n"
+        if str(team_member_reminder_hints or "").strip()
         else ""
     )
     return (
@@ -1154,7 +1172,7 @@ def _daily_brief_user_prompt(
         "A cc-only mention is not enough. If a person is only copied after 'cc' and the actual ask is addressed to someone else, do not create a reminder for the cc'd person. If the direct assignee is outside the allowed list and an allowed teammate is only cc'd, produce no team_member_reminders item for that message.\n"
         "Do not include private chats. Do not include bot/system alerts, automated reminders, SDLC Checker output, or SDLC material/approval reminder messages. Do not include items where the named person replied, acknowledged, handled it, or Xiaodong already followed up later.\n"
         "If the source message is annotated as a thread reply, make the reminder and evidence say thread, for example 'UDL数据小群 / thread: PH A-Card Model V2.1 Deployment'. Do not write 'in the group' for thread replies.\n"
-        "If the mention looks human and action-relevant but you are unsure whether a later follow-up resolved it, include one concise reminder rather than dropping it. Set source_type to seatalk.\n\n"
+        "If the mention looks human and action-relevant but you are unsure whether the named person stayed completely silent after being asked, drop it rather than creating a noisy Follow-up. Set source_type to seatalk.\n\n"
         "## Source And Evidence Rules\n"
         "For SeaTalk evidence, use the group ID/name or the key people involved. For Gmail evidence, use sender or key participants plus subject and thread link when available.\n"
         "Do not output unresolved raw SeaTalk IDs such as group-123, buddy-123, or UID 123 in evidence. Use mapped display names when visible; otherwise use a generic label such as SeaTalk group or SeaTalk contact.\n"
@@ -1166,6 +1184,7 @@ def _daily_brief_user_prompt(
         "Avoid repeating the same topic across sections unless each section has a distinct role: Xiaodong next action, project state, or team member follow-up.\n\n"
         f"{match_block}"
         f"{unanswered_question_block}"
+        f"{team_member_reminder_block}"
         "## Exclusions\n"
         "For other_updates and team_member_reminders, ignore bot-generated alerts, automated reminders, system notifications, Jira/Confluence/calendar reminders, and no-reply notification emails unless a human adds meaningful follow-up in the same thread.\n\n"
         "For team_member_reminders, always exclude SDLC Checker and SG BAU SDLC material check content; those are automated release hygiene signals, not human team follow-up requests.\n\n"
@@ -1267,6 +1286,148 @@ def _build_unanswered_seatalk_question_hints(history_text: str) -> str:
         if len(hints) >= MAX_UNANSWERED_SEATALK_QUESTION_HINTS:
             break
     return "\n".join(hints)
+
+
+def _build_team_member_reminder_candidates(history_text: str) -> list[dict[str, str]] | None:
+    current_group = ""
+    saw_group_header = False
+    pending: list[dict[str, Any]] = []
+    for line in str(history_text or "").splitlines():
+        header_match = _SEATALK_HISTORY_HEADER_RE.match(line.strip())
+        if header_match:
+            saw_group_header = True
+            current_group = header_match.group("group").strip()
+            continue
+        message_match = _SEATALK_HISTORY_MESSAGE_RE.match(line)
+        if not message_match or not current_group:
+            continue
+        sender = message_match.group("sender").strip()
+        thread = (message_match.group("thread") or "").strip()
+        text = message_match.group("text").strip()
+        key = (current_group, thread or "__main__")
+        sender_person = _canonical_team_member_name(sender)
+        sender_is_xiaodong = _sender_is_xiaodong(sender)
+        if sender_person or sender_is_xiaodong:
+            for item in pending:
+                if item.get("key") == key and (sender_is_xiaodong or item.get("person") == sender_person):
+                    item["answered"] = True
+        if not _is_meaningful_human_seatalk_line(sender, text) or not _looks_like_team_member_request(text):
+            continue
+        for person in _mentioned_team_members(text):
+            if person == sender_person or _is_cc_only_team_member_mention(text, person):
+                continue
+            pending.append(
+                {
+                    "key": key,
+                    "person": person,
+                    "sender": sender,
+                    "group": current_group,
+                    "thread": thread,
+                    "timestamp": message_match.group("timestamp").strip(),
+                    "text": text,
+                    "answered": False,
+                }
+            )
+
+    if not saw_group_header:
+        return None
+    unresolved = [item for item in pending if not item.get("answered")]
+    unresolved.sort(key=lambda item: str(item.get("timestamp") or ""), reverse=True)
+    return [
+        {
+            "person": str(item.get("person") or ""),
+            "sender": str(item.get("sender") or ""),
+            "group": str(item.get("group") or ""),
+            "thread": str(item.get("thread") or ""),
+            "timestamp": str(item.get("timestamp") or ""),
+            "text": str(item.get("text") or ""),
+        }
+        for item in unresolved[:MAX_TEAM_MEMBER_REMINDER_HINTS]
+    ]
+
+
+def _format_team_member_reminder_hints(candidates: list[dict[str, str]] | None) -> str:
+    if candidates is None:
+        return ""
+    if not candidates:
+        return "No valid unresolved team-member mention candidates were found."
+    hints: list[str] = []
+    for item in candidates:
+        group = str(item.get("group") or "").strip()
+        thread = str(item.get("thread") or "").strip()
+        source = f"{group} / thread: {thread}" if thread else group
+        hints.append(
+            "- "
+            f"[{item.get('timestamp')}] {source}: {item.get('sender')} asked "
+            f"{item.get('person')}: {_clip_hint_text(item.get('text'), limit=220)}"
+        )
+    return "\n".join(hints)
+
+
+def _mentioned_team_members(text: str) -> list[str]:
+    normalized = f" {_normalize_person_key(text)} "
+    people: list[str] = []
+    for alias, person in sorted(TEAM_MEMBER_REMINDER_ALLOWED_PEOPLE.items(), key=lambda pair: len(pair[0]), reverse=True):
+        if f" {alias} " not in normalized:
+            continue
+        if person not in people:
+            people.append(person)
+    return people
+
+
+def _looks_like_team_member_request(text: str) -> bool:
+    lowered = str(text or "").casefold()
+    return any(
+        cue in lowered
+        for cue in (
+            "@",
+            "please",
+            "pls",
+            "plz",
+            "help",
+            "can you",
+            "could you",
+            "need",
+            "needs",
+            "confirm",
+            "check",
+            "review",
+            "decide",
+            "reply",
+            "update",
+            "provide",
+            "follow up",
+            "handle",
+            "investigate",
+            "帮",
+            "麻烦",
+            "看下",
+            "确认",
+            "决定",
+            "回复",
+            "跟进",
+            "处理",
+            "是否",
+            "能否",
+        )
+    )
+
+
+def _sender_is_xiaodong(sender: str) -> bool:
+    return "xiaodong" in _normalize_person_key(sender)
+
+
+def _is_cc_only_team_member_mention(text: str, person: str) -> bool:
+    lowered = str(text or "").casefold()
+    if "cc" not in lowered:
+        return False
+    person_aliases = [alias for alias, canonical in TEAM_MEMBER_REMINDER_ALLOWED_PEOPLE.items() if canonical == person]
+    normalized = _normalize_person_key(text)
+    cc_index = normalized.find(" cc ")
+    if cc_index < 0 and not normalized.startswith("cc "):
+        return False
+    cc_tail = normalized[cc_index + 4 if cc_index >= 0 else 3 :]
+    return any(f" {alias} " in f" {cc_tail} " for alias in person_aliases)
 
 
 def _unanswered_question_sort_key(item: dict[str, Any]) -> tuple[int, str]:
@@ -1772,13 +1933,21 @@ def _source_coverage_label(source_types: set[str]) -> str:
     return "No message source"
 
 
-def _filter_seatalk_reminders(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _filter_seatalk_reminders(
+    items: list[dict[str, Any]],
+    *,
+    reminder_candidates: list[dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
     filtered: list[dict[str, Any]] = []
     for item in items:
         if item.get("source_type") != "seatalk" or _is_bot_alert_or_reminder_item(item) or _is_sdlc_checker_reminder_item(item):
             continue
         canonical_person = _canonical_team_member_name(item.get("person"))
         if not canonical_person:
+            continue
+        if reminder_candidates is not None and not any(
+            candidate.get("person") == canonical_person for candidate in reminder_candidates
+        ):
             continue
         domain = TEAM_MEMBER_REMINDER_DOMAIN_OVERRIDES.get(_normalize_person_key(canonical_person), _display_domain(item.get("domain")))
         if domain == "Anti-fraud" and _normalize_person_key(canonical_person) not in ANTI_FRAUD_TEAM_MEMBERS:

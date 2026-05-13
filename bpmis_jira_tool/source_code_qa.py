@@ -19,6 +19,16 @@ import uuid
 
 
 from bpmis_jira_tool.errors import ToolError
+from bpmis_jira_tool.codex_model_router import (
+    CODEX_ROUTE_BALANCED,
+    CODEX_ROUTE_CHEAP,
+    CODEX_ROUTE_COMPACT_DEEP,
+    CODEX_ROUTE_DEEP,
+    CODEX_ROUTE_REPAIR,
+    codex_route_policy_payload,
+    resolve_codex_model,
+    resolve_codex_reasoning_effort,
+)
 from bpmis_jira_tool.source_code_qa_evidence_policy import (
     ANSWER_CONCRETE_SOURCE_HINTS,
     ANSWER_POLICY_REGISTRY,
@@ -156,7 +166,6 @@ from bpmis_jira_tool.source_code_qa_runtime_policy import (
     DEFAULT_DOMAIN_PROFILE_PATH,
     DEFAULT_DOMAIN_KNOWLEDGE_PACK_PATH,
     DEFAULT_LLM_TIMEOUT_SECONDS,
-    DEFAULT_CODEX_CLI_MODEL,
     DEFAULT_CODEX_TIMEOUT_SECONDS,
     DEFAULT_CODEX_TOP_PATH_LIMIT,
     DEFAULT_CODEX_REPAIR_TOP_PATH_LIMIT,
@@ -405,6 +414,10 @@ class SourceCodeQAService:
             "provider": self.llm_provider.public_config(),
             "versions": self._llm_versions(),
             "budgets": self.llm_budgets,
+            "codex_model_routes": codex_route_policy_payload(
+                prefix="SOURCE_CODE_QA",
+                legacy_env_names=("SOURCE_CODE_QA_CODEX_MODEL",),
+            ),
             "model_policy": self.model_policy,
             "router": {
                 "version": LLM_ROUTER_VERSION,
@@ -480,26 +493,27 @@ class SourceCodeQAService:
 
     def _build_llm_budgets(self) -> dict[str, dict[str, Any]]:
         budgets = json.loads(json.dumps(DEFAULT_LLM_BUDGETS))
-        budgets["cheap"]["model"] = self.codex_model
-        budgets["balanced"]["model"] = self.codex_model
-        budgets["deep"]["model"] = self.codex_model
-        budgets[COMPACT_DEEP_BUDGET_MODE]["model"] = self.codex_model
+        budgets["cheap"]["model"] = self._codex_model_for_route(CODEX_ROUTE_CHEAP)
+        budgets["balanced"]["model"] = self._codex_model_for_route(CODEX_ROUTE_BALANCED)
+        budgets["deep"]["model"] = self._codex_model_for_route(CODEX_ROUTE_DEEP)
+        budgets[COMPACT_DEEP_BUDGET_MODE]["model"] = self._codex_model_for_route(CODEX_ROUTE_COMPACT_DEEP)
         return budgets
 
     def _build_model_policy_matrix(self) -> dict[str, dict[str, Any]]:
         role_defaults = {
-            "query_rewrite": ("cheap", self.query_rewrite_model, "Normalize follow-up and fuzzy user wording before retrieval."),
-            "planner": ("cheap", self.planner_model, "Choose deterministic retrieval tools and trace expansion steps."),
-            "answer": ("balanced", self.answer_model, "Generate the user-facing evidence-grounded answer."),
-            "repair": ("deep", self.repair_model, "Rewrite after a failed claim check or missing-evidence judge finding."),
+            "query_rewrite": ("cheap", CODEX_ROUTE_CHEAP, self.query_rewrite_model, "Normalize follow-up and fuzzy user wording before retrieval."),
+            "planner": ("cheap", CODEX_ROUTE_CHEAP, self.planner_model, "Choose deterministic retrieval tools and trace expansion steps."),
+            "answer": ("balanced", CODEX_ROUTE_BALANCED, self.answer_model, "Generate the user-facing evidence-grounded answer."),
+            "repair": ("deep", CODEX_ROUTE_REPAIR, self.repair_model, "Rewrite after a failed claim check or missing-evidence judge finding."),
         }
         matrix: dict[str, dict[str, Any]] = {}
-        for role, (budget, override, purpose) in role_defaults.items():
-            budget_model = str((self.llm_budgets.get(budget) or {}).get("model") or self._llm_default_model()).strip()
-            model = str(override or budget_model or self._llm_default_model()).strip()
+        for role, (budget, route, override, purpose) in role_defaults.items():
+            budget_model = str((self.llm_budgets.get(budget) or {}).get("model") or self._codex_model_for_route(route)).strip()
+            model = str(override or (self._codex_model_for_route(route) if role == "repair" else budget_model) or self._llm_default_model()).strip()
             matrix[role] = {
                 "model": model,
                 "budget": budget,
+                "route": route,
                 "override": bool(override),
                 "budget_routed": role in {"answer", "repair"} and not bool(override),
                 "purpose": purpose,
@@ -530,15 +544,40 @@ class SourceCodeQAService:
     def _estimate_llm_tokens(text: str) -> int:
         return max(1, int((len(str(text or "")) / LLM_TOKEN_ESTIMATE_CHARS_PER_TOKEN) + 0.999))
 
+    def _answer_context_estimated_tokens(self, answer_context: dict[str, Any]) -> int:
+        compact_context = {
+            "selected_matches": answer_context.get("selected_matches") or [],
+            "evidence_summary": answer_context.get("evidence_summary") or {},
+            "quality_gate": answer_context.get("quality_gate") or {},
+            "evidence_pack": answer_context.get("evidence_pack") or {},
+        }
+        return self._estimate_llm_tokens(json.dumps(compact_context, ensure_ascii=False, default=str))
+
     def _llm_fallback_model(self) -> str:
-        return self.codex_model
+        return self._codex_model_for_route(CODEX_ROUTE_REPAIR)
 
     def _llm_default_model(self) -> str:
-        return self.codex_model
+        return self._codex_model_for_route(CODEX_ROUTE_BALANCED)
 
     @staticmethod
     def _codex_cli_model() -> str:
-        return str(os.getenv("SOURCE_CODE_QA_CODEX_MODEL") or DEFAULT_CODEX_CLI_MODEL).strip() or DEFAULT_CODEX_CLI_MODEL
+        return resolve_codex_model(
+            CODEX_ROUTE_BALANCED,
+            prefix="SOURCE_CODE_QA",
+            legacy_env_names=("SOURCE_CODE_QA_CODEX_MODEL",),
+        )
+
+    @staticmethod
+    def _codex_model_for_route(route: str) -> str:
+        return resolve_codex_model(
+            route,
+            prefix="SOURCE_CODE_QA",
+            legacy_env_names=("SOURCE_CODE_QA_CODEX_MODEL",),
+        )
+
+    @staticmethod
+    def _codex_reasoning_effort_for_route(route: str) -> str:
+        return resolve_codex_reasoning_effort(route, prefix="SOURCE_CODE_QA")
 
     @staticmethod
     def _normalize_llm_usage(usage: dict[str, Any]) -> dict[str, Any]:
@@ -5877,6 +5916,34 @@ class SourceCodeQAService:
             country=country,
             request_cache=request_cache,
         )
+        if (
+            llm_route.get("mode") == "auto"
+            and routed_budget_mode in {"balanced", "deep"}
+            and self._answer_context_estimated_tokens(answer_context) > LLM_PROMPT_COMPACT_THRESHOLD_TOKENS
+        ):
+            original_budget_mode = routed_budget_mode
+            routed_budget_mode = COMPACT_DEEP_BUDGET_MODE
+            budget = self.llm_budgets[routed_budget_mode]
+            selected_model = self._model_for_role_or_budget("answer", budget)
+            answer_context = self._llm_answer_evidence_context(
+                entries=entries,
+                key=key,
+                question=question,
+                matches=matches,
+                match_limit=int(budget["match_limit"]),
+                pm_team=pm_team,
+                country=country,
+                request_cache=request_cache,
+            )
+            compact_estimated_tokens = self._answer_context_estimated_tokens(answer_context)
+            llm_route = {
+                **llm_route,
+                "selected": routed_budget_mode,
+                "reason": f"{llm_route.get('reason') or ''},prompt_token_pressure".strip(","),
+                "token_pressure": True,
+                "original_selected": original_budget_mode,
+                "compact_estimated_tokens": compact_estimated_tokens,
+            }
         selected_matches = answer_context["selected_matches"]
         evidence_summary = answer_context["evidence_summary"]
         quality_gate = answer_context["quality_gate"]
@@ -6089,6 +6156,7 @@ class SourceCodeQAService:
             candidate_paths=candidate_paths,
             candidate_repo_count=candidate_repo_count,
             selected_model=selected_model,
+            reasoning_effort=self._codex_reasoning_effort_for_route(routed_budget_mode),
             query_mode=query_mode,
             question=question,
             evidence_pack=evidence_pack,
@@ -6456,6 +6524,7 @@ class SourceCodeQAService:
             repair_reason=repair_reason,
             deep_investigation_added=deep_investigation_added,
         )
+        repair_model = self._model_for_role("repair")
         if int(repair_prompt_stats["estimated_prompt_tokens"]) > self.codex_repair_prompt_token_limit:
             repair_attempted = False
             repair_skipped_reason = (
@@ -6466,7 +6535,7 @@ class SourceCodeQAService:
                 elapsed_ms=0,
                 trace_id=trace_id,
                 provider=self.llm_provider.name,
-                model=selected_model,
+                model=repair_model,
                 query_mode=query_mode,
                 reason="repair_prompt_too_large",
                 phase="repair",
@@ -6486,11 +6555,12 @@ class SourceCodeQAService:
                 candidate_path_count=len(candidate_paths),
                 candidate_repo_count=repair_candidate_repo_count,
                 repair_issue_count=repair_issue_count,
+                reasoning_effort=self._codex_reasoning_effort_for_route(CODEX_ROUTE_REPAIR),
             )
             try:
                 repair_result = self.llm_provider.generate(
                     payload=repair_payload,
-                    primary_model=selected_model,
+                    primary_model=repair_model,
                     fallback_model=self._llm_fallback_model(),
                 )
             except ToolError as error:
@@ -6500,7 +6570,7 @@ class SourceCodeQAService:
                     elapsed_ms=0,
                     trace_id=trace_id,
                     provider=self.llm_provider.name,
-                    model=selected_model,
+                    model=repair_model,
                     query_mode=query_mode,
                     phase="repair",
                     error=str(error)[:500],
@@ -6968,6 +7038,7 @@ class SourceCodeQAService:
         candidate_paths: list[dict[str, Any]],
         candidate_repo_count: int,
         selected_model: str,
+        reasoning_effort: str,
         query_mode: str,
         question: str,
         evidence_pack: dict[str, Any],
@@ -6985,6 +7056,7 @@ class SourceCodeQAService:
             prompt_stats=initial_prompt_stats,
             candidate_path_count=len(candidate_paths),
             candidate_repo_count=candidate_repo_count,
+            reasoning_effort=reasoning_effort,
         )
         try:
             result = self.llm_provider.generate(
@@ -7581,6 +7653,7 @@ class SourceCodeQAService:
     ) -> dict[str, Any]:
         return {
             "answer_model": selected_model,
+            "repair_model": self._model_for_role("repair"),
             "prompt_mode": prompt_mode,
             "candidate_paths": candidate_paths,
             "candidate_path_layers": candidate_path_layers,
@@ -7615,9 +7688,10 @@ class SourceCodeQAService:
         candidate_path_count: int = 0,
         candidate_repo_count: int = 0,
         repair_issue_count: int = 0,
+        reasoning_effort: str = "",
     ) -> dict[str, Any]:
         stats = prompt_stats if isinstance(prompt_stats, dict) else self._codex_prompt_stats(prompt)
-        return build_codex_payload(
+        payload = build_codex_payload(
             prompt,
             prompt_mode=prompt_mode,
             system_instruction=self._codex_system_instruction(),
@@ -7631,6 +7705,9 @@ class SourceCodeQAService:
             candidate_repo_count=candidate_repo_count,
             repair_issue_count=repair_issue_count,
         )
+        if reasoning_effort:
+            payload["_codex_reasoning_effort"] = reasoning_effort
+        return payload
 
     def _codex_prompt_stats(self, prompt: str) -> dict[str, int]:
         payload = {

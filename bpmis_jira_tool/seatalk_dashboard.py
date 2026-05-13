@@ -12,10 +12,10 @@ from threading import Lock
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from bpmis_jira_tool.codex_model_router import CODEX_ROUTE_CHEAP, resolve_codex_model, resolve_codex_reasoning_effort
 from bpmis_jira_tool.errors import ConfigError, ToolError
 from bpmis_jira_tool.source_code_qa import (
     CodexCliBridgeSourceCodeQALLMProvider,
-    DEFAULT_CODEX_CLI_MODEL,
     DEFAULT_CODEX_TIMEOUT_SECONDS,
 )
 
@@ -90,7 +90,11 @@ class SeaTalkDashboardService:
         self.seatalk_app_path = Path(str(seatalk_app_path or SEATALK_DEFAULT_APP_PATH)).expanduser()
         self.seatalk_data_dir = Path(str(seatalk_data_dir or SEATALK_DEFAULT_DATA_DIR)).expanduser()
         self.codex_workspace_root = Path(codex_workspace_root or Path.cwd()).expanduser()
-        self.codex_model = str(codex_model or os.getenv("SOURCE_CODE_QA_CODEX_MODEL") or DEFAULT_CODEX_CLI_MODEL).strip() or DEFAULT_CODEX_CLI_MODEL
+        self.codex_model = resolve_codex_model(
+            CODEX_ROUTE_CHEAP,
+            legacy_env_names=("SEATALK_CODEX_MODEL", "SOURCE_CODE_QA_CODEX_MODEL"),
+            explicit_model=codex_model,
+        )
         self.codex_timeout_seconds = max(10, int(codex_timeout_seconds or DEFAULT_CODEX_TIMEOUT_SECONDS))
         self.codex_concurrency = max(1, min(int(codex_concurrency or 1), 4))
         self.codex_binary = str(codex_binary or os.getenv("SOURCE_CODE_QA_CODEX_BINARY") or "codex").strip() or "codex"
@@ -190,6 +194,7 @@ class SeaTalkDashboardService:
         prompt_payload = {
             "codex_prompt_mode": SEATALK_INSIGHTS_PROMPT_MODE,
             "systemInstruction": {"parts": [{"text": self._insights_system_prompt()}]},
+            "_codex_reasoning_effort": resolve_codex_reasoning_effort(CODEX_ROUTE_CHEAP),
             "contents": [
                 {
                     "parts": [
@@ -435,6 +440,7 @@ class SeaTalkDashboardService:
             "codex_prompt_mode": SEATALK_INSIGHTS_PROMPT_MODE,
             "systemInstruction": {"parts": [{"text": system_prompt or self._insights_system_prompt()}]},
             "contents": [{"parts": [{"text": prompt}]}],
+            "_codex_reasoning_effort": resolve_codex_reasoning_effort(CODEX_ROUTE_CHEAP),
         }
         result = provider.generate(
             payload=prompt_payload,

@@ -436,6 +436,7 @@ class LocalAgentServerTests(unittest.TestCase):
         service = _build_seatalk_service(Settings.from_env())
 
         self.assertEqual(str(service.daily_cache_dir), os.path.join(self.temp_dir.name, "seatalk", "cache"))
+        self.assertEqual(service.codex_model, "gpt-5.4-mini")
 
     def test_signed_team_dashboard_daily_briefs_read_agent_archive(self):
         store = DailyBriefArchiveStore(daily_brief_archive_path(Path(self.temp_dir.name)))
@@ -696,8 +697,8 @@ class LocalAgentServerTests(unittest.TestCase):
         record["scheduled_auto_stop"] = {
             "status": "scheduled",
             "mode": "scheduled_end_plus_grace",
-            "grace_seconds": 600,
-            "scheduled_for": "2026-05-04T01:40:00+00:00",
+            "grace_seconds": 1200,
+            "scheduled_for": "2026-05-04T01:50:00+00:00",
         }
         store.save_record(record)
         fake_processing = Mock()
@@ -723,7 +724,7 @@ class LocalAgentServerTests(unittest.TestCase):
             self.app.config["MEETING_RECORDER_RUNTIME"]._scheduled_auto_stop_callback(
                 record_id=record["record_id"],
                 owner_email="owner@npt.sg",
-                scheduled_for="2026-05-04T01:40:00+00:00",
+                scheduled_for="2026-05-04T01:50:00+00:00",
             )
             updated = store.get_record(record["record_id"])
             completed = self._wait_for_meeting_process_job(updated["scheduled_auto_stop"]["process_job_id"])

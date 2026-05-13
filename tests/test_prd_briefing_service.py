@@ -767,6 +767,58 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertIn("Scenario | ApplyCCard", prompt)
         self.assertNotIn("\n[MEDIA_ID_1]\n", prompt)
 
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_prd_review_coverage_reports_confluence_tables(self, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        page = IngestedConfluencePage(
+            page_id="table-media",
+            title="Anti-Fraud Table PRD",
+            source_url="https://example.atlassian.net/wiki/pages/table-media",
+            updated_at="2026-05-13T00:00:00Z",
+            language="en",
+            sections=[
+                ParsedSection(title="Overview", section_path="Overview", content="Intro"),
+                ParsedSection(
+                    title="Scenario",
+                    section_path="3.1.1 New Scenario: ApplyCCard",
+                    content="CMS calls AF system.\n[MEDIA_ID_1]",
+                    media_refs=["MEDIA_ID_1"],
+                ),
+            ],
+            media_dict={
+                "MEDIA_ID_1": {
+                    "type": "table",
+                    "content": "<table><tr><th>Entry points</th><td>CMS to call AF system</td></tr><tr><th>Scenario</th><td>ApplyCCard</td></tr></table>",
+                }
+            },
+        )
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeConnector(page),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        result = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/table-media",
+                language="en",
+                selected_section_indexes=[2],
+            )
+        )
+
+        coverage = result["coverage"]
+        self.assertEqual(coverage["confluence_tables_total"], 1)
+        self.assertEqual(coverage["confluence_tables_reviewed"], 1)
+        self.assertEqual(coverage["confluence_tables"][0]["media_id"], "MEDIA_ID_1")
+        self.assertEqual(coverage["confluence_tables"][0]["source_section_title"], "3.1.1 New Scenario: ApplyCCard")
+        self.assertIn("Entry points | CMS to call AF system", mock_generate.call_args.kwargs["prompt"])
+
     def test_prd_review_result_cache_uses_prd_updated_at_and_prompt_version(self):
         saved = self.store.save_prd_review_result(
             owner_key="anon:test",

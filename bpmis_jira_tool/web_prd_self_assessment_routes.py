@@ -36,6 +36,7 @@ def build_prd_self_assessment_handlers(ctx: Any) -> Any:
             user_identity=_get_user_identity(settings),
             review_url=url_for("prd_self_assessment_review_api"),
             summary_url=url_for("prd_self_assessment_summary_api"),
+            can_generate_prd_summary=bool(_web_helper("_is_portal_admin")()),
             asset_revision=_current_release_revision(),
         )
 

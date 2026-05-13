@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import os
 from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
@@ -151,7 +152,11 @@ class _FakeGmailService:
 
 class MonthlyReportTests(unittest.TestCase):
     def test_codex_generation_uses_monthly_report_timeout(self):
-        with tempfile.TemporaryDirectory() as temp_dir, patch("bpmis_jira_tool.monthly_report.CodexCliBridgeSourceCodeQALLMProvider") as mock_provider:
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"MONTHLY_REPORT_CODEX_MODEL": "", "SOURCE_CODE_QA_CODEX_MODEL": ""},
+            clear=False,
+        ), patch("bpmis_jira_tool.monthly_report.CodexCliBridgeSourceCodeQALLMProvider") as mock_provider:
             instance = mock_provider.return_value
             instance.generate.return_value = SimpleNamespace(payload={"text": "# Draft"}, model="codex-cli")
             instance.extract_text.return_value = "# Draft"
@@ -164,6 +169,7 @@ class MonthlyReportTests(unittest.TestCase):
 
         self.assertEqual(result["result_markdown"], "# Draft")
         self.assertEqual(mock_provider.call_args.kwargs["timeout_seconds"], 777)
+        self.assertEqual(instance.generate.call_args.kwargs["primary_model"], "gpt-5.4")
 
     def test_report_period_resolves_four_week_anchors(self):
         first = resolve_monthly_report_period(datetime(2026, 5, 3, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE))

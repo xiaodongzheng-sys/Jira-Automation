@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from bpmis_jira_tool.codex_model_router import resolve_codex_model, resolve_codex_reasoning_effort
 from bpmis_jira_tool.config import Settings
 
 
@@ -90,7 +91,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.source_code_qa_embedding_model, "local-token-hybrid-v1")
         self.assertTrue(settings.source_code_qa_semantic_index_enabled)
         self.assertEqual(settings.source_code_qa_llm_timeout_seconds, 90)
-        self.assertEqual(settings.source_code_qa_codex_timeout_seconds, 240)
+        self.assertEqual(settings.source_code_qa_codex_timeout_seconds, 360)
         self.assertEqual(settings.source_code_qa_effort_codex_timeout_seconds, 600)
         self.assertEqual(settings.source_code_qa_query_deadline_seconds, 180)
         self.assertEqual(settings.source_code_qa_codex_repair_deadline_seconds, 150)
@@ -101,6 +102,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.source_code_qa_codex_session_max_turns, 8)
         self.assertFalse(settings.source_code_qa_codex_cache_followups)
         self.assertEqual(settings.monthly_report_codex_timeout_seconds, 600)
+        self.assertIsNone(settings.prd_briefing_codex_model)
         self.assertEqual(settings.local_agent_connect_timeout_seconds, 10)
         self.assertEqual(settings.meeting_recorder_audio_input, "Meeting Recorder Aggregate")
         self.assertEqual(settings.meeting_recorder_transcript_segment_workers, 2)
@@ -110,6 +112,39 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.meeting_translation_owner_email, "xiaodong.zheng@npt.sg")
         self.assertEqual(settings.meeting_translation_model, "gpt-realtime-translate")
         self.assertIsNone(settings.meeting_translation_openai_api_key)
+
+    def test_codex_model_router_defaults_and_env_precedence(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(resolve_codex_model("cheap"), "gpt-5.4-mini")
+            self.assertEqual(resolve_codex_model("balanced"), "gpt-5.4")
+            self.assertEqual(resolve_codex_model("deep"), "gpt-5.5")
+            self.assertEqual(resolve_codex_model("compact_deep"), "gpt-5.4")
+            self.assertEqual(resolve_codex_model("repair"), "gpt-5.5")
+            self.assertEqual(resolve_codex_reasoning_effort("cheap"), "low")
+            self.assertEqual(resolve_codex_reasoning_effort("balanced"), "medium")
+            self.assertEqual(resolve_codex_reasoning_effort("deep"), "high")
+            self.assertEqual(resolve_codex_reasoning_effort("repair"), "high")
+
+        with patch.dict(
+            os.environ,
+            {
+                "CODEX_MODEL_CHEAP": "global-cheap",
+                "SOURCE_CODE_QA_CODEX_MODEL_CHEAP": "scoped-cheap",
+                "CODEX_REASONING_CHEAP": "medium",
+                "SOURCE_CODE_QA_CODEX_REASONING_CHEAP": "high",
+                "SOURCE_CODE_QA_CODEX_MODEL": "legacy-all",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                resolve_codex_model("cheap", prefix="SOURCE_CODE_QA", legacy_env_names=("SOURCE_CODE_QA_CODEX_MODEL",)),
+                "scoped-cheap",
+            )
+            self.assertEqual(
+                resolve_codex_model("balanced", prefix="SOURCE_CODE_QA", legacy_env_names=("SOURCE_CODE_QA_CODEX_MODEL",)),
+                "legacy-all",
+            )
+            self.assertEqual(resolve_codex_reasoning_effort("cheap", prefix="SOURCE_CODE_QA"), "high")
 
     def test_meeting_translation_openai_settings_from_env(self):
         with patch.dict(

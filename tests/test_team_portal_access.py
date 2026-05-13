@@ -522,6 +522,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self.assertEqual(issue_search.get_json()["status"], "ok")
 
                 blocked_pages = {
+                    "/prd-briefing/": "/access-denied",
                     "/team-dashboard": "/access-denied",
                     "/reports": "/access-denied",
                     "/gmail-sea-talk-demo": "/",
@@ -703,6 +704,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 route_expectations = [
                     ("get", "/source-code-qa", {200}),
                     ("get", "/prd-self-assessment", {200}),
+                    ("get", "/prd-briefing/", {302}),
                     ("get", "/api/source-code-qa/config", {200}),
                     ("get", "/api/source-code-qa/sessions", {200}),
                     ("post", "/api/source-code-qa/sessions", {200}, {"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"}),
@@ -790,6 +792,8 @@ class TeamPortalAccessTests(unittest.TestCase):
         prd_soup = BeautifulSoup(prd_response.get_data(as_text=True), "html.parser")
         self.assertIsNotNone(prd_soup.select_one("[data-prd-self-assessment-url]"))
         self.assertIsNotNone(prd_soup.select_one("[data-prd-self-assessment-language]"))
+        self.assertIsNone(prd_soup.select_one("[data-prd-self-assessment-action='summary']"))
+        self.assertIsNotNone(prd_soup.select_one("[data-prd-self-assessment-action='review']"))
         self.assertIsNotNone(prd_soup.find("script", src=lambda value: value and "prd_self_assessment.js" in value))
 
     def test_meeting_translation_tab_follows_meeting_recorder_for_admin(self):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import importlib.util
+import os
 import tempfile
 import unittest
 from dataclasses import replace
@@ -29,6 +30,7 @@ from bpmis_jira_tool.seatalk_daily_email import (
     MAX_TEAM_MEMBER_REMINDERS,
     MAX_USEFUL_AWARENESS_OTHER_UPDATES,
     build_daily_briefing,
+    build_seatalk_service,
     build_trello_card_specs,
     ensure_gmail_daily_scopes,
     export_rolling_history,
@@ -40,6 +42,7 @@ from bpmis_jira_tool.seatalk_daily_email import (
     seatalk_name_overrides_path,
     should_skip_fixed_daily_email_window,
     sync_daily_summary_to_trello,
+    _build_team_member_reminder_candidates,
     _build_unanswered_seatalk_question_hints,
     _daily_brief_user_prompt,
 )
@@ -117,6 +120,18 @@ class FakeSeaTalkService:
             ],
             "team_todos": [],
         }
+
+
+class SeaTalkDailyEmailCodexRoutingTests(unittest.TestCase):
+    def test_build_seatalk_service_defaults_to_cheap_codex_route(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"TEAM_PORTAL_DATA_DIR": temp_dir, "SOURCE_CODE_QA_CODEX_MODEL": ""},
+            clear=True,
+        ), patch("bpmis_jira_tool.config.find_dotenv", return_value=""):
+            service = build_seatalk_service(Settings.from_env(), data_root=Path(temp_dir))
+
+        self.assertEqual(service.codex_model, "gpt-5.4-mini")
 
 
 class SeaTalkDailyEmailTests(unittest.TestCase):
@@ -501,7 +516,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(len(payload["team_member_reminders"]), 1)
         self.assertEqual(payload["team_member_reminders"][0]["source_type"], "seatalk")
         self.assertIn("Team Member Reminder Scan", service.last_prompt)
-        self.assertIn("include one concise reminder rather than dropping it", service.last_prompt)
+        self.assertIn("drop it rather than creating a noisy Follow-up", service.last_prompt)
 
     def test_build_daily_briefing_filters_non_anti_fraud_team_reminders(self):
         class NonTeamReminderService(FakeSeaTalkService):
@@ -1067,6 +1082,56 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         hints = _build_unanswered_seatalk_question_hints(history)
 
         self.assertEqual(hints, "")
+
+    def test_team_member_reminder_candidates_require_no_named_person_reply(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== AF-ID follow-up group (group-100) ===",
+                "[2026-05-13 10:00:00] Alice Tan: @Wang Chang please decide whether Reject & Punish should stay SOP-only",
+                "[2026-05-13 10:05:00] Wang Chang (UID 123): I will check with dev and confirm.",
+                "[2026-05-13 10:08:00] Alice Tan: @Ker Yin please confirm whether ETP linkage flows use soft token by default",
+            ]
+        )
+
+        candidates = _build_team_member_reminder_candidates(history)
+
+        self.assertEqual([item["person"] for item in candidates or []], ["Ker Yin"])
+        self.assertIn("ETP linkage", candidates[0]["text"])
+
+    def test_build_daily_briefing_drops_followup_when_named_person_replied(self):
+        class RepliedReminderService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [],
+                    "other_updates": [],
+                    "team_member_reminders": [
+                        {
+                            "domain": "Anti-fraud",
+                            "person": "Wang Chang",
+                            "reminder": "Decide whether Reject & Punish should keep SOP-only control.",
+                            "evidence": "AF-ID follow-up group",
+                            "source_type": "seatalk",
+                        }
+                    ],
+                    "my_todos": [],
+                    "team_todos": [],
+                }
+
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== AF-ID follow-up group (group-100) ===",
+                "[2026-05-13 10:00:00] Alice Tan: @Wang Chang please decide whether Reject & Punish should keep SOP-only control",
+                "[2026-05-13 10:05:00] Wang Chang (UID 123): I replied in the group and will align with dev.",
+            ]
+        )
+        service = RepliedReminderService(history)
+        payload = build_daily_briefing(service, now=datetime(2026, 5, 13, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE))
+
+        self.assertEqual(payload["team_member_reminders"], [])
+        self.assertIn("No valid unresolved team-member mention candidates were found", service.last_prompt)
 
     def test_build_trello_card_specs_includes_direct_watch_and_followups(self):
         briefing = {

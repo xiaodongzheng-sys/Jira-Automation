@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 from typing import Any
 
+from bpmis_jira_tool.codex_model_router import CODEX_ROUTE_CHEAP, resolve_codex_model, resolve_codex_reasoning_effort
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.source_code_qa import CodexCliBridgeSourceCodeQALLMProvider
@@ -38,14 +39,19 @@ def generate_productization_detailed_features_with_local_codex(
         "- Do not include Markdown fences, citations, explanations, or Chinese text.\n\n"
         f"Input JSON:\n{json.dumps({'items': prompt_items}, ensure_ascii=False)}"
     )
+    codex_model = resolve_codex_model(
+        CODEX_ROUTE_CHEAP,
+        legacy_env_names=("PRODUCTIZATION_CODEX_MODEL", "SOURCE_CODE_QA_CODEX_MODEL"),
+    )
     result = provider.generate(
         payload={
             "systemInstruction": {"parts": [{"text": "You are a concise product feature summarizer."}]},
             "contents": [{"parts": [{"text": prompt}]}],
             "codex_prompt_mode": "productization_detailed_feature_v1",
+            "_codex_reasoning_effort": resolve_codex_reasoning_effort(CODEX_ROUTE_CHEAP),
         },
-        primary_model=os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"),
-        fallback_model=os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"),
+        primary_model=codex_model,
+        fallback_model=codex_model,
     )
     text = provider.extract_text(result.payload)
     payload = parse_codex_json_object(text)
