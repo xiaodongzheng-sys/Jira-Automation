@@ -1285,6 +1285,9 @@ class RemoteBPMISClient:
     def list_issues_for_version(self, version_id: str | int) -> list[dict[str, Any]]:
         return self._call("list_issues_for_version", version_id) or []
 
+    def list_actual_mandays_for_projects(self, project_issue_ids: list[str]) -> dict[str, float]:
+        return self._call("list_actual_mandays_for_projects", project_issue_ids) or {}
+
     def get_issue_detail(self, issue_id: str | int) -> dict[str, Any]:
         return self._call("get_issue_detail", issue_id) or {}
 

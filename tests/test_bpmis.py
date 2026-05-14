@@ -118,6 +118,58 @@ class BPMISClientTests(unittest.TestCase):
         self.assertEqual(client.request_stats["issue_detail_bulk_issue_count"], 1)
         self.assertEqual(client.request_stats["issue_detail_single_fallback_count"], 0)
 
+    def test_actual_mandays_sums_open_subtask_story_points_for_each_project(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+            calls: list[tuple[str, dict[str, object] | None]] = []
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                calls.append((path, params))
+                search = json.loads((params or {}).get("search") or "{}")
+                if path == "/api/v1/issues/tree":
+                    self.assertEqual(search["id"], [225159])
+                    return {
+                        "data": {
+                            "rows": [
+                                {"id": 225159, "typeId": "Biz Project", "summary": "Parent"},
+                                {
+                                    "id": 991,
+                                    "typeId": "Task",
+                                    "statusId": "Developing",
+                                    "parentIds": [{"id": 225159}],
+                                },
+                                {
+                                    "id": 992,
+                                    "typeId": "Task",
+                                    "statusId": "Closed",
+                                    "parentIds": [{"id": 225159}],
+                                },
+                            ]
+                        }
+                    }
+                if path == "/api/v1/issues/list":
+                    self.assertEqual(search["subQueries"], [{"parentIds": [991]}])
+                    return {
+                        "data": {
+                            "rows": [
+                                {"id": 1001, "typeId": "Sub Task", "statusId": "Open", "storyPoints": 2},
+                                {"id": 1002, "typeId": "Sub Task", "statusId": "Testing", "storyPoints": "3.5"},
+                                {"id": 1004, "typeId": 5, "parentIds": [991], "statusId": "Open", "storyPoints": 1},
+                                {"id": 1003, "typeId": "Sub Task", "statusId": "Closed", "storyPoints": 8},
+                            ]
+                        }
+                    }
+                self.fail(f"unexpected API call: {path}")
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            actual_mandays = client.list_actual_mandays_for_projects(["225159"])
+
+        self.assertEqual(actual_mandays, {"225159": 6.5})
+        self.assertEqual([path for path, _params in calls], ["/api/v1/issues/tree", "/api/v1/issues/list"])
+        self.assertEqual(client.request_stats["actual_mandays_project_tree_lookup_count"], 1)
+        self.assertEqual(client.request_stats["actual_mandays_subtask_list_page_count"], 1)
+
     def test_team_dashboard_parent_details_are_loaded_in_bulk_chunks(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             client = BPMISDirectApiClient(self._settings(temp_dir))

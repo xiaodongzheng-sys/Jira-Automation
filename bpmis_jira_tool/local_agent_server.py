@@ -88,6 +88,7 @@ BPMIS_PROXY_OPERATIONS = {
     "get_brd_doc_links_for_projects",
     "search_versions",
     "list_issues_for_version",
+    "list_actual_mandays_for_projects",
     "get_issue_detail",
     "get_jira_ticket_detail",
     "get_jira_ticket_details",
@@ -1872,6 +1873,8 @@ def _summarize_bpmis_proxy_args(operation: str, args: list[Any]) -> dict[str, An
         summary["ticket_count"] = len(args[0])
     elif operation in {"get_issue_detail", "get_jira_ticket_detail", "list_issues_for_version"} and args:
         summary["lookup_id_present"] = bool(str(args[0] or "").strip())
+    elif operation == "list_actual_mandays_for_projects" and args and isinstance(args[0], list):
+        summary["project_count"] = len(args[0])
     elif operation == "create_jira_ticket":
         summary["field_count"] = len(args[1]) if len(args) > 1 and isinstance(args[1], dict) else 0
     elif operation in {"link_jira_ticket_to_project", "delink_jira_ticket_from_project"}:

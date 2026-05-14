@@ -74,6 +74,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
     _build_team_dashboard_task_group = ctx._build_team_dashboard_task_group
     _backfill_team_dashboard_empty_project_jira_tasks = ctx._backfill_team_dashboard_empty_project_jira_tasks
     _remove_team_dashboard_zero_jira_pending_live_projects = ctx._remove_team_dashboard_zero_jira_pending_live_projects
+    _hydrate_team_dashboard_actual_mandays = ctx._hydrate_team_dashboard_actual_mandays
     _team_dashboard_combined_request_timings = ctx._team_dashboard_combined_request_timings
     _team_dashboard_combined_fetch_stats = ctx._team_dashboard_combined_fetch_stats
     _store_team_dashboard_task_payload = ctx._store_team_dashboard_task_payload
@@ -575,6 +576,9 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
                 _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client, team_payload)
                 _remove_team_dashboard_zero_jira_pending_live_projects(team_payload)
                 _team_dashboard_add_timing(timing_stats, "backfill_zero_jira_projects", step_started_at)
+                step_started_at = time.monotonic()
+                _hydrate_team_dashboard_actual_mandays(bpmis_client, team_payload)
+                _team_dashboard_add_timing(timing_stats, "actual_mandays", step_started_at)
                 timing_stats.update(_team_dashboard_combined_request_timings(bpmis_client, biz_bpmis_client))
                 team_payload["elapsed_seconds"] = round(time.monotonic() - started_at, 2)
                 team_payload["fetch_stats"] = _team_dashboard_combined_fetch_stats(bpmis_client, biz_bpmis_client)

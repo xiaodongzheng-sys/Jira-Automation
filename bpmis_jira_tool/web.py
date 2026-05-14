@@ -1220,6 +1220,7 @@ def create_app() -> Flask:
                 _build_team_dashboard_task_group=lambda *args, **kwargs: _build_team_dashboard_task_group(*args, **kwargs),
                 _backfill_team_dashboard_empty_project_jira_tasks=lambda *args, **kwargs: _backfill_team_dashboard_empty_project_jira_tasks(*args, **kwargs),
                 _remove_team_dashboard_zero_jira_pending_live_projects=lambda *args, **kwargs: _remove_team_dashboard_zero_jira_pending_live_projects(*args, **kwargs),
+                _hydrate_team_dashboard_actual_mandays=lambda *args, **kwargs: _hydrate_team_dashboard_actual_mandays(*args, **kwargs),
                 _team_dashboard_combined_request_timings=lambda *args, **kwargs: _team_dashboard_combined_request_timings(*args, **kwargs),
                 _team_dashboard_combined_fetch_stats=lambda *args, **kwargs: _team_dashboard_combined_fetch_stats(*args, **kwargs),
                 _store_team_dashboard_task_payload=lambda *args, **kwargs: _store_team_dashboard_task_payload(*args, **kwargs),
@@ -3922,6 +3923,11 @@ def _load_team_dashboard_tasks_for_all_teams_merged(
     for team_payload in team_payloads:
         _remove_team_dashboard_zero_jira_pending_live_projects(team_payload)
     _team_dashboard_add_timing(shared_timing, "backfill_zero_jira_projects", backfill_started_at)
+
+    mandays_started_at = time.monotonic()
+    for team_payload in team_payloads:
+        _hydrate_team_dashboard_actual_mandays(bpmis_client, team_payload)
+    _team_dashboard_add_timing(shared_timing, "actual_mandays", mandays_started_at)
     shared_timing.update(_team_dashboard_combined_request_timings(bpmis_client, biz_bpmis_client))
 
     fetch_stats = _team_dashboard_combined_fetch_stats(bpmis_client, biz_bpmis_client)
@@ -4066,6 +4072,10 @@ def _team_dashboard_fetch_stats(bpmis_client: Any) -> dict[str, int]:
             "issue_tree_page_count",
             "issue_tree_rows_scanned",
             "issue_tree_fallback_count",
+            "actual_mandays_project_tree_lookup_count",
+            "actual_mandays_project_tree_rows_scanned",
+            "actual_mandays_subtask_list_page_count",
+            "actual_mandays_subtask_rows_scanned",
             "release_version_lookup_count",
             "release_version_count",
             "release_version_lookup_failed_count",
@@ -4171,6 +4181,7 @@ def _load_all_team_dashboard_task_payloads(settings: Settings, config: dict[str,
             key_project_overrides=key_project_overrides,
         )
         _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client, team_payload)
+        _hydrate_team_dashboard_actual_mandays(bpmis_client, team_payload)
         team_payloads.append(team_payload)
     return team_payloads
 
@@ -4199,8 +4210,36 @@ def _load_team_dashboard_link_biz_project_payloads(settings: Settings, config: d
         )
         _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client, team_payload)
         _remove_team_dashboard_zero_jira_pending_live_projects(team_payload)
+        _hydrate_team_dashboard_actual_mandays(bpmis_client, team_payload)
         team_payloads.append(team_payload)
     return team_payloads
+
+
+def _hydrate_team_dashboard_actual_mandays(bpmis_client: Any, team_payload: dict[str, Any]) -> None:
+    if not hasattr(bpmis_client, "list_actual_mandays_for_projects"):
+        return
+    projects: list[dict[str, Any]] = []
+    for section_key in ("under_prd", "pending_live"):
+        section_projects = team_payload.get(section_key)
+        if isinstance(section_projects, list):
+            projects.extend(project for project in section_projects if isinstance(project, dict))
+    project_ids = [
+        str(project.get("bpmis_id") or "").strip()
+        for project in projects
+        if str(project.get("bpmis_id") or "").strip()
+    ]
+    if not project_ids:
+        return
+    try:
+        actual_mandays = bpmis_client.list_actual_mandays_for_projects(project_ids) or {}
+    except Exception as error:  # noqa: BLE001 - keep Team Dashboard renderable when BPMIS manday lookup fails.
+        current_app.logger.warning("Team Dashboard Actual Mandays lookup failed: %s", error)
+        return
+    for project in projects:
+        bpmis_id = str(project.get("bpmis_id") or "").strip()
+        if not bpmis_id or bpmis_id not in actual_mandays:
+            continue
+        project["actual_mandays"] = actual_mandays.get(bpmis_id)
 
 
 def _team_dashboard_task_cache_signature(emails: list[str]) -> str:
@@ -5088,6 +5127,7 @@ def _normalize_team_dashboard_project(project: dict[str, Any]) -> dict[str, str]
         "priority": str(project.get("priority") or "").strip(),
         "regional_pm_pic": str(project.get("regional_pm_pic") or "").strip(),
         "status": str(project.get("status") or project.get("biz_project_status") or "").strip(),
+        "actual_mandays": project.get("actual_mandays", ""),
     }
     if matched_pm_emails:
         normalized["matched_pm_emails"] = matched_pm_emails
@@ -5170,7 +5210,7 @@ def _merge_team_dashboard_biz_projects(
             continue
         existing = by_id.get(bpmis_id)
         if existing:
-            for key in ("project_name", "market", "priority", "regional_pm_pic", "status"):
+            for key in ("project_name", "market", "priority", "regional_pm_pic", "status", "actual_mandays"):
                 if project.get(key) and not existing.get(key):
                     existing[key] = project[key]
             _merge_team_dashboard_project_pm_emails(existing, project.get("matched_pm_emails") or [])

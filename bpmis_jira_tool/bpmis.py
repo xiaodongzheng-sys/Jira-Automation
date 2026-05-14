@@ -102,6 +102,10 @@ class BPMISClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_actual_mandays_for_projects(self, project_issue_ids: list[str]) -> dict[str, float]:
+        raise NotImplementedError
+
+    @abstractmethod
     def get_issue_detail(self, issue_id: str | int) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -145,6 +149,7 @@ class BPMISDirectApiClient(BPMISClient):
         "uat",
     }
     TEAM_DASHBOARD_BIZ_PROJECT_STATUS_ID_VALUES = {str(status_id) for status_id in SYNC_BIZ_PROJECT_STATUS_IDS}
+    CLOSED_STATUS_LABELS = {"closed"}
     TASK_TYPE_PREFIX = {
         "feature": "[Feature]",
         "tech": "[Tech]",
@@ -211,6 +216,10 @@ class BPMISDirectApiClient(BPMISClient):
             "issue_tree_page_count": 0,
             "issue_tree_rows_scanned": 0,
             "issue_tree_fallback_count": 0,
+            "actual_mandays_project_tree_lookup_count": 0,
+            "actual_mandays_project_tree_rows_scanned": 0,
+            "actual_mandays_subtask_list_page_count": 0,
+            "actual_mandays_subtask_rows_scanned": 0,
             "release_version_lookup_count": 0,
             "release_version_count": 0,
             "release_version_lookup_failed_count": 0,
@@ -1312,6 +1321,114 @@ class BPMISDirectApiClient(BPMISClient):
                     row = self._merge_issue_payloads(row, detail)
             enriched_rows.append(row)
         return enriched_rows
+
+    def list_actual_mandays_for_projects(self, project_issue_ids: list[str]) -> dict[str, float]:
+        results: dict[str, float] = {}
+        seen_project_ids: set[str] = set()
+        for raw_project_id in project_issue_ids:
+            project_id = str(raw_project_id or "").strip()
+            if not project_id or project_id in seen_project_ids:
+                continue
+            seen_project_ids.add(project_id)
+            results[project_id] = self._calculate_actual_mandays_for_project(project_id)
+        return results
+
+    def _calculate_actual_mandays_for_project(self, project_issue_id: str) -> float:
+        total = 0.0
+        for task in self._list_open_project_task_rows_via_tree(project_issue_id):
+            task_id = self._extract_issue_identifier(task)
+            if not task_id:
+                continue
+            total += self._sum_open_subtask_story_points(task_id)
+        return total
+
+    def _list_open_project_task_rows_via_tree(self, project_issue_id: str) -> list[dict[str, Any]]:
+        project_id = str(project_issue_id or "").strip()
+        if not project_id:
+            return []
+        try:
+            project_id_value: int | str = int(project_id)
+        except ValueError:
+            project_id_value = project_id
+        try:
+            response = self._api_request(
+                "/api/v1/issues/tree",
+                params={
+                    "search": json.dumps(
+                        {
+                            "id": [project_id_value],
+                            "page": 1,
+                            "pageSize": self._tree_page_size(),
+                            "mapping": True,
+                        }
+                    )
+                },
+            )
+        except (BPMISError, ValueError, TypeError):
+            return []
+        self._increment_stat("actual_mandays_project_tree_lookup_count")
+        rows = self._extract_issue_rows_from_response(response)
+        self._increment_stat("actual_mandays_project_tree_rows_scanned", len(rows))
+        tasks: list[dict[str, Any]] = []
+        seen_task_ids: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            issue_id = self._extract_issue_identifier(row)
+            if not issue_id or issue_id == project_id or issue_id in seen_task_ids:
+                continue
+            if self._is_closed_issue(row):
+                continue
+            if not self._is_project_task_row(row, project_id):
+                continue
+            seen_task_ids.add(issue_id)
+            tasks.append(row)
+        return tasks
+
+    def _sum_open_subtask_story_points(self, task_issue_id: str) -> float:
+        task_id = str(task_issue_id or "").strip()
+        if not task_id:
+            return 0.0
+        try:
+            task_id_value: int | str = int(task_id)
+        except ValueError:
+            task_id_value = task_id
+        total = 0.0
+        page = 1
+        page_size = 200
+        while True:
+            try:
+                response = self._api_request(
+                    "/api/v1/issues/list",
+                    params={
+                        "search": json.dumps(
+                            {
+                                "joinType": "and",
+                                "subQueries": [{"parentIds": [task_id_value]}],
+                                "page": page,
+                                "pageSize": page_size,
+                                "mapping": True,
+                            }
+                        )
+                    },
+                )
+            except (BPMISError, ValueError, TypeError):
+                return total
+            self._increment_stat("actual_mandays_subtask_list_page_count")
+            rows = ((response.get("data") or {}).get("rows") or []) if isinstance(response, dict) else []
+            self._increment_stat("actual_mandays_subtask_rows_scanned", len(rows))
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                if self._is_closed_issue(row):
+                    continue
+                if not self._is_subtask_row(row, task_id):
+                    continue
+                total += self._extract_story_points(row)
+            if len(rows) < page_size:
+                break
+            page += 1
+        return total
 
     def get_issue_detail(self, issue_id: str | int) -> dict[str, Any]:
         normalized_issue_id = str(issue_id).strip()
@@ -2560,6 +2677,46 @@ class BPMISDirectApiClient(BPMISClient):
             if text == str(self.BIZ_PROJECT_TYPE_ID) or text.casefold() == "biz project":
                 return True
         return False
+
+    def _is_project_task_row(self, row: dict[str, Any], project_issue_id: str) -> bool:
+        issue_type = self._issue_type_text(row)
+        if issue_type:
+            return issue_type == str(self.TASK_TYPE_ID) or issue_type.casefold() == "task"
+        return project_issue_id in self._extract_parent_issue_ids(row)
+
+    def _is_subtask_row(self, row: dict[str, Any], task_issue_id: str) -> bool:
+        parent_matches = task_issue_id in self._extract_parent_issue_ids(row)
+        issue_type = self._issue_type_text(row)
+        if issue_type:
+            normalized_type = issue_type.replace("-", " ").replace("_", " ").strip().casefold()
+            if normalized_type in {"sub task", "subtask"}:
+                return True
+            if normalized_type in {"task", "biz project"} or issue_type in {str(self.TASK_TYPE_ID), str(self.BIZ_PROJECT_TYPE_ID)}:
+                return False
+        return parent_matches
+
+    def _issue_type_text(self, row: dict[str, Any]) -> str:
+        return self._stringify_value(self._find_first_value(row, "typeId"))
+
+    def _is_closed_issue(self, row: dict[str, Any]) -> bool:
+        status = self._issue_first_text(row, "statusId", "status", "statusName", "issueStatus", "jiraStatus")
+        return status.strip().casefold() in self.CLOSED_STATUS_LABELS
+
+    def _extract_story_points(self, row: dict[str, Any]) -> float:
+        for key in ("storyPoints", "story_points", "storyPoint", "mandays", "manDays"):
+            value = self._find_first_value(row, key)
+            if value is None:
+                continue
+            text = self._stringify_value(value)
+            if not text:
+                continue
+            try:
+                return float(text.replace(",", ""))
+            except ValueError:
+                match = re.search(r"-?\d+(?:\.\d+)?", text)
+                if match:
+                    return float(match.group(0))
+        return 0.0
 
     def _creator_email_for_row(
         self,

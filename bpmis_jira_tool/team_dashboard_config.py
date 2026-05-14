@@ -53,7 +53,7 @@ TEAM_DASHBOARD_UNDER_PRD_STATUSES = {"waiting", "prd in progress", "prd reviewed
 TEAM_DASHBOARD_EXCLUDED_PENDING_STATUSES = {"icebox", "closed", "done"}
 TEAM_DASHBOARD_UNDER_PRD_BIZ_PROJECT_STATUSES = {"pending review", "confirmed"}
 TEAM_DASHBOARD_PENDING_LIVE_BIZ_PROJECT_STATUSES = {"developing", "testing", "uat"}
-TEAM_DASHBOARD_TASK_CACHE_VERSION = 2
+TEAM_DASHBOARD_TASK_CACHE_VERSION = 3
 
 def normalize_team_dashboard_emails(value: Any) -> list[str]:
     if isinstance(value, str):

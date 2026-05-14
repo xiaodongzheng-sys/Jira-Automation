@@ -132,7 +132,7 @@
   };
   const teamOrder = ['AF', 'CRMS', 'GRC'];
   const jiraPageSize = 10;
-  const taskCacheKey = 'team-dashboard:jira-tasks:v7';
+  const taskCacheKey = 'team-dashboard:jira-tasks:v8';
   const monthlyReportDraftCacheKey = 'team-dashboard:monthly-report-draft:v2';
   const seatalkNameMappingDefaultPageSize = 20;
   const seatalkNameMappingPageSizeOptions = [20, 50, 100, 200];
@@ -768,6 +768,7 @@
       priority_default: 'Default from SP/P0 priority',
       none: 'Not Key Project',
     }[project.key_project_source] || 'Not Key Project';
+    const actualMandays = formatMandays(project.actual_mandays);
     return `
       <article class="bpmis-project-card team-dashboard-project-card">
         <div class="bpmis-project-card-main">
@@ -795,6 +796,10 @@
           <div class="bpmis-project-card-name">
             <span>Regional PM PIC</span>
             <strong>${escapeHtml(project.regional_pm_pic || '-')}</strong>
+          </div>
+          <div class="team-dashboard-project-mandays">
+            <span>Actual Mandays</span>
+            <strong>${escapeHtml(actualMandays)}</strong>
           </div>
           <div class="team-dashboard-project-count">
             <span>Jira</span>
@@ -837,6 +842,14 @@
         </div>
       </article>
     `;
+  };
+
+  const formatMandays = (value) => {
+    if (value === null || value === undefined || value === '') return '-';
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return String(value || '-');
+    if (Number.isInteger(numeric)) return String(numeric);
+    return String(Math.round(numeric * 10) / 10);
   };
 
   const renderSection = (title, projects, sectionKey) => {

@@ -1954,6 +1954,14 @@ class WebPortalFeatureTests(unittest.TestCase):
                         ]
                     return []
 
+                def list_actual_mandays_for_projects(self, project_issue_ids):
+                    return {
+                        "225159": 5.5,
+                        "225300": 2,
+                        "300000": 0,
+                        "300300": 1,
+                    }
+
             fake_client = FakeTeamDashboardClient()
             with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
                 with app.test_client() as client:
@@ -1973,8 +1981,10 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(af_under_prd["225159"]["market"], "SG")
         self.assertEqual(af_under_prd["225159"]["priority"], "P1")
         self.assertEqual(af_under_prd["225159"]["regional_pm_pic"], "regional@npt.sg")
+        self.assertEqual(af_under_prd["225159"]["actual_mandays"], 5.5)
         self.assertEqual([item["jira_id"] for item in af_under_prd["225159"]["jira_tickets"]], ["AF-1"])
         self.assertEqual(af_under_prd["300000"]["project_name"], "Biz Only Project")
+        self.assertEqual(af_under_prd["300000"]["actual_mandays"], 0)
         self.assertEqual(af_under_prd["300000"]["jira_tickets"], [])
         self.assertEqual(af_under_prd["300000"]["matched_pm_emails"], ["af@npt.sg"])
         self.assertEqual(af_under_prd["300300"]["project_name"], "Xiaodong Biz Only Project")
@@ -1984,6 +1994,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         af_pending_live = {project["bpmis_id"]: project for project in teams["AF"]["pending_live"]}
         self.assertEqual([project["bpmis_id"] for project in teams["AF"]["pending_live"][:2]], ["225300", "225159"])
         self.assertEqual([project["release_date"] for project in teams["AF"]["pending_live"][:2]], ["2026-05-01", "2026-05-20"])
+        self.assertEqual(af_pending_live["225159"]["actual_mandays"], 5.5)
         self.assertEqual([item["jira_id"] for item in af_pending_live["225159"]["jira_tickets"]], ["AF-2"])
         self.assertEqual(af_pending_live["225159"]["jira_tickets"][0]["release_date"], "2026-05-20")
         self.assertNotIn("300100", af_pending_live)
