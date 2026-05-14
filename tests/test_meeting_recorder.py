@@ -21,6 +21,7 @@ from bpmis_jira_tool.meeting_recorder import (
     _build_ffmpeg_audio_segment_command,
     _effective_audio_input,
     _effective_recording_audio_input,
+    _meeting_transcript_hash,
     _meeting_minutes_markdown_to_html,
     _parse_avfoundation_devices,
     _parse_srt_transcript,
@@ -1678,10 +1679,11 @@ class MeetingProcessingServiceTests(unittest.TestCase):
                 "audio_url": f"/meeting-recorder/assets/{record['record_id']}/meeting.wav",
             }
             store.save_record(record)
+            text_client = FakeTextClient()
             service = MeetingProcessingService(
                 store=store,
                 config=MeetingRecorderConfig(),
-                text_client=FakeTextClient(),
+                text_client=text_client,
             )
 
             with patch.object(service, "_transcribe_audio", return_value={"text": "Alice approved.", "chunks": [], "segments": [], "quality": {}}) as transcribe:
@@ -1691,6 +1693,269 @@ class MeetingProcessingServiceTests(unittest.TestCase):
         self.assertEqual(transcribe.call_args.args[0], audio_path.resolve())
         self.assertEqual(processed["visual_evidence"], [])
         self.assertEqual(processed["transcript"]["text"], "Alice approved.")
+        self.assertEqual(len(text_client.calls), 1)
+        self.assertEqual(processed["minutes"]["generation_mode"], "direct")
+        self.assertEqual(processed["minutes"]["estimated_transcript_tokens"], 4)
+        self.assertEqual(processed["minutes"]["transcript_hash"], _meeting_transcript_hash("Alice approved."))
+        self.assertEqual(processed["minutes"]["chunk_count"], 1)
+        self.assertEqual(processed["minutes"]["cache_status"], "miss")
+
+    def test_long_transcript_generates_chunk_summaries_before_final_minutes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Long Review",
+                platform="zoom",
+                meeting_link="https://zoom.us/j/123",
+            )
+            audio_path = store.record_dir(record["record_id"]) / "meeting.wav"
+            audio_path.write_bytes(b"audio")
+            record["status"] = "recorded"
+            record["media"] = {
+                "recording_mode": "audio_only",
+                "audio_path": str(audio_path.relative_to(root)),
+            }
+            store.save_record(record)
+            text_client = FakeTextClient()
+            service = MeetingProcessingService(
+                store=store,
+                config=MeetingRecorderConfig(),
+                text_client=text_client,
+            )
+            long_transcript = "\n".join(
+                f"{index:03d} Alice and Bob discussed launch readiness, owner follow-ups, and risk checks."
+                for index in range(360)
+            )
+
+            with patch.object(
+                service,
+                "_transcribe_audio",
+                return_value={"text": long_transcript, "chunks": [], "segments": [], "quality": {}},
+            ), patch.object(
+                service,
+                "_transcribe_owner_speech_candidates",
+                return_value={"status": "skipped"},
+            ):
+                processed = service.process_recording(record_id=record["record_id"], owner_email="owner@npt.sg")
+
+        self.assertEqual(processed["status"], "completed")
+        self.assertEqual(processed["minutes"]["generation_mode"], "chunked_summary")
+        self.assertGreater(processed["minutes"]["chunk_count"], 1)
+        self.assertEqual(len(text_client.calls), processed["minutes"]["chunk_count"] + 1)
+        self.assertEqual(processed["minutes"]["transcript_hash"], _meeting_transcript_hash(long_transcript))
+        self.assertGreater(processed["minutes"]["estimated_transcript_tokens"], 3000)
+        self.assertTrue(all(long_transcript not in call["user_prompt"] for call in text_client.calls))
+        self.assertIn("# Chunk Summaries", text_client.calls[-1]["user_prompt"])
+        self.assertNotIn("# Transcript\n", text_client.calls[-1]["user_prompt"])
+
+    def test_process_reuses_cached_minutes_for_same_transcript_hash(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Cached Review",
+                platform="zoom",
+                meeting_link="https://zoom.us/j/123",
+            )
+            audio_path = store.record_dir(record["record_id"]) / "meeting.wav"
+            audio_path.write_bytes(b"audio")
+            transcript_text = "Alice approved the cached launch."
+            transcript_hash = _meeting_transcript_hash(transcript_text)
+            record["status"] = "completed"
+            record["media"] = {
+                "recording_mode": "audio_only",
+                "audio_path": str(audio_path.relative_to(root)),
+            }
+            record["minutes"] = {
+                "status": "completed",
+                "markdown": "## Key Discussion Topics\n- **Cached**\n  - Existing minutes.",
+                "prompt_version": "v3_topic_bullets_english_minutes",
+                "generation_version": "v1_token_safe_chunked_minutes",
+                "transcript_hash": transcript_hash,
+                "estimated_transcript_tokens": 9,
+                "generation_mode": "direct",
+                "chunk_count": 1,
+                "cache_status": "miss",
+            }
+            store.save_record(record)
+            text_client = FakeTextClient()
+            service = MeetingProcessingService(
+                store=store,
+                config=MeetingRecorderConfig(),
+                text_client=text_client,
+            )
+
+            with patch.object(
+                service,
+                "_transcribe_audio",
+                return_value={"text": transcript_text, "chunks": [], "segments": [], "quality": {}},
+            ), patch.object(
+                service,
+                "_transcribe_owner_speech_candidates",
+                return_value={"status": "skipped"},
+            ):
+                processed = service.process_recording(record_id=record["record_id"], owner_email="owner@npt.sg")
+
+        self.assertEqual(len(text_client.calls), 0)
+        self.assertEqual(processed["minutes"]["markdown"], "## Key Discussion Topics\n- **Cached**\n  - Existing minutes.")
+        self.assertEqual(processed["minutes"]["cache_status"], "hit")
+        self.assertEqual(processed["minutes"]["transcript_hash"], transcript_hash)
+
+    def test_process_regenerates_minutes_when_transcript_hash_changes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Changed Review",
+                platform="zoom",
+                meeting_link="https://zoom.us/j/123",
+            )
+            audio_path = store.record_dir(record["record_id"]) / "meeting.wav"
+            audio_path.write_bytes(b"audio")
+            record["status"] = "completed"
+            record["media"] = {
+                "recording_mode": "audio_only",
+                "audio_path": str(audio_path.relative_to(root)),
+            }
+            record["minutes"] = {
+                "status": "completed",
+                "markdown": "Old minutes",
+                "prompt_version": "v3_topic_bullets_english_minutes",
+                "generation_version": "v1_token_safe_chunked_minutes",
+                "transcript_hash": _meeting_transcript_hash("old transcript"),
+                "estimated_transcript_tokens": 4,
+                "generation_mode": "direct",
+                "chunk_count": 1,
+            }
+            store.save_record(record)
+            text_client = FakeTextClient()
+            service = MeetingProcessingService(
+                store=store,
+                config=MeetingRecorderConfig(),
+                text_client=text_client,
+            )
+            new_transcript = "New transcript requiring regeneration."
+
+            with patch.object(
+                service,
+                "_transcribe_audio",
+                return_value={"text": new_transcript, "chunks": [], "segments": [], "quality": {}},
+            ), patch.object(
+                service,
+                "_transcribe_owner_speech_candidates",
+                return_value={"status": "skipped"},
+            ):
+                processed = service.process_recording(record_id=record["record_id"], owner_email="owner@npt.sg")
+
+        self.assertEqual(len(text_client.calls), 1)
+        self.assertEqual(processed["minutes"]["cache_status"], "miss")
+        self.assertEqual(processed["minutes"]["transcript_hash"], _meeting_transcript_hash(new_transcript))
+
+    def test_process_regenerates_minutes_when_generation_version_changes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Versioned Review",
+                platform="zoom",
+                meeting_link="https://zoom.us/j/123",
+            )
+            audio_path = store.record_dir(record["record_id"]) / "meeting.wav"
+            audio_path.write_bytes(b"audio")
+            transcript_text = "Alice approved the versioned launch."
+            record["status"] = "completed"
+            record["media"] = {
+                "recording_mode": "audio_only",
+                "audio_path": str(audio_path.relative_to(root)),
+            }
+            record["minutes"] = {
+                "status": "completed",
+                "markdown": "Old minutes",
+                "prompt_version": "v3_topic_bullets_english_minutes",
+                "generation_version": "old_generation_version",
+                "transcript_hash": _meeting_transcript_hash(transcript_text),
+                "estimated_transcript_tokens": 9,
+                "generation_mode": "direct",
+                "chunk_count": 1,
+            }
+            store.save_record(record)
+            text_client = FakeTextClient()
+            service = MeetingProcessingService(
+                store=store,
+                config=MeetingRecorderConfig(),
+                text_client=text_client,
+            )
+
+            with patch.object(
+                service,
+                "_transcribe_audio",
+                return_value={"text": transcript_text, "chunks": [], "segments": [], "quality": {}},
+            ), patch.object(
+                service,
+                "_transcribe_owner_speech_candidates",
+                return_value={"status": "skipped"},
+            ):
+                processed = service.process_recording(record_id=record["record_id"], owner_email="owner@npt.sg")
+
+        self.assertEqual(len(text_client.calls), 1)
+        self.assertEqual(processed["minutes"]["cache_status"], "miss")
+        self.assertEqual(processed["minutes"]["generation_version"], "v1_token_safe_chunked_minutes")
+
+    def test_process_regenerates_minutes_when_prompt_version_changes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Prompt Version Review",
+                platform="zoom",
+                meeting_link="https://zoom.us/j/123",
+            )
+            audio_path = store.record_dir(record["record_id"]) / "meeting.wav"
+            audio_path.write_bytes(b"audio")
+            transcript_text = "Alice approved the prompt version launch."
+            record["status"] = "completed"
+            record["media"] = {
+                "recording_mode": "audio_only",
+                "audio_path": str(audio_path.relative_to(root)),
+            }
+            record["minutes"] = {
+                "status": "completed",
+                "markdown": "Old minutes",
+                "prompt_version": "old_prompt_version",
+                "generation_version": "v1_token_safe_chunked_minutes",
+                "transcript_hash": _meeting_transcript_hash(transcript_text),
+                "estimated_transcript_tokens": 10,
+                "generation_mode": "direct",
+                "chunk_count": 1,
+            }
+            store.save_record(record)
+            text_client = FakeTextClient()
+            service = MeetingProcessingService(
+                store=store,
+                config=MeetingRecorderConfig(),
+                text_client=text_client,
+            )
+
+            with patch.object(
+                service,
+                "_transcribe_audio",
+                return_value={"text": transcript_text, "chunks": [], "segments": [], "quality": {}},
+            ), patch.object(
+                service,
+                "_transcribe_owner_speech_candidates",
+                return_value={"status": "skipped"},
+            ):
+                processed = service.process_recording(record_id=record["record_id"], owner_email="owner@npt.sg")
+
+        self.assertEqual(len(text_client.calls), 1)
+        self.assertEqual(processed["minutes"]["cache_status"], "miss")
+        self.assertEqual(processed["minutes"]["prompt_version"], "v3_topic_bullets_english_minutes")
 
     def test_process_screencapture_recording_marks_local_microphone_owner_speech_candidates(self):
         with tempfile.TemporaryDirectory() as temp_dir:

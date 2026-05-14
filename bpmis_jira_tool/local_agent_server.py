@@ -2012,8 +2012,24 @@ def _run_prd_job(app: Flask, job_id: str, payload: dict[str, Any], action: str) 
     with app.app_context():
         job_store: JobStore = current_app.config["TEAM_DASHBOARD_JOB_STORE"]
 
-        def progress(stage: str, message: str, current: int, total: int) -> None:
-            job_store.update(job_id, state="running", stage=stage, message=message, current=current, total=total)
+        def progress(
+            stage: str,
+            message: str,
+            current: int,
+            total: int,
+            estimated_prompt_tokens: int = 0,
+            token_risk: str = "",
+        ) -> None:
+            job_store.update(
+                job_id,
+                state="running",
+                stage=stage,
+                message=message,
+                current=current,
+                total=total,
+                estimated_prompt_tokens=estimated_prompt_tokens if estimated_prompt_tokens else None,
+                token_risk=token_risk if token_risk else None,
+            )
 
         def call_prd_service(method: Any, request_model: Any) -> dict[str, Any]:
             try:
@@ -2774,7 +2790,7 @@ def _build_seatalk_service(settings: Settings, *, name_overrides_path: str | Pat
         codex_workspace_root=Path(__file__).resolve().parent.parent,
         codex_model=resolve_codex_model(
             CODEX_ROUTE_CHEAP,
-            legacy_env_names=("SEATALK_CODEX_MODEL", "SOURCE_CODE_QA_CODEX_MODEL"),
+            legacy_env_names=("SEATALK_CODEX_MODEL",),
         ),
         codex_timeout_seconds=settings.source_code_qa_codex_timeout_seconds,
         codex_concurrency=settings.source_code_qa_codex_concurrency,

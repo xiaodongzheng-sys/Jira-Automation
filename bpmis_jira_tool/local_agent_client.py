@@ -145,17 +145,29 @@ class LocalAgentClient:
         generated = payload.get("items")
         return generated if isinstance(generated, list) else []
 
-    def _poll_prd_job(self, job_id: str, *, progress_callback: Callable[[str, str, int, int], None] | None = None) -> dict[str, Any]:
-        last_progress: tuple[str, str, int, int] | None = None
+    def _poll_prd_job(self, job_id: str, *, progress_callback: Callable[..., None] | None = None) -> dict[str, Any]:
+        last_progress: tuple[str, str, int, int, int, str] | None = None
         while True:
             status = self._request("GET", f"/api/local-agent/prd-jobs/{job_id}", signed=True)
             stage = str(status.get("stage") or "")
             message = str(status.get("message") or "")
             current = int(status.get("current") or 0)
             total = int(status.get("total") or 0)
-            progress = (stage, message, current, total)
+            estimated_prompt_tokens = int(status.get("estimated_prompt_tokens") or 0)
+            token_risk = str(status.get("token_risk") or "")
+            progress = (stage, message, current, total, estimated_prompt_tokens, token_risk)
             if progress_callback is not None and message and progress != last_progress:
-                progress_callback(stage, message, current, total)
+                try:
+                    progress_callback(
+                        stage,
+                        message,
+                        current,
+                        total,
+                        estimated_prompt_tokens=estimated_prompt_tokens,
+                        token_risk=token_risk,
+                    )
+                except TypeError:
+                    progress_callback(stage, message, current, total)
                 last_progress = progress
             state = str(status.get("state") or "")
             if state == "completed":

@@ -4393,6 +4393,9 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                     "latency_ms": 120,
                     "llm_route": {"mode": "hybrid"},
                     "llm_provider": "codex_cli_bridge",
+                    "llm_budget_mode": "cheap",
+                    "llm_model": "gpt-5.4-mini",
+                    "llm_usage": {"prompt_tokens": 3000},
                     "llm_cached": True,
                     "answer_contract": {"status": "satisfied"},
                 }
@@ -4405,6 +4408,9 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                     "latency_ms": 360,
                     "llm_route": {"mode": "retrieval"},
                     "llm_provider": "codex_cli_bridge",
+                    "llm_budget_mode": "deep",
+                    "llm_model": "gpt-5.5",
+                    "llm_usage": {"prompt_tokens": 18000},
                     "llm_cached": False,
                     "answer_contract": {"status": "insufficient_evidence"},
                     "index_freshness": {"status": "stale_or_missing"},
@@ -4421,6 +4427,9 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertIn("telemetry_window=2", summary)
         self.assertIn("query_status=ok=1, no_match=1", summary)
+        self.assertIn("llm_budgets=cheap=1, deep=1", summary)
+        self.assertIn("llm_models=gpt-5.4-mini=1, gpt-5.5=1", summary)
+        self.assertIn("prompt_token_bands=lt6k=1, 12k_24k=1", summary)
         self.assertIn("llm_cache_hits=1/2", summary)
         self.assertIn("no_match_rate=1/2", summary)
         self.assertIn("feedback_window=1", summary)
@@ -8901,9 +8910,11 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
+                "SOURCE_CODE_QA_CODEX_MODEL": "legacy-all-model",
                 "SOURCE_CODE_QA_CODEX_MODEL_CHEAP": "cheap-model",
                 "SOURCE_CODE_QA_CODEX_MODEL_BALANCED": "balanced-model",
                 "SOURCE_CODE_QA_CODEX_MODEL_DEEP": "deep-model",
+                "SOURCE_CODE_QA_CODEX_MODEL_COMPACT_DEEP": "compact-model",
                 "SOURCE_CODE_QA_CODEX_MODEL_REPAIR": "repair-model",
             },
             clear=True,
@@ -8920,8 +8931,64 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(service.llm_budgets["cheap"]["model"], "cheap-model")
         self.assertEqual(service.llm_budgets["balanced"]["model"], "balanced-model")
         self.assertEqual(service.llm_budgets["deep"]["model"], "deep-model")
-        self.assertEqual(service.llm_budgets["compact_deep"]["model"], "gpt-5.4")
+        self.assertEqual(service.llm_budgets["compact_deep"]["model"], "compact-model")
         self.assertEqual(service.model_policy["repair"]["model"], "repair-model")
+
+    def test_short_definition_status_question_routes_to_cheap(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+
+        routed_mode, routed_budget, route = service._resolve_llm_budget(
+            "auto",
+            "Rule outcome = pass 是什么意思?",
+            [{"path": "rules.xml", "retrieval": "persistent_index"} for _ in range(8)],
+        )
+
+        self.assertEqual(routed_mode, "cheap")
+        self.assertEqual(routed_budget["model"], service.llm_budgets["cheap"]["model"])
+        self.assertEqual(route["reason"], "short_definition_or_status")
+
+    def test_root_cause_definition_like_question_does_not_route_to_cheap(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+
+        routed_mode, _routed_budget, route = service._resolve_llm_budget(
+            "auto",
+            "why is rule outcome pass in the data source chain?",
+            [],
+        )
+
+        self.assertEqual(routed_mode, "deep")
+        self.assertIn("root_cause_or_error", route["reason"])
+
+    def test_api_config_rule_question_routes_to_balanced(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+
+        routed_mode, routed_budget, route = service._resolve_llm_budget(
+            "auto",
+            "how does API config select rule logic?",
+            [{"path": "RuleService.java", "retrieval": "persistent_index"}],
+        )
+
+        self.assertEqual(routed_mode, "balanced")
+        self.assertEqual(routed_budget["model"], service.llm_budgets["balanced"]["model"])
+        self.assertEqual(route["reason"], "api_config_rule_logic")
 
     def test_codex_cli_provider_uses_codex_specific_timeout(self):
         service = SourceCodeQAService(
@@ -9176,6 +9243,9 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(prompt_logs[0]["scope_repo_count"], 1)
         self.assertEqual(prompt_logs[0]["retrieval_role"], "hints")
         self.assertEqual(prompt_logs[0]["repair_policy"], "severe_only")
+        self.assertEqual(prompt_logs[0]["requested_budget"], "auto")
+        self.assertIn(prompt_logs[0]["routed_budget"], {"cheap", "balanced", "deep", "compact_deep"})
+        self.assertIn(prompt_logs[0]["reasoning_effort"], {"low", "medium", "high", "xhigh"})
         self.assertGreater(prompt_logs[0]["prompt_chars"], 0)
         self.assertGreater(prompt_logs[0]["prompt_bytes"], 0)
         self.assertGreater(prompt_logs[0]["estimated_prompt_tokens"], 0)
@@ -9658,6 +9728,86 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(payload["llm_route"]["codex_deep_investigation_rounds"], 0)
         self.assertIn("right review process", payload["llm_answer"])
         self.assertNotIn("Missing: Webform template screen evidence", payload["llm_answer"])
+
+    def test_oversized_repair_prompt_skips_before_deep_expansion(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+            codex_repair_deadline_seconds=300,
+        )
+        service.codex_repair_prompt_token_limit = 1
+        entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
+        key = "AF:All"
+        repo_path = service._repo_path(key, entry)
+        source_file = repo_path / "repository" / "IssueRepository.java"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("class IssueRepository { void find(){} }\n", encoding="utf-8")
+        matches = [
+            {
+                "repo": "Portal Repo",
+                "path": "repository/IssueRepository.java",
+                "line_start": 1,
+                "line_end": 1,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "IssueRepository matched",
+                "score": 10,
+                "snippet": "class IssueRepository { void find(){} }",
+            }
+        ]
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text(
+                '{"direct_answer":"IssueRepository is relevant.",'
+                '"claims":[{"text":"IssueRepository is relevant","citations":["S1"]}],'
+                '"missing_evidence":[],"confidence":"medium"}',
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        repair_decision = {
+            "severe_repair_reasons": ["deep_investigation_needed_for_high_risk_question"],
+            "repair_issues": ["deep_investigation_needed_for_high_risk_question"],
+            "deep_needed": True,
+            "repair_issue_count": 2,
+            "repair_will_run": True,
+            "repair_decision_ms": 0,
+        }
+
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
+            side_effect=fake_run,
+        ), patch.object(service, "_codex_repair_decision", return_value=repair_decision), patch.object(
+            service,
+            "_codex_deep_investigation_context",
+            wraps=service._codex_deep_investigation_context,
+        ) as deep_context:
+            payload = service._build_llm_answer(
+                entries=[entry],
+                key=key,
+                pm_team="AF",
+                country="All",
+                question="why is IssueRepository relevant?",
+                matches=matches,
+                llm_budget_mode="auto",
+                followup_context={},
+                requested_answer_mode="auto",
+            )
+
+        exec_calls = [item for item in calls if "exec" in item[0]]
+        self.assertEqual(len(exec_calls), 1)
+        deep_context.assert_not_called()
+        self.assertFalse(payload["llm_route"]["codex_repair_attempted"])
+        self.assertIn("repair_preflight_prompt_too_large", payload["llm_route"]["codex_repair_skipped_reason"])
 
     def test_codex_out_of_scope_citation_triggers_severe_repair(self):
         service = SourceCodeQAService(

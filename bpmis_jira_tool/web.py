@@ -2116,7 +2116,7 @@ def _build_seatalk_dashboard_service(settings: Settings) -> SeaTalkDashboardServ
         codex_workspace_root=PROJECT_ROOT,
         codex_model=resolve_codex_model(
             CODEX_ROUTE_CHEAP,
-            legacy_env_names=("SEATALK_CODEX_MODEL", "SOURCE_CODE_QA_CODEX_MODEL"),
+            legacy_env_names=("SEATALK_CODEX_MODEL",),
         ),
         codex_timeout_seconds=settings.source_code_qa_codex_timeout_seconds,
         codex_concurrency=settings.source_code_qa_codex_concurrency,
@@ -2919,8 +2919,24 @@ def _run_prd_generation_job(
     with app.app_context():
         job_store: JobStore = app.config["JOB_STORE"]
 
-        def progress_callback(stage: str, message: str, current: int, total: int) -> None:
-            job_store.update(job_id, state="running", stage=stage, message=message, current=current, total=total)
+        def progress_callback(
+            stage: str,
+            message: str,
+            current: int,
+            total: int,
+            estimated_prompt_tokens: int = 0,
+            token_risk: str = "",
+        ) -> None:
+            job_store.update(
+                job_id,
+                state="running",
+                stage=stage,
+                message=message,
+                current=current,
+                total=total,
+                estimated_prompt_tokens=estimated_prompt_tokens if estimated_prompt_tokens else None,
+                token_risk=token_risk if token_risk else None,
+            )
 
         def call_prd_service(method: Any, request_model: Any) -> dict[str, Any]:
             try:

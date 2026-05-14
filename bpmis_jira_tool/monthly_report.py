@@ -75,7 +75,7 @@ MONTHLY_REPORT_HIGHLIGHT_SOURCES = (
 MONTHLY_REPORT_GMAIL_TOPIC_CACHE_VERSION = "v3"
 MONTHLY_REPORT_GMAIL_TOPIC_CACHE_TTL_SECONDS = 6 * 60 * 60
 MONTHLY_REPORT_PRD_SCOPE_CACHE_VERSION = "v1"
-MONTHLY_REPORT_BATCH_SUMMARY_CACHE_VERSION = "v1"
+MONTHLY_REPORT_BATCH_SUMMARY_CACHE_VERSION = "v2"
 MONTHLY_REPORT_TOPIC_NARRATIVE_CACHE_VERSION = "v1"
 MONTHLY_REPORT_STYLE_GUIDE_CACHE_VERSION = "v2"
 MONTHLY_REPORT_TOPIC_NARRATIVE_MAX_TOKENS = 32_000
@@ -379,6 +379,10 @@ class MonthlyReportService:
             highlight_topic_sources=normalized_highlight_sources,
             fallback_reference_date=self.now.date(),
         )
+        compact_highlight_deep_evidence = _compact_highlight_deep_evidence_for_prompt(
+            highlight_deep_evidence,
+            include_source_evidence=True,
+        )
         highlight_evidence_map = build_monthly_highlight_evidence_map(highlight_deep_evidence)
         step_started = time.monotonic()
         highlight_narratives = self._highlight_topic_narratives(
@@ -391,6 +395,7 @@ class MonthlyReportService:
         included_project_briefs = [
             item for item in monthly_evidence_brief if item.get("include")
         ]
+        compact_project_briefs_for_batch = _compact_monthly_project_evidence_for_batch(included_project_briefs)
         evidence_sidecar = build_monthly_evidence_sidecar(
             seatalk_history_text="\n".join(
                 item
@@ -410,8 +415,8 @@ class MonthlyReportService:
             generated_at=self.now,
             report_period=report_period,
             highlight_topics=normalized_highlight_topics,
-            monthly_evidence_brief=included_project_briefs,
-            highlight_deep_evidence=highlight_deep_evidence,
+            monthly_evidence_brief=compact_project_briefs_for_batch,
+            highlight_deep_evidence=compact_highlight_deep_evidence,
             prd_errors=prd_errors,
             evidence_sidecar=evidence_sidecar,
             progress_callback=progress_callback,
@@ -434,7 +439,7 @@ class MonthlyReportService:
             highlight_topics=normalized_highlight_topics,
             evidence_brief=evidence_brief,
             monthly_evidence_brief=monthly_evidence_brief,
-            highlight_deep_evidence=highlight_deep_evidence,
+            highlight_deep_evidence=compact_highlight_deep_evidence,
             highlight_narratives=highlight_narratives,
             historical_report_style_guide=style_guide,
         )
@@ -452,7 +457,7 @@ class MonthlyReportService:
                 highlight_topics=normalized_highlight_topics,
                 evidence_brief=evidence_brief,
                 monthly_evidence_brief=monthly_evidence_brief,
-                highlight_deep_evidence=highlight_deep_evidence,
+                highlight_deep_evidence=compact_highlight_deep_evidence,
                 highlight_narratives=highlight_narratives,
                 historical_report_style_guide=style_guide,
             )
@@ -488,6 +493,18 @@ class MonthlyReportService:
             for item in batch_summaries
             if isinstance(item, dict)
         ]
+        stage_token_ledger = {
+            "seatalk_compact_estimated_tokens": _estimate_token_count(history_text),
+            "vip_gmail_estimated_tokens": _estimate_token_count(vip_gmail_text),
+            "requirements_gmail_estimated_tokens": _estimate_token_count(requirements_gmail_text),
+            "highlight_deep_evidence_estimated_tokens": _estimate_token_count(_json_block(highlight_deep_evidence)),
+            "highlight_deep_evidence_prompt_estimated_tokens": _estimate_token_count(_json_block(compact_highlight_deep_evidence)),
+            "monthly_evidence_brief_estimated_tokens": _estimate_token_count(_json_block(monthly_evidence_brief)),
+            "monthly_evidence_brief_batch_estimated_tokens": _estimate_token_count(_json_block(compact_project_briefs_for_batch)),
+            "batch_summary_total_estimated_tokens": sum(batch_token_counts),
+            "merge_input_estimated_tokens": _estimate_token_count(_json_block(batch_summaries)),
+            "final_estimated_tokens": final_estimated_tokens,
+        }
         confidence_counts = _monthly_report_confidence_counts(highlight_evidence_map)
         target_source_counts = _monthly_report_target_source_counts(monthly_evidence_brief)
         diagnostics = build_monthly_report_generation_diagnostics(
@@ -547,6 +564,7 @@ class MonthlyReportService:
                 "highlight_narrative_cache_hit_count": len([item for item in highlight_narratives if item.get("cache_hit")]),
                 "max_batch_estimated_tokens": max(batch_token_counts) if batch_token_counts else 0,
                 "final_estimated_tokens": final_estimated_tokens,
+                "stage_token_ledger": stage_token_ledger,
                 "batch_mode": True,
                 "timings": timings,
             },
@@ -2277,6 +2295,7 @@ def build_monthly_report_batch_prompt(
         "For Highlight deep evidence, preserve narrative facts for the user-provided topics. For Monthly project evidence brief, keep other Key Projects concise and do not expand them into highlights.\n"
         f"Hard scope: include only Xiaodong-owned {', '.join(MONTHLY_REPORT_PRODUCT_SCOPE)} product updates. Exclude unrelated general awareness, HR, hiring, personal chat, random live issue, and generic IT/process/material-check updates even if a VIP or priority keyword appears.\n"
         "Use concise Markdown with these headings exactly: Highlights, Decisions, Risks, Owners, Project References, Open Asks, Evidence Gaps.\n"
+        "This is an evidence-summary stage only. Do not repeat or infer the final email template; keep only structured facts, owner/date/status/risk evidence, and gaps needed by the final drafting call.\n"
         "For each highlight topic, respect its topic_intent/intent_focus/confidence/recommended_tone when present. High-confidence topics can be written as progress; low-confidence topics should remain monitoring items without over-claiming.\n"
         "If a highlight topic has product_area_scope, preserve only that product area's changes and timeline for that topic. Do not mix similarly named projects from other product areas into the highlight narrative.\n"
         "For go-live outcome topics, preserve launch result, employee/pilot feedback, production issue, stabilization, and post-live next-action facts. Do not substitute generic development or PRD progress for missing go-live outcome evidence.\n"
@@ -2287,7 +2306,6 @@ def build_monthly_report_batch_prompt(
         f"# Generated At\n{generated_at.isoformat()}\n\n"
         f"# Report Period\n{report_period.start_date} to {report_period.end_date}\n\n"
         f"# User-Provided Highlight Topics\n{_json_block(highlight_topics)}\n\n"
-        f"# Monthly Report Template For Orientation\n{normalize_monthly_report_template(template)}\n\n"
         f"# Evidence Source\n{source_label}\n\n"
         "# PRD Enrichment Gaps\n"
         f"{_json_block(prd_errors)}\n\n"
@@ -2381,7 +2399,12 @@ def build_monthly_report_final_prompt(
     historical_report_style_guide: dict[str, Any] | None = None,
 ) -> str:
     included_project_evidence = _strip_jira_issue_keys_from_data(_compact_monthly_evidence_for_final(monthly_evidence_brief))
-    safe_highlight_deep_evidence = _strip_jira_issue_keys_from_data(highlight_deep_evidence or [])
+    safe_highlight_deep_evidence = _strip_jira_issue_keys_from_data(
+        _compact_highlight_deep_evidence_for_prompt(
+            highlight_deep_evidence or [],
+            include_source_evidence=False,
+        )
+    )
     safe_highlight_narratives = _strip_jira_issue_keys_from_data(highlight_narratives or [])
     safe_style_guide = _compact_monthly_report_style_guide(historical_report_style_guide)
     safe_evidence_brief = re.sub(
@@ -2470,6 +2493,132 @@ def _compact_monthly_evidence_for_final(monthly_evidence_brief: list[dict[str, A
                 "matched_prd_summaries": _compact_report_text_list(item.get("matched_prd_summaries"), limit=3, max_chars=500),
             }
         )
+    return compacted
+
+
+def _compact_monthly_project_evidence_for_batch(monthly_evidence_brief: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    compacted: list[dict[str, Any]] = []
+    for item in monthly_evidence_brief:
+        if not item.get("include"):
+            continue
+        compacted.append(
+            {
+                "include": True,
+                "project_id": str(item.get("project_id") or item.get("bpmis_id") or "").strip(),
+                "bpmis_id": str(item.get("bpmis_id") or item.get("project_id") or "").strip(),
+                "project_name": str(item.get("project_name") or "").strip(),
+                "product_area": str(item.get("product_area") or "").strip(),
+                "market": str(item.get("market") or "").strip(),
+                "priority": str(item.get("priority") or "").strip(),
+                "jira_ids": _compact_text_list(item.get("jira_ids"), limit=8, max_chars=40),
+                "material_update_score": _safe_int(item.get("material_update_score")),
+                "current_status": _monthly_report_status_label(item.get("current_status")),
+                "target_tech_live_date": _monthly_report_month_label(item.get("target_tech_live_date")),
+                "target_tech_live_source": str(item.get("target_tech_live_source") or "").strip(),
+                "status_facts": _compact_report_text_list(item.get("status_facts"), limit=4, max_chars=140),
+                "timeline_facts": _compact_report_text_list(item.get("timeline_facts"), limit=4, max_chars=220),
+                "risks": _compact_report_text_list(item.get("risks"), limit=4, max_chars=260),
+                "decisions_needed": _compact_report_text_list(item.get("decisions_needed"), limit=4, max_chars=260),
+                "matched_prd_summaries": _compact_report_text_list(item.get("matched_prd_summaries"), limit=4, max_chars=520),
+                "monthly_requirements": [
+                    {
+                        "matched_line": str(entry.get("matched_line") or "").strip()[:300],
+                        "target_month": str(entry.get("target_month") or "").strip(),
+                        "source_subject": str(entry.get("source_subject") or "").strip()[:160],
+                    }
+                    for entry in (item.get("monthly_requirements") or [])
+                    if isinstance(entry, dict)
+                ][:3],
+            }
+        )
+    return compacted
+
+
+def _compact_highlight_deep_evidence_for_prompt(
+    highlight_deep_evidence: list[dict[str, Any]],
+    *,
+    include_source_evidence: bool,
+) -> list[dict[str, Any]]:
+    compacted: list[dict[str, Any]] = []
+    for item in highlight_deep_evidence:
+        if not isinstance(item, dict):
+            continue
+        evidence_map = item.get("evidence_map") if isinstance(item.get("evidence_map"), dict) else {}
+        compact_item: dict[str, Any] = {
+            "topic": str(item.get("topic") or "").strip(),
+            "topic_intent": str(item.get("topic_intent") or evidence_map.get("topic_intent") or "").strip(),
+            "intent_focus": str(item.get("intent_focus") or "").strip(),
+            "topic_type": str(item.get("topic_type") or "").strip(),
+            "product_area_scope": str(item.get("product_area_scope") or evidence_map.get("product_area_scope") or "").strip(),
+            "matched_project_ids": _compact_text_list(item.get("matched_project_ids"), limit=8, max_chars=60),
+            "matched_project_names": _compact_text_list(item.get("matched_project_names"), limit=8, max_chars=120),
+            "project_updates": _compact_highlight_project_updates(item.get("project_updates")),
+            "issue_followup_facts": _compact_issue_followup_facts(item.get("issue_followup_facts")),
+            "confidence": str(item.get("confidence") or evidence_map.get("confidence") or "").strip(),
+            "recommended_tone": str(item.get("recommended_tone") or evidence_map.get("recommended_tone") or "").strip(),
+            "evidence_map": _compact_highlight_evidence_map(evidence_map),
+        }
+        if include_source_evidence:
+            compact_item.update(
+                {
+                    "seatalk_evidence": _compact_report_text_list(item.get("seatalk_evidence"), limit=8, max_chars=420),
+                    "gmail_evidence": _compact_report_text_list(item.get("gmail_evidence"), limit=5, max_chars=520),
+                    "google_sheet_evidence": _compact_google_sheet_evidence(item.get("google_sheet_evidence"))[:3],
+                    "prd_scope_summaries": _compact_report_text_list(item.get("prd_scope_summaries"), limit=4, max_chars=520),
+                    "gmail_error": str(item.get("gmail_error") or "").strip()[:240],
+                }
+            )
+        compacted.append(compact_item)
+    return compacted
+
+
+def _compact_highlight_project_updates(value: Any) -> list[dict[str, Any]]:
+    updates = value if isinstance(value, list) else []
+    compacted: list[dict[str, Any]] = []
+    for project in updates:
+        if not isinstance(project, dict):
+            continue
+        compacted.append(
+            {
+                "bpmis_id": str(project.get("bpmis_id") or "").strip(),
+                "project_name": str(project.get("project_name") or "").strip(),
+                "market": str(project.get("market") or "").strip(),
+                "priority": str(project.get("priority") or "").strip(),
+                "current_status": _monthly_report_status_label(project.get("current_status")),
+                "target_tech_live_date": _monthly_report_month_label(project.get("target_tech_live_date")),
+                "target_tech_live_source": str(project.get("target_tech_live_source") or "").strip(),
+                "status_facts": _compact_report_text_list(project.get("status_facts"), limit=4, max_chars=260),
+                "timeline_facts": _compact_report_text_list(project.get("timeline_facts"), limit=3, max_chars=220),
+                "prd_scope_summaries": _compact_report_text_list(project.get("prd_scope_summaries"), limit=2, max_chars=360),
+            }
+        )
+    return compacted[:8]
+
+
+def _compact_issue_followup_facts(value: Any) -> dict[str, list[str]]:
+    facts = value if isinstance(value, dict) else {}
+    compacted: dict[str, list[str]] = {}
+    for key in ("impact", "root_cause", "short_term_solution", "long_term_solution", "next_action"):
+        compacted[key] = _compact_report_text_list(facts.get(key), limit=3, max_chars=320)
+    return {key: items for key, items in compacted.items() if items}
+
+
+def _compact_highlight_evidence_map(value: dict[str, Any]) -> dict[str, Any]:
+    if not value:
+        return {}
+    keys = (
+        "topic",
+        "topic_type",
+        "topic_intent",
+        "product_area_scope",
+        "confidence",
+        "recommended_tone",
+        "evidence_gaps",
+        "selected_sources",
+    )
+    compacted = {key: value.get(key) for key in keys if key in value}
+    if isinstance(value.get("issue_followup_facts"), dict):
+        compacted["issue_followup_facts"] = _compact_issue_followup_facts(value.get("issue_followup_facts"))
     return compacted
 
 
@@ -2567,7 +2716,7 @@ def generate_monthly_report_with_codex(
     )
     codex_model = resolve_codex_model(
         CODEX_ROUTE_BALANCED,
-        legacy_env_names=("MONTHLY_REPORT_CODEX_MODEL", "SOURCE_CODE_QA_CODEX_MODEL"),
+        legacy_env_names=("MONTHLY_REPORT_CODEX_MODEL",),
     )
     result = provider.generate(
         payload={
@@ -2585,6 +2734,9 @@ def generate_monthly_report_with_codex(
             "codex_prompt_mode": prompt_mode,
             "_progress_callback": progress_callback,
             "_codex_reasoning_effort": resolve_codex_reasoning_effort(CODEX_ROUTE_BALANCED),
+            "_codex_estimated_prompt_tokens": _estimate_token_count(prompt),
+            "_llm_ledger_flow": "monthly_report",
+            "_llm_ledger_route": CODEX_ROUTE_BALANCED,
         },
         primary_model=codex_model,
         fallback_model=codex_model,

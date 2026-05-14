@@ -29,6 +29,10 @@ from bpmis_jira_tool.gmail_sender import credentials_from_payload, send_gmail_me
 
 CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
 MEETING_RECORDER_PROMPT_VERSION = "v3_topic_bullets_english_minutes"
+MEETING_RECORDER_MINUTES_GENERATION_VERSION = "v1_token_safe_chunked_minutes"
+MEETING_RECORDER_TOKEN_CHARS_PER_TOKEN = 4
+MEETING_RECORDER_MINUTES_CHUNK_THRESHOLD_TOKENS = 3_000
+MEETING_RECORDER_MINUTES_CHUNK_TARGET_TOKENS = 2_500
 MEETING_RECORD_STATUSES = {
     "scheduled",
     "recording",
@@ -1166,11 +1170,21 @@ class MeetingProcessingService:
             transcript = self._transcribe_audio(audio_path, transcript_language=record.get("transcript_language"))
             owner_speech = self._transcribe_owner_speech_candidates(record, transcript_language=record.get("transcript_language"))
             transcript_text = str(transcript.get("text") or "").strip()
-            minutes = self._generate_minutes(
+            transcript_hash = _meeting_transcript_hash(transcript_text)
+            estimated_transcript_tokens = _estimate_meeting_transcript_tokens(transcript_text)
+            minutes_payload = self._cached_minutes_payload(
                 record=record,
-                transcript_text=transcript_text,
-                transcript_quality=transcript.get("quality") or {},
+                transcript_hash=transcript_hash,
+                estimated_transcript_tokens=estimated_transcript_tokens,
             )
+            if minutes_payload is None:
+                minutes_payload = self._generate_minutes_payload(
+                    record=record,
+                    transcript_text=transcript_text,
+                    transcript_quality=transcript.get("quality") or {},
+                    transcript_hash=transcript_hash,
+                    estimated_transcript_tokens=estimated_transcript_tokens,
+                )
             owner_speech_asset_url = ""
             if owner_speech.get("status") == "completed" and str(owner_speech.get("text") or "").strip():
                 owner_speech_asset_url = f"/meeting-recorder/assets/{record_id}/owner-microphone-transcript.txt"
@@ -1193,13 +1207,9 @@ class MeetingProcessingService:
             }
             (self.store.record_dir(record_id) / "transcript.txt").write_text(transcript_text, encoding="utf-8")
             record["visual_evidence"] = []
-            record["minutes"] = {
-                "status": "completed",
-                "markdown": minutes,
-                "prompt_version": MEETING_RECORDER_PROMPT_VERSION,
-                "asset_url": f"/meeting-recorder/assets/{record_id}/minutes.md",
-            }
-            (self.store.record_dir(record_id) / "minutes.md").write_text(minutes, encoding="utf-8")
+            minutes_payload["asset_url"] = f"/meeting-recorder/assets/{record_id}/minutes.md"
+            record["minutes"] = minutes_payload
+            (self.store.record_dir(record_id) / "minutes.md").write_text(str(minutes_payload.get("markdown") or ""), encoding="utf-8")
             record["status"] = "completed"
             self.store.save_record(record)
             return record
@@ -1776,9 +1786,92 @@ class MeetingProcessingService:
             "warnings": warnings,
         }
 
-    def _generate_minutes(self, *, record: dict[str, Any], transcript_text: str, transcript_quality: dict[str, Any] | None = None) -> str:
-        quality = transcript_quality or {}
-        system_prompt = (
+    def _cached_minutes_payload(
+        self,
+        *,
+        record: dict[str, Any],
+        transcript_hash: str,
+        estimated_transcript_tokens: int,
+    ) -> dict[str, Any] | None:
+        existing = record.get("minutes") if isinstance(record.get("minutes"), dict) else {}
+        markdown = str(existing.get("markdown") or "").strip()
+        expected_generation_mode = (
+            "chunked_summary"
+            if estimated_transcript_tokens > MEETING_RECORDER_MINUTES_CHUNK_THRESHOLD_TOKENS
+            else "direct"
+        )
+        if (
+            str(existing.get("status") or "") == "completed"
+            and markdown
+            and str(existing.get("transcript_hash") or "") == transcript_hash
+            and str(existing.get("prompt_version") or "") == MEETING_RECORDER_PROMPT_VERSION
+            and str(existing.get("generation_version") or "") == MEETING_RECORDER_MINUTES_GENERATION_VERSION
+            and str(existing.get("generation_mode") or "") == expected_generation_mode
+        ):
+            return {
+                **existing,
+                "status": "completed",
+                "markdown": markdown,
+                "prompt_version": MEETING_RECORDER_PROMPT_VERSION,
+                "generation_version": MEETING_RECORDER_MINUTES_GENERATION_VERSION,
+                "transcript_hash": transcript_hash,
+                "estimated_transcript_tokens": estimated_transcript_tokens,
+                "generation_mode": expected_generation_mode,
+                "chunk_count": int(existing.get("chunk_count") or 1),
+                "cache_status": "hit",
+            }
+        return None
+
+    def _generate_minutes_payload(
+        self,
+        *,
+        record: dict[str, Any],
+        transcript_text: str,
+        transcript_quality: dict[str, Any] | None = None,
+        transcript_hash: str | None = None,
+        estimated_transcript_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        transcript_hash = transcript_hash or _meeting_transcript_hash(transcript_text)
+        estimated_tokens = (
+            estimated_transcript_tokens
+            if estimated_transcript_tokens is not None
+            else _estimate_meeting_transcript_tokens(transcript_text)
+        )
+        if estimated_tokens > MEETING_RECORDER_MINUTES_CHUNK_THRESHOLD_TOKENS:
+            chunks = _split_meeting_transcript_chunks(
+                transcript_text,
+                target_tokens=MEETING_RECORDER_MINUTES_CHUNK_TARGET_TOKENS,
+            )
+            markdown = self._generate_minutes_from_chunk_summaries(
+                record=record,
+                transcript_chunks=chunks,
+                transcript_quality=transcript_quality,
+                estimated_transcript_tokens=estimated_tokens,
+            )
+            generation_mode = "chunked_summary"
+            chunk_count = len(chunks)
+        else:
+            markdown = self._generate_minutes(
+                record=record,
+                transcript_text=transcript_text,
+                transcript_quality=transcript_quality,
+            )
+            generation_mode = "direct"
+            chunk_count = 1
+        return {
+            "status": "completed",
+            "markdown": markdown,
+            "prompt_version": MEETING_RECORDER_PROMPT_VERSION,
+            "generation_version": MEETING_RECORDER_MINUTES_GENERATION_VERSION,
+            "transcript_hash": transcript_hash,
+            "estimated_transcript_tokens": estimated_tokens,
+            "generation_mode": generation_mode,
+            "chunk_count": chunk_count,
+            "cache_status": "miss",
+        }
+
+    def _minutes_system_prompt(self) -> str:
+        return (
             "You write concise, evidence-grounded English meeting minutes for product managers. "
             "Use only the provided spoken transcript and meeting metadata. "
             "Do not use screen recordings, screenshots, keyframes, or visual context. "
@@ -1786,6 +1879,9 @@ class MeetingProcessingService:
             "If a next step is implied but owner, timing, or decision is unclear, write it as a [Follow up] item instead of pretending it is confirmed. "
             "If transcript quality warnings are present, include a short warning before Key Discussion Topics and do not infer decisions or follow-ups from repeated low-audio text."
         )
+
+    def _generate_minutes(self, *, record: dict[str, Any], transcript_text: str, transcript_quality: dict[str, Any] | None = None) -> str:
+        quality = transcript_quality or {}
         user_prompt = (
             f"Meeting title: {record.get('title')}\n"
             f"Platform: {record.get('platform')}\n"
@@ -1807,7 +1903,110 @@ class MeetingProcessingService:
             "- Do not return separate Summary, Decisions, Action Items, Risks/Blockers, Open Questions, or Follow-ups sections.\n"
             "- Do not include transcript excerpts unless needed for clarity."
         )
-        return self.text_client.create_answer(system_prompt=system_prompt, user_prompt=user_prompt).strip()
+        return self.text_client.create_answer(system_prompt=self._minutes_system_prompt(), user_prompt=user_prompt).strip()
+
+    def _generate_minutes_from_chunk_summaries(
+        self,
+        *,
+        record: dict[str, Any],
+        transcript_chunks: list[str],
+        transcript_quality: dict[str, Any] | None = None,
+        estimated_transcript_tokens: int,
+    ) -> str:
+        quality = transcript_quality or {}
+        chunk_summaries = []
+        for index, chunk in enumerate(transcript_chunks, start=1):
+            chunk_prompt = (
+                f"Meeting title: {record.get('title')}\n"
+                f"Platform: {record.get('platform')}\n"
+                f"Scheduled start: {record.get('scheduled_start')}\n"
+                f"Transcript quality: {json.dumps(quality, ensure_ascii=False)}\n"
+                f"Chunk: {index}/{len(transcript_chunks)}\n\n"
+                "# Transcript Chunk\n"
+                f"{chunk or 'No transcript text was produced.'}\n\n"
+                "Extract concise factual notes for this chunk only. Preserve explicit decisions, owners, dates, risks, and follow-ups. "
+                "Prefix uncertain action-like items with [Follow up]. Do not invent information. Return compact Markdown bullets only."
+            )
+            summary = self.text_client.create_answer(
+                system_prompt=(
+                    "You compress one meeting transcript chunk into factual PM notes. "
+                    "Use only this chunk and do not infer missing owners, dates, decisions, or action items."
+                ),
+                user_prompt=chunk_prompt,
+            ).strip()
+            chunk_summaries.append(f"## Chunk {index}\n{summary}")
+
+        merge_prompt = (
+            f"Meeting title: {record.get('title')}\n"
+            f"Platform: {record.get('platform')}\n"
+            f"Scheduled start: {record.get('scheduled_start')}\n"
+            f"Attendees from calendar: {json.dumps(record.get('attendees') or [], ensure_ascii=False)}\n"
+            f"Transcript quality: {json.dumps(quality, ensure_ascii=False)}\n"
+            f"Estimated transcript tokens: {estimated_transcript_tokens}\n"
+            f"Transcript chunk count: {len(transcript_chunks)}\n\n"
+            "# Chunk Summaries\n"
+            f"{chr(10).join(chunk_summaries)}\n\n"
+            "Return English Markdown in this exact PM-readable format:\n"
+            "## Key Discussion Topics\n"
+            "- **Topic Name**\n"
+            "  - Factual discussion point grounded in the chunk summaries.\n"
+            "  - [Follow up] Action, question, or check needed before the next discussion.\n\n"
+            "Rules:\n"
+            "- Group related points under 4-8 concise topic bullets.\n"
+            "- Use top-level bullets only for topic names and make every topic name bold.\n"
+            "- Use indented second-level bullets for details under each topic.\n"
+            "- Prefix uncertain next steps, unresolved questions, or checks with [Follow up].\n"
+            "- Do not return separate Summary, Decisions, Action Items, Risks/Blockers, Open Questions, or Follow-ups sections.\n"
+            "- Do not include transcript excerpts unless needed for clarity."
+        )
+        return self.text_client.create_answer(system_prompt=self._minutes_system_prompt(), user_prompt=merge_prompt).strip()
+
+
+def _estimate_meeting_transcript_tokens(text: str) -> int:
+    return max(
+        1,
+        (len(str(text or "")) + MEETING_RECORDER_TOKEN_CHARS_PER_TOKEN - 1)
+        // MEETING_RECORDER_TOKEN_CHARS_PER_TOKEN,
+    )
+
+
+def _meeting_transcript_hash(text: str) -> str:
+    return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()
+
+
+def _split_meeting_transcript_chunks(text: str, *, target_tokens: int) -> list[str]:
+    clean_text = str(text or "").strip()
+    if not clean_text:
+        return [""]
+    target_chars = max(
+        MEETING_RECORDER_TOKEN_CHARS_PER_TOKEN,
+        int(target_tokens or MEETING_RECORDER_MINUTES_CHUNK_TARGET_TOKENS) * MEETING_RECORDER_TOKEN_CHARS_PER_TOKEN,
+    )
+    chunks: list[str] = []
+    current_lines: list[str] = []
+    current_chars = 0
+    for line in clean_text.splitlines():
+        line_text = line.rstrip()
+        line_chars = len(line_text) + 1
+        if current_lines and current_chars + line_chars > target_chars:
+            chunks.append("\n".join(current_lines).strip())
+            current_lines = []
+            current_chars = 0
+        if line_chars > target_chars:
+            if current_lines:
+                chunks.append("\n".join(current_lines).strip())
+                current_lines = []
+                current_chars = 0
+            for start in range(0, len(line_text), target_chars):
+                chunk = line_text[start : start + target_chars].strip()
+                if chunk:
+                    chunks.append(chunk)
+            continue
+        current_lines.append(line_text)
+        current_chars += line_chars
+    if current_lines:
+        chunks.append("\n".join(current_lines).strip())
+    return [chunk for chunk in chunks if chunk] or [clean_text]
 
 
 def _assert_record_owner(record: dict[str, Any], owner_email: str) -> None:

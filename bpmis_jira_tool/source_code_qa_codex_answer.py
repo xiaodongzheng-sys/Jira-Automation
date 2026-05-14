@@ -97,6 +97,12 @@ def build_codex_llm_answer(
     }
     if effort_assessment:
         llm_route["task"] = "effort_assessment"
+    prompt_runtime_evidence = service._runtime_evidence_for_budget(runtime_evidence or [], routed_budget_mode)
+    llm_route = {
+        **llm_route,
+        "runtime_evidence_count": len(runtime_evidence or []),
+        "prompt_runtime_evidence_count": len(prompt_runtime_evidence),
+    }
     prompt_context = service._codex_initial_prompt_context(
         prompt_mode=prompt_mode,
         pm_team=pm_team,
@@ -107,11 +113,17 @@ def build_codex_llm_answer(
         quality_gate=quality_gate,
         followup_context=followup_context,
         attachments=attachments or [],
-        runtime_evidence=runtime_evidence or [],
+        runtime_evidence=prompt_runtime_evidence,
         scope_roots=scope_roots,
     )
     initial_prompt_stats = service._codex_prompt_stats(prompt_context)
+    llm_route = {
+        **llm_route,
+        "initial_prompt_estimated_tokens": initial_prompt_stats["estimated_prompt_tokens"],
+        "initial_prompt_chars": initial_prompt_stats["prompt_chars"],
+    }
     candidate_repo_count = len({item.get("repo") for item in candidate_paths})
+    initial_reasoning_effort = service._codex_reasoning_effort_for_route(routed_budget_mode)
     service._log_codex_prompt_timing(
         prompt_context=prompt_context,
         prompt_stats=initial_prompt_stats,
@@ -125,6 +137,11 @@ def build_codex_llm_answer(
         candidate_path_count=len(candidate_paths),
         candidate_repo_count=candidate_repo_count,
         scope_repo_count=len(scope_roots),
+        requested_budget=llm_budget_mode,
+        routed_budget=routed_budget_mode,
+        reasoning_effort=initial_reasoning_effort,
+        runtime_evidence_count=len(runtime_evidence or []),
+        prompt_runtime_evidence_count=len(prompt_runtime_evidence),
     )
     is_followup = bool(followup_context and (followup_context.get("used") or followup_context.get("question") or followup_context.get("recent_turns")))
     cache_key = service._answer_cache_key(
@@ -165,7 +182,8 @@ def build_codex_llm_answer(
         candidate_paths=candidate_paths,
         candidate_repo_count=candidate_repo_count,
         selected_model=selected_model,
-        reasoning_effort=service._codex_reasoning_effort_for_route(routed_budget_mode),
+        reasoning_effort=initial_reasoning_effort,
+        routed_budget_mode=routed_budget_mode,
         query_mode=query_mode,
         question=question,
         evidence_pack=evidence_pack,
@@ -232,6 +250,44 @@ def build_codex_llm_answer(
     if repair_will_run:
         repair_attempted = True
         repair_reason = "; ".join(severe_repair_reasons[:6])
+        repair_runtime_evidence = service._runtime_evidence_for_budget(runtime_evidence or [], "repair")
+        repair_candidate_paths = service._repair_candidate_paths_for_runtime_evidence(candidate_paths, repair_runtime_evidence)
+        preflight_repair_context = service._codex_repair_brief(
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            initial_answer=answer,
+            scope_roots=scope_roots,
+            candidate_paths=repair_candidate_paths,
+            runtime_evidence=repair_runtime_evidence,
+            repair_issues=list(dict.fromkeys([
+                *[str(issue) for issue in repair_issues if issue],
+                *(["Deep investigation: use the expanded candidate paths and explicitly resolve business ambiguity, caller/callee gaps, and missing source hops before finalizing."] if deep_needed else []),
+            ])),
+        )
+        preflight_repair_stats = service._codex_prompt_stats(preflight_repair_context)
+        if deep_needed and int(preflight_repair_stats["estimated_prompt_tokens"]) > service.codex_repair_prompt_token_limit:
+            repair_will_run = False
+            repair_attempted = False
+            repair_skipped_reason = (
+                f"repair_preflight_prompt_too_large:{preflight_repair_stats['estimated_prompt_tokens']}>{service.codex_repair_prompt_token_limit}"
+            )
+            _log_source_code_qa_timing(
+                "codex_repair_skip",
+                elapsed_ms=0,
+                trace_id=trace_id,
+                provider=service.llm_provider.name,
+                model=service._model_for_role("repair"),
+                query_mode=query_mode,
+                reason="repair_preflight_prompt_too_large",
+                phase="repair",
+                estimated_prompt_tokens=preflight_repair_stats["estimated_prompt_tokens"],
+                prompt_token_limit=service.codex_repair_prompt_token_limit,
+                candidate_path_count=len(repair_candidate_paths),
+                runtime_evidence_count=len(runtime_evidence or []),
+                prompt_runtime_evidence_count=len(repair_runtime_evidence),
+            )
+    if repair_will_run:
         if deep_needed:
             deep_context = service._codex_deep_investigation_context(
                 entries=entries,
@@ -275,7 +331,7 @@ def build_codex_llm_answer(
             structured_answer=structured_answer,
             scope_roots=scope_roots,
             candidate_paths=candidate_paths,
-            runtime_evidence=runtime_evidence or [],
+            runtime_evidence=service._runtime_evidence_for_budget(runtime_evidence or [], "repair"),
             repair_issues=repair_issues,
             deep_needed=deep_needed,
             repair_issue_count=repair_issue_count,

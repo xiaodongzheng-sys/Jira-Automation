@@ -144,6 +144,19 @@
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+  const formatTokenCount = (value) => {
+    const count = Math.max(0, Math.round(Number(value) || 0));
+    if (count >= 1000) return `${Math.round(count / 100) / 10}k`;
+    return String(count);
+  };
+
+  const tokenProgressText = (payload) => {
+    const tokens = Number(payload?.estimated_prompt_tokens || payload?.progress?.estimated_prompt_tokens || 0);
+    const risk = String(payload?.token_risk || payload?.progress?.token_risk || '');
+    if (!tokens) return '';
+    return ` Approx. input: ${formatTokenCount(tokens)} tokens${risk ? `, risk: ${risk}` : ''}.`;
+  };
+
   const jobUrl = (jobId) => jobsUrlTemplate.replace('__JOB_ID__', encodeURIComponent(jobId));
 
   const pollJobResult = async (jobId, action) => {
@@ -157,11 +170,12 @@
       const payload = await parseJsonResponse(response);
       if (!response.ok || payload.status === 'error') throw new Error(payload.message || 'Could not load PRD job status.');
       const message = payload.message || payload.progress?.message || '';
-      if (message && message !== lastMessage) {
-        lastMessage = message;
-        setStatus(message);
+      const progressText = message ? `${message}${tokenProgressText(payload)}` : '';
+      if (progressText && progressText !== lastMessage) {
+        lastMessage = progressText;
+        setStatus(progressText);
         if (resultPanel) {
-          resultPanel.innerHTML = `<div class="briefing-review-loading">${escapeHtml(message)}</div>`;
+          resultPanel.innerHTML = `<div class="briefing-review-loading">${escapeHtml(progressText)}</div>`;
         }
       }
       if (payload.state === 'completed') {
@@ -325,13 +339,14 @@
       ? `<span>Reviewed sections: ${escapeHtml(coverage.sections_assessed)}/${escapeHtml(coverage.selected_sections_total || coverage.sections_assessed)} selected${coverage.sections_total ? ` · ${escapeHtml(coverage.sections_total)} total` : ''}</span>`
       : '';
     const generationCoverageLine = coverage.mode
-      ? `<span>Coverage: ${escapeHtml(coverage.mode)} · ${escapeHtml(coverage.sections_covered || coverage.sections_assessed || 0)}/${escapeHtml(coverage.sections_total || coverage.selected_sections_total || 0)} sections${coverage.truncated ? ' · truncated' : ''}</span>`
+      ? `<span>Coverage: ${escapeHtml(coverage.mode)} · ${escapeHtml(coverage.sections_covered || coverage.sections_assessed || 0)}/${escapeHtml(coverage.sections_total || coverage.selected_sections_total || 0)} sections${coverage.truncated ? ' · truncated' : ''}${coverage.estimated_prompt_tokens ? ` · approx ${escapeHtml(formatTokenCount(coverage.estimated_prompt_tokens))} input tokens${coverage.token_risk ? ` (${escapeHtml(coverage.token_risk)})` : ''}` : ''}</span>`
       : '';
     const reportTemplatesTotal = Number(coverage.report_templates_total ?? coverage.linked_artifacts_total);
     const reportTemplatesReviewed = Number(coverage.report_templates_reviewed ?? coverage.linked_artifacts_reviewed ?? 0);
     const reportTemplatesFailed = Number(coverage.report_templates_failed ?? coverage.linked_artifacts_failed ?? 0);
+    const reportTemplatesCacheHits = Number(coverage.report_templates_cache_hits ?? coverage.linked_artifacts_cache_hits ?? 0);
     const linkedCoverageLine = !isSummary && Number.isFinite(reportTemplatesTotal) && reportTemplatesTotal > 0
-      ? `<span>Report templates reviewed: ${escapeHtml(reportTemplatesReviewed)}/${escapeHtml(reportTemplatesTotal)}${reportTemplatesFailed ? ` · ${escapeHtml(reportTemplatesFailed)} not reviewed` : ''}</span>`
+      ? `<span>Report templates reviewed: ${escapeHtml(reportTemplatesReviewed)}/${escapeHtml(reportTemplatesTotal)}${reportTemplatesCacheHits ? ` · ${escapeHtml(reportTemplatesCacheHits)} cached` : ''}${reportTemplatesFailed ? ` · ${escapeHtml(reportTemplatesFailed)} not reviewed` : ''}</span>`
       : '';
     const linkedArtifacts = Array.isArray(coverage.report_templates) ? coverage.report_templates : (Array.isArray(coverage.linked_artifacts) ? coverage.linked_artifacts : []);
     const linkedArtifactLine = !isSummary && linkedArtifacts.length
@@ -340,7 +355,7 @@
     const confluenceTablesTotal = Number(coverage.confluence_tables_total || 0);
     const confluenceTablesReviewed = Number(coverage.confluence_tables_reviewed || 0);
     const confluenceTableLine = !isSummary && Number.isFinite(confluenceTablesTotal) && confluenceTablesTotal > 0
-      ? `<span>Confluence tables reviewed: ${escapeHtml(confluenceTablesReviewed)}/${escapeHtml(confluenceTablesTotal)}</span>`
+      ? `<span>Confluence tables reviewed: ${escapeHtml(confluenceTablesReviewed)}/${escapeHtml(confluenceTablesTotal)}${coverage.table_truncated ? ` · compacted ${escapeHtml(coverage.table_rows_included || 0)} rows, omitted ${escapeHtml(coverage.table_rows_omitted || 0)}` : ''}</span>`
       : '';
     const confluenceTables = Array.isArray(coverage.confluence_tables) ? coverage.confluence_tables : [];
     const confluenceTableDetailLine = !isSummary && confluenceTables.length

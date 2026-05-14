@@ -64,6 +64,11 @@ MAX_USEFUL_AWARENESS_OTHER_UPDATES = 5
 MAX_UNANSWERED_SEATALK_QUESTION_HINTS = 10
 MAX_TEAM_MEMBER_REMINDER_HINTS = 12
 MAX_TOP_FOCUS_ITEMS = 3
+DAILY_BRIEF_SEATALK_PROMPT_MAX_CHARS = 180_000
+DAILY_BRIEF_SEATALK_PROMPT_RECENT_CHARS = 45_000
+DAILY_BRIEF_GMAIL_PROMPT_MAX_CHARS = 90_000
+DAILY_BRIEF_GMAIL_PROMPT_RECENT_CHARS = 24_000
+DAILY_BRIEF_TOKEN_CHARS_PER_TOKEN = 4
 LOW_SIGNAL_EMAIL_SUMMARY = "No clear action, blocker, key project update, or team follow-up was found in this window."
 EMPTY_TODO_SECTION_SUMMARY = "No Xiaodong-owned action or watch/delegate item found."
 ALLOWED_OTHER_UPDATE_SIGNAL_TYPES = {
@@ -136,6 +141,52 @@ ANTI_FRAUD_TEAM_MEMBERS = {
 TEAM_MEMBER_REMINDER_DOMAIN_OVERRIDES = {
     "sophia wang zijun": "Credit Risk",
 }
+DAILY_BRIEF_SIGNAL_TERMS = (
+    "xiaodong",
+    "anti-fraud",
+    "anti fraud",
+    "fraud",
+    "credit risk",
+    "ops risk",
+    "blocked",
+    "blocker",
+    "risk",
+    "incident",
+    "launch",
+    "go live",
+    "golive",
+    "uat",
+    "prd",
+    "brd",
+    "decision",
+    "decide",
+    "confirm",
+    "pending",
+    "follow up",
+    "follow-up",
+    "owner",
+    "due",
+    "deadline",
+    "mas",
+    "ojk",
+    "bsp",
+    "approval",
+    "approve",
+    "issue",
+    "fix",
+    "root cause",
+    "mitigation",
+    "next action",
+    "todo",
+    "请",
+    "确认",
+    "决定",
+    "风险",
+    "阻塞",
+    "问题",
+    "上线",
+    "待确认",
+)
 RAW_SEATALK_ID_PATTERN = re.compile(r"\b(?:group|buddy)-\d+\b|\bUID\s+\d+\b", re.IGNORECASE)
 TODO_ACTION_TYPES = {"direct_action", "watch_delegate"}
 WATCH_DELEGATE_HINTS = (
@@ -317,7 +368,7 @@ def build_seatalk_service(settings: Settings, *, data_root: Path) -> SeaTalkDash
         codex_workspace_root=Path(__file__).resolve().parent.parent,
         codex_model=resolve_codex_model(
             CODEX_ROUTE_CHEAP,
-            legacy_env_names=("SEATALK_CODEX_MODEL", "SOURCE_CODE_QA_CODEX_MODEL"),
+            legacy_env_names=("SEATALK_CODEX_MODEL",),
         ),
         codex_timeout_seconds=settings.source_code_qa_codex_timeout_seconds,
         codex_concurrency=settings.source_code_qa_codex_concurrency,
@@ -474,6 +525,8 @@ def build_daily_briefing(
         window_label = f"previous {hours} hours"
     history_text = filter_text_by_noise(history_text, config=intelligence_config, source="seatalk")
     gmail_history_text = str(gmail_history_text or "").strip()
+    seatalk_raw_chars = len(history_text)
+    gmail_raw_chars = len(gmail_history_text)
     seatalk_has_messages = any(line.startswith("[") for line in history_text.splitlines())
     gmail_has_messages = any(line.startswith("Message ") for line in gmail_history_text.splitlines())
     if not seatalk_has_messages and not gmail_has_messages:
@@ -511,6 +564,8 @@ def build_daily_briefing(
     )
     if gmail_history_text:
         gmail_history_text = gmail_history_text[:360_000]
+    seatalk_compact_chars = len(history_text)
+    gmail_compact_chars = len(gmail_history_text)
     unanswered_question_hints = _build_unanswered_seatalk_question_hints(history_text)
     team_member_reminder_candidates = _build_team_member_reminder_candidates(history_text)
     team_member_reminder_hints = _format_team_member_reminder_hints(team_member_reminder_candidates)
@@ -520,18 +575,45 @@ def build_daily_briefing(
         key_projects=key_project_candidates or [],
     )
     daily_match_summary = build_daily_match_summary(daily_matches)
+    prompt_history_text = _compact_daily_brief_source_excerpt(
+        history_text,
+        max_chars=DAILY_BRIEF_SEATALK_PROMPT_MAX_CHARS,
+        recent_chars=DAILY_BRIEF_SEATALK_PROMPT_RECENT_CHARS,
+    )
+    prompt_gmail_history_text = _compact_daily_brief_source_excerpt(
+        gmail_history_text,
+        max_chars=DAILY_BRIEF_GMAIL_PROMPT_MAX_CHARS,
+        recent_chars=DAILY_BRIEF_GMAIL_PROMPT_RECENT_CHARS,
+    )
+    source_token_ledger = {
+        "seatalk_raw_chars": seatalk_raw_chars,
+        "seatalk_compact_chars": seatalk_compact_chars,
+        "seatalk_prompt_chars": len(prompt_history_text),
+        "gmail_raw_chars": gmail_raw_chars,
+        "gmail_compact_chars": gmail_compact_chars,
+        "gmail_prompt_chars": len(prompt_gmail_history_text),
+    }
+    evidence_context = _build_daily_brief_evidence_context(
+        unanswered_question_hints=unanswered_question_hints,
+        team_member_reminder_candidates=team_member_reminder_candidates,
+        source_token_ledger=source_token_ledger,
+    )
+    prompt = _daily_brief_user_prompt(
+        history_text=prompt_history_text,
+        gmail_history_text=prompt_gmail_history_text,
+        hours=period_hours,
+        local_now=local_now,
+        window_label=window_label,
+        match_summary=daily_match_summary,
+        unanswered_question_hints=unanswered_question_hints,
+        team_member_reminder_hints=team_member_reminder_hints,
+        evidence_context=evidence_context,
+    )
+    source_token_ledger["final_prompt_chars"] = len(prompt)
+    source_token_ledger["final_estimated_prompt_tokens"] = _estimate_daily_prompt_tokens(prompt)
     _, parsed = service._run_codex_insights_prompt(
         system_prompt=_daily_brief_system_prompt(),
-        prompt=_daily_brief_user_prompt(
-            history_text=history_text,
-            gmail_history_text=gmail_history_text,
-            hours=period_hours,
-            local_now=local_now,
-            window_label=window_label,
-            match_summary=daily_match_summary,
-            unanswered_question_hints=unanswered_question_hints,
-            team_member_reminder_hints=team_member_reminder_hints,
-        ),
+        prompt=prompt,
     )
     name_mappings = _load_seatalk_name_mappings(service)
     project_updates = _dedupe_brief_items(
@@ -583,6 +665,7 @@ def build_daily_briefing(
         reminders=reminders,
         source_texts=[history_text, gmail_history_text],
         deduped_topic_count=deduped_topic_count,
+        token_ledger=source_token_ledger,
     )
     return {
         "project_updates": project_updates,
@@ -1111,6 +1194,7 @@ def _daily_brief_user_prompt(
     match_summary: str = "",
     unanswered_question_hints: str = "",
     team_member_reminder_hints: str = "",
+    evidence_context: str = "",
 ) -> str:
     window_text = window_label or f"previous {hours} hours"
     match_block = (
@@ -1136,6 +1220,14 @@ def _daily_brief_user_prompt(
         "Only create team_member_reminders from these deterministic candidates. "
         "If this block says there are no valid unresolved candidates, team_member_reminders must be an empty array.\n\n"
         if str(team_member_reminder_hints or "").strip()
+        else ""
+    )
+    evidence_context_block = (
+        "## Deterministic Daily Brief Evidence Bundle\n"
+        f"{evidence_context}\n"
+        "Treat this bundle as the first-pass source of truth for follow-up candidates, source-size diagnostics, and evidence refs. "
+        "Use the source excerpts below only to verify nuance and extract additional high-signal project updates or Xiaodong actions.\n\n"
+        if str(evidence_context or "").strip()
         else ""
     )
     return (
@@ -1185,6 +1277,7 @@ def _daily_brief_user_prompt(
         f"{match_block}"
         f"{unanswered_question_block}"
         f"{team_member_reminder_block}"
+        f"{evidence_context_block}"
         "## Exclusions\n"
         "For other_updates and team_member_reminders, ignore bot-generated alerts, automated reminders, system notifications, Jira/Confluence/calendar reminders, and no-reply notification emails unless a human adds meaningful follow-up in the same thread.\n\n"
         "For team_member_reminders, always exclude SDLC Checker and SG BAU SDLC material check content; those are automated release hygiene signals, not human team follow-up requests.\n\n"
@@ -1194,8 +1287,10 @@ def _daily_brief_user_prompt(
         "For evidence, provide only the source label. Do not include long snippets.\n\n"
         f"Window: {window_text}. Generated at: {local_now.isoformat()}.\n\n"
         "=== SeaTalk history ===\n"
+        "[focused evidence excerpt]\n"
         f"{history_text}\n\n"
         "=== Gmail thread history ===\n"
+        "[focused evidence excerpt]\n"
         f"{gmail_history_text or 'No Gmail messages were found in this window.'}"
     )
 
@@ -1238,6 +1333,117 @@ _UNANSWERED_PM_RELEVANT_TERMS = (
     "规则",
     "域名",
 )
+
+
+def _estimate_daily_prompt_tokens(text: str) -> int:
+    source = str(text or "")
+    if not source:
+        return 0
+    return max(1, (len(source) + DAILY_BRIEF_TOKEN_CHARS_PER_TOKEN - 1) // DAILY_BRIEF_TOKEN_CHARS_PER_TOKEN)
+
+
+def _build_daily_brief_evidence_context(
+    *,
+    unanswered_question_hints: str,
+    team_member_reminder_candidates: list[dict[str, str]] | None,
+    source_token_ledger: dict[str, int],
+) -> str:
+    payload = {
+        "unanswered_mentions": [
+            line[2:] if line.startswith("- ") else line
+            for line in str(unanswered_question_hints or "").splitlines()
+            if line.strip()
+        ][:MAX_UNANSWERED_SEATALK_QUESTION_HINTS],
+        "candidate_followups": _compact_daily_followup_candidates(team_member_reminder_candidates),
+        "token_ledger": source_token_ledger,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _compact_daily_followup_candidates(candidates: list[dict[str, str]] | None) -> list[dict[str, str]]:
+    if not candidates:
+        return []
+    compacted: list[dict[str, str]] = []
+    for item in candidates:
+        compacted.append(
+            {
+                "person": str(item.get("person") or "").strip(),
+                "source": (
+                    f"{str(item.get('group') or '').strip()} / thread: {str(item.get('thread') or '').strip()}"
+                    if str(item.get("thread") or "").strip()
+                    else str(item.get("group") or "").strip()
+                ),
+                "timestamp": str(item.get("timestamp") or "").strip(),
+                "requester": str(item.get("sender") or "").strip(),
+                "ask": _clip_hint_text(item.get("text"), limit=220),
+            }
+        )
+    return compacted[:MAX_TEAM_MEMBER_REMINDER_HINTS]
+
+
+def _compact_daily_brief_source_excerpt(text: str, *, max_chars: int, recent_chars: int) -> str:
+    source = str(text or "").strip()
+    if not source or len(source) <= max_chars:
+        return source
+    selected = _daily_brief_signal_excerpt(source, max_chars=max(1_000, max_chars - recent_chars))
+    recent = _tail_by_line_budget(source, max_chars=recent_chars)
+    parts = []
+    if selected:
+        parts.append("## High-signal lines\n" + selected)
+    if recent:
+        parts.append("## Recent tail\n" + recent)
+    compacted = "\n\n".join(parts).strip()
+    if len(compacted) <= max_chars:
+        return compacted
+    return compacted[:max_chars].rstrip()
+
+
+def _daily_brief_signal_excerpt(text: str, *, max_chars: int) -> str:
+    signal_terms = _daily_brief_signal_terms()
+    selected: list[str] = []
+    seen: set[str] = set()
+    current_header = ""
+
+    def add(line: str) -> None:
+        clean = line.rstrip()
+        if not clean or clean in seen:
+            return
+        selected.append(clean)
+        seen.add(clean)
+
+    for line in str(text or "").splitlines():
+        clean = line.rstrip()
+        if _SEATALK_HISTORY_HEADER_RE.match(clean.strip()):
+            current_header = clean
+            continue
+        lowered = clean.casefold()
+        if not any(term in lowered for term in signal_terms):
+            continue
+        if current_header:
+            add(current_header)
+        add(clean)
+        if sum(len(item) + 1 for item in selected) >= max_chars:
+            break
+    return "\n".join(selected).strip()[:max_chars].rstrip()
+
+
+def _tail_by_line_budget(text: str, *, max_chars: int) -> str:
+    lines: list[str] = []
+    total = 0
+    for line in reversed(str(text or "").splitlines()):
+        clean = line.rstrip()
+        line_chars = len(clean) + 1
+        if lines and total + line_chars > max_chars:
+            break
+        lines.append(clean)
+        total += line_chars
+    return "\n".join(reversed(lines)).strip()
+
+
+def _daily_brief_signal_terms() -> tuple[str, ...]:
+    people = {person.casefold() for person in TEAM_MEMBER_REMINDER_ALLOWED_PEOPLE.values()}
+    aliases = {alias.casefold() for alias in TEAM_MEMBER_REMINDER_ALLOWED_PEOPLE}
+    return tuple(dict.fromkeys([*DAILY_BRIEF_SIGNAL_TERMS, *people, *aliases]))
 
 
 def _build_unanswered_seatalk_question_hints(history_text: str) -> str:
@@ -1894,6 +2100,7 @@ def _build_quality_metadata(
     reminders: list[dict[str, Any]],
     source_texts: list[str],
     deduped_topic_count: int,
+    token_ledger: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     source_types = {
         str(item.get("source_type") or "").strip().lower()
@@ -1920,6 +2127,7 @@ def _build_quality_metadata(
         "direct_action_count": len(direct_action_todos),
         "watch_delegate_count": len(watch_delegate_todos),
         "manual_review_notes": manual_notes[:3],
+        "token_ledger": dict(token_ledger or {}),
     }
 
 

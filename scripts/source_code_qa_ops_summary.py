@@ -159,6 +159,29 @@ def build_summary(data_root: Path, *, limit: int = 200, strict: bool = False) ->
     if telemetry_rows:
         status_counts = Counter(str(row.get("status") or "unknown") for row in telemetry_rows)
         route_counts = Counter(str((row.get("llm_route") or {}).get("mode") or row.get("answer_mode") or "unknown") for row in telemetry_rows)
+        budget_counts = Counter(str(row.get("llm_budget_mode") or row.get("routed_budget") or "unknown") for row in telemetry_rows)
+        model_counts = Counter(str(row.get("llm_model") or row.get("effective_model") or "unknown") for row in telemetry_rows)
+        token_bands = Counter()
+        for row in telemetry_rows:
+            usage = row.get("llm_usage") if isinstance(row.get("llm_usage"), dict) else {}
+            prompt_tokens = usage.get("prompt_tokens", usage.get("promptTokenCount"))
+            if prompt_tokens is None:
+                codex_summary = row.get("codex_cli_summary") if isinstance(row.get("codex_cli_summary"), dict) else {}
+                prompt_tokens = codex_summary.get("estimated_prompt_tokens")
+            try:
+                prompt_value = int(prompt_tokens or 0)
+            except (TypeError, ValueError):
+                prompt_value = 0
+            if prompt_value <= 0:
+                token_bands["unknown"] += 1
+            elif prompt_value < 6000:
+                token_bands["lt6k"] += 1
+            elif prompt_value < 12000:
+                token_bands["6k_12k"] += 1
+            elif prompt_value < 24000:
+                token_bands["12k_24k"] += 1
+            else:
+                token_bands["gte24k"] += 1
         policy_counts = Counter(str((row.get("answer_contract") or {}).get("status") or "unknown") for row in telemetry_rows)
         cache_hits = sum(1 for row in telemetry_rows if bool(row.get("llm_cached")))
         cache_eligible = sum(1 for row in telemetry_rows if str(row.get("llm_provider") or "") and row.get("llm_cached") is not None)
@@ -173,6 +196,9 @@ def build_summary(data_root: Path, *, limit: int = 200, strict: bool = False) ->
         lines.append(f"telemetry_window={len(telemetry_rows)} newest={newest}")
         lines.append(f"query_status={_counter_text(status_counts)}")
         lines.append(f"routes={_counter_text(route_counts)}")
+        lines.append(f"llm_budgets={_counter_text(budget_counts, limit=6)}")
+        lines.append(f"llm_models={_counter_text(model_counts, limit=6)}")
+        lines.append(f"prompt_token_bands={_counter_text(token_bands, limit=6)}")
         lines.append(f"answer_contract={_counter_text(policy_counts)}")
         lines.append(f"llm_cache_hits={cache_hits}/{cache_eligible}")
         lines.append(f"latency_ms_p50={int(statistics.median(latencies)) if latencies else 0} p95={_p95(latencies)}")

@@ -14,6 +14,12 @@ import time
 from typing import Any
 
 from bpmis_jira_tool.errors import ToolError
+from bpmis_jira_tool.llm_call_ledger import (
+    estimate_prompt_tokens,
+    infer_llm_flow,
+    prompt_sha256,
+    record_llm_call,
+)
 from bpmis_jira_tool.source_code_qa_runtime_policy import (
     CODEX_SESSION_MODE_EPHEMERAL,
     CODEX_SESSION_MODE_RESUME,
@@ -194,6 +200,19 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                     error=str(error),
                     context=failure_context,
                 )
+                self._record_llm_call_ledger(
+                    payload=payload,
+                    prompt=prompt,
+                    prompt_mode=prompt_mode,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    status="timeout",
+                    error_category="timeout",
+                    error=str(error),
+                    started_at=started_at,
+                    command_mode=command_mode,
+                    queue_wait_ms=queue_wait_ms,
+                )
                 raise ToolError(f"Codex unavailable; used code search fallback. Codex CLI timed out after {timeout_seconds}s.") from error
             except OSError as error:
                 self._log_codex_failure(
@@ -207,6 +226,19 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                     attempt_started=attempt_started,
                     error=str(error),
                     context=failure_context,
+                )
+                self._record_llm_call_ledger(
+                    payload=payload,
+                    prompt=prompt,
+                    prompt_mode=prompt_mode,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    status="error",
+                    error_category="os_error",
+                    error=str(error),
+                    started_at=started_at,
+                    command_mode=command_mode,
+                    queue_wait_ms=queue_wait_ms,
                 )
                 raise ToolError(f"Codex unavailable; used code search fallback. {error}") from error
             output_file.seek(0)
@@ -227,6 +259,19 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                 error=detail[:500],
                 context=failure_context,
             )
+            self._record_llm_call_ledger(
+                payload=payload,
+                prompt=prompt,
+                prompt_mode=prompt_mode,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                status="error",
+                error_category="nonzero_exit",
+                error=detail[:500],
+                started_at=started_at,
+                command_mode=command_mode,
+                queue_wait_ms=queue_wait_ms,
+            )
             raise ToolError(f"Codex unavailable; used code search fallback. Codex CLI exited with {result.returncode}. {detail[:500]}")
         if not answer:
             answer = self._extract_last_json_event_message(result.stdout)
@@ -246,6 +291,19 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                 error=error_answer,
                 context=failure_context,
             )
+            self._record_llm_call_ledger(
+                payload=payload,
+                prompt=prompt,
+                prompt_mode=prompt_mode,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                status="error",
+                error_category="api_error_payload",
+                error=error_answer,
+                started_at=started_at,
+                command_mode=command_mode,
+                queue_wait_ms=queue_wait_ms,
+            )
             raise ToolError(f"Codex unavailable; used code search fallback. Codex CLI returned API error: {error_answer[:500]}")
         if not answer:
             self._log_codex_failure(
@@ -260,6 +318,19 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                 result=result,
                 context=failure_context,
             )
+            self._record_llm_call_ledger(
+                payload=payload,
+                prompt=prompt,
+                prompt_mode=prompt_mode,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                status="error",
+                error_category="empty_answer",
+                error="Codex CLI returned no readable answer.",
+                started_at=started_at,
+                command_mode=command_mode,
+                queue_wait_ms=queue_wait_ms,
+            )
             raise ToolError("Codex unavailable; used code search fallback. Codex CLI returned no readable answer.")
         latency_ms = int((time.time() - started_at) * 1000)
         trace = self._extract_codex_trace(result.stdout, result.stderr)
@@ -272,6 +343,18 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                 "latency_ms": latency_ms,
                 "timeout": False,
             }
+        )
+        self._record_llm_call_ledger(
+            payload=payload,
+            prompt=prompt,
+            prompt_mode=prompt_mode,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            status="ok",
+            started_at=started_at,
+            command_mode=command_mode,
+            queue_wait_ms=queue_wait_ms,
+            latency_ms=latency_ms,
         )
         return LLMGenerateResult(
             payload={
@@ -304,6 +387,57 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                     "command": self._command_summary(command),
                 },
             ),
+        )
+
+    def _record_llm_call_ledger(
+        self,
+        *,
+        payload: dict[str, Any],
+        prompt: str,
+        prompt_mode: str,
+        model: str,
+        reasoning_effort: str,
+        status: str,
+        started_at: float,
+        command_mode: str,
+        queue_wait_ms: int,
+        latency_ms: int | None = None,
+        error_category: str = "",
+        error: str = "",
+    ) -> None:
+        prompt_chars = int(payload.get("_codex_prompt_chars") or len(prompt))
+        prompt_bytes = int(payload.get("_codex_prompt_bytes") or len(prompt.encode("utf-8")))
+        estimated_tokens = estimate_prompt_tokens(prompt, payload.get("_codex_estimated_prompt_tokens"))
+        flow = str(payload.get("_llm_ledger_flow") or infer_llm_flow(prompt_mode))
+        route = str(payload.get("_llm_ledger_route") or "")
+        record_llm_call(
+            provider=self.name,
+            flow=flow,
+            prompt_mode=prompt_mode,
+            route=route,
+            model_id=model,
+            reasoning_effort=reasoning_effort,
+            status=status,
+            latency_ms=int(latency_ms if latency_ms is not None else (time.time() - started_at) * 1000),
+            estimated_prompt_tokens=estimated_tokens,
+            prompt_chars=prompt_chars,
+            prompt_bytes=prompt_bytes,
+            prompt_sha256=prompt_sha256(prompt),
+            cache_hit=bool(payload.get("_llm_cache_hit")),
+            repair_attempted=bool(payload.get("_llm_repair_attempted") or payload.get("_codex_phase") == "repair"),
+            error_category=error_category,
+            error=error,
+            trace_id=str(payload.get("_codex_trace_id") or payload.get("_llm_trace_id") or ""),
+            session_mode=self.session_mode,
+            command_mode=command_mode,
+            queue_wait_ms=queue_wait_ms,
+            attempt_count=1,
+            extra={
+                "codex_phase": str(payload.get("_codex_phase") or ""),
+                "candidate_path_count": int(payload.get("_codex_candidate_path_count") or 0),
+                "candidate_repo_count": int(payload.get("_codex_candidate_repo_count") or 0),
+                "repair_issue_count": int(payload.get("_codex_repair_issue_count") or 0),
+            },
         )
 
     def _build_codex_command(

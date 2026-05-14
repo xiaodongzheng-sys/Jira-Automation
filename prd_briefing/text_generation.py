@@ -15,7 +15,7 @@ class CodexTextGenerationClient:
         self.prompt_mode = str(prompt_mode or "prd_briefing_codex").strip() or "prd_briefing_codex"
         self.codex_model = resolve_codex_model(
             CODEX_ROUTE_BALANCED,
-            legacy_env_names=("PRD_BRIEFING_CODEX_MODEL", "SOURCE_CODE_QA_CODEX_MODEL"),
+            legacy_env_names=("PRD_BRIEFING_CODEX_MODEL",),
             explicit_model=codex_model,
         )
         self.codex_reasoning_effort = resolve_codex_reasoning_effort(CODEX_ROUTE_BALANCED)
@@ -41,8 +41,15 @@ class CodexTextGenerationClient:
                 "contents": [{"parts": [{"text": user_prompt}]}],
                 "codex_prompt_mode": self.prompt_mode,
                 "_codex_reasoning_effort": self.codex_reasoning_effort,
+                "_llm_ledger_flow": self._ledger_flow(),
+                "_llm_ledger_route": CODEX_ROUTE_BALANCED,
             },
             primary_model=self.codex_model,
             fallback_model=self.codex_model,
         )
         return self.provider.extract_text(result.payload)
+
+    def _ledger_flow(self) -> str:
+        if self.prompt_mode.startswith("meeting_recorder"):
+            return "meeting_recorder"
+        return "prd_briefing"

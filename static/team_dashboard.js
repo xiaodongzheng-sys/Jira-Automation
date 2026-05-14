@@ -2386,25 +2386,29 @@
       if (payload.status === 'queued' && payload.job_id) {
         payload = await pollJobResult(payload.job_id, {
           fallbackMessage: isSummary ? 'Could not summarize PRD.' : 'Could not review PRD.',
-          onProgress: (message) => {
-            panel.innerHTML = `<div class="team-dashboard-review-loading">${escapeHtml(message)}</div>`;
+          onProgress: (message, progressPayload) => {
+            const tokens = Number(progressPayload?.estimated_prompt_tokens || progressPayload?.progress?.estimated_prompt_tokens || 0);
+            const risk = String(progressPayload?.token_risk || progressPayload?.progress?.token_risk || '');
+            const tokenText = tokens ? ` Approx. input: ${formatTokenCount(tokens)} tokens${risk ? `, risk: ${risk}` : ''}.` : '';
+            panel.innerHTML = `<div class="team-dashboard-review-loading">${escapeHtml(`${message}${tokenText}`)}</div>`;
           },
         });
       }
       const result = isSummary ? (payload.summary || {}) : (payload.review || {});
       const coverage = payload.coverage || {};
       const coverageLine = coverage.mode
-        ? `<span>Coverage: ${escapeHtml(coverage.mode)} · ${escapeHtml(coverage.sections_covered || coverage.sections_assessed || 0)}/${escapeHtml(coverage.sections_total || coverage.selected_sections_total || 0)} sections${coverage.truncated ? ' · truncated' : ''}</span>`
+        ? `<span>Coverage: ${escapeHtml(coverage.mode)} · ${escapeHtml(coverage.sections_covered || coverage.sections_assessed || 0)}/${escapeHtml(coverage.sections_total || coverage.selected_sections_total || 0)} sections${coverage.truncated ? ' · truncated' : ''}${coverage.estimated_prompt_tokens ? ` · approx ${escapeHtml(formatTokenCount(coverage.estimated_prompt_tokens))} input tokens${coverage.token_risk ? ` (${escapeHtml(coverage.token_risk)})` : ''}` : ''}</span>`
         : '';
       const templateTotal = Number(coverage.report_templates_total ?? coverage.linked_artifacts_total);
       const templateReviewed = Number(coverage.report_templates_reviewed ?? coverage.linked_artifacts_reviewed ?? 0);
+      const templateCacheHits = Number(coverage.report_templates_cache_hits ?? coverage.linked_artifacts_cache_hits ?? 0);
       const templateLine = !isSummary && Number.isFinite(templateTotal) && templateTotal > 0
-        ? `<span>Report templates reviewed: ${escapeHtml(templateReviewed)}/${escapeHtml(templateTotal)}</span>`
+        ? `<span>Report templates reviewed: ${escapeHtml(templateReviewed)}/${escapeHtml(templateTotal)}${templateCacheHits ? ` · ${escapeHtml(templateCacheHits)} cached` : ''}</span>`
         : '';
       const confluenceTablesTotal = Number(coverage.confluence_tables_total || 0);
       const confluenceTablesReviewed = Number(coverage.confluence_tables_reviewed || 0);
       const confluenceTableLine = !isSummary && Number.isFinite(confluenceTablesTotal) && confluenceTablesTotal > 0
-        ? `<span>Confluence tables reviewed: ${escapeHtml(confluenceTablesReviewed)}/${escapeHtml(confluenceTablesTotal)}</span>`
+        ? `<span>Confluence tables reviewed: ${escapeHtml(confluenceTablesReviewed)}/${escapeHtml(confluenceTablesTotal)}${coverage.table_truncated ? ` · compacted ${escapeHtml(coverage.table_rows_included || 0)} rows, omitted ${escapeHtml(coverage.table_rows_omitted || 0)}` : ''}</span>`
         : '';
       const sheetScreenshotTotal = Number(coverage.google_sheet_screenshots_total || 0);
       const sheetScreenshotReviewed = Number(coverage.google_sheet_screenshots_reviewed || 0);

@@ -22,7 +22,7 @@ from .confluence import ConfluenceConnector, IngestedConfluencePage
 from .storage import BriefingStore
 
 
-PRD_REVIEW_PROMPT_VERSION = "v11_prd_review_table_only_no_image_evidence"
+PRD_REVIEW_PROMPT_VERSION = "v12_prd_review_token_optimized_table_packing"
 PRD_SUMMARY_PROMPT_VERSION = "v2_prd_summary_hybrid_sections"
 PRD_REVIEW_MAX_SOURCE_CHARS = 90_000
 PRD_HYBRID_BATCH_SOURCE_CHARS = 45_000
@@ -31,8 +31,8 @@ PRD_LINKED_SPREADSHEET_MAX_SHEETS = 10
 PRD_LINKED_SPREADSHEET_MAX_ROWS_PER_SHEET = 80
 PRD_LINKED_SPREADSHEET_MAX_COLS = 20
 PRD_LINKED_SPREADSHEET_MAX_TEXT_CHARS = 60_000
-PRD_REVIEW_TABLE_MEDIA_MAX_ROWS = 120
-PRD_REVIEW_TABLE_MEDIA_MAX_CHARS = 20_000
+PRD_REVIEW_TABLE_FULL_CHAR_LIMIT = 12_000
+PRD_REVIEW_TABLE_TOTAL_CHARS = 35_000
 PRD_REPORT_SECTION_KEYWORDS = ("report", "layout", "format", "template", "register", "field name", "字段", "报表", "报告", "模板", "格式")
 PRD_GOOGLE_SHEET_ARTIFACT_CACHE_VERSION = "v1"
 PRD_GOOGLE_SHEET_SCREENSHOT_EVIDENCE_CACHE_VERSION = "v1"
@@ -49,7 +49,7 @@ PRD_ANTI_FRAUD_KEYWORDS = (
 )
 PRD_BRIEFING_REVIEW_CACHE_KEY = "__prd_briefing_url_review__"
 PRD_URL_SUMMARY_CACHE_KEY = "__prd_url_summary__"
-PRDProgressCallback = Callable[[str, str, int, int], None]
+PRDProgressCallback = Callable[..., None]
 
 
 @dataclass(frozen=True)
@@ -141,6 +141,7 @@ class PRDReviewService:
                 prompt_version=PRD_REVIEW_PROMPT_VERSION,
                 linked_spreadsheet_evidence=linked_spreadsheet_evidence,
                 google_sheet_screenshot_evidence=google_sheet_screenshot_evidence,
+                progress_callback=progress_callback,
             )
         except Exception as error:  # noqa: BLE001 - persist the failure for visible retry context.
             self.store.save_prd_review_result(
@@ -239,6 +240,7 @@ class PRDReviewService:
                 prompt_version=prompt_version,
                 linked_spreadsheet_evidence=linked_spreadsheet_evidence,
                 google_sheet_screenshot_evidence=google_sheet_screenshot_evidence,
+                progress_callback=progress_callback,
             )
         except Exception as error:  # noqa: BLE001 - persist the failure for visible retry context.
             self.store.save_prd_review_result(
@@ -304,6 +306,7 @@ class PRDReviewService:
                 page=page,
                 language="zh",
                 prompt_version=PRD_SUMMARY_PROMPT_VERSION,
+                progress_callback=progress_callback,
             )
         except Exception as error:  # noqa: BLE001 - persist the failure for visible retry context.
             self.store.save_prd_review_result(
@@ -370,6 +373,7 @@ class PRDReviewService:
                 page=page,
                 language=normalized.language,
                 prompt_version=prompt_version,
+                progress_callback=progress_callback,
             )
         except Exception as error:  # noqa: BLE001 - persist the failure for visible retry context.
             self.store.save_prd_review_result(
@@ -416,6 +420,7 @@ class PRDReviewService:
         prompt_version: str,
         linked_spreadsheet_evidence: dict[str, Any] | None,
         google_sheet_screenshot_evidence: dict[str, Any] | None,
+        progress_callback: PRDProgressCallback | None = None,
     ) -> dict[str, Any]:
         if _generation_mode_for_page(page) == "single":
             prompt = build_prd_review_prompt(
@@ -426,6 +431,16 @@ class PRDReviewService:
                 language=language,
                 linked_spreadsheet_evidence=linked_spreadsheet_evidence,
                 google_sheet_screenshot_evidence=google_sheet_screenshot_evidence,
+            )
+            estimated_tokens = _estimate_prd_prompt_tokens_from_chars(len(prompt))
+            _emit_prd_progress(
+                progress_callback,
+                "generating_review",
+                f"Generating review. Approx. input: {estimated_tokens:,} tokens.",
+                3,
+                4,
+                estimated_prompt_tokens=estimated_tokens,
+                token_risk=_prd_token_risk(estimated_tokens),
             )
             generated = generate_prd_review_with_codex(
                 prompt=prompt,
@@ -453,6 +468,16 @@ class PRDReviewService:
                 batch_index=batch_index,
                 batch_total=len(batches),
             )
+            estimated_tokens = _estimate_prd_prompt_tokens_from_chars(len(prompt))
+            _emit_prd_progress(
+                progress_callback,
+                "generating_review",
+                f"Generating review batch {batch_index}/{len(batches)}. Approx. input: {estimated_tokens:,} tokens.",
+                batch_index,
+                len(batches),
+                estimated_prompt_tokens=estimated_tokens,
+                token_risk=_prd_token_risk(estimated_tokens),
+            )
             generated = generate_prd_review_with_codex(
                 prompt=prompt,
                 settings=self.settings,
@@ -478,6 +503,16 @@ class PRDReviewService:
             linked_spreadsheet_evidence=linked_spreadsheet_evidence,
             google_sheet_screenshot_evidence=google_sheet_screenshot_evidence,
         )
+        estimated_tokens = _estimate_prd_prompt_tokens_from_chars(len(synthesis_prompt))
+        _emit_prd_progress(
+            progress_callback,
+            "generating_review",
+            f"Generating final review. Approx. input: {estimated_tokens:,} tokens.",
+            3,
+            4,
+            estimated_prompt_tokens=estimated_tokens,
+            token_risk=_prd_token_risk(estimated_tokens),
+        )
         final = generate_prd_review_with_codex(
             prompt=synthesis_prompt,
             settings=self.settings,
@@ -501,6 +536,7 @@ class PRDReviewService:
         page: IngestedConfluencePage,
         language: str,
         prompt_version: str,
+        progress_callback: PRDProgressCallback | None = None,
     ) -> dict[str, Any]:
         if _generation_mode_for_page(page) == "single":
             prompt = build_prd_summary_prompt(
@@ -509,6 +545,16 @@ class PRDReviewService:
                 prd_url=prd_url,
                 page=page,
                 language=language,
+            )
+            estimated_tokens = _estimate_prd_prompt_tokens_from_chars(len(prompt))
+            _emit_prd_progress(
+                progress_callback,
+                "generating_summary",
+                f"Generating summary. Approx. input: {estimated_tokens:,} tokens.",
+                1,
+                2,
+                estimated_prompt_tokens=estimated_tokens,
+                token_risk=_prd_token_risk(estimated_tokens),
             )
             return generate_prd_summary_with_codex(
                 prompt=prompt,
@@ -530,6 +576,16 @@ class PRDReviewService:
                 language=language,
                 batch_index=batch_index,
                 batch_total=len(batches),
+            )
+            estimated_tokens = _estimate_prd_prompt_tokens_from_chars(len(prompt))
+            _emit_prd_progress(
+                progress_callback,
+                "generating_summary",
+                f"Generating summary batch {batch_index}/{len(batches)}. Approx. input: {estimated_tokens:,} tokens.",
+                batch_index,
+                len(batches),
+                estimated_prompt_tokens=estimated_tokens,
+                token_risk=_prd_token_risk(estimated_tokens),
             )
             generated = generate_prd_summary_with_codex(
                 prompt=prompt,
@@ -553,6 +609,16 @@ class PRDReviewService:
             page=page,
             language=language,
             batch_outputs=batch_outputs,
+        )
+        estimated_tokens = _estimate_prd_prompt_tokens_from_chars(len(synthesis_prompt))
+        _emit_prd_progress(
+            progress_callback,
+            "generating_summary",
+            f"Generating final summary. Approx. input: {estimated_tokens:,} tokens.",
+            1,
+            2,
+            estimated_prompt_tokens=estimated_tokens,
+            token_risk=_prd_token_risk(estimated_tokens),
         )
         final = generate_prd_summary_with_codex(
             prompt=synthesis_prompt,
@@ -678,30 +744,57 @@ class PRDReviewService:
 
 
 def _build_prd_source(page: IngestedConfluencePage, *, max_chars: int = PRD_REVIEW_MAX_SOURCE_CHARS) -> str:
+    return str(_build_prd_source_payload(page, max_chars=max_chars).get("source") or "")
+
+
+def _build_prd_source_payload(
+    page: IngestedConfluencePage,
+    *,
+    max_chars: int = PRD_REVIEW_MAX_SOURCE_CHARS,
+    section_indexes: list[int] | None = None,
+) -> dict[str, Any]:
     sections = []
     used_chars = 0
-    for index, section in enumerate(page.sections, start=1):
-        content = _build_review_section_content(page=page, section=section)
+    truncated = False
+    table_context = _new_table_pack_context()
+    effective_indexes = section_indexes if section_indexes and len(section_indexes) == len(page.sections) else list(range(1, len(page.sections) + 1))
+    for index, section in zip(effective_indexes, page.sections):
+        content = _build_review_section_content(page=page, section=section, table_context=table_context)
         if not content:
             continue
         block = f"## Section {index}: {section.section_path}\n{content}"
         remaining = max_chars - used_chars
         if remaining <= 0:
+            truncated = True
             break
         if len(block) > remaining:
             block = block[:remaining].rstrip() + "\n[Truncated because the PRD is long.]"
+            truncated = True
         sections.append(block)
         used_chars += len(block)
     source = "\n\n".join(sections).strip()
     if not source:
         raise ToolError("PRD page did not contain readable text.")
-    return source
+    table_stats = [
+        {key: value for key, value in item.items() if key != "text"}
+        for item in table_context["tables"].values()
+    ]
+    return {
+        "source": source,
+        "char_count": len(source),
+        "truncated": truncated,
+        "table_stats": table_stats,
+        "table_rows_included": sum(int(item.get("rows_included") or 0) for item in table_stats),
+        "table_rows_omitted": sum(int(item.get("rows_omitted") or 0) for item in table_stats),
+        "table_truncated": any(bool(item.get("truncated")) for item in table_stats),
+    }
 
 
-def _build_review_section_content(*, page: IngestedConfluencePage, section: Any) -> str:
+def _build_review_section_content(*, page: IngestedConfluencePage, section: Any, table_context: dict[str, Any] | None = None) -> str:
     content = str(getattr(section, "content", "") or "").strip()
     media_blocks: list[str] = []
     media_dict = getattr(page, "media_dict", {}) or {}
+    context = table_context if table_context is not None else _new_table_pack_context()
     for media_ref in getattr(section, "media_refs", []) or []:
         media_id = str(media_ref or "").strip()
         if not media_id:
@@ -709,7 +802,7 @@ def _build_review_section_content(*, page: IngestedConfluencePage, section: Any)
         media = media_dict.get(media_id) or {}
         if str(media.get("type") or "") != "table":
             continue
-        table_text = _format_table_media_for_review(media_id, media)
+        table_text = _format_table_media_for_review(media_id, media, section=section, table_context=context)
         if not table_text:
             continue
         placeholder = f"[{media_id}]"
@@ -720,10 +813,37 @@ def _build_review_section_content(*, page: IngestedConfluencePage, section: Any)
     return "\n".join(part for part in [content, *media_blocks] if str(part or "").strip()).strip()
 
 
-def _format_table_media_for_review(media_id: str, media: dict[str, Any]) -> str:
+def _new_table_pack_context() -> dict[str, Any]:
+    return {"remaining_chars": PRD_REVIEW_TABLE_TOTAL_CHARS, "tables": {}}
+
+
+def _format_table_media_for_review(
+    media_id: str,
+    media: dict[str, Any],
+    *,
+    section: Any | None = None,
+    table_context: dict[str, Any] | None = None,
+) -> str:
+    context = table_context if table_context is not None else _new_table_pack_context()
+    cached = context["tables"].get(media_id)
+    if cached:
+        return str(cached.get("text") or "")
+    rows = _extract_table_media_rows(media)
+    result = _pack_table_rows_for_review(
+        media_id=media_id,
+        rows=rows,
+        section=section,
+        remaining_chars=int(context.get("remaining_chars") or 0),
+    )
+    context["remaining_chars"] = max(0, int(context.get("remaining_chars") or 0) - len(result["text"]))
+    context["tables"][media_id] = result
+    return str(result.get("text") or "")
+
+
+def _extract_table_media_rows(media: dict[str, Any]) -> list[str]:
     html = str(media.get("content") or "")
     if not html.strip():
-        return ""
+        return []
     soup = BeautifulSoup(html, "html.parser")
     rows: list[str] = []
     for row in soup.find_all("tr"):
@@ -735,18 +855,105 @@ def _format_table_media_for_review(media_id: str, media: dict[str, Any]) -> str:
         if not cells:
             continue
         rows.append(" | ".join(cells))
-        if len(rows) >= PRD_REVIEW_TABLE_MEDIA_MAX_ROWS:
-            rows.append("[Table truncated after 120 rows.]")
-            break
     if not rows:
         fallback = re.sub(r"\n{3,}", "\n\n", soup.get_text("\n", strip=True)).strip()
         if not fallback:
-            return ""
+            return []
         rows = [fallback]
-    table_text = "\n".join(rows).strip()
-    if len(table_text) > PRD_REVIEW_TABLE_MEDIA_MAX_CHARS:
-        table_text = table_text[:PRD_REVIEW_TABLE_MEDIA_MAX_CHARS].rstrip() + "\n[Table truncated because it is long.]"
-    return f"[{media_id} table content]\n{table_text}"
+    return rows
+
+
+def _pack_table_rows_for_review(*, media_id: str, rows: list[str], section: Any | None, remaining_chars: int) -> dict[str, Any]:
+    rows_total = len(rows)
+    if not rows:
+        return {
+            "media_id": media_id,
+            "text": "",
+            "rows_total": 0,
+            "rows_included": 0,
+            "rows_omitted": 0,
+            "truncated": False,
+            "char_count": 0,
+        }
+    if remaining_chars <= 0:
+        text = f"[{media_id} table content omitted because the table evidence budget was reached.]"
+        return {
+            "media_id": media_id,
+            "text": text,
+            "rows_total": rows_total,
+            "rows_included": 0,
+            "rows_omitted": rows_total,
+            "truncated": True,
+            "char_count": len(text),
+        }
+    full_body = "\n".join(rows).strip()
+    if len(full_body) <= PRD_REVIEW_TABLE_FULL_CHAR_LIMIT and len(f"[{media_id} table content]\n{full_body}") <= remaining_chars:
+        text = f"[{media_id} table content]\n{full_body}"
+        return {
+            "media_id": media_id,
+            "text": text,
+            "rows_total": rows_total,
+            "rows_included": rows_total,
+            "rows_omitted": 0,
+            "truncated": False,
+            "char_count": len(text),
+        }
+
+    selected_indexes = set(range(min(3, rows_total)))
+    identifiers = _section_identifier_terms(section)
+    if identifiers:
+        for row_index, row in enumerate(rows):
+            row_text = row.casefold()
+            if any(identifier in row_text for identifier in identifiers):
+                selected_indexes.update(index for index in (row_index - 1, row_index, row_index + 1) if 0 <= index < rows_total)
+
+    selected_rows: list[tuple[int, str]] = []
+    note = "[Table compacted: only header, first rows, identifier-matched rows, and neighboring rows are included.]"
+    budget = max(0, remaining_chars - len(f"[{media_id} table content]\n") - len(note) - 2)
+    used = 0
+    for row_index in sorted(selected_indexes):
+        row = rows[row_index]
+        row_len = len(row) + 1
+        if selected_rows and used + row_len > budget:
+            break
+        if not selected_rows and row_len > budget:
+            row = row[: max(0, budget - 40)].rstrip() + " [row truncated]"
+            row_len = len(row) + 1
+        if row_len > budget and not selected_rows:
+            break
+        selected_rows.append((row_index, row))
+        used += row_len
+    body_lines = [row for _index, row in selected_rows]
+    body_lines.append(note)
+    text = f"[{media_id} table content]\n" + "\n".join(body_lines).strip()
+    rows_included = len(selected_rows)
+    rows_omitted = max(rows_total - rows_included, 0)
+    return {
+        "media_id": media_id,
+        "text": text,
+        "rows_total": rows_total,
+        "rows_included": rows_included,
+        "rows_omitted": rows_omitted,
+        "truncated": rows_omitted > 0 or len(full_body) > PRD_REVIEW_TABLE_FULL_CHAR_LIMIT,
+        "char_count": len(text),
+    }
+
+
+def _section_identifier_terms(section: Any | None) -> set[str]:
+    if section is None:
+        return set()
+    content = re.sub(r"\[MEDIA_ID_\d+\]", " ", str(getattr(section, "content", "") or ""))
+    haystack = f"{getattr(section, 'section_path', '')} {getattr(section, 'title', '')} {content}"
+    stopwords = {
+        "section", "scenario", "new", "the", "and", "for", "this", "that", "with", "need", "call",
+        "api", "user", "system", "when", "then", "from", "should", "will", "table", "field",
+    }
+    terms = {
+        token.casefold()
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_]{3,}", haystack)
+        if token.casefold() not in stopwords
+    }
+    return {term for term in terms if len(term) >= 4}
 
 
 def _postprocess_prd_review_markdown(markdown: str, *, page: IngestedConfluencePage) -> str:
@@ -860,11 +1067,24 @@ def _build_prd_source_block(section: Any, index: int) -> str:
 
 
 def _prd_source_char_count(page: IngestedConfluencePage) -> int:
-    return sum(len(_build_prd_source_block(section, index)) for index, section in enumerate(page.sections, start=1))
+    return int(_build_prd_source_payload(page, max_chars=10_000_000).get("char_count") or 0)
 
 
 def _generation_mode_for_page(page: IngestedConfluencePage) -> str:
     return "hybrid" if _prd_source_char_count(page) > PRD_REVIEW_MAX_SOURCE_CHARS else "single"
+
+
+def _estimate_prd_prompt_tokens_from_chars(char_count: int) -> int:
+    return max(1, (max(0, int(char_count or 0)) + 3) // 4)
+
+
+def _prd_token_risk(estimated_tokens: int) -> str:
+    tokens = int(estimated_tokens or 0)
+    if tokens >= 80_000:
+        return "high"
+    if tokens >= 45_000:
+        return "elevated"
+    return "normal"
 
 
 def _build_generation_coverage(
@@ -875,16 +1095,56 @@ def _build_generation_coverage(
     section_indexes: list[int] | None = None,
 ) -> dict[str, Any]:
     covered_sections = sum(1 for section in page.sections if str(section.content or "").strip())
-    table_media = _collect_table_media_coverage(page, section_indexes=section_indexes)
+    source_payload = _build_prd_source_payload(page, max_chars=10_000_000, section_indexes=section_indexes)
+    table_media = _table_stats_to_coverage(source_payload.get("table_stats") or [], page=page, section_indexes=section_indexes)
+    estimated_tokens = _estimate_prd_prompt_tokens_from_chars(int(source_payload.get("char_count") or 0) + 8_000)
     return {
         "mode": "hybrid" if mode == "hybrid" else "single",
         "sections_total": int(total_sections if total_sections is not None else len(page.sections)),
         "sections_covered": covered_sections,
-        "truncated": False if mode == "hybrid" else _prd_source_char_count(page) > PRD_REVIEW_MAX_SOURCE_CHARS,
+        "truncated": bool(source_payload.get("truncated")) if mode != "hybrid" else False,
+        "estimated_prompt_tokens": estimated_tokens,
+        "token_risk": _prd_token_risk(estimated_tokens),
         "confluence_tables_total": len(table_media),
         "confluence_tables_reviewed": len(table_media),
         "confluence_tables": table_media,
+        "table_rows_included": int(source_payload.get("table_rows_included") or 0),
+        "table_rows_omitted": int(source_payload.get("table_rows_omitted") or 0),
+        "table_truncated": bool(source_payload.get("table_truncated")),
     }
+
+
+def _table_stats_to_coverage(table_stats: list[dict[str, Any]], *, page: IngestedConfluencePage, section_indexes: list[int] | None = None) -> list[dict[str, Any]]:
+    media_dict = getattr(page, "media_dict", {}) or {}
+    media_to_section: dict[str, tuple[int, Any]] = {}
+    effective_indexes = section_indexes if section_indexes and len(section_indexes) == len(page.sections) else list(range(1, len(page.sections) + 1))
+    for section_index, section in zip(effective_indexes, page.sections):
+        for media_ref in getattr(section, "media_refs", []) or []:
+            media_id = str(media_ref or "").strip()
+            if media_id and media_id not in media_to_section:
+                media_to_section[media_id] = (section_index, section)
+    tables: list[dict[str, Any]] = []
+    for item in table_stats:
+        media_id = str(item.get("media_id") or "").strip()
+        if not media_id:
+            continue
+        media = media_dict.get(media_id) or {}
+        if str(media.get("type") or "") != "table":
+            continue
+        section_index, section = media_to_section.get(media_id, (0, None))
+        tables.append(
+            {
+                "media_id": media_id,
+                "source_section_index": section_index,
+                "source_section_title": str(getattr(section, "section_path", "") or getattr(section, "title", "") or f"Section {section_index or '-'}"),
+                "row_count": int(item.get("rows_total") or 0),
+                "rows_included": int(item.get("rows_included") or 0),
+                "rows_omitted": int(item.get("rows_omitted") or 0),
+                "truncated": bool(item.get("truncated")),
+                "char_count": int(item.get("char_count") or 0),
+            }
+        )
+    return tables
 
 
 def _collect_table_media_coverage(page: IngestedConfluencePage, *, section_indexes: list[int] | None = None) -> list[dict[str, Any]]:
@@ -937,7 +1197,11 @@ def _split_prd_page_batches(page: IngestedConfluencePage, *, max_chars: int = PR
     current: list[Any] = []
     current_chars = 0
     for index, section in enumerate(page.sections, start=1):
-        block_chars = len(_build_prd_source_block(section, index))
+        single_section_page = _page_with_sections(page, [section])
+        try:
+            block_chars = int(_build_prd_source_payload(single_section_page, max_chars=10_000_000).get("char_count") or len(_build_prd_source_block(section, index)))
+        except ToolError:
+            block_chars = 0
         if current and current_chars + block_chars > max_chars:
             batches.append(current)
             current = []
@@ -957,10 +1221,23 @@ def _emit_prd_progress(
     message: str,
     current: int,
     total: int,
+    *,
+    estimated_prompt_tokens: int = 0,
+    token_risk: str = "",
 ) -> None:
     if progress_callback is None:
         return
-    progress_callback(stage, message, current, total)
+    try:
+        progress_callback(
+            stage,
+            message,
+            current,
+            total,
+            estimated_prompt_tokens=estimated_prompt_tokens,
+            token_risk=token_risk,
+        )
+    except TypeError:
+        progress_callback(stage, message, current, total)
 
 
 def _resolve_linked_spreadsheet_evidence(
@@ -1783,16 +2060,23 @@ def _merge_linked_spreadsheet_coverage(coverage: dict[str, Any], linked_spreadsh
     artifacts = list(linked_spreadsheet_evidence.get("artifacts") or [])
     reviewed = [item for item in artifacts if item.get("status") == "ok"]
     failed = [item for item in artifacts if item.get("status") != "ok"]
+    cache_hits = [item for item in reviewed if item.get("cache_hit")]
+    linked_chars = sum(len(str(item.get("text") or "")) for item in reviewed)
+    estimated_tokens = int(coverage.get("estimated_prompt_tokens") or 0) + _estimate_prd_prompt_tokens_from_chars(linked_chars)
     merged = dict(coverage)
     merged.update(
         {
+            "estimated_prompt_tokens": estimated_tokens,
+            "token_risk": _prd_token_risk(estimated_tokens),
             "linked_artifacts_total": len(artifacts),
             "linked_artifacts_reviewed": len(reviewed),
             "linked_artifacts_failed": len(failed),
+            "linked_artifacts_cache_hits": len(cache_hits),
             "linked_artifacts": [_linked_artifact_public_payload(item) for item in artifacts],
             "report_templates_total": len(artifacts),
             "report_templates_reviewed": len(reviewed),
             "report_templates_failed": len(failed),
+            "report_templates_cache_hits": len(cache_hits),
             "report_templates": [_linked_artifact_public_payload(item) for item in artifacts],
         }
     )
@@ -1892,6 +2176,116 @@ def _build_linked_spreadsheet_prompt_section(linked_spreadsheet_evidence: dict[s
                 f"Do not infer this artifact's contents."
             )
     return "\n\n".join(blocks).strip()
+
+
+def _use_compact_review_prompt(
+    page: IngestedConfluencePage,
+    linked_spreadsheet_evidence: dict[str, Any] | None,
+    google_sheet_screenshot_evidence: dict[str, Any] | None,
+) -> bool:
+    if (linked_spreadsheet_evidence or {}).get("artifacts"):
+        return False
+    if (google_sheet_screenshot_evidence or {}).get("artifacts"):
+        return False
+    if any(_is_report_related_section(section) for section in page.sections):
+        return False
+    return len(page.sections) <= 1 or _prd_source_char_count(page) <= 18_000
+
+
+def _build_compact_prd_review_prompt(
+    *,
+    jira_id: str,
+    jira_link: str,
+    prd_url: str,
+    page: IngestedConfluencePage,
+    language: str,
+    source: str,
+) -> str:
+    if normalize_prd_review_language(language) == "en":
+        return f"""# Role
+Senior PRD delivery-readiness reviewer using the `prd-review` skill.
+
+# Boundary
+Review only delivery logic: business-flow closure, role actions, permissions, status transitions, rule precedence, exceptions, reverse paths, operational fallback, and QA/dev acceptance clarity. Do not assess business value, architecture, API design, database design, or engineering effort. Preserve scenario names, API names, field names, enum values, and other identifiers exactly as written; do not create spelling/typo findings unless the exact typo is quoted from the PRD. Never treat `[MEDIA_ID_x]` placeholders as PRD defects.
+
+# Output
+Return only concise Markdown in English:
+### Executive Verdict
+- **Final Score:** [X] / 10
+- **Dev-Readiness Verdict:** [Ready / Needs Clarification / Not Ready]
+- **Bottom line:** [one sentence]
+- **Top 3 attention points:** [max 3 bullets]
+
+### Top Must-Fix Delivery Blockers
+At most 5 P0/P1 items. Each item must include **Priority**, **Section**, **Problem**, **Why this is important**, **Suggested PRD patch**, **Acceptance check**, and **Evidence basis**.
+
+### Section Patch Suggestions
+Give copy-ready PRD updates only; do not repeat the full blocker explanation.
+
+### Secondary Clarifications
+P2 only.
+
+### Evidence Coverage
+State current PRD sections/tables reviewed. If evidence is missing, say `Source not found in selected sections`.
+
+### PM Decision Checklist
+Actionable yes/no or rule-choice questions ordered by priority.
+
+# Context
+- Jira ID: {jira_id or "-"}
+- Jira Link: {jira_link or "-"}
+- PRD Title: {page.title}
+- PRD Link: {prd_url}
+- PRD Updated At: {page.updated_at or "-"}
+
+# PRD Content
+{source}
+
+# Linked Spreadsheet Evidence
+No report-template spreadsheet links were found in report-related PRD sections.
+"""
+    return f"""# Role
+你是一位资深 PRD 交付就绪度评审专家，使用 `prd-review` Skill。
+
+# 评审边界
+只评审交付逻辑：流程闭环、角色动作、权限、状态流转、规则优先级、异常/逆向路径、运营兜底、QA/研发验收清晰度。不评价商业价值、架构、API 设计、数据库设计或工期。场景名、API 名、字段名、枚举值等 identifier 必须按 PRD 原文保留；除非能引用 exact typo，否则不要输出 identifier 拼写类 finding。不能把 `[MEDIA_ID_x]` 当作业务缺口。
+
+# 输出结构
+请输出精炼 Markdown：
+### Executive Verdict
+- **最终得分：** [X] / 10
+- **Dev-Readiness Verdict：** [Ready / Needs Clarification / Not Ready]
+- **Bottom line：** [一句话]
+- **Top 3 attention points：** [最多 3 条]
+
+### Top Must-Fix Delivery Blockers
+最多 5 条 P0/P1。每条必须包含 **优先级**、**Section**、**Problem**、**Why this is important**、**Suggested PRD patch / 建议补写**、**Acceptance check / 验收检查**、**Evidence basis**。
+
+### Section Patch Suggestions
+只给可直接写回 PRD 的补写文本，不重复完整问题描述。
+
+### Secondary Clarifications
+只放 P2。
+
+### Evidence Coverage
+说明已评审的 PRD sections/tables。缺证据时写 `Source not found in selected sections`。
+
+### PM Decision Checklist
+按优先级列出 PM 要回答的 yes/no 或规则选择问题。
+
+# Context
+- Jira ID: {jira_id or "-"}
+- Jira Link: {jira_link or "-"}
+- PRD Title: {page.title}
+- PRD Link: {prd_url}
+- PRD Updated At: {page.updated_at or "-"}
+
+# PRD Content
+{source}
+
+# Linked Spreadsheet Evidence
+No report-template spreadsheet links were found in report-related PRD sections.
+"""
 
 
 def _build_google_sheet_screenshot_prompt_section(google_sheet_screenshot_evidence: dict[str, Any]) -> str:
@@ -2189,6 +2583,15 @@ def build_prd_review_prompt(
         if include_screenshot_sections
         else ""
     )
+    if _use_compact_review_prompt(page, linked_spreadsheet_evidence, google_sheet_screenshot_evidence):
+        return _build_compact_prd_review_prompt(
+            jira_id=jira_id,
+            jira_link=jira_link,
+            prd_url=prd_url,
+            page=page,
+            language=language,
+            source=source,
+        )
     if normalize_prd_review_language(language) == "en":
         return f"""# Role
 You are a senior PRD delivery-readiness reviewer using the `prd-review` skill. Your job is to help the PM identify the few delivery blockers that matter most and turn them into concrete PRD patches.
@@ -2805,7 +3208,7 @@ def _generate_with_codex(
     )
     codex_model = resolve_codex_model(
         CODEX_ROUTE_DEEP,
-        legacy_env_names=("PRD_REVIEWER_CODEX_MODEL", "SOURCE_CODE_QA_CODEX_MODEL"),
+        legacy_env_names=("PRD_REVIEWER_CODEX_MODEL",),
     )
     result = provider.generate(
         payload={
@@ -2813,6 +3216,9 @@ def _generate_with_codex(
             "contents": [{"parts": [{"text": prompt}]}],
             "codex_prompt_mode": prompt_mode,
             "_codex_reasoning_effort": resolve_codex_reasoning_effort(CODEX_ROUTE_DEEP),
+            "_codex_estimated_prompt_tokens": _estimate_prd_prompt_tokens_from_chars(len(prompt)),
+            "_llm_ledger_flow": "prd_reviewer",
+            "_llm_ledger_route": CODEX_ROUTE_DEEP,
             **({"_codex_image_paths": list(image_paths)} if image_paths else {}),
         },
         primary_model=codex_model,

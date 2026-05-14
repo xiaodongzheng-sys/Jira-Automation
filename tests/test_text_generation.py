@@ -25,7 +25,7 @@ class _FakeCodexProvider:
 
     def generate(self, *, payload, primary_model, fallback_model):
         self.calls.append((payload, primary_model, fallback_model))
-        return type("Result", (), {"payload": {"text": "codex ok"}})()
+        return type("Result", (), {"payload": {"text": "codex ok"}, "model": primary_model})()
 
     def extract_text(self, payload):
         return payload["text"]
@@ -34,7 +34,7 @@ class _FakeCodexProvider:
 class _FakeJsonCodexProvider(_FakeCodexProvider):
     def generate(self, *, payload, primary_model, fallback_model):
         self.calls.append((payload, primary_model, fallback_model))
-        return type("Result", (), {"payload": {"text": '{"items":[]}'}})()
+        return type("Result", (), {"payload": {"text": '{"items":[]}'}, "model": primary_model})()
 
 
 class TextGenerationClientTests(unittest.TestCase):
@@ -69,7 +69,10 @@ class TextGenerationClientTests(unittest.TestCase):
 
     def test_productization_codex_defaults_to_cheap_route(self):
         _FakeCodexProvider.instances.clear()
-        with patch.dict(os.environ, {}, clear=True), patch("bpmis_jira_tool.config.find_dotenv", return_value=""), patch(
+        with patch.dict(os.environ, {"SOURCE_CODE_QA_CODEX_MODEL": "gpt-5.5"}, clear=True), patch(
+            "bpmis_jira_tool.config.find_dotenv",
+            return_value="",
+        ), patch(
             "bpmis_jira_tool.productization_codex.CodexCliBridgeSourceCodeQALLMProvider",
             _FakeJsonCodexProvider,
         ):
@@ -89,7 +92,10 @@ class TextGenerationClientTests(unittest.TestCase):
         _FakeCodexProvider.instances.clear()
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
-            {"SOURCE_CODE_QA_CODEX_BINARY": "/usr/local/bin/codex"},
+            {
+                "SOURCE_CODE_QA_CODEX_BINARY": "/usr/local/bin/codex",
+                "SOURCE_CODE_QA_CODEX_MODEL": "gpt-5.5",
+            },
             clear=True,
         ), patch("bpmis_jira_tool.config.find_dotenv", return_value=""), patch(
             "prd_briefing.text_generation.CodexCliBridgeSourceCodeQALLMProvider",
@@ -104,6 +110,54 @@ class TextGenerationClientTests(unittest.TestCase):
         self.assertEqual(primary_model, "gpt-5.4")
         self.assertEqual(fallback_model, "gpt-5.4")
         self.assertEqual(payload["codex_prompt_mode"], "prd_briefing_codex")
+
+    def test_codex_client_marks_meeting_recorder_ledger_flow(self):
+        _FakeCodexProvider.instances.clear()
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {},
+            clear=True,
+        ), patch("bpmis_jira_tool.config.find_dotenv", return_value=""), patch(
+            "prd_briefing.text_generation.CodexCliBridgeSourceCodeQALLMProvider",
+            _FakeCodexProvider,
+        ):
+            settings = Settings.from_env()
+            client = CodexTextGenerationClient(
+                settings=settings,
+                workspace_root=Path(temp_dir),
+                prompt_mode="meeting_recorder_minutes_codex",
+            )
+            client.create_answer(system_prompt="sys", user_prompt="user")
+
+        payload, _, _ = _FakeCodexProvider.instances[0].calls[0]
+        self.assertEqual(payload["_llm_ledger_flow"], "meeting_recorder")
+        self.assertEqual(payload["_llm_ledger_route"], "balanced")
+
+    def test_prd_reviewer_defaults_to_deep_route_without_source_code_qa_fallback(self):
+        from prd_briefing.reviewer import _generate_with_codex
+
+        _FakeCodexProvider.instances.clear()
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"SOURCE_CODE_QA_CODEX_MODEL": "gpt-5.4-mini"},
+            clear=True,
+        ), patch("bpmis_jira_tool.config.find_dotenv", return_value=""), patch(
+            "prd_briefing.reviewer.CodexCliBridgeSourceCodeQALLMProvider",
+            _FakeCodexProvider,
+        ):
+            result = _generate_with_codex(
+                prompt="review",
+                settings=Settings.from_env(),
+                workspace_root=Path(temp_dir),
+                system_text="sys",
+                prompt_mode="prd_reviewer_test",
+            )
+
+        payload, primary_model, fallback_model = _FakeCodexProvider.instances[0].calls[0]
+        self.assertEqual(result["model_id"], "gpt-5.5")
+        self.assertEqual(primary_model, "gpt-5.5")
+        self.assertEqual(fallback_model, "gpt-5.5")
+        self.assertEqual(payload["codex_prompt_mode"], "prd_reviewer_test")
 
 
 if __name__ == "__main__":

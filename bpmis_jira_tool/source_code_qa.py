@@ -6076,6 +6076,7 @@ class SourceCodeQAService:
         repair_attempted: bool,
         repair_skipped_reason: str,
     ) -> dict[str, Any]:
+        candidate_paths = self._repair_candidate_paths_for_runtime_evidence(candidate_paths, runtime_evidence)
         repair_context = self._codex_repair_brief(
             pm_team=pm_team,
             country=country,
@@ -6091,11 +6092,12 @@ class SourceCodeQAService:
         )
         repair_prompt_stats = self._codex_prompt_stats(repair_context)
         repair_candidate_repo_count = len({item.get("repo") for item in candidate_paths})
+        repair_model = self._model_for_role("repair")
         self._log_codex_prompt_timing(
             prompt_context=repair_context,
             prompt_stats=repair_prompt_stats,
             trace_id=trace_id,
-            selected_model=selected_model,
+            selected_model=repair_model,
             query_mode=query_mode,
             phase="repair",
             prompt_mode=CODEX_INVESTIGATION_PROMPT_MODE,
@@ -6108,8 +6110,12 @@ class SourceCodeQAService:
             repair_issue_count=repair_issue_count,
             repair_reason=repair_reason,
             deep_investigation_added=deep_investigation_added,
+            requested_budget=CODEX_ROUTE_REPAIR,
+            routed_budget=CODEX_ROUTE_REPAIR,
+            reasoning_effort=self._codex_reasoning_effort_for_route(CODEX_ROUTE_REPAIR),
+            runtime_evidence_count=len(runtime_evidence),
+            prompt_runtime_evidence_count=len(runtime_evidence),
         )
-        repair_model = self._model_for_role("repair")
         if int(repair_prompt_stats["estimated_prompt_tokens"]) > self.codex_repair_prompt_token_limit:
             repair_attempted = False
             repair_skipped_reason = (
@@ -6141,6 +6147,7 @@ class SourceCodeQAService:
                 candidate_repo_count=repair_candidate_repo_count,
                 repair_issue_count=repair_issue_count,
                 reasoning_effort=self._codex_reasoning_effort_for_route(CODEX_ROUTE_REPAIR),
+                ledger_route=CODEX_ROUTE_REPAIR,
             )
             try:
                 repair_result = self.llm_provider.generate(
@@ -6168,7 +6175,7 @@ class SourceCodeQAService:
                     "citation_validation",
                     lambda: self._validate_codex_citations(answer, candidate_paths, candidate_paths, scope_roots=scope_roots),
                     trace_id=trace_id,
-                    selected_model=selected_model,
+                    selected_model=repair_model,
                     query_mode=query_mode,
                     phase="repair",
                 )
@@ -6178,7 +6185,7 @@ class SourceCodeQAService:
                     "answer_judge",
                     lambda: self._run_answer_judge(question, answer, evidence_pack, claim_check),
                     trace_id=trace_id,
-                    selected_model=selected_model,
+                    selected_model=repair_model,
                     query_mode=query_mode,
                     phase="repair",
                 )
@@ -6624,6 +6631,7 @@ class SourceCodeQAService:
         candidate_repo_count: int,
         selected_model: str,
         reasoning_effort: str,
+        routed_budget_mode: str,
         query_mode: str,
         question: str,
         evidence_pack: dict[str, Any],
@@ -6642,6 +6650,7 @@ class SourceCodeQAService:
             candidate_path_count=len(candidate_paths),
             candidate_repo_count=candidate_repo_count,
             reasoning_effort=reasoning_effort,
+            ledger_route=routed_budget_mode,
         )
         try:
             result = self.llm_provider.generate(
@@ -7093,6 +7102,11 @@ class SourceCodeQAService:
         repair_issue_count: int = 0,
         repair_reason: str = "",
         deep_investigation_added: int = 0,
+        requested_budget: str = "",
+        routed_budget: str = "",
+        reasoning_effort: str = "",
+        runtime_evidence_count: int = 0,
+        prompt_runtime_evidence_count: int = 0,
     ) -> None:
         fields: dict[str, Any] = {
             "phase": phase,
@@ -7110,6 +7124,16 @@ class SourceCodeQAService:
             "prompt_bytes": prompt_stats["prompt_bytes"],
             "estimated_prompt_tokens": prompt_stats["estimated_prompt_tokens"],
         }
+        if requested_budget:
+            fields["requested_budget"] = requested_budget
+        if routed_budget:
+            fields["routed_budget"] = routed_budget
+        if reasoning_effort:
+            fields["reasoning_effort"] = reasoning_effort
+        if runtime_evidence_count:
+            fields["runtime_evidence_count"] = runtime_evidence_count
+        if prompt_runtime_evidence_count:
+            fields["prompt_runtime_evidence_count"] = prompt_runtime_evidence_count
         if include_repair_fields:
             fields["repair_issue_count"] = repair_issue_count
             fields["repair_reason"] = repair_reason
@@ -7172,6 +7196,7 @@ class SourceCodeQAService:
             "prompt_mode": llm_route.get("prompt_mode"),
             "candidate_repo_count": llm_route.get("candidate_repo_count"),
             "candidate_path_count": llm_route.get("candidate_path_count"),
+            "estimated_prompt_tokens": llm_route.get("initial_prompt_estimated_tokens", 0),
             "cited_path_count": codex_validation.get("cited_path_count", 0),
             "citation_validation_status": codex_validation.get("status"),
             "scoped_file_refs": codex_validation.get("scoped_file_refs") or [],
@@ -7274,6 +7299,7 @@ class SourceCodeQAService:
         candidate_repo_count: int = 0,
         repair_issue_count: int = 0,
         reasoning_effort: str = "",
+        ledger_route: str = "",
     ) -> dict[str, Any]:
         stats = prompt_stats if isinstance(prompt_stats, dict) else self._codex_prompt_stats(prompt)
         payload = build_codex_payload(
@@ -7292,6 +7318,8 @@ class SourceCodeQAService:
         )
         if reasoning_effort:
             payload["_codex_reasoning_effort"] = reasoning_effort
+        payload["_llm_ledger_flow"] = "source_code_qa"
+        payload["_llm_ledger_route"] = str(ledger_route or (CODEX_ROUTE_REPAIR if phase == "repair" else ""))
         return payload
 
     def _codex_prompt_stats(self, prompt: str) -> dict[str, int]:
@@ -7523,6 +7551,50 @@ class SourceCodeQAService:
                         "runtime DB instance separate; cross-check generated SQL against code mappers or repository SQL when available."
                     )
         return "\n".join(lines)
+
+    @staticmethod
+    def _runtime_evidence_for_budget(
+        runtime_evidence: list[dict[str, Any]],
+        budget_mode: str,
+    ) -> list[dict[str, Any]]:
+        normalized = [item for item in runtime_evidence or [] if isinstance(item, dict)]
+        mode = str(budget_mode or "").strip().lower()
+        if mode == "cheap":
+            limit = 4
+            text_limits = {"data_dictionary": 0, "apollo": 0, "db": 0, "other": 0}
+        elif mode in {"balanced", "compact_deep"}:
+            limit = 8
+            text_limits = {"data_dictionary": 12000, "apollo": 2500, "db": 3000, "other": 2000}
+        elif mode == "repair":
+            limit = 8
+            text_limits = {"data_dictionary": 8000, "apollo": 1800, "db": 2000, "other": 1500}
+        else:
+            limit = 16
+            text_limits = {"data_dictionary": 60000, "apollo": 6000, "db": 6000, "other": 4000}
+        compacted: list[dict[str, Any]] = []
+        for item in normalized[:limit]:
+            compact = dict(item)
+            source_type = str(compact.get("source_type") or "other").strip().lower()
+            text_limit = int(text_limits.get(source_type, text_limits["other"]))
+            text = str(compact.get("text") or "").strip()
+            if text_limit <= 0:
+                compact.pop("text", None)
+            elif text and len(text) > text_limit:
+                compact["text"] = f"{text[:text_limit]}\n...[runtime evidence compacted for {mode or 'default'} budget]"
+            summary = str(compact.get("summary") or "").strip()
+            if summary and text_limit <= 0:
+                compact["summary"] = summary[:1000]
+            compacted.append(compact)
+        return compacted
+
+    def _repair_candidate_paths_for_runtime_evidence(
+        self,
+        candidate_paths: list[dict[str, Any]],
+        runtime_evidence: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if len([item for item in runtime_evidence or [] if isinstance(item, dict)]) >= 4:
+            return candidate_paths[: min(8, self.codex_repair_top_path_limit)]
+        return candidate_paths[: self.codex_repair_top_path_limit]
 
     @classmethod
     def _context_attachment_section(cls, attachments: list[dict[str, Any]], runtime_evidence: list[dict[str, Any]]) -> str:
@@ -8241,6 +8313,12 @@ class SourceCodeQAService:
         retrievals = {str(match.get("retrieval") or "") for match in matches}
         lowered_question = str(question or "").lower()
         simple_lookup = self._is_simple_symbol_lookup_question(question)
+        if self._is_short_definition_or_status_question(question):
+            mode = "cheap"
+            return mode, self.llm_budgets[mode], {"mode": "auto", "requested": requested, "selected": mode, "reason": "short_definition_or_status"}
+        if self._is_moderate_api_config_rule_question(question, intent):
+            mode = "balanced"
+            return mode, self.llm_budgets[mode], {"mode": "auto", "requested": requested, "selected": mode, "reason": "api_config_rule_logic"}
         deep_reasons: list[str] = []
         if intent.get("data_source"):
             deep_reasons.append("data_source_trace")
@@ -8261,6 +8339,105 @@ class SourceCodeQAService:
             mode = "cheap"
             deep_reasons.append("simple_lookup")
         return mode, self.llm_budgets[mode], {"mode": "auto", "requested": requested, "selected": mode, "reason": ",".join(deep_reasons)}
+
+    @staticmethod
+    def _is_moderate_api_config_rule_question(question: str, intent: dict[str, Any]) -> bool:
+        if not any(intent.get(key) for key in ("api", "config", "rule_logic")):
+            return False
+        lowered = f" {str(question or '').lower()} "
+        deep_markers = (
+            "why",
+            "root cause",
+            "data source",
+            "source table",
+            "upstream",
+            "downstream",
+            "flow",
+            "chain",
+            "call graph",
+            "caller",
+            "callee",
+            "cross-repo",
+            "cross repo",
+            "trace",
+            "rca",
+            "rta",
+            "为什么",
+            "根因",
+            "数据源",
+            "上游",
+            "下游",
+            "链路",
+            "调用",
+        )
+        if any(marker in lowered for marker in deep_markers):
+            return False
+        return True
+
+    @staticmethod
+    def _is_short_definition_or_status_question(question: str) -> bool:
+        normalized = re.sub(r"\s+", " ", str(question or "").strip())
+        if not normalized:
+            return False
+        lowered = f" {normalized.lower()} "
+        high_risk_markers = (
+            "why",
+            "root cause",
+            "data source",
+            "source table",
+            "upstream",
+            "downstream",
+            "flow",
+            "chain",
+            "call graph",
+            "caller",
+            "callee",
+            "cross-repo",
+            "cross repo",
+            "sql",
+            "select ",
+            "table",
+            "database",
+            "security",
+            "permission",
+            "authorization",
+            "production",
+            "impact",
+            "trace",
+            "rta",
+            "rca",
+            "为什么",
+            "根因",
+            "数据源",
+            "上游",
+            "下游",
+            "链路",
+            "调用",
+            "表",
+            "权限",
+            "影响",
+        )
+        if any(marker in lowered for marker in high_risk_markers):
+            return False
+        if len(normalized) > 120:
+            return False
+        definition_markers = (
+            "what is",
+            "what does",
+            "meaning",
+            "mean",
+            "definition",
+            "status",
+            "outcome",
+            "pass",
+            "fail",
+            "是什么意思",
+            "什么意思",
+            "代表什么",
+            "含义",
+            "状态",
+        )
+        return any(marker in lowered for marker in definition_markers)
 
     def _is_simple_symbol_lookup_question(self, question: str) -> bool:
         lowered = str(question or "").lower()

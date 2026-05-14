@@ -41,7 +41,7 @@ def generate_productization_detailed_features_with_local_codex(
     )
     codex_model = resolve_codex_model(
         CODEX_ROUTE_CHEAP,
-        legacy_env_names=("PRODUCTIZATION_CODEX_MODEL", "SOURCE_CODE_QA_CODEX_MODEL"),
+        legacy_env_names=("PRODUCTIZATION_CODEX_MODEL",),
     )
     result = provider.generate(
         payload={
@@ -49,6 +49,8 @@ def generate_productization_detailed_features_with_local_codex(
             "contents": [{"parts": [{"text": prompt}]}],
             "codex_prompt_mode": "productization_detailed_feature_v1",
             "_codex_reasoning_effort": resolve_codex_reasoning_effort(CODEX_ROUTE_CHEAP),
+            "_llm_ledger_flow": "productization",
+            "_llm_ledger_route": CODEX_ROUTE_CHEAP,
         },
         primary_model=codex_model,
         fallback_model=codex_model,

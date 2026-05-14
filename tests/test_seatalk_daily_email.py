@@ -126,7 +126,7 @@ class SeaTalkDailyEmailCodexRoutingTests(unittest.TestCase):
     def test_build_seatalk_service_defaults_to_cheap_codex_route(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
-            {"TEAM_PORTAL_DATA_DIR": temp_dir, "SOURCE_CODE_QA_CODEX_MODEL": ""},
+            {"TEAM_PORTAL_DATA_DIR": temp_dir, "SOURCE_CODE_QA_CODEX_MODEL": "gpt-5.5"},
             clear=True,
         ), patch("bpmis_jira_tool.config.find_dotenv", return_value=""):
             service = build_seatalk_service(Settings.from_env(), data_root=Path(temp_dir))
@@ -1050,6 +1050,44 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertIn("already represented as a my_todos watch_delegate item", prompt)
         self.assertIn("Report Intelligence Matches", prompt)
         self.assertIn("Use these matches only as prioritization hints", prompt)
+
+    def test_build_daily_briefing_compacts_prompt_sources_and_records_token_ledger(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== AF-ID follow-up group (group-100) ===",
+                "[2026-05-13 09:00:00] Alice Tan: @Ker Yin please confirm whether ETP linkage flows use soft token by default",
+                *[
+                    f"[2026-05-13 09:{index % 60:02d}:00] Random User: low value filler {index} " + ("noise " * 45)
+                    for index in range(900)
+                ],
+                "[2026-05-13 12:50:00] Bob Tan: AF launch is blocked pending MAS approval and owner decision.",
+            ]
+        )
+        gmail_history = "\n".join(
+            [
+                "Message 1",
+                "Subject: CR rollout approval",
+                *[f"Body filler {index} " + ("email noise " * 45) for index in range(500)],
+                "Body: BSP launch approval is pending and needs Xiaodong review.",
+            ]
+        )
+        service = FakeSeaTalkService(history)
+
+        payload = build_daily_briefing(
+            service,
+            now=datetime(2026, 5, 13, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            gmail_history_text=gmail_history,
+        )
+
+        ledger = payload["quality_metadata"]["token_ledger"]
+        self.assertGreater(ledger["seatalk_raw_chars"], ledger["seatalk_prompt_chars"])
+        self.assertGreater(ledger["gmail_raw_chars"], ledger["gmail_prompt_chars"])
+        self.assertGreater(ledger["final_estimated_prompt_tokens"], 0)
+        self.assertIn("Deterministic Daily Brief Evidence Bundle", service.last_prompt)
+        self.assertIn("@Ker Yin please confirm", service.last_prompt)
+        self.assertIn("BSP launch approval is pending", service.last_prompt)
+        self.assertNotIn("low value filler 200", service.last_prompt)
 
     def test_unanswered_seatalk_question_hints_include_pm_relevant_thread_questions(self):
         history = "\n".join(

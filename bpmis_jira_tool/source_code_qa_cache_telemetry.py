@@ -201,6 +201,12 @@ def _record_query_telemetry(
         tool_trace = payload.get("tool_trace") or []
         policies = answer_contract.get("policies") or (payload.get("answer_quality") or {}).get("policies") or []
         stage_counts, retrieval_counts = self._query_telemetry_match_counts(matches)
+        llm_attempts = payload.get("llm_attempt_log") or []
+        reasoning_efforts = [
+            str(item.get("reasoning_effort") or "")
+            for item in llm_attempts
+            if isinstance(item, dict) and str(item.get("reasoning_effort") or "").strip()
+        ]
         record = {
             "timestamp": self._now_iso(),
             "key": key,
@@ -221,17 +227,24 @@ def _record_query_telemetry(
             "deadline_fallback_reason": payload.get("deadline_fallback_reason") or "",
             "background_deep_job_id": payload.get("background_deep_job_id") or "",
             "requested_llm_budget_mode": llm_budget_mode,
+            "requested_budget": payload.get("llm_requested_budget_mode") or llm_budget_mode,
+            "routed_budget": payload.get("llm_budget_mode") or llm_budget_mode,
             "llm_budget_mode": payload.get("llm_budget_mode") or llm_budget_mode,
             "llm_requested_budget_mode": payload.get("llm_requested_budget_mode") or llm_budget_mode,
             "llm_route": payload.get("llm_route") or {},
             "llm_provider": payload.get("llm_provider") or self.llm_provider.name,
             "llm_model": payload.get("llm_model"),
+            "effective_model": payload.get("llm_model"),
+            "reasoning_effort": reasoning_efforts[-1] if reasoning_efforts else "",
             "llm_thinking_budget": payload.get("llm_thinking_budget"),
             "llm_cached": bool(payload.get("llm_cached")),
             "llm_attempts": payload.get("llm_attempts"),
             "llm_latency_ms": payload.get("llm_latency_ms"),
+            "answer_generation_ms": (payload.get("llm_timing") or {}).get("answer_generation_ms") or payload.get("llm_latency_ms"),
+            "runtime_evidence_count": (payload.get("llm_route") or {}).get("runtime_evidence_count", 0),
+            "repair_skipped_reason": (payload.get("llm_route") or {}).get("codex_repair_skipped_reason", ""),
             "llm_finish_reason": payload.get("llm_finish_reason"),
-            "llm_attempt_log": payload.get("llm_attempt_log") or [],
+            "llm_attempt_log": llm_attempts,
             "status": payload.get("status"),
             "latency_ms": int(payload.get("latency_ms") or int((time.time() - started_at) * 1000)),
             "elapsed_seconds": payload.get("elapsed_seconds"),
@@ -277,6 +290,7 @@ def _codex_telemetry_summary(payload: dict[str, Any]) -> dict[str, Any]:
     ]
     return {
         "prompt_mode": llm_route.get("prompt_mode"),
+        "estimated_prompt_tokens": llm_route.get("initial_prompt_estimated_tokens", 0),
         "candidate_repo_count": llm_route.get("candidate_repo_count"),
         "candidate_path_count": llm_route.get("candidate_path_count"),
         "cited_path_count": validation.get("cited_path_count", llm_route.get("codex_cited_path_count", 0)),

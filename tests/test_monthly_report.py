@@ -154,7 +154,7 @@ class MonthlyReportTests(unittest.TestCase):
     def test_codex_generation_uses_monthly_report_timeout(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
-            {"MONTHLY_REPORT_CODEX_MODEL": "", "SOURCE_CODE_QA_CODEX_MODEL": ""},
+            {"MONTHLY_REPORT_CODEX_MODEL": "", "SOURCE_CODE_QA_CODEX_MODEL": "gpt-5.5"},
             clear=False,
         ), patch("bpmis_jira_tool.monthly_report.CodexCliBridgeSourceCodeQALLMProvider") as mock_provider:
             instance = mock_provider.return_value
@@ -730,7 +730,7 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertGreater(result["evidence_summary"]["highlight_seatalk_raw_match_count"], 0)
         self.assertGreater(result["evidence_summary"]["highlight_seatalk_line_match_count"], 0)
 
-    def test_generate_draft_splits_large_project_evidence_brief_batches(self):
+    def test_generate_draft_compacts_large_project_evidence_brief_batch(self):
         seatalk = _FakeSeaTalkService()
         projects = []
         for project_index in range(30):
@@ -771,9 +771,15 @@ class MonthlyReportTests(unittest.TestCase):
             call for call in mock_generate.call_args_list
             if call.kwargs.get("prompt_mode", "").endswith("_batch_monthly_evidence_brief")
         ]
-        self.assertGreater(len(evidence_batch_calls), 1)
+        self.assertGreaterEqual(len(evidence_batch_calls), 1)
         for call in evidence_batch_calls:
             self.assertLessEqual(_estimate_token_count(call.kwargs["prompt"]), MONTHLY_REPORT_BATCH_MAX_TOKENS)
+            self.assertNotIn("Monthly Report Template For Orientation", call.kwargs["prompt"])
+            self.assertNotIn("scope detail " * 12, call.kwargs["prompt"])
+        self.assertLess(
+            result["generation_summary"]["stage_token_ledger"]["monthly_evidence_brief_batch_estimated_tokens"],
+            result["generation_summary"]["stage_token_ledger"]["monthly_evidence_brief_estimated_tokens"],
+        )
         self.assertEqual(result["evidence_summary"]["key_project_count"], 30)
 
     def test_generate_draft_does_not_batch_full_vip_gmail_threads(self):
@@ -878,6 +884,40 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertIn("go_live_outcome", prompt)
         self.assertIn("no confirmed evidence", prompt)
         self.assertIn("pending confirmation", prompt)
+
+    def test_final_prompt_uses_compact_highlight_deep_evidence(self):
+        period = resolve_monthly_report_period(datetime(2026, 5, 3, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE))
+        prompt = build_monthly_report_final_prompt(
+            template="# Template",
+            generated_at=datetime(2026, 5, 3, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            report_period=period,
+            evidence_brief="Compact brief",
+            monthly_evidence_brief=[],
+            highlight_topics=["ID issue follow up"],
+            highlight_deep_evidence=[
+                {
+                    "topic": "ID issue follow up",
+                    "topic_intent": "issue_followup",
+                    "confidence": "high",
+                    "recommended_tone": "state confirmed mitigation",
+                    "seatalk_evidence": ["raw transcript " * 500],
+                    "gmail_evidence": ["raw email " * 500],
+                    "issue_followup_facts": {
+                        "impact": ["25 onboarding applications were affected."],
+                        "root_cause": ["Risk Database read path was overloaded."],
+                        "long_term_solution": ["Migrate risk identification data to Codis cache."],
+                    },
+                    "evidence_map": {"topic_intent": "issue_followup", "confidence": "high"},
+                }
+            ],
+            highlight_narratives=[{"topic": "ID issue follow up", "narrative_markdown": "Mitigation is in progress."}],
+        )
+
+        self.assertIn("Highlight Deep Evidence", prompt)
+        self.assertIn("issue_followup_facts", prompt)
+        self.assertIn("Risk Database read path was overloaded", prompt)
+        self.assertNotIn("raw transcript raw transcript raw transcript", prompt)
+        self.assertNotIn("raw email raw email raw email", prompt)
 
     def test_go_live_highlight_intent_does_not_promote_generic_progress(self):
         period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")

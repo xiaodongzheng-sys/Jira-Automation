@@ -684,7 +684,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
             page=page,
         )
 
-        self.assertEqual(PRD_REVIEW_PROMPT_VERSION, "v11_prd_review_table_only_no_image_evidence")
+        self.assertEqual(PRD_REVIEW_PROMPT_VERSION, "v12_prd_review_token_optimized_table_packing")
         self.assertIn("prd-review", prompt)
         self.assertIn("Executive Verdict", prompt)
         self.assertIn("Top Must-Fix Delivery Blockers", prompt)
@@ -818,6 +818,59 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(coverage["confluence_tables"][0]["media_id"], "MEDIA_ID_1")
         self.assertEqual(coverage["confluence_tables"][0]["source_section_title"], "3.1.1 New Scenario: ApplyCCard")
         self.assertIn("Entry points | CMS to call AF system", mock_generate.call_args.kwargs["prompt"])
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_prd_review_compacts_large_confluence_table_by_identifier_rows(self, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        rows = ["<tr><th>Scenario</th><th>Action</th><th>Rule</th></tr>"]
+        for index in range(1, 180):
+            scenario = "ApplyCCard" if index == 120 else f"UnrelatedScenario{index}"
+            rows.append(
+                f"<tr><td>{scenario}</td><td>Action{index}</td><td>{'long rule text ' * 12}</td></tr>"
+            )
+        page = IngestedConfluencePage(
+            page_id="large-table-media",
+            title="Anti-Fraud Table PRD",
+            source_url="https://example.atlassian.net/wiki/pages/large-table-media",
+            updated_at="2026-05-13T00:00:00Z",
+            language="en",
+            sections=[
+                ParsedSection(
+                    title="Scenario",
+                    section_path="3.1.1 New Scenario: ApplyCCard",
+                    content="CMS calls AF system for ApplyCCard.\n[MEDIA_ID_1]",
+                    media_refs=["MEDIA_ID_1"],
+                )
+            ],
+            media_dict={"MEDIA_ID_1": {"type": "table", "content": f"<table>{''.join(rows)}</table>"}},
+        )
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeConnector(page),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        result = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/large-table-media",
+                language="en",
+                selected_section_indexes=[1],
+            )
+        )
+
+        prompt = mock_generate.call_args.kwargs["prompt"]
+        self.assertIn("Scenario | Action | Rule", prompt)
+        self.assertIn("ApplyCCard | Action120", prompt)
+        self.assertNotIn("UnrelatedScenario179", prompt)
+        self.assertIn("Table compacted", prompt)
+        self.assertTrue(result["coverage"]["table_truncated"])
+        self.assertGreater(result["coverage"]["table_rows_omitted"], 0)
 
     def test_prd_review_result_cache_uses_prd_updated_at_and_prompt_version(self):
         saved = self.store.save_prd_review_result(
@@ -1647,6 +1700,52 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertIn("Cached Google Sheet format", mock_generate.call_args.kwargs["prompt"])
 
     @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_prd_self_assessment_google_sheet_modified_time_invalidates_artifact_cache(self, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        page = self.service.confluence.page
+        page.sections[1].section_path = "3.11.1 Report Layout and Field Name & Format"
+        page.sections[1].spreadsheet_links = [
+            SpreadsheetLink(
+                title="MAS Outsourcing Register Google Sheet",
+                url="https://docs.google.com/spreadsheets/d/sheet123/edit#gid=0",
+                source_section="Rollout",
+                filename="",
+            )
+        ]
+        drive_service = FakeDriveService(_xlsx_bytes(marker="Google Sheet v1"), modified_time="2026-05-12T10:00:00.000Z")
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeConnector(page),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+        request = PRDBriefingReviewRequest(
+            owner_key="anon:test",
+            prd_url="https://example.atlassian.net/wiki/pages/123",
+            language="en",
+            selected_section_indexes=[2],
+            force_refresh=True,
+            google_credentials={
+                "token": "x",
+                "scopes": ["https://www.googleapis.com/auth/drive.readonly"],
+            },
+        )
+
+        with patch("bpmis_jira_tool.gmail_dashboard.build_drive_api_service", return_value=drive_service):
+            service.review_url(request)
+            drive_service.files_resource.modified_time = "2026-05-13T10:00:00.000Z"
+            drive_service.files_resource.workbook_content = _xlsx_bytes(marker="Google Sheet v2")
+            result = service.review_url(request)
+
+        self.assertEqual(drive_service.files_resource.export_calls, 2)
+        self.assertFalse(result["coverage"]["linked_artifacts"][0]["cache_hit"])
+        self.assertIn("Google Sheet v2", mock_generate.call_args.kwargs["prompt"])
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
     def test_prd_review_progress_reports_prd_template_metadata_and_generation_stages(self, mock_generate):
         mock_generate.return_value = {
             "result_markdown": "### Review",
@@ -1678,7 +1777,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
                 language="en",
                 selected_section_indexes=[2],
             ),
-            progress_callback=lambda stage, message, current, total: progress_events.append((stage, message, current, total)),
+            progress_callback=lambda stage, message, current, total, **kwargs: progress_events.append((stage, message, current, total, kwargs)),
         )
 
         stages = [event[0] for event in progress_events]
@@ -1688,6 +1787,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertIn("analyzing_template_metadata", stages)
         self.assertIn("generating_review", stages)
         self.assertTrue(any("Reading 1 report templates" in message for message in messages))
+        self.assertTrue(any((event[4].get("estimated_prompt_tokens") or 0) > 0 for event in progress_events))
 
     @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
     @patch("prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image")
