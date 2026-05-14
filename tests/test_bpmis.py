@@ -127,11 +127,12 @@ class BPMISClientTests(unittest.TestCase):
                 calls.append((path, params))
                 search = json.loads((params or {}).get("search") or "{}")
                 if path == "/api/v1/issues/tree":
-                    self.assertEqual(search["id"], [225159])
+                    self.assertEqual(search["parentIds"], [225159])
+                    self.assertEqual(search["typeId"], BPMISDirectApiClient.TASK_TYPE_ID)
+                    self.assertEqual(search["taskType"], 1)
                     return {
                         "data": {
                             "rows": [
-                                {"id": 225159, "typeId": "Biz Project", "summary": "Parent"},
                                 {
                                     "id": 991,
                                     "typeId": "Task",

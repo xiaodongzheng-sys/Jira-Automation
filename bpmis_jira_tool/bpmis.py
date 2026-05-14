@@ -1350,25 +1350,35 @@ class BPMISDirectApiClient(BPMISClient):
             project_id_value: int | str = int(project_id)
         except ValueError:
             project_id_value = project_id
-        try:
-            response = self._api_request(
-                "/api/v1/issues/tree",
-                params={
-                    "search": json.dumps(
-                        {
-                            "id": [project_id_value],
-                            "page": 1,
-                            "pageSize": self._tree_page_size(),
-                            "mapping": True,
-                        }
-                    )
-                },
-            )
-        except (BPMISError, ValueError, TypeError):
-            return []
-        self._increment_stat("actual_mandays_project_tree_lookup_count")
-        rows = self._extract_issue_rows_from_response(response)
-        self._increment_stat("actual_mandays_project_tree_rows_scanned", len(rows))
+        rows: list[dict[str, Any]] = []
+        page = 1
+        page_size = self._tree_page_size()
+        while True:
+            try:
+                response = self._api_request(
+                    "/api/v1/issues/tree",
+                    params={
+                        "search": json.dumps(
+                            {
+                                "parentIds": [project_id_value],
+                                "typeId": self.TASK_TYPE_ID,
+                                "taskType": 1,
+                                "page": page,
+                                "pageSize": page_size,
+                                "mapping": True,
+                            }
+                        )
+                    },
+                )
+            except (BPMISError, ValueError, TypeError):
+                return []
+            self._increment_stat("actual_mandays_project_tree_lookup_count")
+            page_rows = self._extract_issue_rows_from_response(response)
+            self._increment_stat("actual_mandays_project_tree_rows_scanned", len(page_rows))
+            rows.extend(page_rows)
+            if len(page_rows) < page_size:
+                break
+            page += 1
         tasks: list[dict[str, Any]] = []
         seen_task_ids: set[str] = set()
         for row in rows:
