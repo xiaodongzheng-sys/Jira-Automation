@@ -10,6 +10,11 @@
   data-link-biz-project-url="{{ url_for('team_dashboard_link_biz_projects') }}"
   data-link-biz-project-jira-url="{{ url_for('team_dashboard_link_biz_project_jira') }}"
   data-link-biz-project-suggestions-url="{{ url_for('team_dashboard_link_biz_project_suggestions') }}"
+  data-version-plan-url="{{ url_for('team_dashboard_version_plan_af') }}"
+  data-version-plan-sync-url="{{ url_for('team_dashboard_version_plan_sync') }}"
+  data-version-plan-sync-status-url="{{ url_for('team_dashboard_version_plan_sync_status') }}"
+  data-version-plan-cell-url="{{ url_for('team_dashboard_version_plan_cell') }}"
+  data-version-plan-rows-url="{{ url_for('team_dashboard_version_plan_rows') }}"
   {% if can_view_team_dashboard_monthly_report %}
     data-monthly-report-template-url="{{ url_for('team_dashboard_monthly_report_template') }}"
     data-monthly-report-template-save-url="{{ url_for('save_team_dashboard_monthly_report_template') }}"
@@ -46,6 +51,7 @@
       {% endif %}
     {% else %}
       <button class="workspace-tab is-active" type="button" role="tab" aria-selected="true" data-team-dashboard-tab="tasks">Task List</button>
+      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="version-plan">Version Plan</button>
       <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="link-biz-project">Link Biz Project</button>
       {% if can_manage_team_dashboard %}
         <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="admin">Team Admin</button>
@@ -64,6 +70,27 @@
       <p class="productization-inline-status" data-team-dashboard-task-status></p>
       <div class="team-dashboard-team-list" data-team-dashboard-task-list>
         <div class="workspace-tabs team-dashboard-track-tabs" hidden></div>
+      </div>
+    </section>
+  {% endif %}
+
+  {% if not reports_only %}
+    <section data-team-dashboard-panel="version-plan" hidden>
+      <div class="productization-section-head team-dashboard-version-plan-head">
+        <div>
+          <h3>Version Plan</h3>
+          <span>Anti-fraud version bundles, pipeline, and archived Jira rows.</span>
+        </div>
+        <div class="button-row">
+          <button class="button button-secondary" type="button" data-version-plan-sync>Sync Jira</button>
+        </div>
+      </div>
+      <p class="productization-inline-status" data-version-plan-status></p>
+      <div class="workspace-tabs team-dashboard-track-tabs team-dashboard-version-plan-track" aria-label="Version Plan track">
+        <button class="workspace-tab is-active" type="button">Anti-fraud</button>
+      </div>
+      <div class="team-dashboard-version-plan" data-version-plan-content>
+        <p class="productization-inline-status">Loading Version Plan...</p>
       </div>
     </section>
   {% endif %}

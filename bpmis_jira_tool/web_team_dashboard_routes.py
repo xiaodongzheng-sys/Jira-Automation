@@ -35,9 +35,20 @@ from bpmis_jira_tool.report_intelligence import normalize_report_intelligence_co
 from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.seatalk_stores import SeaTalkNameMappingStore
 from bpmis_jira_tool.team_dashboard_config import TEAM_DASHBOARD_TEAMS
+from bpmis_jira_tool.team_dashboard_version_plan import (
+    mark_version_plan_sync_error,
+    mark_version_plan_sync_running,
+    update_version_plan_cell,
+    update_version_plan_rows,
+    version_plan_payload,
+    version_plan_sync,
+    version_plan_synced_today,
+)
 from prd_briefing.reviewer import PRDReviewRequest
 
 GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+_VERSION_PLAN_SYNC_LOCK = threading.Lock()
+_VERSION_PLAN_SYNC_RUNNING = False
 
 
 def _add_route(app: Any, rule: str, view_func: Callable[..., Any], *, methods: list[str] | None = None) -> None:
@@ -98,6 +109,53 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
     _queue_prd_generation_job = ctx._queue_prd_generation_job
     resolve_monthly_report_period = ctx.resolve_monthly_report_period
     send_monthly_report_email = ctx.send_monthly_report_email
+
+    def _start_version_plan_sync_if_needed(*, force: bool = False) -> bool:
+        global _VERSION_PLAN_SYNC_RUNNING  # noqa: PLW0603
+        store = _get_team_dashboard_config_store()
+        config = store.save(store.load())
+        if not force and version_plan_synced_today(config):
+            return False
+        with _VERSION_PLAN_SYNC_LOCK:
+            if _VERSION_PLAN_SYNC_RUNNING:
+                return True
+            _VERSION_PLAN_SYNC_RUNNING = True
+        try:
+            bpmis_client = _build_bpmis_client_for_current_user(settings)
+            app = current_app._get_current_object()
+            store.save(mark_version_plan_sync_running(config))
+        except Exception as error:  # noqa: BLE001
+            with _VERSION_PLAN_SYNC_LOCK:
+                _VERSION_PLAN_SYNC_RUNNING = False
+            store.save(mark_version_plan_sync_error(config, str(error)))
+            raise
+
+        def _run_sync() -> None:
+            global _VERSION_PLAN_SYNC_RUNNING  # noqa: PLW0603
+            try:
+                with app.app_context():
+                    sync_store = _get_team_dashboard_config_store()
+                    latest_config = sync_store.load()
+                    sync_store.save(version_plan_sync(latest_config, bpmis_client))
+            except Exception as error:  # noqa: BLE001
+                try:
+                    with app.app_context():
+                        sync_store = _get_team_dashboard_config_store()
+                        sync_store.save(mark_version_plan_sync_error(sync_store.load(), str(error)))
+                        current_app.logger.exception("Team Dashboard Version Plan sync failed.")
+                except Exception:
+                    logging.getLogger(__name__).exception("Team Dashboard Version Plan sync failure could not be recorded.")
+            finally:
+                with _VERSION_PLAN_SYNC_LOCK:
+                    _VERSION_PLAN_SYNC_RUNNING = False
+
+        threading.Thread(target=_run_sync, name="team-dashboard-version-plan-sync", daemon=True).start()
+        return True
+
+    def _version_plan_json_response(config: dict[str, Any], *, sync_queued: bool = False):
+        payload = version_plan_payload(config)
+        payload["sync_queued"] = bool(sync_queued)
+        return jsonify(payload)
 
     def team_dashboard_page():
         access_gate = _require_team_dashboard_access(settings)
@@ -233,6 +291,8 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             payload["key_project_overrides"] = existing_config["key_project_overrides"]
         if isinstance(existing_config.get("task_cache"), dict):
             payload["task_cache"] = existing_config["task_cache"]
+        if isinstance(existing_config.get("version_plan"), dict):
+            payload["version_plan"] = existing_config["version_plan"]
         payload["monthly_report_template"] = existing_config.get("monthly_report_template") or DEFAULT_MONTHLY_REPORT_TEMPLATE
         payload["report_intelligence_config"] = existing_config.get("report_intelligence_config") or normalize_report_intelligence_config({})
         saved = store.save(payload)
@@ -251,6 +311,79 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             ),
         )
         return jsonify({"status": "ok", "config": saved})
+
+
+    def team_dashboard_version_plan_af():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        store = _get_team_dashboard_config_store()
+        config = store.save(store.load())
+        sync_queued = False
+        try:
+            sync_queued = _start_version_plan_sync_if_needed(force=False)
+        except (ConfigError, ToolError) as error:
+            config = store.save(mark_version_plan_sync_error(config, str(error)))
+        except Exception as error:  # noqa: BLE001
+            current_app.logger.exception("Team Dashboard Version Plan auto-sync could not be queued.")
+            config = store.save(mark_version_plan_sync_error(config, str(error)))
+        if sync_queued:
+            config = store.load()
+        return _version_plan_json_response(config, sync_queued=sync_queued)
+
+
+    def team_dashboard_version_plan_sync():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        store = _get_team_dashboard_config_store()
+        config = store.save(store.load())
+        try:
+            sync_queued = _start_version_plan_sync_if_needed(force=True)
+        except (ConfigError, ToolError) as error:
+            config = store.save(mark_version_plan_sync_error(config, str(error)))
+            return _version_plan_json_response(config, sync_queued=False), HTTPStatus.BAD_REQUEST
+        if sync_queued:
+            config = store.load()
+        return _version_plan_json_response(config, sync_queued=sync_queued)
+
+
+    def team_dashboard_version_plan_sync_status():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = version_plan_payload(_get_team_dashboard_config_store().load())
+        return jsonify({"status": "ok", "sync_state": payload.get("sync_state") or {}})
+
+
+    def team_dashboard_version_plan_cell():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"status": "error", "message": "JSON payload is required."}), HTTPStatus.BAD_REQUEST
+        store = _get_team_dashboard_config_store()
+        try:
+            saved = store.save(update_version_plan_cell(store.load(), payload))
+            return _version_plan_json_response(saved)
+        except ValueError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+
+    def team_dashboard_version_plan_rows():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"status": "error", "message": "JSON payload is required."}), HTTPStatus.BAD_REQUEST
+        store = _get_team_dashboard_config_store()
+        try:
+            saved = store.save(update_version_plan_rows(store.load(), payload))
+            return _version_plan_json_response(saved)
+        except ValueError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 
 
     def team_dashboard_monthly_report_template():
@@ -1220,6 +1353,11 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         reports_page=reports_page,
         team_dashboard_config=team_dashboard_config,
         save_team_dashboard_members=save_team_dashboard_members,
+        team_dashboard_version_plan_af=team_dashboard_version_plan_af,
+        team_dashboard_version_plan_sync=team_dashboard_version_plan_sync,
+        team_dashboard_version_plan_sync_status=team_dashboard_version_plan_sync_status,
+        team_dashboard_version_plan_cell=team_dashboard_version_plan_cell,
+        team_dashboard_version_plan_rows=team_dashboard_version_plan_rows,
         team_dashboard_monthly_report_template=team_dashboard_monthly_report_template,
         team_dashboard_monthly_report_style_guide_refresh=team_dashboard_monthly_report_style_guide_refresh,
         team_dashboard_monthly_report_latest_draft=team_dashboard_monthly_report_latest_draft,
@@ -1246,6 +1384,11 @@ def register_team_dashboard_routes(app: Any, handlers: Any) -> None:
     _add_route(app, "/reports", handlers.reports_page)
     _add_route(app, "/admin/team-dashboard/members", handlers.save_team_dashboard_members, methods=["POST"])
     _add_route(app, "/api/team-dashboard/config", handlers.team_dashboard_config)
+    _add_route(app, "/api/team-dashboard/version-plan/af", handlers.team_dashboard_version_plan_af)
+    _add_route(app, "/api/team-dashboard/version-plan/af/sync", handlers.team_dashboard_version_plan_sync, methods=["POST"])
+    _add_route(app, "/api/team-dashboard/version-plan/af/sync-status", handlers.team_dashboard_version_plan_sync_status)
+    _add_route(app, "/api/team-dashboard/version-plan/af/cell", handlers.team_dashboard_version_plan_cell, methods=["POST"])
+    _add_route(app, "/api/team-dashboard/version-plan/af/rows", handlers.team_dashboard_version_plan_rows, methods=["POST"])
     _add_route(app, "/api/team-dashboard/monthly-report/template", handlers.team_dashboard_monthly_report_template)
     _add_route(app, "/api/team-dashboard/monthly-report/style-guide/refresh", handlers.team_dashboard_monthly_report_style_guide_refresh, methods=["POST"])
     _add_route(app, "/api/team-dashboard/monthly-report/latest-draft", handlers.team_dashboard_monthly_report_latest_draft)

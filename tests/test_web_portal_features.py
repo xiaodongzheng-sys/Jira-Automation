@@ -15,6 +15,7 @@ from bpmis_jira_tool.errors import BPMISError, ToolError
 from bpmis_jira_tool.models import CreatedTicket
 from bpmis_jira_tool.monthly_report import DEFAULT_MONTHLY_REPORT_TEMPLATE, MonthlyReportSendResult, resolve_monthly_report_period
 from bpmis_jira_tool.seatalk_dashboard import SEATALK_INSIGHTS_TIMEZONE
+from bpmis_jira_tool.team_dashboard_version_plan import singapore_date_text
 from bpmis_jira_tool.user_config import WebConfigStore
 from bpmis_jira_tool.web import (
     _build_team_profiles_for_display,
@@ -1154,8 +1155,10 @@ class WebPortalFeatureTests(unittest.TestCase):
             node.get_text(strip=True)
             for node in dashboard_soup.select(".team-dashboard-tabs > .workspace-tab")
         ]
-        self.assertEqual(dashboard_main_tabs, ["Task List", "Link Biz Project", "Team Admin"])
+        self.assertEqual(dashboard_main_tabs, ["Task List", "Version Plan", "Link Biz Project", "Team Admin"])
         self.assertIn(b"Team Admin", dashboard_response.data)
+        self.assertIn(b'data-team-dashboard-tab="version-plan"', dashboard_response.data)
+        self.assertIn(b'data-team-dashboard-panel="version-plan"', dashboard_response.data)
         self.assertNotIn(b'data-team-dashboard-tab="monthly-report"', dashboard_response.data)
         self.assertNotIn(b'data-team-dashboard-tab="report-intelligence"', dashboard_response.data)
         self.assertNotIn(b'data-team-dashboard-tab="seatalk-name-mapping"', dashboard_response.data)
@@ -1274,12 +1277,73 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("Monthly Report", config_payload["config"]["monthly_report_template"])
         self.assertIn("BSP", config_payload["config"]["report_intelligence_config"]["priority_keywords"])
         self.assertIn("OJK", config_payload["config"]["report_intelligence_config"]["priority_keywords"])
+        self.assertEqual(len(config_payload["config"]["version_plan"]["af"]["pipeline_rows"]), 45)
         self.assertEqual(save_response.status_code, 200)
         self.assertEqual(sophia_config_response.status_code, 403)
         self.assertEqual(sophia_save_response.status_code, 403)
         saved_payload = save_response.get_json()
         self.assertEqual(saved_payload["config"]["teams"]["AF"]["member_emails"], ["pm1@npt.sg", "pm2@npt.sg"])
         self.assertEqual(saved_payload["config"]["teams"]["GRC"]["member_emails"], ["ops@npt.sg", "ops2@npt.sg"])
+        self.assertEqual(len(saved_payload["config"]["version_plan"]["af"]["pipeline_rows"]), 45)
+
+    def test_team_dashboard_version_plan_api_manual_rows_are_available_to_dashboard_users(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "ENV_FILE": os.devnull,
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            config = app.config["TEAM_DASHBOARD_CONFIG_STORE"].load()
+            config["version_plan"]["af"]["sync_state"]["last_synced_date_sgt"] = singapore_date_text()
+            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(config)
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                    session["google_credentials"] = {"token": "x"}
+                plan_response = client.get("/api/team-dashboard/version-plan/af")
+                status_response = client.get("/api/team-dashboard/version-plan/af/sync-status")
+                add_response = client.post(
+                    "/api/team-dashboard/version-plan/af/rows",
+                    json={"scope": "pipeline", "action": "add"},
+                )
+                added_payload = add_response.get_json()
+                added_row_id = added_payload["pipeline_rows"][-1]["row_id"]
+                cell_response = client.post(
+                    "/api/team-dashboard/version-plan/af/cell",
+                    json={
+                        "scope": "pipeline",
+                        "row_id": added_row_id,
+                        "field": "feature",
+                        "value": "Manual API row",
+                    },
+                )
+                delete_response = client.post(
+                    "/api/team-dashboard/version-plan/af/rows",
+                    json={"scope": "pipeline", "action": "delete", "row_id": added_row_id},
+                )
+
+        self.assertEqual(plan_response.status_code, 200)
+        self.assertFalse(plan_response.get_json()["sync_queued"])
+        self.assertEqual(len(plan_response.get_json()["pipeline_rows"]), 45)
+        self.assertEqual(status_response.status_code, 200)
+        self.assertEqual(add_response.status_code, 200)
+        self.assertEqual(cell_response.status_code, 200)
+        self.assertTrue(
+            any(row["feature"] == "Manual API row" for row in cell_response.get_json()["pipeline_rows"])
+        )
+        self.assertEqual(delete_response.status_code, 200)
+        self.assertFalse(
+            any(row["row_id"] == added_row_id for row in delete_response.get_json()["pipeline_rows"])
+        )
 
     def test_team_dashboard_report_intelligence_save_normalizes_and_requires_admin(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

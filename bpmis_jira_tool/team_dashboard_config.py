@@ -11,6 +11,7 @@ from bpmis_jira_tool.monthly_report import (
     normalize_monthly_report_template,
     normalize_report_intelligence_config,
 )
+from bpmis_jira_tool.team_dashboard_version_plan import normalize_version_plan_state
 
 
 TEAM_DASHBOARD_LEGACY_DEFAULT_MEMBER_EMAILS = (
@@ -122,6 +123,7 @@ class TeamDashboardConfigStore:
             "key_project_overrides": {},
             "monthly_report_template": DEFAULT_MONTHLY_REPORT_TEMPLATE,
             "report_intelligence_config": normalize_report_intelligence_config({}),
+            "version_plan": normalize_version_plan_state({}),
         }
 
     def normalize_config(self, config: dict[str, Any]) -> dict[str, Any]:
@@ -133,6 +135,7 @@ class TeamDashboardConfigStore:
         raw_report_intelligence_config = config.get("report_intelligence_config") if isinstance(config, dict) else {}
         raw_task_cache = config.get("task_cache") if isinstance(config, dict) else {}
         raw_task_cache = raw_task_cache if isinstance(raw_task_cache, dict) else {}
+        raw_version_plan = config.get("version_plan") if isinstance(config, dict) else {}
         default = self.default_config()
         normalized_teams: dict[str, dict[str, Any]] = {}
         for team_key, label in TEAM_DASHBOARD_TEAMS.items():
@@ -163,6 +166,7 @@ class TeamDashboardConfigStore:
             "monthly_report_template": normalize_monthly_report_template(raw_monthly_report_template),
             "report_intelligence_config": normalize_report_intelligence_config(raw_report_intelligence_config),
             "task_cache": self._normalize_task_cache(raw_task_cache),
+            "version_plan": normalize_version_plan_state(raw_version_plan),
         }
 
     def _normalize_task_cache(self, task_cache: dict[str, Any]) -> dict[str, Any]:

@@ -1,0 +1,208 @@
+from __future__ import annotations
+
+from datetime import datetime
+import unittest
+
+from bpmis_jira_tool.team_dashboard_version_plan import (
+    PIPELINE_SEED_ROWS,
+    normalize_version_plan_state,
+    update_version_plan_cell,
+    update_version_plan_rows,
+    version_plan_payload,
+    version_plan_sync,
+    version_plan_synced_today,
+)
+
+
+class FakeBPMISVersionPlanClient:
+    def __init__(self) -> None:
+        self.search_calls: list[str] = []
+
+    def search_versions(self, query: str) -> list[dict]:
+        self.search_calls.append(query)
+        if query == "AF_":
+            return [
+                {
+                    "id": "af-20260520",
+                    "fullName": "AF_1.0.76_20260520",
+                    "timelineStart": "2026-05-01T00:00:00+08:00",
+                    "timelineEnd": "2026-05-20T00:00:00+08:00",
+                },
+                {
+                    "id": "af-20261001",
+                    "fullName": "AF_1.0.99_20261001",
+                    "timelineStart": "2026-09-01T00:00:00+08:00",
+                    "timelineEnd": "2026-10-01T00:00:00+08:00",
+                },
+            ]
+        if query == "DBPSG_":
+            return [
+                {
+                    "id": "dbpsg-0528",
+                    "fullName": "DBPSG_v2.85_0528",
+                    "timelineEnd": "2026-05-28T00:00:00+08:00",
+                }
+            ]
+        if query == "DBPID_":
+            return [
+                {
+                    "id": "dbpid-0528",
+                    "fullName": "DBPID_v3.41_0528",
+                    "timelineEnd": "2026-05-28T00:00:00+08:00",
+                }
+            ]
+        if query == "DBPPH_":
+            return [
+                {
+                    "id": "dbpph-0528",
+                    "fullName": "DBPPH_v3.17_0528",
+                    "timelineEnd": "2026-05-28T00:00:00+08:00",
+                }
+            ]
+        return []
+
+    def list_issues_for_version(self, version_id: str) -> list[dict]:
+        if version_id != "dbpsg-0528":
+            return []
+        return [
+            {
+                "jiraKey": "SPDBP-94945",
+                "summary": "[Feature] Antifraud - UIUX Improvement for AMR",
+                "status": "Developing",
+                "reporter": {"email": "chang.wang@npt.sg"},
+                "jiraRegionalPmPicId": [{"email": "chang.wang@npt.sg"}],
+                "parentIds": ["biz-1"],
+            },
+            {
+                "jiraKey": "SPDBP-closed",
+                "summary": "Closed task",
+                "status": "Closed",
+                "reporter": {"email": "chang.wang@npt.sg"},
+            },
+            {
+                "jiraKey": "SPDBP-xiaodong",
+                "summary": "Excluded reporter",
+                "status": "Developing",
+                "reporter": {"email": "xiaodong.zheng@npt.sg"},
+            },
+        ]
+
+    def get_issue_detail(self, issue_id: str) -> dict:
+        if issue_id != "biz-1":
+            raise AssertionError(f"Unexpected issue id: {issue_id}")
+        return {"bizPriorityId": "P0", "market": "SG"}
+
+
+class TeamDashboardVersionPlanTest(unittest.TestCase):
+    def test_pipeline_seed_is_global_and_not_deduped(self) -> None:
+        plan = normalize_version_plan_state({})
+        rows = plan["af"]["pipeline_rows"]
+
+        self.assertEqual(len(rows), len(PIPELINE_SEED_ROWS))
+        self.assertEqual(len(rows), 45)
+        self.assertEqual(rows[0]["feature"], "[ID] Corporate Internet Banking Phase 2")
+        self.assertEqual(rows[-1]["feature"], "[ID] Credit Card - Txn Scenario / In-App Auth / Rules Changes")
+
+    def test_sync_builds_active_bundle_seen_versions_and_synced_rows(self) -> None:
+        config = {
+            "version_plan": {
+                "af": {
+                    "bundles": {
+                        "af-20260520": {
+                            "manual_rows": [
+                                {"row_id": "manual-1", "feature": "Manual item", "priority": "P1", "pm": ["Zoey"]}
+                            ]
+                        }
+                    },
+                    "pipeline_rows": [{"row_id": "pipe-1", "feature": "Keep pipeline", "priority": "SP"}],
+                }
+            }
+        }
+        synced = version_plan_sync(
+            config,
+            FakeBPMISVersionPlanClient(),
+            now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
+        )
+        payload = version_plan_payload(synced, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
+
+        self.assertTrue(version_plan_synced_today(synced, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00")))
+        self.assertEqual([bundle["af_version_name"] for bundle in payload["bundles"]], ["AF_1.0.76_20260520"])
+        bundle = payload["bundles"][0]
+        self.assertEqual(bundle["prd_initial_date"], "2026-05-16")
+        self.assertEqual(bundle["prd_final_date"], "2026-05-18")
+        self.assertEqual(bundle["synced_rows"][0]["jira_id"], "SPDBP-94945")
+        self.assertEqual(bundle["synced_rows"][0]["market"], "SG")
+        self.assertEqual(bundle["synced_rows"][0]["priority"], "P0")
+        self.assertEqual(bundle["synced_rows"][0]["pm"], ["Wang Chang"])
+        self.assertEqual(bundle["manual_rows"][0]["feature"], "Manual item")
+        self.assertEqual(payload["pipeline_rows"][0]["feature"], "Keep pipeline")
+
+    def test_seen_past_version_moves_to_archived_without_manual_rows(self) -> None:
+        config = {
+            "version_plan": {
+                "af": {
+                    "seen_versions": {
+                        "af-20260520": {
+                            "version_id": "af-20260520",
+                            "version_name": "AF_1.0.76_20260520",
+                            "release_date": "2026-05-20",
+                            "timeline_start": "2026-05-01T00:00:00+08:00",
+                        }
+                    },
+                    "bundles": {
+                        "af-20260520": {
+                            "manual_rows": [
+                                {"row_id": "manual-1", "feature": "Should not archive", "priority": "P1"}
+                            ]
+                        }
+                    },
+                    "pipeline_rows": [{"row_id": "pipe-1", "feature": "Pipeline", "priority": "P2"}],
+                }
+            }
+        }
+        synced = version_plan_sync(
+            config,
+            FakeBPMISVersionPlanClient(),
+            now=datetime.fromisoformat("2026-05-22T09:00:00+08:00"),
+        )
+        payload = version_plan_payload(synced, now=datetime.fromisoformat("2026-05-22T09:00:00+08:00"))
+
+        self.assertEqual(payload["bundles"], [])
+        self.assertEqual(len(payload["archived_bundles"]), 1)
+        archived = payload["archived_bundles"][0]
+        self.assertEqual(archived["af_version_name"], "AF_1.0.76_20260520")
+        self.assertEqual(archived["manual_rows"], [])
+        self.assertEqual(archived["synced_rows"][0]["jira_id"], "SPDBP-94945")
+
+    def test_manual_cell_add_delete_and_priority_order_persist(self) -> None:
+        config = normalize_version_plan_state(
+            {"af": {"pipeline_rows": [{"row_id": "pipe-1", "feature": "Existing", "priority": "P0"}]}}
+        )
+        wrapped = {"version_plan": config}
+        first_row_id = config["af"]["pipeline_rows"][0]["row_id"]
+
+        wrapped = update_version_plan_cell(
+            wrapped,
+            {"scope": "pipeline", "row_id": first_row_id, "field": "priority", "value": "P3"},
+        )
+        wrapped = update_version_plan_rows(wrapped, {"scope": "pipeline", "action": "add"})
+        rows = wrapped["version_plan"]["af"]["pipeline_rows"]
+        new_row_id = rows[-1]["row_id"]
+        wrapped = update_version_plan_cell(
+            wrapped,
+            {"scope": "pipeline", "row_id": new_row_id, "field": "priority", "value": "SP"},
+        )
+        payload = version_plan_payload(wrapped)
+
+        self.assertEqual(payload["pipeline_rows"][0]["row_id"], new_row_id)
+        self.assertEqual(payload["pipeline_rows"][-1]["row_id"], first_row_id)
+
+        wrapped = update_version_plan_rows(wrapped, {"scope": "pipeline", "action": "delete", "row_id": new_row_id})
+        self.assertNotIn(
+            new_row_id,
+            [row["row_id"] for row in wrapped["version_plan"]["af"]["pipeline_rows"]],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

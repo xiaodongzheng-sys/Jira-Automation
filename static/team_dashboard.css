@@ -1253,3 +1253,298 @@
     grid-column: auto !important;
   }
 }
+
+.team-dashboard-version-plan,
+.team-dashboard-version-plan *,
+.team-dashboard-version-plan *::before,
+.team-dashboard-version-plan *::after {
+  box-sizing: border-box;
+}
+
+.team-dashboard-version-plan {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.team-dashboard-version-plan-track {
+  max-width: 420px;
+}
+
+.team-dashboard-version-plan-sections,
+.team-dashboard-version-plan-bundle,
+.team-dashboard-version-plan-archive {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.team-dashboard-version-plan-bundle,
+.team-dashboard-version-plan-archive {
+  padding: 14px;
+  border: 1px solid #dfe7f3;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.team-dashboard-version-plan-bundle-head,
+.team-dashboard-version-plan-archive-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.team-dashboard-version-plan-bundle-head h4,
+.team-dashboard-version-plan-archive-head h4 {
+  margin: 0 0 4px;
+  color: #111827;
+  font-size: 1rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.team-dashboard-version-plan-bundle-head p,
+.team-dashboard-version-plan-archive-head span {
+  margin: 0;
+  color: #667085;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.team-dashboard-version-plan-bundle-head p span {
+  display: inline-block;
+  margin-left: 10px;
+}
+
+.team-dashboard-version-plan-sheet {
+  display: grid;
+  gap: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid #e5ebf5;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.team-dashboard-version-plan-row {
+  display: grid;
+  grid-template-columns: 90px minmax(260px, 2fr) 90px minmax(150px, 0.8fr) minmax(180px, 1fr) 140px 92px;
+  min-width: 1000px;
+  border-bottom: 1px solid #edf1f7;
+}
+
+.team-dashboard-version-plan-row:last-child {
+  border-bottom: 0;
+}
+
+.team-dashboard-version-plan-header {
+  background: #f8fafc;
+  color: #4b5565;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.team-dashboard-version-plan-header > div,
+.team-dashboard-version-plan-cell {
+  min-width: 0;
+  padding: 10px;
+  overflow-wrap: anywhere;
+}
+
+.team-dashboard-version-plan-cell {
+  display: grid;
+  align-content: start;
+  color: #172033;
+  font-size: 0.85rem;
+  line-height: 1.35;
+}
+
+.team-dashboard-version-plan-cell-feature {
+  min-width: 0;
+}
+
+.team-dashboard-version-plan-feature {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.team-dashboard-version-plan-feature a,
+.team-dashboard-version-plan-feature span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.team-dashboard-version-plan-market {
+  padding: 1px 6px;
+  border: 1px solid #d7e4f8;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1.4;
+}
+
+.team-dashboard-version-plan-cell textarea,
+.team-dashboard-version-plan-cell select {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #d8e3f2;
+  border-radius: 8px;
+  background: #fff;
+  color: #172033;
+  font: inherit;
+  line-height: 1.35;
+}
+
+.team-dashboard-version-plan-cell textarea {
+  min-height: 42px;
+  resize: vertical;
+}
+
+.team-dashboard-version-plan-cell select[multiple] {
+  min-height: 96px;
+}
+
+.team-dashboard-version-plan-cell-actions {
+  align-content: center;
+}
+
+.team-dashboard-version-plan-cell-actions .button {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 8px;
+  font-size: 0.78rem;
+  line-height: 1.2;
+}
+
+.team-dashboard-version-plan-move {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+}
+
+.team-dashboard-version-plan-row.is-dragging {
+  opacity: 0.55;
+}
+
+.team-dashboard-version-plan-empty {
+  padding: 12px;
+  color: #667085;
+  font-size: 0.86rem;
+}
+
+.team-dashboard-version-plan-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.team-dashboard-version-plan-actions .button {
+  min-height: 38px;
+}
+
+.team-dashboard-version-plan-archive {
+  margin-top: 4px;
+}
+
+.team-dashboard-version-plan-bundle.is-archived {
+  background: #fbfcff;
+}
+
+@media (max-width: 760px) {
+  .team-dashboard-version-plan-head .button-row {
+    width: 100%;
+  }
+
+  .team-dashboard-version-plan-track {
+    max-width: 100%;
+  }
+
+  .team-dashboard-version-plan-bundle,
+  .team-dashboard-version-plan-archive {
+    padding: 10px;
+  }
+
+  .team-dashboard-version-plan-bundle-head,
+  .team-dashboard-version-plan-archive-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .team-dashboard-version-plan-bundle-head p span {
+    display: block;
+    margin-left: 0;
+  }
+
+  .team-dashboard-version-plan-sheet {
+    gap: 8px;
+    overflow-x: hidden;
+    border: 0;
+    background: transparent;
+  }
+
+  .team-dashboard-version-plan-header {
+    display: none;
+  }
+
+  .team-dashboard-version-plan-row {
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
+    gap: 8px;
+    padding: 10px;
+    border: 1px solid #e0e7f2;
+    border-radius: 8px;
+    background: #fff;
+  }
+
+  .team-dashboard-version-plan-cell {
+    padding: 0;
+    gap: 4px;
+    font-size: 0.92rem;
+  }
+
+  .team-dashboard-version-plan-cell::before {
+    content: attr(data-label);
+    color: #667085;
+    font-size: 0.74rem;
+    font-weight: 800;
+    letter-spacing: 0;
+    text-transform: uppercase;
+  }
+
+  .team-dashboard-version-plan-feature {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 5px;
+  }
+
+  .team-dashboard-version-plan-market {
+    justify-self: start;
+  }
+
+  .team-dashboard-version-plan-cell textarea {
+    min-height: 58px;
+  }
+
+  .team-dashboard-version-plan-move {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .team-dashboard-version-plan-cell-actions .button,
+  .team-dashboard-version-plan-actions .button {
+    min-height: 42px;
+  }
+
+  .team-dashboard-version-plan-actions {
+    display: grid;
+    width: 100%;
+  }
+}

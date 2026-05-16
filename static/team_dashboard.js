@@ -124,6 +124,9 @@
   const linkBizProjectRows = root.querySelector('[data-link-biz-project-rows]');
   const linkBizProjectFindJira = root.querySelector('[data-link-biz-project-find-jira]');
   const linkBizProjectSuggest = root.querySelector('[data-link-biz-project-suggest]');
+  const versionPlanContent = root.querySelector('[data-version-plan-content]');
+  const versionPlanStatus = root.querySelector('[data-version-plan-status]');
+  const versionPlanSyncButton = root.querySelector('[data-version-plan-sync]');
   const canManageKeyProjects = root.dataset.canManageKeyProjects === 'true';
   const teamLabels = {
     AF: 'Anti-fraud',
@@ -158,6 +161,10 @@
   let monthlyReportProgressTimer = null;
   let monthlyReportProgressStartedAt = 0;
   let monthlyReportLastProgress = null;
+  let versionPlanLoaded = false;
+  let versionPlanState = null;
+  let versionPlanPollTimer = null;
+  let versionPlanDragRow = null;
   const pmFilterState = {};
   const expandedPanels = {};
   const jiraPageState = {};
@@ -427,6 +434,9 @@
       if (name === 'seatalk-name-mapping') {
         loadSeaTalkNameMappings(false);
       }
+      if (name === 'version-plan') {
+        loadVersionPlan();
+      }
     };
     triggers.forEach((trigger) => {
       trigger.addEventListener('click', () => activate(trigger.dataset.teamDashboardTab || 'tasks'));
@@ -445,6 +455,345 @@
   const renderLink = (url, label) => {
     if (!url) return escapeHtml(label || '-');
     return `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(label || url)}</a>`;
+  };
+
+  const versionPlanPriorityOptions = (selected) => {
+    const priorities = Array.isArray(versionPlanState?.priority_order) && versionPlanState.priority_order.length
+      ? versionPlanState.priority_order
+      : ['SP', 'P0', 'P1', 'P2', 'P3'];
+    return [
+      '<option value="">-</option>',
+      ...priorities.map((priority) => (
+        `<option value="${escapeHtml(priority)}"${priority === selected ? ' selected' : ''}>${escapeHtml(priority)}</option>`
+      )),
+    ].join('');
+  };
+
+  const versionPlanPmOptions = (selectedValues = []) => {
+    const selected = new Set((Array.isArray(selectedValues) ? selectedValues : []).map((item) => String(item || '').trim()));
+    const options = Array.isArray(versionPlanState?.pm_options) && versionPlanState.pm_options.length
+      ? versionPlanState.pm_options
+      : ['Wang Chang', 'Zoey', 'Jireh', 'Ker Yin', 'Rene', 'Jun Wei', 'TBC'];
+    return options.map((pm) => (
+      `<option value="${escapeHtml(pm)}"${selected.has(pm) ? ' selected' : ''}>${escapeHtml(pm)}</option>`
+    )).join('');
+  };
+
+  const setVersionPlanStatus = (message, tone = 'neutral') => {
+    setStatus(versionPlanStatus, message, tone);
+  };
+
+  const versionPlanSyncText = (syncState = {}) => {
+    const state = String(syncState.state || '').trim();
+    if (state === 'running') return syncState.message || 'Syncing Jira information...';
+    if (state === 'error') return syncState.error || syncState.message || 'Sync failed.';
+    if (syncState.last_synced_date_sgt) return `Last synced: ${syncState.last_synced_date_sgt} SGT`;
+    return 'Cached Version Plan loaded. Jira sync will start when needed.';
+  };
+
+  const versionPlanRowFeature = (row, readOnly) => {
+    if (row.row_type === 'synced') {
+      const jiraId = row.jira_id || '-';
+      const market = row.market || '-';
+      const summary = row.jira_summary || '-';
+      return `
+        <div class="team-dashboard-version-plan-feature">
+          ${renderLink(row.jira_link, jiraId)}
+          <span class="team-dashboard-version-plan-market">${escapeHtml(market)}</span>
+          <span>${escapeHtml(summary)}</span>
+        </div>
+      `;
+    }
+    if (readOnly) return escapeHtml(row.feature || '-');
+    return `
+      <textarea
+        rows="2"
+        spellcheck="true"
+        data-version-plan-cell="feature"
+      >${escapeHtml(row.feature || '')}</textarea>
+    `;
+  };
+
+  const versionPlanManualField = (row, field, readOnly) => {
+    if (readOnly || row.row_type !== 'manual') {
+      if (field === 'pm') return escapeHtml((Array.isArray(row.pm) ? row.pm : []).join(', ') || '-');
+      return escapeHtml(row[field] || '-');
+    }
+    if (field === 'priority') {
+      return `<select data-version-plan-cell="priority" aria-label="Priority">${versionPlanPriorityOptions(row.priority || '')}</select>`;
+    }
+    if (field === 'pm') {
+      return `<select multiple size="4" data-version-plan-cell="pm" aria-label="PM">${versionPlanPmOptions(row.pm || [])}</select>`;
+    }
+    if (field === 'productization_efforts') {
+      return `
+        <select data-version-plan-cell="productization_efforts" aria-label="Productization Efforts">
+          <option value=""${!row.productization_efforts ? ' selected' : ''}>-</option>
+          <option value="Y"${row.productization_efforts === 'Y' ? ' selected' : ''}>Y</option>
+          <option value="N"${row.productization_efforts === 'N' ? ' selected' : ''}>N</option>
+        </select>
+      `;
+    }
+    return `<textarea rows="2" spellcheck="true" data-version-plan-cell="${escapeHtml(field)}">${escapeHtml(row[field] || '')}</textarea>`;
+  };
+
+  const renderVersionPlanRows = (rows, { scope, versionId = '', readOnly = false, title = 'Rows' } = {}) => {
+    const rowItems = Array.isArray(rows) ? rows : [];
+    const empty = `<div class="team-dashboard-version-plan-empty">No ${escapeHtml(title.toLowerCase())} yet.</div>`;
+    const body = rowItems.map((row) => {
+      const manual = row.row_type === 'manual' && !readOnly;
+      return `
+        <div
+          class="team-dashboard-version-plan-row${manual ? ' is-manual' : ' is-readonly'}"
+          data-version-plan-row-id="${escapeHtml(row.row_id || '')}"
+          data-version-plan-scope="${escapeHtml(scope)}"
+          data-version-id="${escapeHtml(versionId)}"
+          data-version-plan-priority="${escapeHtml(row.priority || '')}"
+          ${manual ? 'data-version-plan-manual-row="true" draggable="true"' : ''}
+        >
+          <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-cell-actions" data-label="Action">
+            ${manual ? '<div class="team-dashboard-version-plan-move"><button class="button button-secondary team-dashboard-version-plan-drag" type="button" aria-label="Drag row">Drag</button><button class="button button-secondary" type="button" data-version-plan-row-action="up">Up</button><button class="button button-secondary" type="button" data-version-plan-row-action="down">Down</button></div>' : '<span class="field-badge">Jira</span>'}
+          </div>
+          <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-cell-feature" data-label="Feature">
+            ${versionPlanRowFeature(row, readOnly)}
+          </div>
+          <div class="team-dashboard-version-plan-cell" data-label="Priority">
+            ${versionPlanManualField(row, 'priority', readOnly)}
+          </div>
+          <div class="team-dashboard-version-plan-cell" data-label="PM">
+            ${versionPlanManualField(row, 'pm', readOnly)}
+          </div>
+          <div class="team-dashboard-version-plan-cell" data-label="Remarks">
+            ${versionPlanManualField(row, 'remarks', readOnly)}
+          </div>
+          <div class="team-dashboard-version-plan-cell" data-label="Productization Efforts?">
+            ${versionPlanManualField(row, 'productization_efforts', readOnly)}
+          </div>
+          <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-cell-actions" data-label="Delete">
+            ${manual ? `<button class="button button-secondary" type="button" data-version-plan-row-action="delete">Delete</button>` : '-'}
+          </div>
+        </div>
+      `;
+    }).join('');
+    return `
+      <div class="team-dashboard-version-plan-sheet" data-version-plan-sheet="${escapeHtml(scope)}" data-version-id="${escapeHtml(versionId)}">
+        <div class="team-dashboard-version-plan-row team-dashboard-version-plan-header" aria-hidden="true">
+          <div>Action</div>
+          <div>Feature</div>
+          <div>Priority</div>
+          <div>PM</div>
+          <div>Remarks</div>
+          <div>Productization Efforts?</div>
+          <div>Delete</div>
+        </div>
+        ${body || empty}
+      </div>
+    `;
+  };
+
+  const renderVersionPlanBundle = (bundle) => {
+    const mapped = bundle.mapped_versions && typeof bundle.mapped_versions === 'object' ? bundle.mapped_versions : {};
+    const mappedText = ['DBPSG', 'DBPID', 'DBPPH']
+      .map((key) => `${key}: ${mapped[key]?.version_name || '-'}`)
+      .join(' · ');
+    const manualRows = Array.isArray(bundle.manual_rows) ? bundle.manual_rows : [];
+    const syncedRows = Array.isArray(bundle.synced_rows) ? bundle.synced_rows : [];
+    return `
+      <section class="team-dashboard-version-plan-bundle">
+        <div class="team-dashboard-version-plan-bundle-head">
+          <div>
+            <h4>${escapeHtml(bundle.af_version_name || 'AF Version')}</h4>
+            <p>
+              <strong>AF Live:</strong> ${escapeHtml(bundle.af_release_date || '-')}
+              <span>PRD initial: ${escapeHtml(bundle.prd_initial_date || '-')}</span>
+              <span>PRD final: ${escapeHtml(bundle.prd_final_date || '-')}</span>
+            </p>
+            <p>${escapeHtml(mappedText)}</p>
+          </div>
+          <span class="field-badge">${bundle.in_dev ? 'Developing' : 'Upcoming'}</span>
+        </div>
+        ${syncedRows.length ? renderVersionPlanRows(syncedRows, { scope: 'synced', versionId: bundle.version_id, readOnly: true, title: 'Jira rows' }) : ''}
+        ${renderVersionPlanRows(manualRows, { scope: 'bundle', versionId: bundle.version_id, readOnly: false, title: 'manual rows' })}
+        <div class="team-dashboard-version-plan-actions">
+          <button class="button button-secondary" type="button" data-version-plan-row-action="add" data-version-plan-scope="bundle" data-version-id="${escapeHtml(bundle.version_id || '')}">Add Row</button>
+        </div>
+      </section>
+    `;
+  };
+
+  const renderVersionPlanArchivedBundle = (bundle) => `
+    <section class="team-dashboard-version-plan-bundle is-archived">
+      <div class="team-dashboard-version-plan-bundle-head">
+        <div>
+          <h4>${escapeHtml(bundle.af_version_name || 'AF Version')}</h4>
+          <p><strong>AF Live:</strong> ${escapeHtml(bundle.af_release_date || '-')}</p>
+        </div>
+        <span class="field-badge">Archived</span>
+      </div>
+      ${renderVersionPlanRows(bundle.synced_rows || [], { scope: 'archived', versionId: bundle.version_id, readOnly: true, title: 'archived Jira rows' })}
+    </section>
+  `;
+
+  const renderVersionPlan = (payload) => {
+    if (!versionPlanContent) return;
+    versionPlanState = payload || {};
+    const bundles = Array.isArray(payload?.bundles) ? payload.bundles : [];
+    const pipelineRows = Array.isArray(payload?.pipeline_rows) ? payload.pipeline_rows : [];
+    const archived = Array.isArray(payload?.archived_bundles) ? payload.archived_bundles : [];
+    const activeHtml = bundles.length
+      ? bundles.map(renderVersionPlanBundle).join('')
+      : '<section class="team-dashboard-version-plan-bundle"><p class="productization-inline-status">No active or upcoming AF version bundles in range.</p></section>';
+    versionPlanContent.innerHTML = `
+      <div class="team-dashboard-version-plan-sections">
+        ${activeHtml}
+        <section class="team-dashboard-version-plan-bundle team-dashboard-version-plan-pipeline">
+          <div class="team-dashboard-version-plan-bundle-head">
+            <div>
+              <h4>Pipeline Section</h4>
+              <p>Manual Anti-fraud pipeline items. Sync does not overwrite this section.</p>
+            </div>
+            <span class="field-badge">${escapeHtml(pipelineRows.length)} rows</span>
+          </div>
+          ${renderVersionPlanRows(pipelineRows, { scope: 'pipeline', readOnly: false, title: 'pipeline rows' })}
+          <div class="team-dashboard-version-plan-actions">
+            <button class="button button-secondary" type="button" data-version-plan-row-action="add" data-version-plan-scope="pipeline">Add Row</button>
+          </div>
+        </section>
+        <section class="team-dashboard-version-plan-archive">
+          <div class="team-dashboard-version-plan-archive-head">
+            <h4>Archived Version</h4>
+            <span>${escapeHtml(archived.length)} versions</span>
+          </div>
+          ${archived.length ? archived.map(renderVersionPlanArchivedBundle).join('') : '<p class="productization-inline-status">No archived versions recorded after Version Plan launch yet.</p>'}
+        </section>
+      </div>
+    `;
+    setVersionPlanStatus(versionPlanSyncText(payload?.sync_state || {}), payload?.sync_state?.state === 'error' ? 'error' : 'neutral');
+  };
+
+  const loadVersionPlan = async ({ force = false } = {}) => {
+    if (!versionPlanContent || (versionPlanLoaded && !force)) return;
+    versionPlanLoaded = true;
+    setVersionPlanStatus('Loading cached Version Plan...', 'neutral');
+    try {
+      const response = await fetch(root.dataset.versionPlanUrl || '/api/team-dashboard/version-plan/af', {
+        headers: { Accept: 'application/json' },
+        credentials: 'same-origin',
+      });
+      const payload = await readJson(response, 'Could not load Version Plan.');
+      renderVersionPlan(payload);
+      if (payload?.sync_state?.state === 'running' || payload?.sync_queued) {
+        startVersionPlanPolling();
+      }
+    } catch (error) {
+      versionPlanLoaded = false;
+      setVersionPlanStatus(error.message || 'Could not load Version Plan.', 'error');
+      versionPlanContent.innerHTML = '<p class="productization-inline-status" data-tone="error">Version Plan failed to load.</p>';
+    }
+  };
+
+  const startVersionPlanPolling = () => {
+    if (versionPlanPollTimer) return;
+    versionPlanPollTimer = window.setInterval(async () => {
+      try {
+        const response = await fetch(root.dataset.versionPlanSyncStatusUrl || '/api/team-dashboard/version-plan/af/sync-status', {
+          headers: { Accept: 'application/json' },
+          credentials: 'same-origin',
+        });
+        const payload = await readJson(response, 'Could not load Version Plan sync status.');
+        const syncState = payload.sync_state || {};
+        setVersionPlanStatus(versionPlanSyncText(syncState), syncState.state === 'error' ? 'error' : 'neutral');
+        if (syncState.state !== 'running') {
+          window.clearInterval(versionPlanPollTimer);
+          versionPlanPollTimer = null;
+          versionPlanLoaded = false;
+          loadVersionPlan({ force: true });
+        }
+      } catch (error) {
+        window.clearInterval(versionPlanPollTimer);
+        versionPlanPollTimer = null;
+        setVersionPlanStatus(error.message || 'Could not load Version Plan sync status.', 'error');
+      }
+    }, 1800);
+  };
+
+  const syncVersionPlan = async () => {
+    if (!versionPlanSyncButton) return;
+    versionPlanSyncButton.disabled = true;
+    setVersionPlanStatus('Starting Jira sync...', 'neutral');
+    try {
+      const response = await fetch(root.dataset.versionPlanSyncUrl || '/api/team-dashboard/version-plan/af/sync', {
+        method: 'POST',
+        headers: { Accept: 'application/json' },
+        credentials: 'same-origin',
+      });
+      const payload = await readJson(response, 'Could not start Version Plan sync.');
+      renderVersionPlan(payload);
+      startVersionPlanPolling();
+    } catch (error) {
+      setVersionPlanStatus(error.message || 'Could not start Version Plan sync.', 'error');
+    } finally {
+      versionPlanSyncButton.disabled = false;
+    }
+  };
+
+  const saveVersionPlanCell = async (input) => {
+    const row = input.closest('[data-version-plan-row-id]');
+    if (!row) return;
+    const field = input.dataset.versionPlanCell || '';
+    const value = input.multiple ? Array.from(input.selectedOptions).map((option) => option.value) : input.value;
+    try {
+      const response = await fetch(root.dataset.versionPlanCellUrl || '/api/team-dashboard/version-plan/af/cell', {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          scope: row.dataset.versionPlanScope || '',
+          version_id: row.dataset.versionId || '',
+          row_id: row.dataset.versionPlanRowId || '',
+          field,
+          value,
+        }),
+      });
+      const payload = await readJson(response, 'Could not save Version Plan cell.');
+      renderVersionPlan(payload);
+      setVersionPlanStatus('Saved.', 'success');
+    } catch (error) {
+      setVersionPlanStatus(error.message || 'Could not save Version Plan cell.', 'error');
+    }
+  };
+
+  const updateVersionPlanRows = async (payload, fallbackMessage = 'Could not update Version Plan rows.') => {
+    const response = await fetch(root.dataset.versionPlanRowsUrl || '/api/team-dashboard/version-plan/af/rows', {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    });
+    const result = await readJson(response, fallbackMessage);
+    renderVersionPlan(result);
+    setVersionPlanStatus('Saved.', 'success');
+  };
+
+  const reorderVersionPlanRows = async (dropRow) => {
+    if (!versionPlanDragRow || !dropRow || versionPlanDragRow === dropRow) return;
+    if (versionPlanDragRow.dataset.versionPlanScope !== dropRow.dataset.versionPlanScope) return;
+    if ((versionPlanDragRow.dataset.versionId || '') !== (dropRow.dataset.versionId || '')) return;
+    if ((versionPlanDragRow.dataset.versionPlanPriority || '') !== (dropRow.dataset.versionPlanPriority || '')) return;
+    const sheet = dropRow.closest('[data-version-plan-sheet]');
+    if (!sheet) return;
+    const before = versionPlanDragRow.compareDocumentPosition(dropRow) & Node.DOCUMENT_POSITION_FOLLOWING;
+    sheet.insertBefore(versionPlanDragRow, before ? dropRow.nextSibling : dropRow);
+    const rowIds = Array.from(sheet.querySelectorAll('[data-version-plan-manual-row="true"]'))
+      .filter((row) => (row.dataset.versionPlanPriority || '') === (dropRow.dataset.versionPlanPriority || ''))
+      .map((row) => row.dataset.versionPlanRowId || '')
+      .filter(Boolean);
+    await updateVersionPlanRows({
+      action: 'reorder',
+      scope: dropRow.dataset.versionPlanScope || '',
+      version_id: dropRow.dataset.versionId || '',
+      row_ids: rowIds,
+    }, 'Could not reorder Version Plan rows.');
   };
 
   const renderMarkdown = (value) => {
@@ -2219,6 +2568,94 @@
   monthlyReportGenerateButton?.addEventListener('click', generateMonthlyReport);
   monthlyReportSendButton?.addEventListener('click', sendMonthlyReport);
   monthlyReportTemplateForm?.addEventListener('submit', saveMonthlyReportTemplate);
+  versionPlanSyncButton?.addEventListener('click', syncVersionPlan);
+  versionPlanContent?.addEventListener('change', (event) => {
+    const input = event.target.closest('[data-version-plan-cell]');
+    if (input) saveVersionPlanCell(input);
+  });
+  versionPlanContent?.addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-version-plan-row-action]');
+    if (!button) return;
+    const action = button.dataset.versionPlanRowAction || '';
+    const scope = button.dataset.versionPlanScope || button.closest('[data-version-plan-row-id]')?.dataset.versionPlanScope || '';
+    const versionId = button.dataset.versionId || button.closest('[data-version-plan-row-id]')?.dataset.versionId || '';
+    const row = button.closest('[data-version-plan-row-id]');
+    try {
+      if (action === 'add') {
+        await updateVersionPlanRows({ action: 'add', scope, version_id: versionId }, 'Could not add Version Plan row.');
+        return;
+      }
+      if (action === 'delete' && row) {
+        await updateVersionPlanRows({
+          action: 'delete',
+          scope,
+          version_id: versionId,
+          row_id: row.dataset.versionPlanRowId || '',
+        }, 'Could not delete Version Plan row.');
+        return;
+      }
+      if ((action === 'up' || action === 'down') && row) {
+        const sheet = row.closest('[data-version-plan-sheet]');
+        const groupRows = Array.from(sheet?.querySelectorAll('[data-version-plan-manual-row="true"]') || [])
+          .filter((item) => (item.dataset.versionPlanPriority || '') === (row.dataset.versionPlanPriority || ''));
+        const index = groupRows.indexOf(row);
+        const swapWith = action === 'up' ? groupRows[index - 1] : groupRows[index + 1];
+        if (!swapWith) return;
+        if (action === 'up') sheet.insertBefore(row, swapWith);
+        else sheet.insertBefore(swapWith, row);
+        const rowIds = groupRows
+          .map((item) => item.dataset.versionPlanRowId || '')
+          .filter(Boolean);
+        const moved = row.dataset.versionPlanRowId || '';
+        const target = swapWith.dataset.versionPlanRowId || '';
+        const movedIndex = rowIds.indexOf(moved);
+        const targetIndex = rowIds.indexOf(target);
+        if (movedIndex >= 0 && targetIndex >= 0) {
+          rowIds[movedIndex] = target;
+          rowIds[targetIndex] = moved;
+        }
+        await updateVersionPlanRows({
+          action: 'reorder',
+          scope,
+          version_id: versionId,
+          row_ids: rowIds,
+        }, 'Could not reorder Version Plan rows.');
+      }
+    } catch (error) {
+      setVersionPlanStatus(error.message || 'Could not update Version Plan rows.', 'error');
+    }
+  });
+  versionPlanContent?.addEventListener('dragstart', (event) => {
+    const row = event.target.closest('[data-version-plan-manual-row="true"]');
+    if (!row) return;
+    versionPlanDragRow = row;
+    row.classList.add('is-dragging');
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', row.dataset.versionPlanRowId || '');
+  });
+  versionPlanContent?.addEventListener('dragend', () => {
+    versionPlanDragRow?.classList.remove('is-dragging');
+    versionPlanDragRow = null;
+  });
+  versionPlanContent?.addEventListener('dragover', (event) => {
+    const row = event.target.closest('[data-version-plan-manual-row="true"]');
+    if (!row || !versionPlanDragRow) return;
+    if (row.dataset.versionPlanScope !== versionPlanDragRow.dataset.versionPlanScope) return;
+    if ((row.dataset.versionId || '') !== (versionPlanDragRow.dataset.versionId || '')) return;
+    if ((row.dataset.versionPlanPriority || '') !== (versionPlanDragRow.dataset.versionPlanPriority || '')) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+  });
+  versionPlanContent?.addEventListener('drop', async (event) => {
+    const row = event.target.closest('[data-version-plan-manual-row="true"]');
+    if (!row) return;
+    event.preventDefault();
+    try {
+      await reorderVersionPlanRows(row);
+    } catch (error) {
+      setVersionPlanStatus(error.message || 'Could not reorder Version Plan rows.', 'error');
+    }
+  });
   linkBizProjectFindJira?.addEventListener('click', loadLinkBizJira);
   linkBizProjectSuggest?.addEventListener('click', suggestLinkBizProjects);
   linkBizProjectRows?.addEventListener('change', (event) => {
