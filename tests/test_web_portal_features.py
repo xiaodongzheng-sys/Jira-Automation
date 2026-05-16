@@ -3088,6 +3088,19 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("activeTrigger", script)
         self.assertIn("activate(activeTrigger.dataset.teamDashboardTab || 'tasks')", script)
 
+    def test_team_dashboard_version_plan_frontend_uses_sheet_format(self):
+        script = Path("static/team_dashboard.js").read_text(encoding="utf-8")
+        styles = Path("static/team_dashboard.css").read_text(encoding="utf-8")
+
+        self.assertIn("(PRD Final: ${versionPlanShortDate(bundle.prd_final_date)})", script)
+        self.assertIn("Productization Efforts? (Y/N)", script)
+        self.assertIn("└ ${escapeHtml(line)}", script)
+        self.assertIn("renderLink(row.jira_link, `[${jiraId}]`)", script)
+        self.assertIn("[${escapeHtml(market)}]", script)
+        self.assertIn("--version-plan-sheet-grid", styles)
+        self.assertIn("grid-template-columns: var(--version-plan-sheet-grid)", styles)
+        self.assertNotIn("grid-template-columns: minmax(0, 1fr);\n    min-width: 0;\n    gap: 8px;", styles)
+
     def test_team_dashboard_daily_brief_frontend_and_template_hooks(self):
         template = Path("templates/_team_dashboard_content.html").read_text(encoding="utf-8")
         script = Path("static/team_dashboard.js").read_text(encoding="utf-8")

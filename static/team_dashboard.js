@@ -491,6 +491,35 @@
     return 'Cached Version Plan loaded. Jira sync will start when needed.';
   };
 
+  const versionPlanShortDate = (value) => {
+    const text = String(value || '').trim();
+    if (!text) return '-';
+    const date = new Date(`${text.slice(0, 10)}T00:00:00+08:00`);
+    if (Number.isNaN(date.getTime())) return text;
+    return new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Singapore',
+      day: 'numeric',
+      month: 'short',
+    }).format(date);
+  };
+
+  const versionPlanDbpLine = (prefix, version) => {
+    const fallbackMarket = { DBPSG: 'SG', DBPID: 'ID', DBPPH: 'PH' }[prefix] || prefix;
+    const rawName = String(version?.version_name || '').trim();
+    if (!rawName || rawName === '-') return `${fallbackMarket}_-`;
+    return rawName.replace(/^DBP/, '');
+  };
+
+  const versionPlanSheetTitle = (title, mappedVersions = {}) => {
+    const lines = ['DBPSG', 'DBPID', 'DBPPH'].map((prefix) => versionPlanDbpLine(prefix, mappedVersions[prefix]));
+    return `
+      <div class="team-dashboard-version-plan-sheet-title">
+        <strong>${escapeHtml(title || '-')}</strong>
+        ${lines.map((line) => `<span>└ ${escapeHtml(line)}</span>`).join('')}
+      </div>
+    `;
+  };
+
   const versionPlanRowFeature = (row, readOnly) => {
     if (row.row_type === 'synced') {
       const jiraId = row.jira_id || '-';
@@ -498,8 +527,8 @@
       const summary = row.jira_summary || '-';
       return `
         <div class="team-dashboard-version-plan-feature">
-          ${renderLink(row.jira_link, jiraId)}
-          <span class="team-dashboard-version-plan-market">${escapeHtml(market)}</span>
+          ${renderLink(row.jira_link, `[${jiraId}]`)}
+          <span class="team-dashboard-version-plan-market">[${escapeHtml(market)}]</span>
           <span>${escapeHtml(summary)}</span>
         </div>
       `;
@@ -507,7 +536,7 @@
     if (readOnly) return escapeHtml(row.feature || '-');
     return `
       <textarea
-        rows="2"
+        rows="1"
         spellcheck="true"
         data-version-plan-cell="feature"
       >${escapeHtml(row.feature || '')}</textarea>
@@ -523,7 +552,7 @@
       return `<select data-version-plan-cell="priority" aria-label="Priority">${versionPlanPriorityOptions(row.priority || '')}</select>`;
     }
     if (field === 'pm') {
-      return `<select multiple size="4" data-version-plan-cell="pm" aria-label="PM">${versionPlanPmOptions(row.pm || [])}</select>`;
+      return `<select multiple size="3" data-version-plan-cell="pm" aria-label="PM">${versionPlanPmOptions(row.pm || [])}</select>`;
     }
     if (field === 'productization_efforts') {
       return `
@@ -534,10 +563,10 @@
         </select>
       `;
     }
-    return `<textarea rows="2" spellcheck="true" data-version-plan-cell="${escapeHtml(field)}">${escapeHtml(row[field] || '')}</textarea>`;
+    return `<textarea rows="1" spellcheck="true" data-version-plan-cell="${escapeHtml(field)}">${escapeHtml(row[field] || '')}</textarea>`;
   };
 
-  const renderVersionPlanRows = (rows, { scope, versionId = '', readOnly = false, title = 'Rows' } = {}) => {
+  const renderVersionPlanRows = (rows, { scope, versionId = '', readOnly = false, title = 'Rows', headerFeature = 'Feature' } = {}) => {
     const rowItems = Array.isArray(rows) ? rows : [];
     const empty = `<div class="team-dashboard-version-plan-empty">No ${escapeHtml(title.toLowerCase())} yet.</div>`;
     const body = rowItems.map((row) => {
@@ -551,10 +580,8 @@
           data-version-plan-priority="${escapeHtml(row.priority || '')}"
           ${manual ? 'data-version-plan-manual-row="true" draggable="true"' : ''}
         >
-          <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-cell-actions" data-label="Action">
-            ${manual ? '<div class="team-dashboard-version-plan-move"><button class="button button-secondary team-dashboard-version-plan-drag" type="button" aria-label="Drag row">Drag</button><button class="button button-secondary" type="button" data-version-plan-row-action="up">Up</button><button class="button button-secondary" type="button" data-version-plan-row-action="down">Down</button></div>' : '<span class="field-badge">Jira</span>'}
-          </div>
           <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-cell-feature" data-label="Feature">
+            ${manual ? '<div class="team-dashboard-version-plan-row-tools"><button class="button button-secondary team-dashboard-version-plan-drag" type="button" aria-label="Drag row">Drag</button><button class="button button-secondary" type="button" data-version-plan-row-action="up">Up</button><button class="button button-secondary" type="button" data-version-plan-row-action="down">Down</button><button class="button button-secondary" type="button" data-version-plan-row-action="delete">Delete</button></div>' : ''}
             ${versionPlanRowFeature(row, readOnly)}
           </div>
           <div class="team-dashboard-version-plan-cell" data-label="Priority">
@@ -569,22 +596,17 @@
           <div class="team-dashboard-version-plan-cell" data-label="Productization Efforts?">
             ${versionPlanManualField(row, 'productization_efforts', readOnly)}
           </div>
-          <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-cell-actions" data-label="Delete">
-            ${manual ? `<button class="button button-secondary" type="button" data-version-plan-row-action="delete">Delete</button>` : '-'}
-          </div>
         </div>
       `;
     }).join('');
     return `
       <div class="team-dashboard-version-plan-sheet" data-version-plan-sheet="${escapeHtml(scope)}" data-version-id="${escapeHtml(versionId)}">
         <div class="team-dashboard-version-plan-row team-dashboard-version-plan-header" aria-hidden="true">
-          <div>Action</div>
-          <div>Feature</div>
+          <div>${headerFeature}</div>
           <div>Priority</div>
           <div>PM</div>
           <div>Remarks</div>
-          <div>Productization Efforts?</div>
-          <div>Delete</div>
+          <div>Productization Efforts? (Y/N)</div>
         </div>
         ${body || empty}
       </div>
@@ -593,27 +615,15 @@
 
   const renderVersionPlanBundle = (bundle) => {
     const mapped = bundle.mapped_versions && typeof bundle.mapped_versions === 'object' ? bundle.mapped_versions : {};
-    const mappedText = ['DBPSG', 'DBPID', 'DBPPH']
-      .map((key) => `${key}: ${mapped[key]?.version_name || '-'}`)
-      .join(' · ');
     const manualRows = Array.isArray(bundle.manual_rows) ? bundle.manual_rows : [];
     const syncedRows = Array.isArray(bundle.synced_rows) ? bundle.synced_rows : [];
+    const headerFeature = versionPlanSheetTitle(
+      `${bundle.af_version_name || 'AF Version'} (PRD Final: ${versionPlanShortDate(bundle.prd_final_date)})`,
+      mapped,
+    );
     return `
       <section class="team-dashboard-version-plan-bundle">
-        <div class="team-dashboard-version-plan-bundle-head">
-          <div>
-            <h4>${escapeHtml(bundle.af_version_name || 'AF Version')}</h4>
-            <p>
-              <strong>AF Live:</strong> ${escapeHtml(bundle.af_release_date || '-')}
-              <span>PRD initial: ${escapeHtml(bundle.prd_initial_date || '-')}</span>
-              <span>PRD final: ${escapeHtml(bundle.prd_final_date || '-')}</span>
-            </p>
-            <p>${escapeHtml(mappedText)}</p>
-          </div>
-          <span class="field-badge">${bundle.in_dev ? 'Developing' : 'Upcoming'}</span>
-        </div>
-        ${syncedRows.length ? renderVersionPlanRows(syncedRows, { scope: 'synced', versionId: bundle.version_id, readOnly: true, title: 'Jira rows' }) : ''}
-        ${renderVersionPlanRows(manualRows, { scope: 'bundle', versionId: bundle.version_id, readOnly: false, title: 'manual rows' })}
+        ${renderVersionPlanRows([...syncedRows, ...manualRows], { scope: 'bundle', versionId: bundle.version_id, readOnly: false, title: 'rows', headerFeature })}
         <div class="team-dashboard-version-plan-actions">
           <button class="button button-secondary" type="button" data-version-plan-row-action="add" data-version-plan-scope="bundle" data-version-id="${escapeHtml(bundle.version_id || '')}">Add Row</button>
         </div>
@@ -621,18 +631,18 @@
     `;
   };
 
-  const renderVersionPlanArchivedBundle = (bundle) => `
-    <section class="team-dashboard-version-plan-bundle is-archived">
-      <div class="team-dashboard-version-plan-bundle-head">
-        <div>
-          <h4>${escapeHtml(bundle.af_version_name || 'AF Version')}</h4>
-          <p><strong>AF Live:</strong> ${escapeHtml(bundle.af_release_date || '-')}</p>
-        </div>
-        <span class="field-badge">Archived</span>
-      </div>
-      ${renderVersionPlanRows(bundle.synced_rows || [], { scope: 'archived', versionId: bundle.version_id, readOnly: true, title: 'archived Jira rows' })}
-    </section>
-  `;
+  const renderVersionPlanArchivedBundle = (bundle) => {
+    const mapped = bundle.mapped_versions && typeof bundle.mapped_versions === 'object' ? bundle.mapped_versions : {};
+    const headerFeature = versionPlanSheetTitle(
+      `${bundle.af_version_name || 'AF Version'} (PRD Final: ${versionPlanShortDate(bundle.prd_final_date || bundle.af_release_date)})`,
+      mapped,
+    );
+    return `
+      <section class="team-dashboard-version-plan-bundle is-archived">
+        ${renderVersionPlanRows(bundle.synced_rows || [], { scope: 'archived', versionId: bundle.version_id, readOnly: true, title: 'archived Jira rows', headerFeature })}
+      </section>
+    `;
+  };
 
   const renderVersionPlan = (payload) => {
     if (!versionPlanContent) return;
@@ -650,11 +660,10 @@
           <div class="team-dashboard-version-plan-bundle-head">
             <div>
               <h4>Pipeline Section</h4>
-              <p>Manual Anti-fraud pipeline items. Sync does not overwrite this section.</p>
             </div>
             <span class="field-badge">${escapeHtml(pipelineRows.length)} rows</span>
           </div>
-          ${renderVersionPlanRows(pipelineRows, { scope: 'pipeline', readOnly: false, title: 'pipeline rows' })}
+          ${renderVersionPlanRows(pipelineRows, { scope: 'pipeline', readOnly: false, title: 'pipeline rows', headerFeature: 'Pipeline Section' })}
           <div class="team-dashboard-version-plan-actions">
             <button class="button button-secondary" type="button" data-version-plan-row-action="add" data-version-plan-scope="pipeline">Add Row</button>
           </div>
