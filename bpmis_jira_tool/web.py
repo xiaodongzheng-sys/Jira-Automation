@@ -1023,15 +1023,18 @@ def create_app() -> Flask:
         gate = _require_vpn_connection_access(settings, api=True)
         if gate is not None:
             return gate
+        payload = request.get_json(silent=True) or {}
+        second_password = str(payload.get("second_password") or "")
         try:
             if _vpn_connection_uses_local_agent(settings):
-                return jsonify(_build_local_agent_client(settings).vpn_connect(profile_id))
+                return jsonify(_build_local_agent_client(settings).vpn_connect(profile_id, second_password=second_password))
             store = _get_vpn_profile_store()
             profile = store.get_profile(profile_id, include_password=True)
             vpn_status = _get_cisco_vpn_client().connect(
                 host=str(profile.get("vpn_host") or ""),
                 username=str(profile.get("username") or ""),
                 password=str(profile.get("password") or ""),
+                second_password=second_password,
             )
             if not vpn_status.get("connected"):
                 raise ToolError(str(vpn_status.get("message") or "Cisco Secure Client did not reach Connected state."))

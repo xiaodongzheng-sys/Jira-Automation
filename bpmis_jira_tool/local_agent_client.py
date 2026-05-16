@@ -99,8 +99,9 @@ class LocalAgentClient:
     def vpn_delete_profile(self, profile_id: str) -> dict[str, Any]:
         return self._request("DELETE", f"/api/local-agent/vpn/profiles/{quote(profile_id, safe='')}")
 
-    def vpn_connect(self, profile_id: str) -> dict[str, Any]:
-        return self._request("POST", f"/api/local-agent/vpn/profiles/{quote(profile_id, safe='')}/connect", {})
+    def vpn_connect(self, profile_id: str, *, second_password: str = "") -> dict[str, Any]:
+        payload = {"second_password": second_password} if second_password else {}
+        return self._request("POST", f"/api/local-agent/vpn/profiles/{quote(profile_id, safe='')}/connect", payload)
 
     def vpn_disconnect(self) -> dict[str, Any]:
         return self._request("POST", "/api/local-agent/vpn/disconnect", {})

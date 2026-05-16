@@ -665,6 +665,32 @@ class UserConfigStoreTests(unittest.TestCase):
             [[vpn_bin, "-s", "connect", "ShopeeVPN"], [vpn_bin, "-s", "connect", "ShopeeVPN"]],
         )
 
+    @patch("bpmis_jira_tool.vpn_manager.subprocess.run")
+    def test_cisco_vpn_connect_feeds_second_password_on_stdin_and_redacts_it(self, run_mock):
+        vpn_bin = "/tmp/fake-cisco-vpn"
+        Path(vpn_bin).write_text("", encoding="utf-8")
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=[vpn_bin],
+            returncode=0,
+            stdout="notice: second-secret\nstate: Connected",
+            stderr="",
+        )
+        client = CiscoVPNClient(vpn_bin=vpn_bin)
+
+        result = client.connect(
+            host="Seabank PH",
+            username="vpn-user",
+            password="vpn-secret",
+            second_password="second-secret",
+        )
+
+        command = run_mock.call_args_list[0].args[0]
+        stdin_payload = run_mock.call_args_list[0].kwargs["input"]
+        self.assertEqual(command, [vpn_bin, "-s", "connect", "Seabank PH"])
+        self.assertIn("second-secret", stdin_payload)
+        self.assertNotIn("second-secret", result["message"])
+        self.assertTrue(result["connected"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -238,19 +238,23 @@ class CiscoVPNClient:
                     hosts.append(host)
         return hosts
 
-    def connect(self, *, host: str, username: str, password: str) -> dict[str, Any]:
+    def connect(self, *, host: str, username: str, password: str, second_password: str = "") -> dict[str, Any]:
         if not host.strip():
             raise ToolError("Cisco VPN host/profile name is required.")
         if not username.strip():
             raise ToolError("VPN username is required.")
         if not password:
             raise ToolError("VPN password is required.")
-        response_text = "\n".join([username, password, "y", ""])
+        responses = [username, password]
+        if second_password:
+            responses.append(second_password)
+        responses.extend(["y", ""])
+        response_text = "\n".join(responses)
         last_output = ""
         restarted_gui = False
         for attempt in range(2):
             completed = self._run(["-s", "connect", host], input_text=response_text, timeout_seconds=self.timeout_seconds)
-            output = self._sanitize_output(self._combined_output(completed), secrets=[username, password])
+            output = self._sanitize_output(self._combined_output(completed), secrets=[username, password, second_password])
             last_output = self._append_output(last_output, output)
             if self._is_gui_capability_error(output) and attempt == 0:
                 self._restart_cisco_gui()
@@ -259,7 +263,7 @@ class CiscoVPNClient:
                 continue
             if completed.returncode != 0:
                 raise ToolError(self._connection_failure_message(last_output))
-            verified = self._wait_for_connected(secrets=[username, password], previous_output=last_output)
+            verified = self._wait_for_connected(secrets=[username, password, second_password], previous_output=last_output)
             if verified.get("connected"):
                 message = self._append_output(last_output, str(verified.get("message") or ""))
                 return {

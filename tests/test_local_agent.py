@@ -139,20 +139,25 @@ class LocalAgentServerTests(unittest.TestCase):
 
     def test_vpn_failed_connect_does_not_record_success(self):
         class FakeCiscoVPNClient:
+            def __init__(self):
+                self.connect_calls = []
+
             def status(self):
                 return {"status": "ok", "connected": False, "state": "Disconnected", "message": "state: Disconnected"}
 
             def hosts(self):
                 return ["ShopeeVPN"]
 
-            def connect(self, *, host, username, password):
+            def connect(self, *, host, username, password, second_password=""):
+                self.connect_calls.append((host, username, password, second_password))
                 return {"status": "ok", "connected": False, "state": "Disconnected", "message": "state: Disconnected"}
 
         self.app.config["VPN_PROFILE_STORE"] = VPNProfileStore(
             Path(self.temp_dir.name) / "vpn.db",
             encryption_key=Fernet.generate_key().decode("utf-8"),
         )
-        self.app.config["CISCO_VPN_CLIENT"] = FakeCiscoVPNClient()
+        fake_cisco = FakeCiscoVPNClient()
+        self.app.config["CISCO_VPN_CLIENT"] = fake_cisco
         save_response = self._post_signed(
             "/api/local-agent/vpn/profiles",
             {
@@ -170,6 +175,47 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertIn("Disconnected", connect_response.get_json()["message"])
         profile = self.app.config["VPN_PROFILE_STORE"].get_profile(profile_id)
         self.assertIsNone(profile["last_connected_at"])
+
+    def test_vpn_connect_passes_second_password_to_cisco_client(self):
+        class FakeCiscoVPNClient:
+            def __init__(self):
+                self.connect_calls = []
+
+            def status(self):
+                return {"status": "ok", "connected": False, "state": "Disconnected", "message": "state: Disconnected"}
+
+            def hosts(self):
+                return ["Seabank PH"]
+
+            def connect(self, *, host, username, password, second_password=""):
+                self.connect_calls.append((host, username, password, second_password))
+                return {"status": "ok", "connected": True, "state": "Connected", "message": "state: Connected"}
+
+        self.app.config["VPN_PROFILE_STORE"] = VPNProfileStore(
+            Path(self.temp_dir.name) / "vpn.db",
+            encryption_key=Fernet.generate_key().decode("utf-8"),
+        )
+        fake_cisco = FakeCiscoVPNClient()
+        self.app.config["CISCO_VPN_CLIENT"] = fake_cisco
+        save_response = self._post_signed(
+            "/api/local-agent/vpn/profiles",
+            {
+                "display_name": "Seabank PH VPN",
+                "vpn_host": "Seabank PH",
+                "username": "vpn-user",
+                "password": "vpn-secret",
+            },
+        )
+        profile_id = save_response.get_json()["profile"]["id"]
+
+        connect_response = self._post_signed(
+            f"/api/local-agent/vpn/profiles/{profile_id}/connect",
+            {"second_password": "second-secret"},
+        )
+
+        self.assertEqual(connect_response.status_code, 200)
+        self.assertEqual(fake_cisco.connect_calls, [("Seabank PH", "vpn-user", "vpn-secret", "second-secret")])
+        self.assertNotIn("second-secret", str(connect_response.get_json()))
 
     def test_healthz_is_public_and_reports_capabilities(self):
         response = self.app.test_client().get("/healthz")

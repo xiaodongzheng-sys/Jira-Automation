@@ -67,6 +67,11 @@
     `).join('');
   };
 
+  const requiresSecondPassword = (profile) => {
+    const value = `${profile?.display_name || ''} ${profile?.vpn_host || ''}`.toLowerCase();
+    return value.includes('seabank ph');
+  };
+
   const applyPayload = (payload) => {
     profiles = Array.isArray(payload.profiles) ? payload.profiles : profiles;
     renderStatus(payload.vpn_status || payload.status || {});
@@ -134,10 +139,25 @@
       return;
     }
     if (connectId) {
+      const profile = profiles.find((item) => item.id === connectId);
+      if (!profile) return;
+      const requestBody = {};
+      if (requiresSecondPassword(profile)) {
+        const secondPassword = window.prompt('Enter Cisco second password for Seabank PH VPN');
+        if (secondPassword === null) {
+          setInlineStatus('VPN connection cancelled.', 'neutral');
+          return;
+        }
+        if (!secondPassword.trim()) {
+          setInlineStatus('Cisco second password is required for Seabank PH VPN.', 'error');
+          return;
+        }
+        requestBody.second_password = secondPassword;
+      }
       setInlineStatus('Connecting VPN... approve MFA if prompted.');
       try {
         const url = `${root.dataset.profilesUrl}/${encodeURIComponent(connectId)}/connect`;
-        const payload = await requestJson(url, { method: 'POST', body: '{}' });
+        const payload = await requestJson(url, { method: 'POST', body: JSON.stringify(requestBody) });
         const connectStatus = payload.vpn_status || payload.status || {};
         await loadProfiles();
         renderStatus(connectStatus);

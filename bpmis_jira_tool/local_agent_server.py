@@ -219,12 +219,14 @@ def create_local_agent_app() -> Flask:
 
     @app.post("/api/local-agent/vpn/profiles/<profile_id>/connect")
     def vpn_connect(profile_id: str):
+        payload = request.get_json(silent=True) or {}
         store = _vpn_profile_store()
         profile = store.get_profile(profile_id, include_password=True)
         status = _cisco_vpn_client().connect(
             host=str(profile.get("vpn_host") or ""),
             username=str(profile.get("username") or ""),
             password=str(profile.get("password") or ""),
+            second_password=str(payload.get("second_password") or ""),
         )
         if not status.get("connected"):
             raise ToolError(str(status.get("message") or "Cisco Secure Client did not reach Connected state."))

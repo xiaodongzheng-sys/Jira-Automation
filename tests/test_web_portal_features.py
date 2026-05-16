@@ -89,8 +89,8 @@ class _FakeCiscoVPNClient:
     def hosts(self):
         return ["ShopeeVPN", "GalaxisVPN"]
 
-    def connect(self, *, host, username, password):
-        self.connected_hosts.append((host, username, password))
+    def connect(self, *, host, username, password, second_password=""):
+        self.connected_hosts.append((host, username, password, second_password))
         return self.connect_result
 
     def disconnect(self):
@@ -5524,8 +5524,48 @@ class WebPortalFeatureTests(unittest.TestCase):
 
         self.assertEqual(save_response.status_code, 200)
         self.assertEqual(connect_response.status_code, 200)
-        self.assertEqual(fake_cisco.connected_hosts, [("ShopeeVPN", "vpn-user", "vpn-secret")])
+        self.assertEqual(fake_cisco.connected_hosts, [("ShopeeVPN", "vpn-user", "vpn-secret", "")])
         self.assertNotIn("vpn-secret", str(connect_response.get_json()))
+
+    def test_vpn_connection_passes_second_password_without_echoing_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "ENV_FILE": os.devnull,
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": Fernet.generate_key().decode("utf-8"),
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            fake_cisco = _FakeCiscoVPNClient()
+            app.config["CISCO_VPN_CLIENT"] = fake_cisco
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
+                    session["google_credentials"] = {"token": "x"}
+                save_response = client.post(
+                    "/api/vpn-connection/profiles",
+                    json={
+                        "display_name": "Seabank PH VPN",
+                        "vpn_host": "Seabank PH",
+                        "username": "vpn-user",
+                        "password": "vpn-secret",
+                    },
+                )
+                profile_id = save_response.get_json()["profile"]["id"]
+                connect_response = client.post(
+                    f"/api/vpn-connection/profiles/{profile_id}/connect",
+                    json={"second_password": "second-secret"},
+                )
+
+        self.assertEqual(connect_response.status_code, 200)
+        self.assertEqual(fake_cisco.connected_hosts, [("Seabank PH", "vpn-user", "vpn-secret", "second-secret")])
+        self.assertNotIn("second-secret", str(connect_response.get_json()))
 
     def test_vpn_connection_failed_connect_does_not_record_success(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -5578,6 +5618,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn("VPN command finished.", script)
         self.assertIn("VPN connected.", script)
         self.assertIn("approve MFA if prompted", script)
+        self.assertIn("second_password", script)
+        self.assertIn("Seabank PH VPN", script)
 
 
 if __name__ == "__main__":
