@@ -5463,8 +5463,21 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(non_admin_page.status_code, 302)
         self.assertEqual(non_admin_api.status_code, 403)
         self.assertEqual(admin_page.status_code, 200)
-        self.assertIn(b"VPN Connection", admin_page.data)
-        self.assertIn(b"VPN Connection", admin_home.data)
+        home_soup = BeautifulSoup(admin_home.get_data(as_text=True), "html.parser")
+        home_labels = [node.get_text(strip=True) for node in home_soup.select(".site-switcher-tab")]
+        home_project_subtabs = [node.get_text(strip=True) for node in home_soup.select(".site-switcher-subtab")]
+        self.assertIn("Others", home_labels)
+        self.assertLess(home_labels.index("Others"), home_labels.index("Projects"))
+        self.assertNotIn("VPN Connection", home_project_subtabs)
+
+        vpn_soup = BeautifulSoup(admin_page.get_data(as_text=True), "html.parser")
+        active_site_tabs = [
+            node.get_text(strip=True)
+            for node in vpn_soup.select(".site-switcher-tab.is-active")
+        ]
+        vpn_subtabs = [node.get_text(strip=True) for node in vpn_soup.select(".site-switcher-subtab")]
+        self.assertEqual(active_site_tabs, ["Others"])
+        self.assertEqual(vpn_subtabs, ["VPN Connection"])
 
     def test_vpn_connection_admin_can_save_and_connect_profile(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

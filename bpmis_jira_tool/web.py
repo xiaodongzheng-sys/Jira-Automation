@@ -706,6 +706,20 @@ def create_app() -> Flask:
         user_identity = _get_user_identity(settings)
         can_access_team_dashboard = _can_access_team_dashboard(user_identity)
         site_tabs = []
+        if _can_access_vpn_connection(settings):
+            site_tabs.append(
+                _nav_group(
+                    "Others",
+                    url_for("vpn_connection_page"),
+                    [
+                        {
+                            "label": "VPN Connection",
+                            "href": url_for("vpn_connection_page"),
+                            "active": current_endpoint == "vpn_connection_page",
+                        }
+                    ],
+                )
+            )
         if _can_access_source_code_qa(settings):
             site_tabs.append(
                 {
@@ -730,7 +744,7 @@ def create_app() -> Flask:
                     "active": request.path.startswith("/meeting-translation"),
                 }
             )
-            site_tabs.append(_nav_group("Meeting Module", url_for("meeting_recorder_page"), meeting_tabs))
+            site_tabs.append(_nav_group("Meeting", url_for("meeting_recorder_page"), meeting_tabs))
         prd_tabs = []
         if _can_access_prd_self_assessment(settings):
             prd_tabs.append(
@@ -772,13 +786,6 @@ def create_app() -> Flask:
                     "label": "Reports",
                     "href": url_for("reports_page"),
                     "active": current_endpoint == "reports_page",
-                }
-            )
-            project_tabs.append(
-                {
-                    "label": "VPN Connection",
-                    "href": url_for("vpn_connection_page"),
-                    "active": current_endpoint == "vpn_connection_page",
                 }
             )
         if _can_access_work_memory(settings):

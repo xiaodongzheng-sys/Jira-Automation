@@ -834,7 +834,7 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         soup = BeautifulSoup(response.get_data(as_text=True), "html.parser")
         labels = [node.get_text(strip=True) for node in soup.select(".site-switcher-tab")]
-        self.assertIn("Meeting Module", labels)
+        self.assertIn("Meeting", labels)
         meeting_labels = [node.get_text(strip=True) for node in soup.select(".site-switcher-subtab")]
         self.assertIn("Meeting Recorder", meeting_labels)
         self.assertIn("Meeting Translation", meeting_labels)
