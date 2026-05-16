@@ -41,6 +41,16 @@ class FakeBPMISVersionPlanClient:
         if query == "DBPSG_":
             return [
                 {
+                    "id": "dbpsg-0525",
+                    "fullName": "DBPSG_v2.85_0525",
+                    "timelineEnd": "2026-05-25T00:00:00+08:00",
+                },
+                {
+                    "id": "dbpsg-0526",
+                    "fullName": "DBPSG_v2.85_0526",
+                    "timelineEnd": "2026-05-26T00:00:00+08:00",
+                },
+                {
                     "id": "dbpsg-0528",
                     "fullName": "DBPSG_v2.85_0528",
                     "timelineEnd": "2026-05-28T00:00:00+08:00",
@@ -49,6 +59,11 @@ class FakeBPMISVersionPlanClient:
         if query == "DBPID_":
             return [
                 {
+                    "id": "dbpid-0526",
+                    "fullName": "DBPID_v3.41_0526",
+                    "timelineEnd": "2026-05-26T00:00:00+08:00",
+                },
+                {
                     "id": "dbpid-0528",
                     "fullName": "DBPID_v3.41_0528",
                     "timelineEnd": "2026-05-28T00:00:00+08:00",
@@ -56,6 +71,11 @@ class FakeBPMISVersionPlanClient:
             ]
         if query == "DBPPH_":
             return [
+                {
+                    "id": "dbpph-0526",
+                    "fullName": "DBPPH_v3.17_0526",
+                    "timelineEnd": "2026-05-26T00:00:00+08:00",
+                },
                 {
                     "id": "dbpph-0528",
                     "fullName": "DBPPH_v3.17_0528",
@@ -214,9 +234,10 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(bundle["synced_rows"][0]["market"], "SG")
         self.assertEqual(bundle["synced_rows"][0]["priority"], "P0")
         self.assertEqual(bundle["synced_rows"][0]["pm"], ["Wang Chang"])
+        self.assertEqual(bundle["mapped_versions"]["DBPSG"]["version_name"], "DBPSG_v2.85_0526")
         self.assertEqual(len(client.release_window_calls), 1)
         self.assertEqual(client.release_window_calls[0]["release_after"], "2026-05-20")
-        self.assertEqual(client.release_window_calls[0]["release_before"], "2026-05-28")
+        self.assertEqual(client.release_window_calls[0]["release_before"], "2026-05-26")
         rene_row = next(row for row in bundle["synced_rows"] if row["jira_id"] == "SPDBP-rene")
         self.assertEqual(rene_row["pm"], ["Rene"])
         self.assertEqual(bundle["manual_rows"][0]["feature"], "Manual item")
@@ -288,7 +309,7 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
             [row["row_id"] for row in wrapped["version_plan"]["af"]["pipeline_rows"]],
         )
 
-    def test_pipeline_row_can_move_to_version_bundle(self) -> None:
+    def test_manual_rows_can_move_between_pipeline_and_version_bundles(self) -> None:
         config = normalize_version_plan_state(
             {
                 "af": {
@@ -298,6 +319,12 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
                             "version_name": "AF_1.0.84_20260724",
                             "release_date": "2026-07-24",
                             "manual_rows": [{"row_id": "bundle-1", "feature": "Bundle item", "priority": "P0"}],
+                        },
+                        "af-2": {
+                            "version_id": "af-2",
+                            "version_name": "AF_1.0.85_20260807",
+                            "release_date": "2026-08-07",
+                            "manual_rows": [{"row_id": "bundle-2", "feature": "Second bundle item", "priority": "P1"}],
                         }
                     },
                     "pipeline_rows": [{"row_id": "pipe-1", "feature": "Pipeline item", "priority": "P1"}],
@@ -316,12 +343,34 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
                 "target_version_id": "af-1",
             },
         )
+        wrapped = update_version_plan_rows(
+            wrapped,
+            {
+                "action": "move",
+                "row_id": "bundle-1",
+                "source_scope": "bundle",
+                "source_version_id": "af-1",
+                "target_scope": "bundle",
+                "target_version_id": "af-2",
+                "target_before_row_id": "bundle-2",
+            },
+        )
+        wrapped = update_version_plan_rows(
+            wrapped,
+            {
+                "action": "move",
+                "row_id": "pipe-1",
+                "source_scope": "bundle",
+                "source_version_id": "af-1",
+                "target_scope": "pipeline",
+            },
+        )
         payload = version_plan_payload(wrapped, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
-        bundle = payload["bundles"][0]
+        first_bundle, second_bundle = payload["bundles"]
 
-        self.assertEqual(payload["pipeline_rows"], [])
-        self.assertEqual([row["row_id"] for row in bundle["manual_rows"]], ["bundle-1", "pipe-1"])
-        self.assertEqual(bundle["manual_rows"][1]["feature"], "Pipeline item")
+        self.assertEqual([row["row_id"] for row in payload["pipeline_rows"]], ["pipe-1"])
+        self.assertEqual(first_bundle["manual_rows"], [])
+        self.assertEqual([row["row_id"] for row in second_bundle["manual_rows"]], ["bundle-1", "bundle-2"])
 
     def test_not_started_dev_version_is_manual_only_after_sync(self) -> None:
         config = {

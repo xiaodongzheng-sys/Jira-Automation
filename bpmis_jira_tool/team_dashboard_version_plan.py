@@ -395,9 +395,15 @@ def _move_version_plan_manual_row(plan: dict[str, Any], payload: dict[str, Any])
     if moving_row is None:
         raise ValueError("Version Plan manual row was not found.")
     source_rows[:] = remaining_rows
-    moving_row["sort_order"] = _next_sort_order(target_rows)
     moving_row["updated_at"] = _now_text()
-    target_rows.append(moving_row)
+    target_before_row_id = str(payload.get("target_before_row_id") or "").strip()
+    target_index = next(
+        (index for index, row in enumerate(target_rows) if row.get("row_id") == target_before_row_id),
+        len(target_rows),
+    )
+    target_rows.insert(target_index, moving_row)
+    for index, row in enumerate(target_rows):
+        row["sort_order"] = index
 
 
 def _pipeline_seed_rows() -> list[dict[str, Any]]:
@@ -634,7 +640,7 @@ def _parent_project_detail(bpmis_client: Any, row: dict[str, Any]) -> dict[str, 
 
 def _mapped_dbp_versions(af_version: dict[str, Any], dbp_versions_by_prefix: dict[str, list[dict[str, Any]]]) -> dict[str, dict[str, Any]]:
     release_date = _parse_date(af_version.get("release_date"))
-    minimum_date = release_date + timedelta(days=7) if release_date else None
+    minimum_date = release_date + timedelta(days=6) if release_date else None
     mapped: dict[str, dict[str, Any]] = {}
     for prefix, versions in dbp_versions_by_prefix.items():
         candidates = []

@@ -840,11 +840,36 @@
     setVersionPlanStatus('Saved.', 'success');
   };
 
+  const clearVersionPlanDropIndicators = () => {
+    versionPlanContent?.querySelectorAll('.is-drop-target, .is-drop-before, .is-drop-after').forEach((node) => {
+      node.classList.remove('is-drop-target', 'is-drop-before', 'is-drop-after');
+    });
+  };
+
+  const versionPlanSameManualBlock = (row) => Boolean(row && versionPlanDragRow
+    && row.dataset.versionPlanScope === versionPlanDragRow.dataset.versionPlanScope
+    && (row.dataset.versionId || '') === (versionPlanDragRow.dataset.versionId || '')
+    && (row.dataset.versionPlanPriority || '') === (versionPlanDragRow.dataset.versionPlanPriority || ''));
+
+  const versionPlanSheetAcceptsDrop = (sheet) => {
+    if (!versionPlanDragRow || !sheet) return false;
+    const targetScope = sheet.dataset.versionPlanSheet || '';
+    const targetVersionId = sheet.dataset.versionId || '';
+    if (targetScope === 'bundle' && !targetVersionId) return false;
+    if (!['bundle', 'pipeline'].includes(targetScope)) return false;
+    return targetScope !== (versionPlanDragRow.dataset.versionPlanScope || '')
+      || targetVersionId !== (versionPlanDragRow.dataset.versionId || '');
+  };
+
+  const versionPlanDropBeforeRow = (event, row) => {
+    if (!row) return false;
+    const box = row.getBoundingClientRect();
+    return event.clientY < box.top + (box.height / 2);
+  };
+
   const reorderVersionPlanRows = async (dropRow) => {
     if (!versionPlanDragRow || !dropRow || versionPlanDragRow === dropRow) return;
-    if (versionPlanDragRow.dataset.versionPlanScope !== dropRow.dataset.versionPlanScope) return;
-    if ((versionPlanDragRow.dataset.versionId || '') !== (dropRow.dataset.versionId || '')) return;
-    if ((versionPlanDragRow.dataset.versionPlanPriority || '') !== (dropRow.dataset.versionPlanPriority || '')) return;
+    if (!versionPlanSameManualBlock(dropRow)) return;
     const sheet = dropRow.closest('[data-version-plan-sheet]');
     if (!sheet) return;
     const before = versionPlanDragRow.compareDocumentPosition(dropRow) & Node.DOCUMENT_POSITION_FOLLOWING;
@@ -861,13 +886,16 @@
     }, 'Could not reorder Version Plan rows.');
   };
 
-  const moveVersionPlanRowToSheet = async (targetSheet) => {
+  const moveVersionPlanRowToSheet = async (targetSheet, dropRow = null, insertBefore = false) => {
     if (!versionPlanDragRow || !targetSheet) return;
     const sourceScope = versionPlanDragRow.dataset.versionPlanScope || '';
     const targetScope = targetSheet.dataset.versionPlanSheet || '';
     const sourceVersionId = versionPlanDragRow.dataset.versionId || '';
     const targetVersionId = targetSheet.dataset.versionId || '';
-    if (sourceScope !== 'pipeline' || targetScope !== 'bundle' || !targetVersionId) return;
+    if (!versionPlanSheetAcceptsDrop(targetSheet)) return;
+    const targetBeforeRowId = dropRow && dropRow.dataset.versionPlanPriority === versionPlanDragRow.dataset.versionPlanPriority
+      ? (insertBefore ? dropRow.dataset.versionPlanRowId || '' : dropRow.nextElementSibling?.dataset.versionPlanRowId || '')
+      : '';
     await updateVersionPlanRows({
       action: 'move',
       row_id: versionPlanDragRow.dataset.versionPlanRowId || '',
@@ -875,7 +903,8 @@
       source_version_id: sourceVersionId,
       target_scope: targetScope,
       target_version_id: targetVersionId,
-    }, 'Could not move Pipeline row into the version.');
+      target_before_row_id: targetBeforeRowId,
+    }, 'Could not move Version Plan row.');
   };
 
   const renderMarkdown = (value) => {
@@ -2734,22 +2763,26 @@
   });
   versionPlanContent?.addEventListener('dragend', () => {
     versionPlanDragRow?.classList.remove('is-dragging');
+    clearVersionPlanDropIndicators();
     versionPlanDragRow = null;
   });
   versionPlanContent?.addEventListener('dragover', (event) => {
     const row = event.target.closest('[data-version-plan-manual-row="true"]');
     const sheet = event.target.closest('[data-version-plan-sheet]');
     if (!versionPlanDragRow || !sheet) return;
-    const sameManualBlock = row
-      && row.dataset.versionPlanScope === versionPlanDragRow.dataset.versionPlanScope
-      && (row.dataset.versionId || '') === (versionPlanDragRow.dataset.versionId || '')
-      && (row.dataset.versionPlanPriority || '') === (versionPlanDragRow.dataset.versionPlanPriority || '');
-    const pipelineToBundle = (versionPlanDragRow.dataset.versionPlanScope || '') === 'pipeline'
-      && (sheet.dataset.versionPlanSheet || '') === 'bundle'
-      && Boolean(sheet.dataset.versionId || '');
-    if (!sameManualBlock && !pipelineToBundle) return;
+    const sameManualBlock = versionPlanSameManualBlock(row);
+    const targetAcceptsDrop = versionPlanSheetAcceptsDrop(sheet);
+    if (!sameManualBlock && !targetAcceptsDrop) return;
     event.preventDefault();
-    sheet.classList.toggle('is-drop-target', pipelineToBundle && !sameManualBlock);
+    clearVersionPlanDropIndicators();
+    if (sameManualBlock) {
+      row.classList.add(versionPlanDropBeforeRow(event, row) ? 'is-drop-before' : 'is-drop-after');
+    } else if (targetAcceptsDrop) {
+      sheet.classList.add('is-drop-target');
+      if (row && row.dataset.versionPlanPriority === versionPlanDragRow.dataset.versionPlanPriority) {
+        row.classList.add(versionPlanDropBeforeRow(event, row) ? 'is-drop-before' : 'is-drop-after');
+      }
+    }
     event.dataTransfer.dropEffect = 'move';
   });
   versionPlanContent?.addEventListener('drop', async (event) => {
@@ -2758,20 +2791,20 @@
     if (!sheet) return;
     event.preventDefault();
     try {
-      if (row && row.dataset.versionPlanScope === versionPlanDragRow?.dataset.versionPlanScope) {
+      if (versionPlanSameManualBlock(row)) {
         await reorderVersionPlanRows(row);
       } else {
-        await moveVersionPlanRowToSheet(sheet);
+        await moveVersionPlanRowToSheet(sheet, row, versionPlanDropBeforeRow(event, row));
       }
     } catch (error) {
       setVersionPlanStatus(error.message || 'Could not reorder Version Plan rows.', 'error');
     } finally {
-      sheet.classList.remove('is-drop-target');
+      clearVersionPlanDropIndicators();
     }
   });
   versionPlanContent?.addEventListener('dragleave', (event) => {
     const sheet = event.target.closest('[data-version-plan-sheet]');
-    if (sheet && !sheet.contains(event.relatedTarget)) sheet.classList.remove('is-drop-target');
+    if (sheet && !sheet.contains(event.relatedTarget)) clearVersionPlanDropIndicators();
   });
   linkBizProjectFindJira?.addEventListener('click', loadLinkBizJira);
   linkBizProjectSuggest?.addEventListener('click', suggestLinkBizProjects);
