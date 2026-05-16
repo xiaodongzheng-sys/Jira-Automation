@@ -78,6 +78,11 @@
   background: #fff;
 }
 
+.vpn-profile[data-active="true"] {
+  border-color: #a7d7bd;
+  background: #f7fcf8;
+}
+
 .vpn-profile-main {
   display: grid;
   gap: 3px;

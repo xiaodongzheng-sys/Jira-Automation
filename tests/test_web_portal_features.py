@@ -5489,6 +5489,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         vpn_subtabs = [node.get_text(strip=True) for node in vpn_soup.select(".site-switcher-subtab")]
         self.assertEqual(active_site_tabs, ["Others"])
         self.assertEqual(vpn_subtabs, ["VPN Connection"])
+        self.assertNotIn('data-vpn-disconnect>Disconnect', admin_page.get_data(as_text=True))
 
     def test_vpn_connection_admin_can_save_and_connect_profile(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -5623,6 +5624,9 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("Seabank PH VPN", script)
         self.assertIn("Connection request was interrupted. Cisco status has been refreshed.", script)
         self.assertIn("isFetchInterrupted", script)
+        self.assertIn("activeProfileId", script)
+        self.assertIn("data-vpn-disconnect-profile", script)
+        self.assertNotIn("querySelector('[data-vpn-disconnect]')", script)
 
 
 if __name__ == "__main__":

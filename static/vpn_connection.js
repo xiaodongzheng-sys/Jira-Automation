@@ -10,6 +10,7 @@
   const idInput = root.querySelector('[data-vpn-id]');
 
   let profiles = [];
+  let currentVpnStatus = {};
 
   const escapeHtml = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -50,13 +51,24 @@
     hostsDatalist.innerHTML = (hosts || []).map((host) => `<option value="${escapeHtml(host)}"></option>`).join('');
   };
 
+  const activeProfileId = () => {
+    if (!currentVpnStatus?.connected) return '';
+    return profiles
+      .filter((profile) => profile.last_connected_at)
+      .slice()
+      .sort((left, right) => (
+        Date.parse(right.last_connected_at || '') - Date.parse(left.last_connected_at || '')
+      ))[0]?.id || '';
+  };
+
   const renderProfiles = () => {
     if (!profiles.length) {
       list.innerHTML = '<div class="vpn-empty">No VPN profiles configured.</div>';
       return;
     }
+    const connectedProfileId = activeProfileId();
     list.innerHTML = profiles.map((profile) => `
-      <article class="vpn-profile" data-profile-id="${escapeHtml(profile.id)}">
+      <article class="vpn-profile" data-profile-id="${escapeHtml(profile.id)}" data-active="${profile.id === connectedProfileId ? 'true' : 'false'}">
         <div class="vpn-profile-main">
           <strong>${escapeHtml(profile.display_name)}</strong>
           <span>${escapeHtml(profile.vpn_host)}</span>
@@ -64,7 +76,9 @@
         </div>
         <div class="vpn-profile-actions">
           <button class="button button-secondary" type="button" data-vpn-edit="${escapeHtml(profile.id)}">Edit</button>
-          <button class="button" type="button" data-vpn-connect="${escapeHtml(profile.id)}">Connect</button>
+          ${profile.id === connectedProfileId
+            ? `<button class="button button-secondary" type="button" data-vpn-disconnect-profile="${escapeHtml(profile.id)}">Disconnect</button>`
+            : `<button class="button" type="button" data-vpn-connect="${escapeHtml(profile.id)}">Connect</button>`}
           <button class="button button-danger" type="button" data-vpn-delete="${escapeHtml(profile.id)}">Delete</button>
         </div>
       </article>
@@ -78,7 +92,8 @@
 
   const applyPayload = (payload) => {
     profiles = Array.isArray(payload.profiles) ? payload.profiles : profiles;
-    renderStatus(payload.vpn_status || payload.status || {});
+    currentVpnStatus = payload.vpn_status || payload.status || {};
+    renderStatus(currentVpnStatus);
     renderHosts(payload.hosts || []);
     renderProfiles();
   };
@@ -117,19 +132,11 @@
 
   root.querySelector('[data-vpn-refresh]')?.addEventListener('click', loadProfiles);
   root.querySelector('[data-vpn-reset]')?.addEventListener('click', resetForm);
-  root.querySelector('[data-vpn-disconnect]')?.addEventListener('click', async () => {
-    setInlineStatus('Disconnecting VPN...');
-    try {
-      applyPayload(await requestJson(root.dataset.disconnectUrl, { method: 'POST', body: '{}' }));
-      setInlineStatus('VPN disconnected.', 'success');
-    } catch (error) {
-      setInlineStatus(error.message, 'error');
-    }
-  });
 
   list.addEventListener('click', async (event) => {
     const editId = event.target.closest('[data-vpn-edit]')?.dataset.vpnEdit;
     const connectId = event.target.closest('[data-vpn-connect]')?.dataset.vpnConnect;
+    const disconnectId = event.target.closest('[data-vpn-disconnect-profile]')?.dataset.vpnDisconnectProfile;
     const deleteId = event.target.closest('[data-vpn-delete]')?.dataset.vpnDelete;
     if (editId) {
       const profile = profiles.find((item) => item.id === editId);
@@ -180,6 +187,16 @@
           }
           return;
         }
+        setInlineStatus(error.message, 'error');
+      }
+      return;
+    }
+    if (disconnectId) {
+      setInlineStatus('Disconnecting VPN...');
+      try {
+        applyPayload(await requestJson(root.dataset.disconnectUrl, { method: 'POST', body: '{}' }));
+        setInlineStatus('VPN disconnected.', 'success');
+      } catch (error) {
         setInlineStatus(error.message, 'error');
       }
       return;
