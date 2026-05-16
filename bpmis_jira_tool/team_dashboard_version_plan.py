@@ -20,6 +20,7 @@ VERSION_PLAN_PM_ALIASES = {
     "keryin.lim@npt.sg": "Ker Yin",
     "ker yin": "Ker Yin",
     "keryin": "Ker Yin",
+    "chongzj@npt.sg": "Rene",
     "rene": "Rene",
     "jun wei": "Jun Wei",
     "tbc": "TBC",
@@ -190,7 +191,7 @@ def version_plan_sync(config: dict[str, Any], bpmis_client: Any, *, now: datetim
     for seen_version in af["seen_versions"].values():
         release_date = _parse_date(seen_version.get("release_date"))
         if release_date and release_date < today:
-            candidate_versions.append(seen_version)
+            candidate_versions.append(all_versions_by_id.get(str(seen_version.get("version_id") or ""), seen_version))
 
     for version in _dedupe_versions(candidate_versions):
         version_id = version["version_id"]
@@ -206,8 +207,8 @@ def version_plan_sync(config: dict[str, Any], bpmis_client: Any, *, now: datetim
         next_bundles[version_id] = {
             **version,
             "mapped_versions": mapped_dbp_versions,
-            "prd_initial_date": _offset_date_text(version["release_date"], -4),
-            "prd_final_date": _offset_date_text(version["release_date"], -2),
+            "prd_initial_date": _offset_date_text(_prd_schedule_base_date(version), -4),
+            "prd_final_date": _offset_date_text(_prd_schedule_base_date(version), -2),
             "in_dev": in_dev,
             "manual_rows": _normalize_manual_rows(existing.get("manual_rows") if isinstance(existing, dict) else []),
             "synced_rows": synced_rows,
@@ -361,8 +362,32 @@ def _version_record(row: dict[str, Any]) -> dict[str, Any]:
         "version_name": version_name,
         "release_date": _date_text(row.get("timelineEnd") or row.get("release_date") or row.get("release") or ""),
         "timeline_start": _datetime_text(row.get("timelineStart") or row.get("timeline_start") or ""),
+        "prd_deadline_date": _version_prd_deadline_date(row),
         "market": _normalize_market(row.get("market") or row.get("marketId") or _market_from_version_name(version_name)),
     }
+
+
+def _version_prd_deadline_date(row: dict[str, Any]) -> str:
+    timeline = row.get("timeline") if isinstance(row.get("timeline"), dict) else {}
+    for value in (
+        timeline.get("prdDueDate"),
+        timeline.get("prdDeadline"),
+        timeline.get("prdEndDate"),
+        timeline.get("prdFinalDate"),
+        row.get("prdDueDate"),
+        row.get("prdDeadline"),
+        row.get("prdEndDate"),
+        row.get("prdFinalDate"),
+        row.get("prd_deadline_date"),
+    ):
+        text = _date_text(value)
+        if text:
+            return text
+    return ""
+
+
+def _prd_schedule_base_date(version: dict[str, Any]) -> str:
+    return str(version.get("prd_deadline_date") or version.get("release_date") or "").strip()
 
 
 def _bundle_payload(bundle: dict[str, Any], *, today: date) -> dict[str, Any]:
@@ -371,6 +396,7 @@ def _bundle_payload(bundle: dict[str, Any], *, today: date) -> dict[str, Any]:
         "af_version_name": str(bundle.get("version_name") or "").strip(),
         "af_release_date": str(bundle.get("release_date") or "").strip(),
         "timeline_start": str(bundle.get("timeline_start") or "").strip(),
+        "prd_deadline_date": str(bundle.get("prd_deadline_date") or "").strip(),
         "prd_initial_date": str(bundle.get("prd_initial_date") or "").strip(),
         "prd_final_date": str(bundle.get("prd_final_date") or "").strip(),
         "in_dev": bool(bundle.get("in_dev")),

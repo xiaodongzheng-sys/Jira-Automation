@@ -25,6 +25,7 @@ class FakeBPMISVersionPlanClient:
                 {
                     "id": "af-20260520",
                     "fullName": "AF_1.0.76_20260520",
+                    "timeline": {"prdDueDate": "2026-05-10", "release": "2026-05-20"},
                     "timelineStart": "2026-05-01T00:00:00+08:00",
                     "timelineEnd": "2026-05-20T00:00:00+08:00",
                 },
@@ -74,6 +75,14 @@ class FakeBPMISVersionPlanClient:
                 "parentIds": ["biz-1"],
             },
             {
+                "jiraKey": "SPDBP-rene",
+                "summary": "[Feature] Rene owner mapping",
+                "status": "Developing",
+                "reporter": {"email": "chongzj@npt.sg"},
+                "jiraRegionalPmPicId": [{"email": "chongzj@npt.sg"}],
+                "parentIds": ["biz-2"],
+            },
+            {
                 "jiraKey": "SPDBP-closed",
                 "summary": "Closed task",
                 "status": "Closed",
@@ -89,6 +98,8 @@ class FakeBPMISVersionPlanClient:
 
     def get_issue_detail(self, issue_id: str) -> dict:
         if issue_id != "biz-1":
+            if issue_id == "biz-2":
+                return {"bizPriorityId": "P1", "market": "ID"}
             raise AssertionError(f"Unexpected issue id: {issue_id}")
         return {"bizPriorityId": "P0", "market": "SG"}
 
@@ -128,12 +139,15 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertTrue(version_plan_synced_today(synced, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00")))
         self.assertEqual([bundle["af_version_name"] for bundle in payload["bundles"]], ["AF_1.0.76_20260520"])
         bundle = payload["bundles"][0]
-        self.assertEqual(bundle["prd_initial_date"], "2026-05-16")
-        self.assertEqual(bundle["prd_final_date"], "2026-05-18")
+        self.assertEqual(bundle["prd_deadline_date"], "2026-05-10")
+        self.assertEqual(bundle["prd_initial_date"], "2026-05-06")
+        self.assertEqual(bundle["prd_final_date"], "2026-05-08")
         self.assertEqual(bundle["synced_rows"][0]["jira_id"], "SPDBP-94945")
         self.assertEqual(bundle["synced_rows"][0]["market"], "SG")
         self.assertEqual(bundle["synced_rows"][0]["priority"], "P0")
         self.assertEqual(bundle["synced_rows"][0]["pm"], ["Wang Chang"])
+        rene_row = next(row for row in bundle["synced_rows"] if row["jira_id"] == "SPDBP-rene")
+        self.assertEqual(rene_row["pm"], ["Rene"])
         self.assertEqual(bundle["manual_rows"][0]["feature"], "Manual item")
         self.assertEqual(payload["pipeline_rows"][0]["feature"], "Keep pipeline")
 
