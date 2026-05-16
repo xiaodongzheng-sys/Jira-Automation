@@ -706,20 +706,6 @@ def create_app() -> Flask:
         user_identity = _get_user_identity(settings)
         can_access_team_dashboard = _can_access_team_dashboard(user_identity)
         site_tabs = []
-        if _can_access_vpn_connection(settings):
-            site_tabs.append(
-                _nav_group(
-                    "Others",
-                    url_for("vpn_connection_page"),
-                    [
-                        {
-                            "label": "VPN Connection",
-                            "href": url_for("vpn_connection_page"),
-                            "active": current_endpoint == "vpn_connection_page",
-                        }
-                    ],
-                )
-            )
         if _can_access_source_code_qa(settings):
             site_tabs.append(
                 {
@@ -798,6 +784,20 @@ def create_app() -> Flask:
             )
         project_href = url_for("team_dashboard_page") if can_access_team_dashboard else url_for("index", workspace="run")
         site_tabs.append(_nav_group("Projects", project_href, project_tabs))
+        if _can_access_vpn_connection(settings):
+            site_tabs.append(
+                _nav_group(
+                    "Others",
+                    url_for("vpn_connection_page"),
+                    [
+                        {
+                            "label": "VPN Connection",
+                            "href": url_for("vpn_connection_page"),
+                            "active": current_endpoint == "vpn_connection_page",
+                        }
+                    ],
+                )
+            )
         return {
             "site_tabs": site_tabs,
             "site_requires_google_login": _site_requires_google_login(settings),

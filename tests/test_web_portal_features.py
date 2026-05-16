@@ -5467,7 +5467,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         home_labels = [node.get_text(strip=True) for node in home_soup.select(".site-switcher-tab")]
         home_project_subtabs = [node.get_text(strip=True) for node in home_soup.select(".site-switcher-subtab")]
         self.assertIn("Others", home_labels)
-        self.assertLess(home_labels.index("Others"), home_labels.index("Projects"))
+        self.assertGreater(home_labels.index("Others"), home_labels.index("Projects"))
         self.assertNotIn("VPN Connection", home_project_subtabs)
 
         vpn_soup = BeautifulSoup(admin_page.get_data(as_text=True), "html.parser")
