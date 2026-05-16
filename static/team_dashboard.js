@@ -598,6 +598,9 @@
   };
 
   const versionPlanManualField = (row, field, readOnly) => {
+    if (!readOnly && row.row_type === 'synced' && field === 'remarks') {
+      return `<textarea rows="1" spellcheck="true" data-version-plan-cell="remarks">${escapeHtml(row.remarks || '')}</textarea>`;
+    }
     if (readOnly || row.row_type !== 'manual') {
       if (field === 'pm') return escapeHtml((Array.isArray(row.pm) ? row.pm : []).join(', ') || '-');
       return escapeHtml(row[field] || '-');

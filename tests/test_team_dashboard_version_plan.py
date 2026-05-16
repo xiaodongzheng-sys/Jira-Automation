@@ -18,6 +18,7 @@ from bpmis_jira_tool.team_dashboard_version_plan import (
 class FakeBPMISVersionPlanClient:
     def __init__(self) -> None:
         self.search_calls: list[str] = []
+        self.release_window_calls: list[dict] = []
 
     def search_versions(self, query: str) -> list[dict]:
         self.search_calls.append(query)
@@ -97,6 +98,33 @@ class FakeBPMISVersionPlanClient:
             },
         ]
 
+    def list_jira_tasks_created_by_emails(self, emails: list[str], **kwargs) -> list[dict]:
+        self.release_window_calls.append({"emails": emails, **kwargs})
+        return [
+            {
+                "jira_id": "SPDBP-94945",
+                "jira_title": "[Feature] Antifraud - UIUX Improvement for AMR",
+                "status": "Developing",
+                "pm_email": "chang.wang@npt.sg",
+                "market": "SG",
+                "parent_project": {"priority": "P0", "market": "SG"},
+            },
+            {
+                "jira_id": "SPDBP-rene",
+                "jira_title": "[Feature] Rene owner mapping",
+                "status": "Developing",
+                "pm_email": "chongzj@npt.sg",
+                "market": "ID",
+                "parent_project": {"priority": "P1", "market": "ID"},
+            },
+            {
+                "jira_id": "SPDBP-closed",
+                "jira_title": "Closed task",
+                "status": "Closed",
+                "pm_email": "chang.wang@npt.sg",
+            },
+        ]
+
     def get_issue_detail(self, issue_id: str) -> dict:
         if issue_id != "biz-1":
             if issue_id == "biz-2":
@@ -168,9 +196,10 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
                 }
             }
         }
+        client = FakeBPMISVersionPlanClient()
         synced = version_plan_sync(
             config,
-            FakeBPMISVersionPlanClient(),
+            client,
             now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
         )
         payload = version_plan_payload(synced, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
@@ -185,6 +214,9 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(bundle["synced_rows"][0]["market"], "SG")
         self.assertEqual(bundle["synced_rows"][0]["priority"], "P0")
         self.assertEqual(bundle["synced_rows"][0]["pm"], ["Wang Chang"])
+        self.assertEqual(len(client.release_window_calls), 1)
+        self.assertEqual(client.release_window_calls[0]["release_after"], "2026-05-20")
+        self.assertEqual(client.release_window_calls[0]["release_before"], "2026-05-28")
         rene_row = next(row for row in bundle["synced_rows"] if row["jira_id"] == "SPDBP-rene")
         self.assertEqual(rene_row["pm"], ["Rene"])
         self.assertEqual(bundle["manual_rows"][0]["feature"], "Manual item")
@@ -324,6 +356,51 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(bundle["synced_rows"], [])
         self.assertEqual(bundle["manual_rows"][0]["feature"], "[ID][PH] AMR Fix")
         self.assertEqual(client.list_issue_calls, [])
+        self.assertEqual(client.release_window_calls, [])
+
+    def test_synced_jira_remarks_are_editable_and_preserved_after_sync(self) -> None:
+        config = {
+            "version_plan": {
+                "af": {
+                    "bundles": {
+                        "af-20260520": {
+                            "synced_rows": [
+                                {
+                                    "row_id": "sync-af-20260520-SPDBP-94945",
+                                    "jira_id": "SPDBP-94945",
+                                    "jira_summary": "Old summary",
+                                    "remarks": "Keep this note",
+                                }
+                            ]
+                        }
+                    },
+                    "pipeline_rows": [],
+                }
+            }
+        }
+
+        synced = version_plan_sync(
+            config,
+            FakeBPMISVersionPlanClient(),
+            now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
+        )
+        payload = version_plan_payload(synced, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
+        row = next(row for row in payload["bundles"][0]["synced_rows"] if row["jira_id"] == "SPDBP-94945")
+        self.assertEqual(row["remarks"], "Keep this note")
+
+        updated = update_version_plan_cell(
+            synced,
+            {
+                "scope": "bundle",
+                "version_id": "af-20260520",
+                "row_id": row["row_id"],
+                "field": "remarks",
+                "value": "Updated note",
+            },
+        )
+        payload = version_plan_payload(updated, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
+        row = next(row for row in payload["bundles"][0]["synced_rows"] if row["jira_id"] == "SPDBP-94945")
+        self.assertEqual(row["remarks"], "Updated note")
 
     def test_empty_bpmis_version_search_preserves_cached_bundles(self) -> None:
         config = {

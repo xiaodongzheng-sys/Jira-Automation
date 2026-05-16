@@ -78,6 +78,7 @@ class BPMISClient(ABC):
         enrich_missing_parent: bool = True,
         created_after: str | date | datetime | None = None,
         release_after: str | date | datetime | None = None,
+        release_before: str | date | datetime | None = None,
     ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
@@ -735,6 +736,7 @@ class BPMISDirectApiClient(BPMISClient):
         enrich_missing_parent: bool = True,
         created_after: str | date | datetime | None = None,
         release_after: str | date | datetime | None = None,
+        release_before: str | date | datetime | None = None,
     ) -> list[dict[str, Any]]:
         normalized_emails = self._normalize_email_list(emails)
         if not normalized_emails:
@@ -742,9 +744,10 @@ class BPMISDirectApiClient(BPMISClient):
 
         created_cutoff = self._parse_issue_datetime(created_after) if created_after else None
         release_cutoff = self._parse_issue_datetime(release_after) if release_after else None
+        release_before_cutoff = self._parse_issue_datetime(release_before) if release_before else None
         with ThreadPoolExecutor(max_workers=2) as executor:
             user_future = executor.submit(self._resolve_team_dashboard_user_ids_timed, normalized_emails)
-            release_future = executor.submit(self._team_dashboard_release_version_ids, release_cutoff)
+            release_future = executor.submit(self._team_dashboard_release_version_ids, release_cutoff, release_before_cutoff)
             user_ids_by_email = user_future.result()
             release_version_ids = release_future.result()
         user_ids = sorted({user_id for ids in user_ids_by_email.values() for user_id in ids})
@@ -799,13 +802,19 @@ class BPMISDirectApiClient(BPMISClient):
             if created_cutoff and not self._issue_created_on_or_after(row, created_cutoff):
                 self._increment_stat("issue_created_before_cutoff_count")
                 continue
-            if release_cutoff:
+            if release_cutoff or release_before_cutoff:
                 release_text = self._extract_issue_release_date_text(row)
                 release_at = self._parse_issue_datetime(release_text)
                 if not release_text or not release_at:
+                    if release_before_cutoff:
+                        self._increment_stat("issue_release_missing_excluded_count")
+                        continue
                     self._increment_stat("issue_release_missing_included_count")
-                elif release_at < release_cutoff:
+                elif release_cutoff and release_at < release_cutoff:
                     self._increment_stat("issue_release_before_cutoff_count")
+                    continue
+                elif release_before_cutoff and release_at.date() > release_before_cutoff.date():
+                    self._increment_stat("issue_release_after_window_count")
                     continue
             if enrich_missing_parent and issue_id and not self._extract_parent_issue_ids(row):
                 detail = self.get_issue_detail(issue_id)
@@ -1065,18 +1074,24 @@ class BPMISDirectApiClient(BPMISClient):
             "mapping": True,
         }
 
-    def _team_dashboard_release_version_ids(self, release_cutoff: datetime | None) -> list[int]:
+    def _team_dashboard_release_version_ids(
+        self,
+        release_cutoff: datetime | None,
+        release_before_cutoff: datetime | None = None,
+    ) -> list[int]:
         started_at = time.monotonic()
         with self._cache_lock:
             self._team_dashboard_release_versions_by_id = {}
-        if not release_cutoff:
+        if not release_cutoff and not release_before_cutoff:
             self._add_request_timing("release_versions", started_at)
             return []
         rows: list[dict[str, Any]] = []
         page = 1
         page_size = 1000
-        end_date = (release_cutoff + timedelta(days=730)).date().isoformat()
-        start_date = release_cutoff.date().isoformat()
+        start_dt = release_cutoff or datetime(1970, 1, 1, tzinfo=timezone.utc)
+        end_dt = release_before_cutoff or (start_dt + timedelta(days=730))
+        end_date = end_dt.date().isoformat()
+        start_date = start_dt.date().isoformat()
         try:
             while True:
                 self._increment_stat("release_version_lookup_count")

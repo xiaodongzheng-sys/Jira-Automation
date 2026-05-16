@@ -3131,6 +3131,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("aria-expanded", script)
         self.assertIn("team-dashboard-version-plan-delete", script)
         self.assertIn("aria-label=\"Delete row\"", script)
+        self.assertIn("row.row_type === 'synced' && field === 'remarks'", script)
         self.assertIn("--version-plan-sheet-grid", styles)
         self.assertIn("grid-template-columns: var(--version-plan-sheet-grid)", styles)
         self.assertIn(".team-dashboard-version-plan-bundle-toggle-row", styles)

@@ -2715,6 +2715,72 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(client.request_stats["issue_release_before_cutoff_count"], 1)
             self.assertEqual(client.request_stats["issue_release_missing_included_count"], 1)
 
+    def test_team_dashboard_jira_lookup_filters_release_window(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+            client._resolve_bpmis_user_ids_by_emails = lambda emails: {"pm@npt.sg": [101]}  # type: ignore[method-assign]
+            searches = []
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                search = json.loads((params or {}).get("search") or "{}")
+                searches.append(search)
+                if path == "/api/v1/versions/list":
+                    self.assertEqual(search["timelineEndAfter"], "2026-05-20")
+                    self.assertEqual(search["timelineEndBefore"], "2026-05-28")
+                    return {
+                        "data": {
+                            "rows": [
+                                {"id": 321, "fullName": "AF_v1.0.80", "timelineEnd": "2026-05-20"},
+                                {"id": 322, "fullName": "DBPSG_v3.01", "timelineEnd": "2026-05-28"},
+                            ]
+                        }
+                    }
+                self.assertEqual(path, "/api/v1/issues/tree")
+                if "jiraRegionalPmPicId" in search:
+                    return {"data": {"rows": []}}
+                return {
+                    "data": {
+                        "rows": [
+                            {
+                                "id": 991,
+                                "jiraKey": "AF-991",
+                                "summary": "In window",
+                                "reporter": {"id": 101},
+                                "fixVersionId": [{"timeline": {"release": "2026-05-20"}}],
+                                "status": {"label": "Testing"},
+                            },
+                            {
+                                "id": 992,
+                                "jiraKey": "AF-992",
+                                "summary": "After window",
+                                "reporter": {"id": 101},
+                                "fixVersionId": [{"timeline": {"release": "2026-06-01"}}],
+                                "status": {"label": "Testing"},
+                            },
+                            {
+                                "id": 993,
+                                "jiraKey": "AF-993",
+                                "summary": "Missing release",
+                                "reporter": {"id": 101},
+                                "status": {"label": "Testing"},
+                            },
+                        ]
+                    }
+                }
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+            tasks = client.list_jira_tasks_created_by_emails(
+                ["pm@npt.sg"],
+                release_after="2026-05-20",
+                release_before="2026-05-28",
+                enrich_missing_parent=False,
+            )
+
+            self.assertEqual([task["jira_id"] for task in tasks], ["AF-991"])
+            self.assertEqual(searches[-1]["fixVersionId"], [321, 322])
+            self.assertEqual(client.request_stats["issue_release_after_window_count"], 1)
+            self.assertEqual(client.request_stats["issue_release_missing_excluded_count"], 1)
+
     def test_team_dashboard_jira_lookup_falls_back_when_release_version_lookup_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             client = BPMISDirectApiClient(self._settings(temp_dir))

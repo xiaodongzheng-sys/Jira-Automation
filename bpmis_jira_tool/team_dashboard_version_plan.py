@@ -10,6 +10,13 @@ from zoneinfo import ZoneInfo
 
 VERSION_PLAN_PRIORITY_ORDER = ("SP", "P0", "P1", "P2", "P3")
 VERSION_PLAN_PM_OPTIONS = ("Wang Chang", "Zoey", "Jireh", "Ker Yin", "Rene", "Jun Wei", "TBC")
+VERSION_PLAN_AF_PM_EMAILS = (
+    "jireh.tanyx@npt.sg",
+    "keryin.lim@npt.sg",
+    "chongzj@npt.sg",
+    "chang.wang@npt.sg",
+    "zoey.luxy@npt.sg",
+)
 VERSION_PLAN_PM_ALIASES = {
     "chang.wang@npt.sg": "Wang Chang",
     "wang chang": "Wang Chang",
@@ -212,13 +219,19 @@ def version_plan_sync(config: dict[str, Any], bpmis_client: Any, *, now: datetim
         mapped_dbp_versions = _mapped_dbp_versions(version, dbp_versions_by_prefix)
         in_dev = _is_in_dev(version, current_dt)
         synced_rows = []
-        if in_dev or (release_date and release_date < today):
-            synced_rows = _sync_rows_for_bundle(bpmis_client, mapped_dbp_versions)
+        prd_final_date = _offset_date_text(_prd_schedule_base_date(version), -2)
+        if _version_plan_should_sync_jira(version, today):
+            synced_rows = _sync_rows_for_bundle(
+                bpmis_client,
+                version,
+                mapped_dbp_versions,
+                existing.get("synced_rows") if isinstance(existing, dict) else [],
+            )
         next_bundles[version_id] = {
             **version,
             "mapped_versions": mapped_dbp_versions,
             "prd_initial_date": _offset_date_text(_prd_schedule_base_date(version), -4),
-            "prd_final_date": _offset_date_text(_prd_schedule_base_date(version), -2),
+            "prd_final_date": prd_final_date,
             "in_dev": in_dev,
             "manual_rows": _normalize_manual_rows(existing.get("manual_rows") if isinstance(existing, dict) else []),
             "synced_rows": synced_rows,
@@ -290,10 +303,10 @@ def version_plan_auto_sync_attempted_today(config: dict[str, Any], *, now: datet
 
 def update_version_plan_cell(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     plan = normalize_version_plan_state(config.get("version_plan") if isinstance(config, dict) else {})
-    row = _find_manual_row(plan, payload)
     field = str(payload.get("field") or "").strip()
     if field not in {"feature", "priority", "pm", "remarks", "productization_efforts"}:
         raise ValueError("Unsupported Version Plan field.")
+    row = _find_version_plan_cell_row(plan, payload, field)
     if field == "priority":
         row[field] = _normalize_priority(payload.get("value"))
     elif field == "pm":
@@ -304,6 +317,28 @@ def update_version_plan_cell(config: dict[str, Any], payload: dict[str, Any]) ->
     config = dict(config)
     config["version_plan"] = plan
     return config
+
+
+def _find_version_plan_cell_row(plan: dict[str, Any], payload: dict[str, Any], field: str) -> dict[str, Any]:
+    try:
+        return _find_manual_row(plan, payload)
+    except ValueError:
+        pass
+    if field != "remarks":
+        raise ValueError("Version Plan manual row was not found.")
+    row_id = str(payload.get("row_id") or "").strip()
+    scope = str(payload.get("scope") or "").strip().lower()
+    if scope != "bundle":
+        raise ValueError("Version Plan row was not found.")
+    version_id = str(payload.get("version_id") or "").strip()
+    bundle = plan["af"]["bundles"].get(version_id)
+    if not isinstance(bundle, dict):
+        raise ValueError("Version Plan row was not found.")
+    bundle["synced_rows"] = _normalize_synced_rows(bundle.get("synced_rows"))
+    for row in bundle["synced_rows"]:
+        if row.get("row_id") == row_id:
+            return row
+    raise ValueError("Version Plan row was not found.")
 
 
 def update_version_plan_rows(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
@@ -479,38 +514,95 @@ def _archived_bundle_payload(item: dict[str, Any]) -> dict[str, Any]:
     return archived
 
 
-def _sync_rows_for_bundle(bpmis_client: Any, mapped_versions: dict[str, Any]) -> list[dict[str, Any]]:
+def _version_plan_should_sync_jira(version: dict[str, Any], today: date) -> bool:
+    prd_final_date = _parse_date(_offset_date_text(_prd_schedule_base_date(version), -2))
+    return bool(prd_final_date and prd_final_date < today)
+
+
+def _sync_rows_for_bundle(
+    bpmis_client: Any,
+    af_version: dict[str, Any],
+    mapped_versions: dict[str, Any],
+    existing_synced_rows: Any = None,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for prefix, version in mapped_versions.items():
-        version_id = str((version or {}).get("version_id") or "").strip() if isinstance(version, dict) else ""
-        if not version_id:
+    existing_by_jira = {
+        str(row.get("jira_id") or "").strip(): row
+        for row in _normalize_synced_rows(existing_synced_rows)
+        if str(row.get("jira_id") or "").strip()
+    }
+    release_after = str(af_version.get("release_date") or "").strip()
+    release_before = _latest_mapped_release_date(mapped_versions)
+    for raw in _safe_list_jira_tasks_for_release_window(
+        bpmis_client,
+        VERSION_PLAN_AF_PM_EMAILS,
+        release_after=release_after,
+        release_before=release_before,
+    ):
+        if _is_closed_or_icebox(raw):
             continue
-        for raw in _safe_list_issues_for_version(bpmis_client, version_id):
-            if not _is_af_reporter(raw):
-                continue
-            if _is_closed_or_icebox(raw):
-                continue
-            jira_id = _extract_jira_id(raw)
-            if not jira_id or jira_id in seen:
-                continue
-            seen.add(jira_id)
-            parent = _parent_project_detail(bpmis_client, raw)
-            rows.append(
-                _synced_row(
-                    {
-                        "row_id": f"sync-{version_id}-{jira_id}",
-                        "jira_id": jira_id,
-                        "jira_link": _extract_jira_link(raw, jira_id),
-                        "market": _extract_market(parent) or _extract_market(raw) or _market_from_version_prefix(prefix),
-                        "jira_summary": _extract_first_text(raw, "summary", "title", "jiraSummary"),
-                        "priority": _extract_first_text(parent, "bizPriorityId", "bizPriority", "priority", "priorityId"),
-                        "pm": _extract_pm(raw),
-                        "sort_order": len(rows),
-                    }
-                )
+        jira_id = _extract_jira_id(raw)
+        if not jira_id or jira_id in seen:
+            continue
+        seen.add(jira_id)
+        parent = _task_parent_project(raw) or _parent_project_detail(bpmis_client, raw)
+        existing = existing_by_jira.get(jira_id) or {}
+        rows.append(
+            _synced_row(
+                {
+                    "row_id": f"sync-{af_version.get('version_id') or af_version.get('version_name')}-{jira_id}",
+                    "jira_id": jira_id,
+                    "jira_link": _extract_jira_link(raw, jira_id),
+                    "market": _extract_market(parent) or _extract_market(raw),
+                    "jira_summary": _extract_first_text(raw, "jira_title", "summary", "title", "jiraSummary"),
+                    "priority": _extract_parent_priority(parent),
+                    "pm": _extract_pm(raw),
+                    "remarks": existing.get("remarks") or "",
+                    "sort_order": len(rows),
+                }
             )
+        )
     return rows
+
+
+def _latest_mapped_release_date(mapped_versions: dict[str, Any]) -> str:
+    dates = [
+        parsed
+        for version in mapped_versions.values()
+        for parsed in [_parse_date((version or {}).get("release_date") if isinstance(version, dict) else "")]
+        if parsed
+    ]
+    return max(dates).isoformat() if dates else ""
+
+
+def _safe_list_jira_tasks_for_release_window(
+    bpmis_client: Any,
+    emails: tuple[str, ...],
+    *,
+    release_after: str,
+    release_before: str,
+) -> list[dict[str, Any]]:
+    if not hasattr(bpmis_client, "list_jira_tasks_created_by_emails"):
+        return []
+    try:
+        rows = bpmis_client.list_jira_tasks_created_by_emails(
+            list(emails),
+            release_after=release_after,
+            release_before=release_before,
+        )
+        return [row for row in rows or [] if isinstance(row, dict)]
+    except Exception:
+        return []
+
+
+def _task_parent_project(row: dict[str, Any]) -> dict[str, Any]:
+    parent = row.get("parent_project")
+    return parent if isinstance(parent, dict) else {}
+
+
+def _extract_parent_priority(parent: dict[str, Any]) -> str:
+    return _extract_first_text(parent, "priority", "bizPriorityId", "bizPriority", "priorityId")
 
 
 def _parent_project_detail(bpmis_client: Any, row: dict[str, Any]) -> dict[str, Any]:
@@ -652,7 +744,7 @@ def _is_closed_or_icebox(row: dict[str, Any]) -> bool:
 
 
 def _extract_jira_id(row: dict[str, Any]) -> str:
-    value = _extract_first_text(row, "jiraKey", "ticketKey", "jiraIssueKey", "issueKey", "key")
+    value = _extract_first_text(row, "jira_id", "ticket_key", "jiraKey", "ticketKey", "jiraIssueKey", "issueKey", "key")
     if value:
         return value
     link = _extract_first_text(row, "jiraLink", "ticketLink", "jiraUrl", "url", "link")
@@ -661,14 +753,14 @@ def _extract_jira_id(row: dict[str, Any]) -> str:
 
 
 def _extract_jira_link(row: dict[str, Any], jira_id: str) -> str:
-    link = _extract_first_text(row, "jiraLink", "ticketLink", "jiraUrl", "url", "link")
+    link = _extract_first_text(row, "jira_link", "ticket_link", "jiraLink", "ticketLink", "jiraUrl", "url", "link")
     if link:
         return link
     return f"https://jira.shopee.io/browse/{jira_id}" if jira_id else ""
 
 
 def _extract_pm(row: dict[str, Any]) -> list[str]:
-    value = row.get("jiraRegionalPmPicId") or row.get("regionalPmPic") or row.get("productManager") or row.get("pm")
+    value = row.get("pm_email") or row.get("jiraRegionalPmPicId") or row.get("regionalPmPic") or row.get("productManager") or row.get("pm")
     people = _flatten_people(value)
     return _normalize_pm_values(people)
 
