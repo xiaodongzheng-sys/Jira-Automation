@@ -580,11 +580,7 @@
       const market = row.market || '-';
       const summary = row.jira_summary || '-';
       return `
-        <div class="team-dashboard-version-plan-feature">
-          ${renderLink(row.jira_link, `[${jiraId}]`)}
-          <span class="team-dashboard-version-plan-market">[${escapeHtml(market)}]</span>
-          <span>${escapeHtml(summary)}</span>
-        </div>
+        <div class="team-dashboard-version-plan-feature">${renderLink(row.jira_link, `[${jiraId}]`)}<span class="team-dashboard-version-plan-market">[${escapeHtml(market)}]</span><span>${escapeHtml(summary)}</span></div>
       `;
     }
     if (readOnly) return escapeHtml(row.feature || '-');

@@ -2893,6 +2893,7 @@ class BPMISDirectApiClient(BPMISClient):
             "jira_link": ticket_link or "",
             "ticket_link": ticket_link or "",
             "jira_title": self._issue_first_text(row, "summary", "title", "jiraSummary"),
+            "jira_board": self._extract_issue_jira_board_text(row, ticket_key),
             "component": self._issue_first_text(row, "componentId", "component", "components"),
             "market": self._issue_first_text(row, "marketId", "market", "country"),
             "system": self._issue_first_text(row, "system", "systemId", "track", "scope"),
@@ -2908,6 +2909,26 @@ class BPMISDirectApiClient(BPMISClient):
             "parent_project": parent_project or self._normalize_team_dashboard_parent_project({}),
             "raw_response": row,
         }
+
+    def _extract_issue_jira_board_text(self, row: dict[str, Any], ticket_key: str = "") -> str:
+        board = self._issue_first_text(
+            row,
+            "jiraBoard",
+            "jiraBoardName",
+            "board",
+            "boardName",
+            "jiraProjectKey",
+            "projectKey",
+            "project_key",
+            "jiraProject",
+            "project",
+            "projectName",
+        )
+        if board:
+            return board
+        if ticket_key and "-" in ticket_key:
+            return ticket_key.split("-", 1)[0]
+        return ""
 
     def _issue_created_on_or_after(self, row: dict[str, Any], cutoff: datetime) -> bool:
         created_at = self._parse_issue_datetime(self._extract_issue_created_at_text(row))

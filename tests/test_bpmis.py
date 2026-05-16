@@ -2307,6 +2307,7 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(tasks[0]["pm_email"], "pm1@npt.sg")
             self.assertEqual(tasks[0]["jira_status"], "PRD Reviewed")
             self.assertEqual(tasks[0]["version"], "Planning_26Q2")
+            self.assertEqual(tasks[0]["jira_board"], "AF")
             self.assertEqual(tasks[0]["prd_links"], ["https://docs/prd-1"])
             self.assertEqual(tasks[0]["parent_project"]["bpmis_id"], "225159")
             self.assertEqual(tasks[0]["parent_project"]["project_name"], "Parent Project 225159")

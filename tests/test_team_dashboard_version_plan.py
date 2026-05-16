@@ -130,12 +130,20 @@ class FakeBPMISVersionPlanClient:
                 "parent_project": {"priority": "P0", "market": "SG"},
             },
             {
-                "jira_id": "SPDBP-rene",
+                "jira_id": "SPDBK-130825",
                 "jira_title": "[Feature] Rene owner mapping",
                 "status": "Developing",
                 "pm_email": "chongzj@npt.sg",
                 "market": "ID",
                 "parent_project": {"priority": "P1", "market": "ID"},
+            },
+            {
+                "jira_id": "SGDB-75128",
+                "jira_title": "[Feature] SG owner mapping",
+                "status": "Developing",
+                "pm_email": "zoey.luxy@npt.sg",
+                "market": "PH",
+                "parent_project": {"priority": "P0", "market": "PH"},
             },
             {
                 "jira_id": "SPDBP-closed",
@@ -231,15 +239,21 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(bundle["prd_initial_date"], "2026-05-06")
         self.assertEqual(bundle["prd_final_date"], "2026-05-08")
         self.assertEqual(bundle["synced_rows"][0]["jira_id"], "SPDBP-94945")
-        self.assertEqual(bundle["synced_rows"][0]["market"], "SG")
+        self.assertEqual(bundle["synced_rows"][0]["market"], "Regional")
         self.assertEqual(bundle["synced_rows"][0]["priority"], "P0")
         self.assertEqual(bundle["synced_rows"][0]["pm"], ["Wang Chang"])
+        self.assertEqual(bundle["synced_rows"][0]["productization_efforts"], "Y")
+        self.assertEqual([row["pm"][0] for row in bundle["synced_rows"] if row["priority"] == "P0"], ["Wang Chang", "Zoey"])
+        sg_row = next(row for row in bundle["synced_rows"] if row["jira_id"] == "SGDB-75128")
+        self.assertEqual(sg_row["market"], "SG")
+        self.assertEqual(sg_row["productization_efforts"], "N")
         self.assertEqual(bundle["mapped_versions"]["DBPSG"]["version_name"], "DBPSG_v2.85_0526")
         self.assertEqual(len(client.release_window_calls), 1)
         self.assertEqual(client.release_window_calls[0]["release_after"], "2026-05-20")
         self.assertEqual(client.release_window_calls[0]["release_before"], "2026-05-26")
-        rene_row = next(row for row in bundle["synced_rows"] if row["jira_id"] == "SPDBP-rene")
+        rene_row = next(row for row in bundle["synced_rows"] if row["jira_id"] == "SPDBK-130825")
         self.assertEqual(rene_row["pm"], ["Rene"])
+        self.assertEqual(rene_row["market"], "ID")
         self.assertEqual(bundle["manual_rows"][0]["feature"], "Manual item")
         self.assertEqual(payload["pipeline_rows"][0]["feature"], "Keep pipeline")
 
@@ -371,6 +385,25 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual([row["row_id"] for row in payload["pipeline_rows"]], ["pipe-1"])
         self.assertEqual(first_bundle["manual_rows"], [])
         self.assertEqual([row["row_id"] for row in second_bundle["manual_rows"]], ["bundle-1", "bundle-2"])
+
+    def test_manual_rows_sort_by_priority_then_pm(self) -> None:
+        payload = version_plan_payload(
+            {
+                "version_plan": {
+                    "af": {
+                        "pipeline_rows": [
+                            {"row_id": "zoey", "feature": "Zoey P0", "priority": "P0", "pm": ["Zoey"], "sort_order": 0},
+                            {"row_id": "rene", "feature": "Rene P0", "priority": "P0", "pm": ["Rene"], "sort_order": 1},
+                            {"row_id": "sp", "feature": "SP item", "priority": "SP", "pm": ["TBC"], "sort_order": 2},
+                            {"row_id": "wang", "feature": "Wang P0", "priority": "P0", "pm": ["Wang Chang"], "sort_order": 3},
+                        ]
+                    }
+                }
+            },
+            now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
+        )
+
+        self.assertEqual([row["row_id"] for row in payload["pipeline_rows"]], ["sp", "rene", "wang", "zoey"])
 
     def test_not_started_dev_version_is_manual_only_after_sync(self) -> None:
         config = {

@@ -441,17 +441,21 @@ def _normalize_synced_rows(value: Any) -> list[dict[str, Any]]:
 
 def _synced_row(row: dict[str, Any]) -> dict[str, Any]:
     jira_id = str(row.get("jira_id") or row.get("jira_ticket_number") or "").strip()
+    jira_board = _extract_jira_board(row) or jira_id
+    productization_efforts = str(row.get("productization_efforts") or "").strip().upper()
+    if productization_efforts not in {"Y", "N"}:
+        productization_efforts = "Y" if _jira_board_is_productization(jira_board) else "N"
     return {
         "row_id": str(row.get("row_id") or f"sync-{jira_id or uuid.uuid4().hex}"),
         "row_type": "synced",
         "jira_id": jira_id,
         "jira_link": str(row.get("jira_link") or "").strip(),
-        "market": _normalize_market(row.get("market")),
+        "market": _market_from_jira_board(jira_board) or _normalize_market(row.get("market")),
         "jira_summary": str(row.get("jira_summary") or row.get("feature") or "").strip(),
         "priority": _normalize_priority(row.get("priority")),
         "pm": _normalize_pm_values(row.get("pm")),
         "remarks": str(row.get("remarks") or "").strip(),
-        "productization_efforts": "Y" if jira_id.upper().startswith("SPDBP") else "N",
+        "productization_efforts": productization_efforts,
         "sort_order": _safe_int(row.get("sort_order"), 0),
     }
 
@@ -573,11 +577,12 @@ def _sync_rows_for_bundle(
                     "row_id": f"sync-{af_version.get('version_id') or af_version.get('version_name')}-{jira_id}",
                     "jira_id": jira_id,
                     "jira_link": _extract_jira_link(raw, jira_id),
-                    "market": _extract_market(parent) or _extract_market(raw),
+                    "market": _extract_market_from_jira_board(raw, jira_id),
                     "jira_summary": _extract_first_text(raw, "jira_title", "summary", "title", "jiraSummary"),
                     "priority": _extract_parent_priority(parent),
                     "pm": _extract_pm(raw),
                     "remarks": existing.get("remarks") or "",
+                    "productization_efforts": _extract_productization_efforts(raw, jira_id),
                     "sort_order": len(rows),
                 }
             )
@@ -696,12 +701,33 @@ def _manual_rows_for_scope(plan: dict[str, Any], payload: dict[str, Any]) -> lis
 
 def _sort_manual_rows(rows: Any) -> list[dict[str, Any]]:
     normalized = _normalize_manual_rows(rows)
-    return sorted(normalized, key=lambda row: (_priority_rank(row.get("priority")), _safe_int(row.get("sort_order"), 0), str(row.get("feature") or "")))
+    return sorted(
+        normalized,
+        key=lambda row: (
+            _priority_rank(row.get("priority")),
+            _pm_sort_key(row.get("pm")),
+            _safe_int(row.get("sort_order"), 0),
+            str(row.get("feature") or ""),
+        ),
+    )
 
 
 def _sort_synced_rows(rows: Any) -> list[dict[str, Any]]:
     normalized = _normalize_synced_rows(rows)
-    return sorted(normalized, key=lambda row: (_priority_rank(row.get("priority")), _safe_int(row.get("sort_order"), 0), str(row.get("jira_id") or "")))
+    return sorted(
+        normalized,
+        key=lambda row: (
+            _priority_rank(row.get("priority")),
+            _pm_sort_key(row.get("pm")),
+            _safe_int(row.get("sort_order"), 0),
+            str(row.get("jira_id") or ""),
+        ),
+    )
+
+
+def _pm_sort_key(value: Any) -> str:
+    values = _normalize_pm_values(value)
+    return " / ".join(values).casefold()
 
 
 def _priority_rank(priority: Any) -> int:
@@ -799,6 +825,65 @@ def _flatten_people(value: Any) -> list[str]:
 
 def _extract_market(row: dict[str, Any]) -> str:
     return _normalize_market(row.get("market") or row.get("marketId") or row.get("country") or row.get("region"))
+
+
+def _extract_market_from_jira_board(row: dict[str, Any], jira_id: str = "") -> str:
+    return _market_from_jira_board(_extract_jira_board(row) or jira_id)
+
+
+def _extract_productization_efforts(row: dict[str, Any], jira_id: str = "") -> str:
+    return "Y" if _jira_board_is_productization(_extract_jira_board(row) or jira_id) else "N"
+
+
+def _extract_jira_board(row: dict[str, Any]) -> str:
+    value = _extract_first_text(
+        row,
+        "jira_board",
+        "jiraBoard",
+        "jiraBoardName",
+        "board",
+        "boardName",
+        "jira_project_key",
+        "jiraProjectKey",
+        "projectKey",
+        "project_key",
+        "jira_project",
+        "jiraProject",
+        "project",
+        "projectName",
+    )
+    if value:
+        return value
+    raw = row.get("raw_response")
+    if isinstance(raw, dict):
+        return _extract_jira_board(raw)
+    return ""
+
+
+def _market_from_jira_board(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    board_key = text.split("-", 1)[0].strip().upper()
+    normalized = re.sub(r"[^A-Z0-9]+", " ", text.upper())
+    if _jira_board_is_productization(text):
+        return "Regional"
+    if board_key in {"SGDB", "SG"} or re.search(r"\b(SG|SINGAPORE)\b", normalized):
+        return "SG"
+    if board_key in {"SPPHDB", "PHDB", "PH"} or re.search(r"\b(PH|PHILIPPINES)\b", normalized):
+        return "PH"
+    if board_key in {"SPDBK", "IDDB", "ID"} or re.search(r"\b(ID|INDONESIA)\b", normalized):
+        return "ID"
+    if board_key in {"REG", "REGIONAL"} or re.search(r"\b(REG|REGIONAL)\b", normalized):
+        return "Regional"
+    return ""
+
+
+def _jira_board_is_productization(value: Any) -> bool:
+    text = str(value or "").strip()
+    board_key = text.split("-", 1)[0].strip().upper()
+    normalized = re.sub(r"[^A-Z0-9]+", " ", text.upper())
+    return board_key in {"SPDBP", "DBP"} or "PRODUCTIZATION" in normalized
 
 
 def _normalize_market(value: Any) -> str:

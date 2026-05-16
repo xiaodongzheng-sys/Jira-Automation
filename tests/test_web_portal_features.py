@@ -3123,6 +3123,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("└ ${escapeHtml(line)}", script)
         self.assertIn("renderLink(row.jira_link, `[${jiraId}]`)", script)
         self.assertIn("[${escapeHtml(market)}]", script)
+        self.assertIn('<div class="team-dashboard-version-plan-feature">${renderLink(row.jira_link, `[${jiraId}]`)}<span', script)
         self.assertIn("action: 'move'", script)
         self.assertIn("target_scope: targetScope", script)
         self.assertIn("target_before_row_id: targetBeforeRowId", script)
