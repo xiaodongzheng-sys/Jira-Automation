@@ -635,7 +635,7 @@
           ${manual ? 'data-version-plan-manual-row="true" draggable="true"' : ''}
         >
           <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-cell-feature" data-label="Feature">
-            ${manual ? '<div class="team-dashboard-version-plan-row-tools"><button class="button button-secondary team-dashboard-version-plan-drag" type="button" aria-label="Drag row">Drag</button><button class="button button-secondary" type="button" data-version-plan-row-action="up">Up</button><button class="button button-secondary" type="button" data-version-plan-row-action="down">Down</button><button class="button button-secondary" type="button" data-version-plan-row-action="delete">Delete</button></div>' : ''}
+            ${manual ? '<div class="team-dashboard-version-plan-row-tools"><button class="button button-secondary team-dashboard-version-plan-drag" type="button" aria-label="Drag row">Drag</button><button class="button button-secondary" type="button" data-version-plan-row-action="up">Up</button><button class="button button-secondary" type="button" data-version-plan-row-action="down">Down</button><button class="button button-secondary team-dashboard-version-plan-delete" type="button" data-version-plan-row-action="delete" aria-label="Delete row" title="Delete row"><span aria-hidden="true">🗑</span></button></div>' : ''}
             ${versionPlanRowFeature(row, readOnly)}
           </div>
           <div class="team-dashboard-version-plan-cell" data-label="Priority">

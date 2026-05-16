@@ -1484,12 +1484,23 @@
   z-index: 2;
   display: flex;
   gap: 4px;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.team-dashboard-version-plan-row-tools .button:not(.team-dashboard-version-plan-delete) {
   opacity: 0;
   pointer-events: none;
 }
 
 .team-dashboard-version-plan-row:hover .team-dashboard-version-plan-row-tools,
 .team-dashboard-version-plan-row:focus-within .team-dashboard-version-plan-row-tools {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.team-dashboard-version-plan-row:hover .team-dashboard-version-plan-row-tools .button,
+.team-dashboard-version-plan-row:focus-within .team-dashboard-version-plan-row-tools .button {
   opacity: 1;
   pointer-events: auto;
 }
@@ -1501,6 +1512,11 @@
   border-radius: 3px;
   font-size: 0.72rem;
   line-height: 1.1;
+}
+
+.team-dashboard-version-plan-delete {
+  min-width: 24px;
+  color: #b42318;
 }
 
 .team-dashboard-version-plan-row.is-dragging {
@@ -1631,6 +1647,11 @@
   .team-dashboard-version-plan-row-tools {
     opacity: 1;
     pointer-events: auto;
+  }
+
+  .team-dashboard-version-plan-row-tools .button {
+    opacity: 1 !important;
+    pointer-events: auto !important;
   }
 
   .team-dashboard-version-plan-row-tools .button {
