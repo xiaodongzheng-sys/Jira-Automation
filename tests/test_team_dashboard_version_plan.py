@@ -358,6 +358,43 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(client.list_issue_calls, [])
         self.assertEqual(client.release_window_calls, [])
 
+    def test_not_started_dev_version_hides_cached_synced_rows_without_sync(self) -> None:
+        payload = version_plan_payload(
+            {
+                "version_plan": {
+                    "af": {
+                        "bundles": {
+                            "af-20260626": {
+                                "version_id": "af-20260626",
+                                "version_name": "AF_v1.0.82_20260626",
+                                "release_date": "2026-06-26",
+                                "prd_final_date": "2026-05-27",
+                                "synced_at": "2026-05-16 08:00:00 SGT",
+                                "synced_rows": [
+                                    {
+                                        "row_id": "sync-old",
+                                        "jira_id": "SPDBP-old",
+                                        "jira_summary": "Old cached row",
+                                    }
+                                ],
+                                "manual_rows": [
+                                    {"row_id": "manual-1", "feature": "[ID][PH] AMR Fix", "priority": "P1"}
+                                ],
+                            }
+                        }
+                    }
+                }
+            },
+            now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
+        )
+
+        bundle = payload["bundles"][0]
+
+        self.assertEqual(bundle["af_version_name"], "AF_v1.0.82_20260626")
+        self.assertEqual(bundle["synced_rows"], [])
+        self.assertEqual(bundle["synced_at"], "")
+        self.assertEqual(bundle["manual_rows"][0]["feature"], "[ID][PH] AMR Fix")
+
     def test_synced_jira_remarks_are_editable_and_preserved_after_sync(self) -> None:
         config = {
             "version_plan": {

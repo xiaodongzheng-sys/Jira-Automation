@@ -488,6 +488,8 @@ def _prd_schedule_base_date(version: dict[str, Any]) -> str:
 
 
 def _bundle_payload(bundle: dict[str, Any], *, today: date) -> dict[str, Any]:
+    release_date = _parse_date(str(bundle.get("release_date") or ""))
+    should_show_synced_rows = _bundle_should_show_synced_rows(bundle, today=today)
     item = {
         "version_id": str(bundle.get("version_id") or "").strip(),
         "af_version_name": str(bundle.get("version_name") or "").strip(),
@@ -498,11 +500,10 @@ def _bundle_payload(bundle: dict[str, Any], *, today: date) -> dict[str, Any]:
         "prd_final_date": str(bundle.get("prd_final_date") or "").strip(),
         "in_dev": bool(bundle.get("in_dev")),
         "mapped_versions": bundle.get("mapped_versions") if isinstance(bundle.get("mapped_versions"), dict) else {},
-        "synced_at": str(bundle.get("synced_at") or "").strip(),
-        "synced_rows": _sort_synced_rows(bundle.get("synced_rows")),
+        "synced_at": str(bundle.get("synced_at") or "").strip() if should_show_synced_rows else "",
+        "synced_rows": _sort_synced_rows(bundle.get("synced_rows")) if should_show_synced_rows else [],
         "manual_rows": _sort_manual_rows(bundle.get("manual_rows")),
     }
-    release_date = _parse_date(item["af_release_date"])
     item["is_archived"] = bool(release_date and release_date < today)
     return item
 
@@ -517,6 +518,18 @@ def _archived_bundle_payload(item: dict[str, Any]) -> dict[str, Any]:
 def _version_plan_should_sync_jira(version: dict[str, Any], today: date) -> bool:
     prd_final_date = _parse_date(_offset_date_text(_prd_schedule_base_date(version), -2))
     return bool(prd_final_date and prd_final_date < today)
+
+
+def _bundle_should_show_synced_rows(bundle: dict[str, Any], *, today: date) -> bool:
+    release_date = _parse_date(str(bundle.get("release_date") or ""))
+    if release_date and release_date < today:
+        return True
+    prd_final_date = _parse_date(str(bundle.get("prd_final_date") or ""))
+    if prd_final_date:
+        return prd_final_date < today
+    if not str(bundle.get("prd_deadline_date") or "").strip():
+        return True
+    return _version_plan_should_sync_jira(bundle, today)
 
 
 def _sync_rows_for_bundle(
