@@ -266,7 +266,7 @@ print_timing_report() {
 cd "$ROOT_DIR"
 RELEASE_TARGET="$(release_window_target)"
 if [[ "$RELEASE_TARGET" == "uat" ]]; then
-  echo "Release window policy allows UAT only: $(release_window_summary)"
+  echo "Release window policy selected UAT default path: $(release_window_summary)"
   "$ROOT_DIR/scripts/release_uat_fast.sh"
   print_timing_report
   FINISHED_AT="$(date +%s)"
@@ -274,7 +274,7 @@ if [[ "$RELEASE_TARGET" == "uat" ]]; then
   exit 0
 fi
 
-echo "Release window policy allows Live only: $(release_window_summary)"
+echo "Release window policy selected Live default path: $(release_window_summary)"
 SHA="$(current_sha)"
 LIVE_URL="$(resolve_live_url)"
 if [[ "$(live_revision || true)" == "$SHA" ]]; then

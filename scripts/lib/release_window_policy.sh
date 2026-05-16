@@ -40,13 +40,21 @@ minutes = now.hour * 60 + now.minute
 business_start = 10 * 60
 business_end = 19 * 60
 is_business_hours = now.weekday() < 5 and business_start <= minutes < business_end
-target = "uat" if is_business_hours else "live"
+is_weekday = now.weekday() < 5
+is_live_window = is_weekday and not is_business_hours
+target = "live" if is_live_window else "uat"
+allowed_targets = ["uat"]
+if is_live_window:
+    allowed_targets.append("live")
 
 print(
     json.dumps(
         {
+            "allowed_targets": allowed_targets,
+            "is_live_window": is_live_window,
             "target": target,
             "is_business_hours": is_business_hours,
+            "is_weekday": is_weekday,
             "now": now.isoformat(timespec="seconds"),
             "timezone": timezone_name,
             "business_hours": "Mon-Fri 10:00-19:00",
@@ -62,7 +70,7 @@ release_window_target() {
 }
 
 release_window_summary() {
-  release_window_policy_json | "$PYTHON_BIN" -c 'import json, sys; p=json.load(sys.stdin); print("{} {}; allowed target: {}; business hours: {}".format(p["now"], p["timezone"], p["target"], p["business_hours"]))'
+  release_window_policy_json | "$PYTHON_BIN" -c 'import json, sys; p=json.load(sys.stdin); print("{} {}; default target: {}; allowed targets: {}; business hours: {}".format(p["now"], p["timezone"], p["target"], ",".join(p["allowed_targets"]), p["business_hours"]))'
 }
 
 enforce_release_window_target() {
@@ -72,22 +80,24 @@ enforce_release_window_target() {
     return 0
   fi
 
-  local policy_json allowed_target now timezone business_hours
+  local policy_json allowed_target allowed_targets now timezone business_hours
   policy_json="$(release_window_policy_json)"
   allowed_target="$(printf '%s' "$policy_json" | "$PYTHON_BIN" -c 'import json, sys; print(json.load(sys.stdin)["target"])')"
-  if [[ "$requested_target" == "$allowed_target" ]]; then
+  if printf '%s' "$policy_json" | REQUESTED_TARGET="$requested_target" "$PYTHON_BIN" -c 'import json, os, sys; p=json.load(sys.stdin); raise SystemExit(0 if os.environ["REQUESTED_TARGET"] in p["allowed_targets"] else 1)'; then
     return 0
   fi
 
   now="$(printf '%s' "$policy_json" | "$PYTHON_BIN" -c 'import json, sys; print(json.load(sys.stdin)["now"])')"
   timezone="$(printf '%s' "$policy_json" | "$PYTHON_BIN" -c 'import json, sys; print(json.load(sys.stdin)["timezone"])')"
   business_hours="$(printf '%s' "$policy_json" | "$PYTHON_BIN" -c 'import json, sys; print(json.load(sys.stdin)["business_hours"])')"
+  allowed_targets="$(printf '%s' "$policy_json" | "$PYTHON_BIN" -c 'import json, sys; print(",".join(json.load(sys.stdin)["allowed_targets"]))')"
   {
     echo "Release window policy blocked '$requested_target' release."
     echo "Current time: $now ($timezone)"
-    echo "Allowed target: $allowed_target"
+    echo "Default target: $allowed_target"
+    echo "Allowed targets: $allowed_targets"
     echo "Business hours: $business_hours"
-    echo "Policy: business hours publish UAT only; outside business hours publish Live only."
+    echo "Policy: UAT may be deployed anytime; Live may be deployed only Monday-Friday outside 10:00-19:00 Asia/Singapore."
     echo "Set RELEASE_WINDOW_POLICY_BYPASS=1 only for an explicitly approved exception."
   } >&2
   return 1

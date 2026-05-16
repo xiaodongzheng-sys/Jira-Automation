@@ -1211,8 +1211,8 @@ exit 0
 
         self.assertIn("run_gate_and_image_in_parallel", script)
         self.assertIn("release_window_target", script)
-        self.assertIn("allows UAT only", script)
-        self.assertIn("allows Live only", script)
+        self.assertIn("selected UAT default path", script)
+        self.assertIn("selected Live default path", script)
         self.assertIn("Live already serves $SHA; skipping Cloud Run/UAT gcloud promotion checks.", script)
         self.assertIn("require_gcloud_noninteractive_auth", script)
         self.assertIn("gcloud credentials are not usable non-interactively", script)
@@ -1240,6 +1240,7 @@ RELEASE_WINDOW_POLICY_NOW="2026-05-08T10:00:00+08:00" release_window_target
 RELEASE_WINDOW_POLICY_NOW="2026-05-08T18:59:00+08:00" release_window_target
 RELEASE_WINDOW_POLICY_NOW="2026-05-08T19:00:00+08:00" release_window_target
 RELEASE_WINDOW_POLICY_NOW="2026-05-09T12:00:00+08:00" release_window_target
+RELEASE_WINDOW_POLICY_NOW="2026-05-11T09:59:00+08:00" release_window_target
 '''
         completed = subprocess.run(
             ["bash", "-lc", command],
@@ -1250,13 +1251,33 @@ RELEASE_WINDOW_POLICY_NOW="2026-05-09T12:00:00+08:00" release_window_target
         )
 
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
-        self.assertEqual(completed.stdout.splitlines(), ["uat", "uat", "live", "live"])
+        self.assertEqual(completed.stdout.splitlines(), ["uat", "uat", "live", "uat", "live"])
+
+    def test_release_window_policy_allows_uat_anytime(self):
+        helper_path = PROJECT_ROOT / "scripts/lib/release_window_policy.sh"
+        team_env_path = PROJECT_ROOT / "scripts/lib/team_env.sh"
+        command = f'''
+source "{team_env_path}"
+source "{helper_path}"
+RELEASE_WINDOW_POLICY_NOW="2026-05-08T12:00:00+08:00" enforce_release_window_target uat
+RELEASE_WINDOW_POLICY_NOW="2026-05-08T19:00:00+08:00" enforce_release_window_target uat
+RELEASE_WINDOW_POLICY_NOW="2026-05-09T12:00:00+08:00" enforce_release_window_target uat
+'''
+        completed = subprocess.run(
+            ["bash", "-lc", command],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=self._script_env(PYTHON_BIN=sys.executable, RELEASE_WINDOW_POLICY_BYPASS="0"),
+        )
+
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
 
     def test_release_window_policy_blocks_wrong_target_by_default(self):
         helper_path = PROJECT_ROOT / "scripts/lib/release_window_policy.sh"
         team_env_path = PROJECT_ROOT / "scripts/lib/team_env.sh"
         scenarios = [
-            ("2026-05-09T12:00:00+08:00", "uat", "live"),
+            ("2026-05-09T12:00:00+08:00", "live", "uat"),
             ("2026-05-08T12:00:00+08:00", "live", "uat"),
         ]
 
@@ -1276,7 +1297,8 @@ RELEASE_WINDOW_POLICY_NOW="{timestamp}" enforce_release_window_target {requested
 
             self.assertNotEqual(completed.returncode, 0)
             self.assertIn(f"blocked '{requested}' release", completed.stderr)
-            self.assertIn(f"Allowed target: {allowed}", completed.stderr)
+            self.assertIn(f"Default target: {allowed}", completed.stderr)
+            self.assertIn(f"Allowed targets: {allowed}", completed.stderr)
 
     def test_deploy_scripts_enforce_release_window_policy(self):
         uat_script = (PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh").read_text(encoding="utf-8")

@@ -1,10 +1,11 @@
 # Release Checklist
 
-Use this checklist for every portal release. Release target is selected by Singapore business hours:
+Use this checklist for every portal release. Release target is selected by Singapore release-window rules:
 
 - Business hours are Monday-Friday, 10:00-19:00 Asia/Singapore.
-- During business hours, publish UAT only.
-- Outside business hours, publish Live only.
+- UAT may be deployed anytime.
+- Live may be deployed only Monday-Friday outside business hours.
+- The one-command release orchestrator defaults to Live during the Live window and UAT at all other times.
 - The release scripts enforce this by default. Set `RELEASE_WINDOW_POLICY_BYPASS=1` only for an explicitly approved exception.
 
 - The Mac-hosted portal exposed through Cloudflare Tunnel is the primary teammate entrypoint.
@@ -151,7 +152,7 @@ curl -fsS "$LIVE_URL/api/local-agent/healthz"
 
 ## 2. UAT Release
 
-Run this for routine releases after changes are committed and pushed to `origin/main`. This is allowed only during business hours.
+Run this for routine releases after changes are committed and pushed to `origin/main`. UAT deployment is allowed anytime.
 
 - Deploy timing metrics are appended to the Mac data root by default:
 
@@ -252,7 +253,7 @@ RELEASE_UAT_FAST_WAIT_FOR_GITHUB_IMAGE=0 \
 
 Set `RELEASE_UAT_FAST_BUILD_IMAGE_FALLBACK=0` to fail instead of building a missing prebuilt image locally. Set `RELEASE_UAT_FAST_BUILD_IMAGE=0` to preserve the older source-deploy fallback behavior.
 
-For one-command release handling, use the window-aware orchestrator. During business hours it publishes UAT only. Outside business hours it publishes Live only by promoting the existing UAT tag to the Mac-hosted Live portal, runs the live doctor, and prints the timing report:
+For one-command release handling, use the window-aware orchestrator. During the weekday Live window it publishes Live by promoting the existing UAT tag to the Mac-hosted Live portal, runs the live doctor, and prints the timing report. At all other times, including weekends and business hours, it publishes UAT:
 
 ```bash
 ./scripts/release_uat_live_fast.sh
@@ -407,7 +408,7 @@ curl https://app.bankpmtool.uk/api/local-agent/healthz
 
 ## 5. Live Promotion
 
-Run this only after the user explicitly confirms UAT passed and asks to publish Live. This is allowed only outside business hours. The promotion script reads the Cloud Run `uat` tag, verifies the tagged revision's `TEAM_PORTAL_RELEASE_REVISION`, refuses to publish if `origin/main` has moved past that UAT commit, fast-forwards the host workspace, validates the new portal revision on an inactive local slot, restarts the live guard, restarts the live local-agent only when local-agent-backed files changed, and verifies `/healthz`.
+Run this only after the user explicitly confirms UAT passed and asks to publish Live. This is allowed only Monday-Friday outside business hours. The promotion script reads the Cloud Run `uat` tag, verifies the tagged revision's `TEAM_PORTAL_RELEASE_REVISION`, refuses to publish if `origin/main` has moved past that UAT commit, fast-forwards the host workspace, validates the new portal revision on an inactive local slot, restarts the live guard, restarts the live local-agent only when local-agent-backed files changed, and verifies `/healthz`.
 
 ```bash
 CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceaccount.com \
