@@ -1321,7 +1321,7 @@
 }
 
 .team-dashboard-version-plan-sheet {
-  --version-plan-sheet-grid: minmax(320px, 1fr) 40px 108px minmax(150px, 0.55fr) 44px;
+  --version-plan-sheet-grid: minmax(320px, 1fr) 58px 116px minmax(150px, 0.45fr) 118px;
   display: grid;
   gap: 0;
   max-width: 100%;
@@ -1335,7 +1335,7 @@
 .team-dashboard-version-plan-row {
   display: grid;
   grid-template-columns: var(--version-plan-sheet-grid);
-  min-width: 700px;
+  min-width: 762px;
   border-bottom: 1px solid #d9dde5;
 }
 
@@ -1454,20 +1454,15 @@
 .team-dashboard-version-plan-cell textarea {
   min-height: 22px;
   padding: 0;
-  resize: vertical;
+  resize: none;
 }
 
-.team-dashboard-version-plan-cell select[multiple] {
-  height: 24px;
-  min-height: 24px;
-}
-
-.team-dashboard-version-plan-cell select[multiple]:focus {
-  position: relative;
-  z-index: 3;
-  width: 132px;
-  max-width: none;
-  height: 86px;
+.team-dashboard-version-plan-cell select {
+  min-height: 22px;
+  padding: 0 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .team-dashboard-version-plan-cell-actions {
@@ -1602,7 +1597,7 @@
 
   .team-dashboard-version-plan-row {
     grid-template-columns: var(--version-plan-sheet-grid);
-    min-width: 700px;
+    min-width: 762px;
     gap: 0;
     padding: 0;
     border: 0;

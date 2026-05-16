@@ -471,13 +471,18 @@
   };
 
   const versionPlanPmOptions = (selectedValues = []) => {
-    const selected = new Set((Array.isArray(selectedValues) ? selectedValues : []).map((item) => String(item || '').trim()));
+    const selected = (Array.isArray(selectedValues) ? selectedValues : [selectedValues])
+      .map((item) => String(item || '').trim())
+      .find(Boolean) || '';
     const options = Array.isArray(versionPlanState?.pm_options) && versionPlanState.pm_options.length
       ? versionPlanState.pm_options
       : ['Wang Chang', 'Zoey', 'Jireh', 'Ker Yin', 'Rene', 'Jun Wei', 'TBC'];
-    return options.map((pm) => (
-      `<option value="${escapeHtml(pm)}"${selected.has(pm) ? ' selected' : ''}>${escapeHtml(pm)}</option>`
-    )).join('');
+    return [
+      '<option value="">-</option>',
+      ...options.map((pm) => (
+        `<option value="${escapeHtml(pm)}"${selected === pm ? ' selected' : ''}>${escapeHtml(pm)}</option>`
+      )),
+    ].join('');
   };
 
   const setVersionPlanStatus = (message, tone = 'neutral') => {
@@ -601,7 +606,7 @@
       return `<select data-version-plan-cell="priority" aria-label="Priority">${versionPlanPriorityOptions(row.priority || '')}</select>`;
     }
     if (field === 'pm') {
-      return `<select multiple size="3" data-version-plan-cell="pm" aria-label="PM">${versionPlanPmOptions(row.pm || [])}</select>`;
+      return `<select data-version-plan-cell="pm" aria-label="PM">${versionPlanPmOptions(row.pm || [])}</select>`;
     }
     if (field === 'productization_efforts') {
       return `
@@ -655,7 +660,7 @@
           <div>Priority</div>
           <div>PM</div>
           <div>Remarks</div>
-          <div>Y/N</div>
+          <div>Productization Efforts? (Y/N)</div>
         </div>
         ${body || empty}
       </div>

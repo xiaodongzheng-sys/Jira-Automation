@@ -3119,7 +3119,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         styles = Path("static/team_dashboard.css").read_text(encoding="utf-8")
 
         self.assertIn("(PRD Final: ${versionPlanShortDate(bundle.prd_final_date || bundle.af_release_date)})", script)
-        self.assertIn("<div>Y/N</div>", script)
+        self.assertIn("<div>Productization Efforts? (Y/N)</div>", script)
         self.assertIn("└ ${escapeHtml(line)}", script)
         self.assertIn("renderLink(row.jira_link, `[${jiraId}]`)", script)
         self.assertIn("[${escapeHtml(market)}]", script)
@@ -3132,7 +3132,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("--version-plan-sheet-grid", styles)
         self.assertIn("grid-template-columns: var(--version-plan-sheet-grid)", styles)
         self.assertIn(".team-dashboard-version-plan-bundle-toggle-row", styles)
-        self.assertIn("min-width: 700px", styles)
+        self.assertIn("min-width: 762px", styles)
+        self.assertIn("resize: none", styles)
         self.assertNotIn("min-width: 2045px", styles)
         self.assertNotIn("grid-template-columns: minmax(0, 1fr);\n    min-width: 0;\n    gap: 8px;", styles)
 
