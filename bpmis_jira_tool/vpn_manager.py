@@ -377,9 +377,24 @@ class CiscoVPNClient:
             check=False,
             timeout=10,
         )
-        self._sleeper(3.0)
-        subprocess.run(["open", self.cisco_app_path], capture_output=True, text=True, check=False, timeout=10)
-        self._sleeper(5.0)
+        if not self._wait_for_cisco_gui_exit(timeout_seconds=8.0):
+            subprocess.run(["pkill", "-x", "Cisco Secure Client"], capture_output=True, text=True, check=False, timeout=10)
+            self._wait_for_cisco_gui_exit(timeout_seconds=5.0)
+
+    def _wait_for_cisco_gui_exit(self, *, timeout_seconds: float) -> bool:
+        deadline = time.monotonic() + max(0.1, timeout_seconds)
+        while time.monotonic() <= deadline:
+            completed = subprocess.run(
+                ["pgrep", "-x", "Cisco Secure Client"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            if completed.returncode != 0:
+                return True
+            self._sleeper(0.5)
+        return False
 
     @staticmethod
     def _is_gui_capability_error(output: str) -> bool:
