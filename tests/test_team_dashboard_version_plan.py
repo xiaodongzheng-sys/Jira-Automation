@@ -8,6 +8,7 @@ from bpmis_jira_tool.team_dashboard_version_plan import (
     normalize_version_plan_state,
     update_version_plan_cell,
     update_version_plan_rows,
+    version_plan_auto_sync_attempted_today,
     version_plan_payload,
     version_plan_sync,
     version_plan_synced_today,
@@ -354,6 +355,33 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(payload["bundles"][0]["af_version_name"], "AF_cached")
         self.assertEqual(payload["bundles"][0]["manual_rows"][0]["feature"], "Cached manual")
         self.assertEqual(payload["bundles"][0]["synced_rows"][0]["jira_id"], "SPDBP-1")
+
+    def test_auto_sync_attempt_guard_blocks_same_day_error_loop(self) -> None:
+        config = {
+            "version_plan": {
+                "af": {
+                    "sync_state": {
+                        "state": "error",
+                        "started_at": "2026-05-16T20:50:29+08:00",
+                        "finished_at": "2026-05-16T20:50:31+08:00",
+                        "error": "No AF versions were returned from BPMIS.",
+                    }
+                }
+            }
+        }
+
+        self.assertTrue(
+            version_plan_auto_sync_attempted_today(
+                config,
+                now=datetime.fromisoformat("2026-05-16T21:00:00+08:00"),
+            )
+        )
+        self.assertFalse(
+            version_plan_auto_sync_attempted_today(
+                config,
+                now=datetime.fromisoformat("2026-05-17T09:00:00+08:00"),
+            )
+        )
 
 
 if __name__ == "__main__":

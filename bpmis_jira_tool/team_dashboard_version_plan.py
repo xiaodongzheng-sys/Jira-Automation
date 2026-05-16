@@ -273,6 +273,21 @@ def version_plan_synced_today(config: dict[str, Any], *, now: datetime | None = 
     return str(plan["af"]["sync_state"].get("last_synced_date_sgt") or "") == singapore_date_text(now)
 
 
+def version_plan_auto_sync_attempted_today(config: dict[str, Any], *, now: datetime | None = None) -> bool:
+    if version_plan_synced_today(config, now=now):
+        return True
+    plan = normalize_version_plan_state(config.get("version_plan") if isinstance(config, dict) else {})
+    sync_state = plan["af"]["sync_state"]
+    if str(sync_state.get("state") or "").strip() != "error":
+        return False
+    today = singapore_today(now)
+    for key in ("finished_at", "started_at"):
+        sync_date = _parse_date(sync_state.get(key))
+        if sync_date == today:
+            return True
+    return False
+
+
 def update_version_plan_cell(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     plan = normalize_version_plan_state(config.get("version_plan") if isinstance(config, dict) else {})
     row = _find_manual_row(plan, payload)
