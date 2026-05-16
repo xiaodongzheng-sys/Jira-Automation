@@ -3,9 +3,10 @@ from __future__ import annotations
 import re
 import sqlite3
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -13,7 +14,9 @@ from bpmis_jira_tool.errors import ToolError
 
 
 DEFAULT_CISCO_VPN_BIN = "/opt/cisco/secureclient/bin/vpn"
+DEFAULT_CISCO_APP_PATH = "/Applications/Cisco/Cisco Secure Client.app"
 _ENCRYPTED_PREFIX = "enc:"
+_CISCO_GUI_CAPABILITY_ERROR = "connect capability is unavailable"
 
 
 class VPNProfileStore:
@@ -187,9 +190,30 @@ class VPNProfileStore:
 
 
 class CiscoVPNClient:
-    def __init__(self, *, vpn_bin: str = DEFAULT_CISCO_VPN_BIN, timeout_seconds: int = 120) -> None:
+    def __init__(
+        self,
+        *,
+        vpn_bin: str = DEFAULT_CISCO_VPN_BIN,
+        cisco_app_path: str = DEFAULT_CISCO_APP_PATH,
+        timeout_seconds: int = 120,
+        process_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+        app_restarter: Callable[[], None] | None = None,
+        sleeper: Callable[[float], None] | None = None,
+        poll_interval_seconds: float = 2.0,
+        connect_verify_timeout_seconds: float | None = None,
+    ) -> None:
         self.vpn_bin = str(vpn_bin or DEFAULT_CISCO_VPN_BIN)
+        self.cisco_app_path = str(cisco_app_path or DEFAULT_CISCO_APP_PATH)
         self.timeout_seconds = max(10, int(timeout_seconds or 120))
+        self._process_runner = process_runner or subprocess.run
+        self._app_restarter = app_restarter
+        self._sleeper = sleeper or time.sleep
+        self.poll_interval_seconds = max(0.05, float(poll_interval_seconds or 2.0))
+        self.connect_verify_timeout_seconds = (
+            max(0.1, float(connect_verify_timeout_seconds))
+            if connect_verify_timeout_seconds is not None
+            else float(self.timeout_seconds)
+        )
 
     def status(self) -> dict[str, Any]:
         completed = self._run(["state"], timeout_seconds=20)
@@ -222,17 +246,38 @@ class CiscoVPNClient:
         if not password:
             raise ToolError("VPN password is required.")
         response_text = "\n".join([username, password, "y", ""])
-        completed = self._run(["-s", "connect", host], input_text=response_text, timeout_seconds=self.timeout_seconds)
-        output = self._sanitize_output(self._combined_output(completed), secrets=[username, password])
-        connected = completed.returncode == 0 and "state: connected" in output.lower()
-        if completed.returncode != 0 and not connected:
-            raise ToolError(output or "Cisco Secure Client failed to connect.")
-        return {
-            "status": "ok",
-            "connected": connected,
-            "state": self._parse_state(output),
-            "message": output,
-        }
+        last_output = ""
+        restarted_gui = False
+        for attempt in range(2):
+            completed = self._run(["-s", "connect", host], input_text=response_text, timeout_seconds=self.timeout_seconds)
+            output = self._sanitize_output(self._combined_output(completed), secrets=[username, password])
+            last_output = self._append_output(last_output, output)
+            if self._is_gui_capability_error(output) and attempt == 0:
+                self._restart_cisco_gui()
+                restarted_gui = True
+                last_output = self._append_output(last_output, "Restarted Cisco Secure Client and retried the VPN connection.")
+                continue
+            if completed.returncode != 0:
+                raise ToolError(self._connection_failure_message(last_output))
+            verified = self._wait_for_connected(secrets=[username, password], previous_output=last_output)
+            if verified.get("connected"):
+                message = self._append_output(last_output, str(verified.get("message") or ""))
+                return {
+                    "status": "ok",
+                    "connected": True,
+                    "state": verified.get("state") or "Connected",
+                    "message": message,
+                }
+            last_output = self._append_output(last_output, str(verified.get("message") or ""))
+            if self._is_gui_capability_error(last_output) and attempt == 0:
+                self._restart_cisco_gui()
+                restarted_gui = True
+                last_output = self._append_output(last_output, "Restarted Cisco Secure Client and retried the VPN connection.")
+                continue
+            break
+        if restarted_gui:
+            last_output = self._append_output(last_output, "Cisco Secure Client was restarted once, but VPN still did not connect.")
+        raise ToolError(self._connection_failure_message(last_output))
 
     def disconnect(self) -> dict[str, Any]:
         completed = self._run(["disconnect"], timeout_seconds=60)
@@ -257,7 +302,7 @@ class CiscoVPNClient:
         if not vpn_path.exists():
             raise ToolError(f"Cisco Secure Client CLI was not found at {self.vpn_bin}.")
         try:
-            return subprocess.run(
+            return self._process_runner(
                 [self.vpn_bin, *args],
                 input=input_text,
                 capture_output=True,
@@ -276,7 +321,7 @@ class CiscoVPNClient:
 
     @staticmethod
     def _parse_state(output: str) -> str:
-        matches = re.findall(r"state:\s*([^\r\n]+)", output or "", flags=re.IGNORECASE)
+        matches = re.findall(r"(?:state|connection state):\s*([^\r\n]+)", output or "", flags=re.IGNORECASE)
         return matches[-1].strip() if matches else ""
 
     @staticmethod
@@ -286,6 +331,71 @@ class CiscoVPNClient:
             if secret:
                 sanitized = sanitized.replace(secret, "[redacted]")
         return sanitized.strip()
+
+    def _wait_for_connected(self, *, secrets: list[str], previous_output: str) -> dict[str, Any]:
+        deadline = time.monotonic() + self.connect_verify_timeout_seconds
+        last_status = self._status_from_output(previous_output)
+        while time.monotonic() <= deadline:
+            for status in (self._poll_status(secrets=secrets), self._poll_stats(secrets=secrets)):
+                if status.get("message"):
+                    last_status = status
+                if status.get("connected"):
+                    return status
+            self._sleeper(self.poll_interval_seconds)
+        if not last_status.get("message"):
+            last_status["message"] = "Cisco Secure Client did not report a VPN connection before the timeout."
+        return last_status
+
+    def _poll_status(self, *, secrets: list[str]) -> dict[str, Any]:
+        completed = self._run(["state"], timeout_seconds=20)
+        output = self._sanitize_output(self._combined_output(completed), secrets=secrets)
+        return self._status_from_output(output, returncode=completed.returncode)
+
+    def _poll_stats(self, *, secrets: list[str]) -> dict[str, Any]:
+        completed = self._run(["stats"], timeout_seconds=20)
+        output = self._sanitize_output(self._combined_output(completed), secrets=secrets)
+        return self._status_from_output(output, returncode=completed.returncode)
+
+    def _status_from_output(self, output: str, *, returncode: int = 0) -> dict[str, Any]:
+        state = self._parse_state(output)
+        connected = state.strip().lower() == "connected"
+        return {
+            "status": "ok" if returncode == 0 else "error",
+            "connected": connected,
+            "state": state,
+            "message": output,
+        }
+
+    def _restart_cisco_gui(self) -> None:
+        if self._app_restarter is not None:
+            self._app_restarter()
+            return
+        subprocess.run(
+            ["osascript", "-e", 'tell application "Cisco Secure Client" to quit'],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        self._sleeper(3.0)
+        subprocess.run(["open", self.cisco_app_path], capture_output=True, text=True, check=False, timeout=10)
+        self._sleeper(5.0)
+
+    @staticmethod
+    def _is_gui_capability_error(output: str) -> bool:
+        return _CISCO_GUI_CAPABILITY_ERROR in str(output or "").casefold()
+
+    @staticmethod
+    def _append_output(existing: str, addition: str) -> str:
+        parts = [part.strip() for part in (existing, addition) if str(part or "").strip()]
+        return "\n\n".join(parts)
+
+    def _connection_failure_message(self, output: str) -> str:
+        state = self._parse_state(output) or "Unknown"
+        detail = output.strip()
+        if detail:
+            return f"Cisco Secure Client did not reach Connected state. Last state: {state}.\n\n{detail}"
+        return f"Cisco Secure Client did not reach Connected state. Last state: {state}."
 
 
 def vpn_payload(profile: dict[str, Any], *, status: dict[str, Any] | None = None, hosts: list[str] | None = None) -> dict[str, Any]:

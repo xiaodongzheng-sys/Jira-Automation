@@ -73,9 +73,15 @@ class _PortalFakeBPMISClient:
 
 
 class _FakeCiscoVPNClient:
-    def __init__(self):
+    def __init__(self, *, connect_result=None):
         self.connected_hosts = []
         self.disconnected = False
+        self.connect_result = connect_result or {
+            "status": "ok",
+            "connected": True,
+            "state": "Connected",
+            "message": "state: Connected",
+        }
 
     def status(self):
         return {"status": "ok", "connected": False, "state": "Disconnected", "message": "state: Disconnected"}
@@ -85,7 +91,7 @@ class _FakeCiscoVPNClient:
 
     def connect(self, *, host, username, password):
         self.connected_hosts.append((host, username, password))
-        return {"status": "ok", "connected": True, "state": "Connected", "message": "state: Connected"}
+        return self.connect_result
 
     def disconnect(self):
         self.disconnected = True
@@ -5516,6 +5522,58 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(connect_response.status_code, 200)
         self.assertEqual(fake_cisco.connected_hosts, [("ShopeeVPN", "vpn-user", "vpn-secret")])
         self.assertNotIn("vpn-secret", str(connect_response.get_json()))
+
+    def test_vpn_connection_failed_connect_does_not_record_success(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "ENV_FILE": os.devnull,
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": Fernet.generate_key().decode("utf-8"),
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            app.config["CISCO_VPN_CLIENT"] = _FakeCiscoVPNClient(
+                connect_result={
+                    "status": "ok",
+                    "connected": False,
+                    "state": "Disconnected",
+                    "message": "state: Disconnected",
+                }
+            )
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
+                    session["google_credentials"] = {"token": "x"}
+                save_response = client.post(
+                    "/api/vpn-connection/profiles",
+                    json={
+                        "display_name": "Shopee VPN",
+                        "vpn_host": "ShopeeVPN",
+                        "username": "vpn-user",
+                        "password": "vpn-secret",
+                    },
+                )
+                profile_id = save_response.get_json()["profile"]["id"]
+                connect_response = client.post(f"/api/vpn-connection/profiles/{profile_id}/connect")
+                profiles_response = client.get("/api/vpn-connection/profiles")
+
+        self.assertEqual(connect_response.status_code, 400)
+        self.assertIn("Disconnected", connect_response.get_json()["message"])
+        profiles = profiles_response.get_json()["profiles"]
+        self.assertIsNone(profiles[0]["last_connected_at"])
+
+    def test_vpn_connection_frontend_does_not_show_command_finished_as_success(self):
+        script = Path("static/vpn_connection.js").read_text(encoding="utf-8")
+
+        self.assertNotIn("VPN command finished.", script)
+        self.assertIn("VPN connected.", script)
+        self.assertIn("approve MFA if prompted", script)
 
 
 if __name__ == "__main__":

@@ -1033,6 +1033,8 @@ def create_app() -> Flask:
                 username=str(profile.get("username") or ""),
                 password=str(profile.get("password") or ""),
             )
+            if not vpn_status.get("connected"):
+                raise ToolError(str(vpn_status.get("message") or "Cisco Secure Client did not reach Connected state."))
             store.record_connected(profile_id)
             return jsonify(_vpn_connection_snapshot(settings, status_override=vpn_status))
         except ToolError as error:

@@ -597,11 +597,73 @@ class UserConfigStoreTests(unittest.TestCase):
 
         result = client.connect(host="ShopeeVPN", username="vpn-user", password="vpn-secret")
 
-        command = run_mock.call_args.args[0]
+        command = run_mock.call_args_list[0].args[0]
         self.assertEqual(command, [vpn_bin, "-s", "connect", "ShopeeVPN"])
         self.assertNotIn("vpn-secret", command)
-        self.assertIn("vpn-secret", run_mock.call_args.kwargs["input"])
+        self.assertIn("vpn-secret", run_mock.call_args_list[0].kwargs["input"])
         self.assertTrue(result["connected"])
+
+    @patch("bpmis_jira_tool.vpn_manager.subprocess.run")
+    def test_cisco_vpn_connect_rejects_zero_returncode_disconnected_state(self, run_mock):
+        vpn_bin = "/tmp/fake-cisco-vpn"
+        Path(vpn_bin).write_text("", encoding="utf-8")
+
+        def fake_run(args, **kwargs):
+            if args[1:4] == ["-s", "connect", "ShopeeVPN"]:
+                return subprocess.CompletedProcess(args=args, returncode=0, stdout="state: Disconnected", stderr="")
+            if args[-1] == "stats":
+                return subprocess.CompletedProcess(args=args, returncode=0, stdout="Connection State: Disconnected", stderr="")
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="state: Disconnected", stderr="")
+
+        run_mock.side_effect = fake_run
+        client = CiscoVPNClient(
+            vpn_bin=vpn_bin,
+            connect_verify_timeout_seconds=0.1,
+            poll_interval_seconds=0.05,
+        )
+
+        with self.assertRaisesRegex(ToolError, "did not reach Connected"):
+            client.connect(host="ShopeeVPN", username="vpn-user", password="vpn-secret")
+
+    def test_cisco_vpn_connect_restarts_gui_once_when_capability_is_owned_by_gui(self):
+        vpn_bin = "/tmp/fake-cisco-vpn"
+        Path(vpn_bin).write_text("", encoding="utf-8")
+        calls = []
+        restarts = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            connect_calls = [call for call in calls if call[1:4] == ["-s", "connect", "ShopeeVPN"]]
+            if args[1:4] == ["-s", "connect", "ShopeeVPN"] and len(connect_calls) == 1:
+                return subprocess.CompletedProcess(
+                    args=args,
+                    returncode=0,
+                    stdout=(
+                        "state: Disconnected\n"
+                        "error: Connect capability is unavailable. Another Cisco Secure Client application acquired it."
+                    ),
+                    stderr="",
+                )
+            if args[1:4] == ["-s", "connect", "ShopeeVPN"]:
+                return subprocess.CompletedProcess(args=args, returncode=0, stdout="state: Connecting", stderr="")
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="state: Connected", stderr="")
+
+        client = CiscoVPNClient(
+            vpn_bin=vpn_bin,
+            process_runner=fake_run,
+            app_restarter=lambda: restarts.append("restart"),
+            sleeper=lambda _seconds: None,
+            connect_verify_timeout_seconds=0.1,
+        )
+
+        result = client.connect(host="ShopeeVPN", username="vpn-user", password="vpn-secret")
+
+        self.assertTrue(result["connected"])
+        self.assertEqual(restarts, ["restart"])
+        self.assertEqual(
+            [call for call in calls if call[1:4] == ["-s", "connect", "ShopeeVPN"]],
+            [[vpn_bin, "-s", "connect", "ShopeeVPN"], [vpn_bin, "-s", "connect", "ShopeeVPN"]],
+        )
 
 
 if __name__ == "__main__":

@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from cryptography.fernet import Fernet
+
 from bpmis_jira_tool.daily_brief_archive import DailyBriefArchiveStore, daily_brief_archive_path
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.job_store import JobStore
@@ -20,6 +22,7 @@ from bpmis_jira_tool.local_agent_server import create_local_agent_app
 from bpmis_jira_tool.models import CreatedTicket
 from bpmis_jira_tool.bpmis_client import build_bpmis_client
 from bpmis_jira_tool.config import Settings
+from bpmis_jira_tool.vpn_manager import VPNProfileStore
 
 
 class LocalAgentProtocolTests(unittest.TestCase):
@@ -133,6 +136,40 @@ class LocalAgentServerTests(unittest.TestCase):
                 return last_payload
             time.sleep(0.02)
         self.fail(f"Meeting Recorder local-agent job did not reach {terminal_state}: {last_payload}")
+
+    def test_vpn_failed_connect_does_not_record_success(self):
+        class FakeCiscoVPNClient:
+            def status(self):
+                return {"status": "ok", "connected": False, "state": "Disconnected", "message": "state: Disconnected"}
+
+            def hosts(self):
+                return ["ShopeeVPN"]
+
+            def connect(self, *, host, username, password):
+                return {"status": "ok", "connected": False, "state": "Disconnected", "message": "state: Disconnected"}
+
+        self.app.config["VPN_PROFILE_STORE"] = VPNProfileStore(
+            Path(self.temp_dir.name) / "vpn.db",
+            encryption_key=Fernet.generate_key().decode("utf-8"),
+        )
+        self.app.config["CISCO_VPN_CLIENT"] = FakeCiscoVPNClient()
+        save_response = self._post_signed(
+            "/api/local-agent/vpn/profiles",
+            {
+                "display_name": "Shopee VPN",
+                "vpn_host": "ShopeeVPN",
+                "username": "vpn-user",
+                "password": "vpn-secret",
+            },
+        )
+        profile_id = save_response.get_json()["profile"]["id"]
+
+        connect_response = self._post_signed(f"/api/local-agent/vpn/profiles/{profile_id}/connect", {})
+
+        self.assertEqual(connect_response.status_code, 400)
+        self.assertIn("Disconnected", connect_response.get_json()["message"])
+        profile = self.app.config["VPN_PROFILE_STORE"].get_profile(profile_id)
+        self.assertIsNone(profile["last_connected_at"])
 
     def test_healthz_is_public_and_reports_capabilities(self):
         response = self.app.test_client().get("/healthz")

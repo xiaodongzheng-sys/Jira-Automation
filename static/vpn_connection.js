@@ -134,13 +134,18 @@
       return;
     }
     if (connectId) {
-      setInlineStatus('Connecting VPN...');
+      setInlineStatus('Connecting VPN... approve MFA if prompted.');
       try {
         const url = `${root.dataset.profilesUrl}/${encodeURIComponent(connectId)}/connect`;
         const payload = await requestJson(url, { method: 'POST', body: '{}' });
+        const connectStatus = payload.vpn_status || payload.status || {};
         await loadProfiles();
-        renderStatus(payload.status || {});
-        setInlineStatus('VPN command finished.', 'success');
+        renderStatus(connectStatus);
+        if (connectStatus.connected) {
+          setInlineStatus('VPN connected.', 'success');
+        } else {
+          setInlineStatus(connectStatus.message || 'VPN did not connect.', 'error');
+        }
       } catch (error) {
         setInlineStatus(error.message, 'error');
       }

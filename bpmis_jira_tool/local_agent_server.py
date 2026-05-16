@@ -226,7 +226,10 @@ def create_local_agent_app() -> Flask:
             username=str(profile.get("username") or ""),
             password=str(profile.get("password") or ""),
         )
+        if not status.get("connected"):
+            raise ToolError(str(status.get("message") or "Cisco Secure Client did not reach Connected state."))
         store.record_connected(profile_id)
+        profile = store.get_profile(profile_id, include_password=False)
         try:
             hosts = _cisco_vpn_client().hosts()
         except ToolError:
