@@ -173,6 +173,17 @@ def version_plan_sync(config: dict[str, Any], bpmis_client: Any, *, now: datetim
 
     af_versions = [_version_record(row) for row in _safe_search_versions(bpmis_client, "AF_")]
     af_versions = [row for row in af_versions if row["version_id"] and row["version_name"].startswith("AF_") and row["release_date"]]
+    if not af_versions:
+        af["sync_state"] = {
+            **af["sync_state"],
+            "state": "error",
+            "finished_at": _now_text(current_dt),
+            "message": "Version Plan sync skipped.",
+            "error": "No AF versions were returned from BPMIS; cached Version Plan data was preserved.",
+        }
+        config = dict(config)
+        config["version_plan"] = plan
+        return config
     dbp_versions_by_prefix = {
         "DBPSG": [_version_record(row) for row in _safe_search_versions(bpmis_client, "DBPSG_")],
         "DBPID": [_version_record(row) for row in _safe_search_versions(bpmis_client, "DBPID_")],

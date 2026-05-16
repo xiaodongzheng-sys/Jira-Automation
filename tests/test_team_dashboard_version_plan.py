@@ -136,6 +136,12 @@ class FakeNotStartedDevVersionPlanClient(FakeBPMISVersionPlanClient):
         return [{"jiraKey": "SPDBP-should-not-sync", "summary": "Not started Dev"}]
 
 
+class FakeEmptyVersionPlanClient(FakeBPMISVersionPlanClient):
+    def search_versions(self, query: str) -> list[dict]:
+        self.search_calls.append(query)
+        return []
+
+
 class TeamDashboardVersionPlanTest(unittest.TestCase):
     def test_pipeline_seed_is_global_and_not_deduped(self) -> None:
         plan = normalize_version_plan_state({})
@@ -317,6 +323,37 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(bundle["synced_rows"], [])
         self.assertEqual(bundle["manual_rows"][0]["feature"], "[ID][PH] AMR Fix")
         self.assertEqual(client.list_issue_calls, [])
+
+    def test_empty_bpmis_version_search_preserves_cached_bundles(self) -> None:
+        config = {
+            "version_plan": {
+                "af": {
+                    "bundles": {
+                        "af-cached": {
+                            "version_id": "af-cached",
+                            "version_name": "AF_cached",
+                            "release_date": "2026-06-26",
+                            "manual_rows": [{"row_id": "manual-1", "feature": "Cached manual", "priority": "P1"}],
+                            "synced_rows": [{"row_id": "sync-1", "jira_id": "SPDBP-1", "jira_summary": "Cached Jira"}],
+                        }
+                    },
+                    "pipeline_rows": [{"row_id": "pipe-1", "feature": "Pipeline", "priority": "P0"}],
+                }
+            }
+        }
+
+        synced = version_plan_sync(
+            config,
+            FakeEmptyVersionPlanClient(),
+            now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
+        )
+        payload = version_plan_payload(synced, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
+
+        self.assertEqual(payload["sync_state"]["state"], "error")
+        self.assertIn("cached Version Plan data was preserved", payload["sync_state"]["error"])
+        self.assertEqual(payload["bundles"][0]["af_version_name"], "AF_cached")
+        self.assertEqual(payload["bundles"][0]["manual_rows"][0]["feature"], "Cached manual")
+        self.assertEqual(payload["bundles"][0]["synced_rows"][0]["jira_id"], "SPDBP-1")
 
 
 if __name__ == "__main__":
