@@ -62,6 +62,7 @@ from bpmis_jira_tool.source_code_qa_stores import (
     SourceCodeQASessionStore,
 )
 from bpmis_jira_tool.user_config import WebConfigStore
+from bpmis_jira_tool.vpn_manager import CiscoVPNClient, VPNProfileStore, json_response_payload, vpn_payload
 from bpmis_jira_tool.work_memory import WorkMemoryStore, meeting_record_memory_items, team_dashboard_memory_items
 from prd_briefing.confluence import ConfluenceConnector
 from prd_briefing.reviewer import PRDBriefingReviewRequest, PRDReviewRequest, PRDReviewService
@@ -113,6 +114,11 @@ def create_local_agent_app() -> Flask:
     app.config["SOURCE_CODE_QA_QUERY_JOBS_LOCK"] = threading.Lock()
     app.config["TEAM_DASHBOARD_JOB_STORE"] = JobStore(_data_root(settings) / "run" / "team_dashboard_jobs.json")
     app.config["WORK_MEMORY_STORE"] = WorkMemoryStore(_data_root(settings) / "work_memory" / "memory.db")
+    app.config["VPN_PROFILE_STORE"] = VPNProfileStore(
+        _data_root(settings) / "team_portal.db",
+        encryption_key=settings.team_portal_config_encryption_key,
+    )
+    app.config["CISCO_VPN_CLIENT"] = CiscoVPNClient(timeout_seconds=settings.local_agent_timeout_seconds)
     app.config["MEETING_RECORDER_JOB_STORE"] = JobStore(_data_root(settings) / "run" / "meeting_recorder_jobs.json")
     meeting_store = MeetingRecordStore(_data_root(settings) / "meeting_records")
     app.config["MEETING_RECORD_STORE"] = meeting_store
@@ -170,9 +176,71 @@ def create_local_agent_app() -> Flask:
                     "meeting_recorder": True,
                     "meeting_recorder_diagnostics": _get_meeting_recorder_runtime().diagnostics(),
                     "meeting_translation": True,
+                    "vpn_connection": True,
                 },
             }
         )
+
+    def _vpn_profile_store() -> VPNProfileStore:
+        return current_app.config["VPN_PROFILE_STORE"]
+
+    def _cisco_vpn_client() -> CiscoVPNClient:
+        return current_app.config["CISCO_VPN_CLIENT"]
+
+    def _vpn_snapshot() -> dict[str, Any]:
+        client = _cisco_vpn_client()
+        status = client.status()
+        try:
+            hosts = client.hosts()
+        except ToolError:
+            hosts = []
+        return json_response_payload(
+            profiles=_vpn_profile_store().list_profiles(),
+            status=status,
+            hosts=hosts,
+        )
+
+    @app.get("/api/local-agent/vpn/profiles")
+    def vpn_profiles():
+        return jsonify(_vpn_snapshot())
+
+    @app.post("/api/local-agent/vpn/profiles")
+    def vpn_save_profile():
+        payload = request.get_json(silent=True) or {}
+        profile = _vpn_profile_store().save_profile(payload)
+        snapshot = _vpn_snapshot()
+        snapshot["profile"] = profile
+        return jsonify(snapshot)
+
+    @app.delete("/api/local-agent/vpn/profiles/<profile_id>")
+    def vpn_delete_profile(profile_id: str):
+        _vpn_profile_store().delete_profile(profile_id)
+        return jsonify(_vpn_snapshot())
+
+    @app.post("/api/local-agent/vpn/profiles/<profile_id>/connect")
+    def vpn_connect(profile_id: str):
+        store = _vpn_profile_store()
+        profile = store.get_profile(profile_id, include_password=True)
+        status = _cisco_vpn_client().connect(
+            host=str(profile.get("vpn_host") or ""),
+            username=str(profile.get("username") or ""),
+            password=str(profile.get("password") or ""),
+        )
+        store.record_connected(profile_id)
+        try:
+            hosts = _cisco_vpn_client().hosts()
+        except ToolError:
+            hosts = []
+        return jsonify(vpn_payload(profile, status=status, hosts=hosts))
+
+    @app.post("/api/local-agent/vpn/disconnect")
+    def vpn_disconnect():
+        status = _cisco_vpn_client().disconnect()
+        try:
+            hosts = _cisco_vpn_client().hosts()
+        except ToolError:
+            hosts = []
+        return jsonify(json_response_payload(profiles=_vpn_profile_store().list_profiles(), status=status, hosts=hosts))
 
     @app.post("/api/local-agent/source-code-qa/config")
     def source_code_qa_config():

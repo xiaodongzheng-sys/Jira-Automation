@@ -1,12 +1,15 @@
 import tempfile
 import unittest
 import sqlite3
+import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.user_config import DEFAULT_SHEET_HEADERS, FieldMapping, WebConfigStore
+from bpmis_jira_tool.vpn_manager import CiscoVPNClient, VPNProfileStore
 
 
 class UserConfigStoreTests(unittest.TestCase):
@@ -535,6 +538,70 @@ class UserConfigStoreTests(unittest.TestCase):
 
             self.assertEqual(serialized["bpmis_api_access_token"], "enc:already")
             self.assertEqual(serialized["bpmis_secondary_api_access_token"], "")
+
+    def test_vpn_profile_password_is_encrypted_and_update_can_keep_existing_password(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            key = Fernet.generate_key().decode("utf-8")
+            store = VPNProfileStore(Path(temp_dir) / "team_portal.db", encryption_key=key)
+
+            saved = store.save_profile(
+                {
+                    "display_name": "Shopee VPN",
+                    "vpn_host": "ShopeeVPN",
+                    "username": "vpn-user",
+                    "password": "vpn-secret",
+                }
+            )
+            updated = store.save_profile(
+                {
+                    "id": saved["id"],
+                    "display_name": "Shopee VPN SG",
+                    "vpn_host": "ShopeeVPN",
+                    "username": "vpn-user",
+                    "password": "",
+                }
+            )
+
+            raw_password = store._encrypted_password_for_profile(saved["id"])
+            self.assertTrue(raw_password.startswith("enc:"))
+            self.assertNotIn("vpn-secret", raw_password)
+            loaded = store.get_profile(updated["id"], include_password=True)
+            self.assertEqual(loaded["password"], "vpn-secret")
+            self.assertEqual(loaded["display_name"], "Shopee VPN SG")
+
+    def test_vpn_profile_rejects_plaintext_password_without_encryption_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = VPNProfileStore(Path(temp_dir) / "team_portal.db")
+
+            with self.assertRaisesRegex(ToolError, "ENCRYPTION_KEY"):
+                store.save_profile(
+                    {
+                        "display_name": "Shopee VPN",
+                        "vpn_host": "ShopeeVPN",
+                        "username": "vpn-user",
+                        "password": "vpn-secret",
+                    }
+                )
+
+    @patch("bpmis_jira_tool.vpn_manager.subprocess.run")
+    def test_cisco_vpn_connect_feeds_credentials_on_stdin_not_command_args(self, run_mock):
+        vpn_bin = "/tmp/fake-cisco-vpn"
+        Path(vpn_bin).write_text("", encoding="utf-8")
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=[vpn_bin],
+            returncode=0,
+            stdout="state: Connected",
+            stderr="",
+        )
+        client = CiscoVPNClient(vpn_bin=vpn_bin)
+
+        result = client.connect(host="ShopeeVPN", username="vpn-user", password="vpn-secret")
+
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command, [vpn_bin, "-s", "connect", "ShopeeVPN"])
+        self.assertNotIn("vpn-secret", command)
+        self.assertIn("vpn-secret", run_mock.call_args.kwargs["input"])
+        self.assertTrue(result["connected"])
 
 
 if __name__ == "__main__":

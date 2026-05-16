@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block extra_head %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='vpn_connection.css', v=asset_revision|default('static')) }}">
+{% endblock %}
+
+{% block body %}
+  <section
+    class="vpn-shell"
+    data-vpn-root
+    data-profiles-url="{{ url_for('vpn_connection_profiles') }}"
+    data-save-url="{{ url_for('vpn_connection_save_profile') }}"
+    data-disconnect-url="{{ url_for('vpn_connection_disconnect') }}"
+  >
+    <header class="vpn-header">
+      <div>
+        <p class="eyebrow">Admin Module</p>
+        <h1>VPN Connection</h1>
+      </div>
+      <div class="vpn-status" data-vpn-status>Loading Cisco status...</div>
+    </header>
+
+    <div class="vpn-grid">
+      <section class="panel vpn-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Profiles</p>
+            <h2>Configured VPNs</h2>
+          </div>
+          <button class="button button-secondary" type="button" data-vpn-refresh>Refresh</button>
+        </div>
+        <div class="vpn-list" data-vpn-list></div>
+      </section>
+
+      <section class="panel vpn-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Cisco Secure Client</p>
+            <h2>Profile Setup</h2>
+          </div>
+        </div>
+        <form class="vpn-form" data-vpn-form>
+          <input type="hidden" name="id" data-vpn-id>
+          <label>
+            <span>Display Name</span>
+            <input name="display_name" type="text" autocomplete="off" required placeholder="Shopee VPN">
+          </label>
+          <label>
+            <span>Cisco VPN Name</span>
+            <input name="vpn_host" type="text" list="vpn-hosts" autocomplete="off" required placeholder="ShopeeVPN">
+          </label>
+          <datalist id="vpn-hosts" data-vpn-hosts></datalist>
+          <label>
+            <span>Username</span>
+            <input name="username" type="text" autocomplete="username" required>
+          </label>
+          <label>
+            <span>Password</span>
+            <input name="password" type="password" autocomplete="current-password" placeholder="Leave blank to keep existing password">
+          </label>
+          <div class="button-row">
+            <button class="button" type="submit">Save Profile</button>
+            <button class="button button-secondary" type="button" data-vpn-reset>New</button>
+            <button class="button button-secondary" type="button" data-vpn-disconnect>Disconnect</button>
+          </div>
+          <p class="vpn-inline-status" data-vpn-inline-status></p>
+        </form>
+      </section>
+    </div>
+  </section>
+  <script src="{{ url_for('static', filename='vpn_connection.js', v=asset_revision|default('static')) }}"></script>
+{% endblock %}

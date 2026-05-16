@@ -72,6 +72,26 @@ class _PortalFakeBPMISClient:
         return {"jiraKey": ticket_key, "parentIds": []}
 
 
+class _FakeCiscoVPNClient:
+    def __init__(self):
+        self.connected_hosts = []
+        self.disconnected = False
+
+    def status(self):
+        return {"status": "ok", "connected": False, "state": "Disconnected", "message": "state: Disconnected"}
+
+    def hosts(self):
+        return ["ShopeeVPN", "GalaxisVPN"]
+
+    def connect(self, *, host, username, password):
+        self.connected_hosts.append((host, username, password))
+        return {"status": "ok", "connected": True, "state": "Connected", "message": "state: Connected"}
+
+    def disconnect(self):
+        self.disconnected = True
+        return {"status": "ok", "connected": False, "state": "Disconnected", "message": "state: Disconnected"}
+
+
 class _RemoteBPMISConfigClient:
     def __init__(self, data_root):
         self.store = WebConfigStore(data_root)
@@ -5410,6 +5430,79 @@ class WebPortalFeatureTests(unittest.TestCase):
         payload = response.get_json()
         self.assertTrue(payload["cached"])
         self.assertEqual(payload["summary"]["result_markdown"], "### Cached Summary")
+
+    def test_vpn_connection_page_is_admin_only_and_in_admin_navigation(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "ENV_FILE": os.devnull,
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": Fernet.generate_key().decode("utf-8"),
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            app.config["CISCO_VPN_CLIENT"] = _FakeCiscoVPNClient()
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+                non_admin_page = client.get("/vpn-connection")
+                non_admin_api = client.get("/api/vpn-connection/profiles")
+
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
+                    session["google_credentials"] = {"token": "x"}
+                admin_home = client.get("/team-dashboard")
+                admin_page = client.get("/vpn-connection")
+
+        self.assertEqual(non_admin_page.status_code, 302)
+        self.assertEqual(non_admin_api.status_code, 403)
+        self.assertEqual(admin_page.status_code, 200)
+        self.assertIn(b"VPN Connection", admin_page.data)
+        self.assertIn(b"VPN Connection", admin_home.data)
+
+    def test_vpn_connection_admin_can_save_and_connect_profile(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "ENV_FILE": os.devnull,
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": Fernet.generate_key().decode("utf-8"),
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            fake_cisco = _FakeCiscoVPNClient()
+            app.config["CISCO_VPN_CLIENT"] = fake_cisco
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
+                    session["google_credentials"] = {"token": "x"}
+                save_response = client.post(
+                    "/api/vpn-connection/profiles",
+                    json={
+                        "display_name": "Shopee VPN",
+                        "vpn_host": "ShopeeVPN",
+                        "username": "vpn-user",
+                        "password": "vpn-secret",
+                    },
+                )
+                profile_id = save_response.get_json()["profile"]["id"]
+                connect_response = client.post(f"/api/vpn-connection/profiles/{profile_id}/connect")
+
+        self.assertEqual(save_response.status_code, 200)
+        self.assertEqual(connect_response.status_code, 200)
+        self.assertEqual(fake_cisco.connected_hosts, [("ShopeeVPN", "vpn-user", "vpn-secret")])
+        self.assertNotIn("vpn-secret", str(connect_response.get_json()))
 
 
 if __name__ == "__main__":

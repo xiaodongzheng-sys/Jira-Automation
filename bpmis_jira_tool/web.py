@@ -232,6 +232,7 @@ from bpmis_jira_tool.user_config import (
     TEAM_PROFILE_DEFAULTS,
     WebConfigStore,
 )
+from bpmis_jira_tool.vpn_manager import CiscoVPNClient, VPNProfileStore, json_response_payload
 from bpmis_jira_tool.web_bpmis_routes import build_bpmis_handlers, register_bpmis_routes
 from bpmis_jira_tool.web_gmail_seatalk_routes import build_gmail_seatalk_handlers, register_gmail_seatalk_routes
 from bpmis_jira_tool.web_meeting_recorder_routes import build_meeting_recorder_handlers, register_meeting_recorder_routes
@@ -632,6 +633,11 @@ def create_app() -> Flask:
     app.config["SEATALK_TODO_STORE"] = SeaTalkTodoStore(data_root / "seatalk" / "completed_todos.json")
     app.config["SEATALK_NAME_MAPPING_STORE"] = SeaTalkNameMappingStore(data_root / "seatalk" / "name_overrides.json")
     app.config["SEATALK_DAILY_CACHE_DIR"] = data_root / "seatalk" / "cache"
+    app.config["VPN_PROFILE_STORE"] = VPNProfileStore(
+        config_store.db_path,
+        encryption_key=settings.team_portal_config_encryption_key,
+    )
+    app.config["CISCO_VPN_CLIENT"] = CiscoVPNClient(timeout_seconds=settings.local_agent_timeout_seconds)
     meeting_store = MeetingRecordStore(data_root / "meeting_records")
     app.config["MEETING_RECORD_STORE"] = meeting_store
 
@@ -766,6 +772,13 @@ def create_app() -> Flask:
                     "label": "Reports",
                     "href": url_for("reports_page"),
                     "active": current_endpoint == "reports_page",
+                }
+            )
+            project_tabs.append(
+                {
+                    "label": "VPN Connection",
+                    "href": url_for("vpn_connection_page"),
+                    "active": current_endpoint == "vpn_connection_page",
                 }
             )
         if _can_access_work_memory(settings):
@@ -945,6 +958,91 @@ def create_app() -> Flask:
     @app.get("/access-denied")
     def access_denied():
         return render_template("access_denied.html", page_title="Access Restricted"), HTTPStatus.FORBIDDEN
+
+    @app.get("/vpn-connection")
+    def vpn_connection_page():
+        gate = _require_vpn_connection_access(settings, api=False)
+        if gate is not None:
+            return gate
+        user_identity = _get_user_identity(settings)
+        return render_template(
+            "vpn_connection.html",
+            page_title="VPN Connection",
+            user_identity=user_identity,
+            local_agent_required=_local_agent_mode_enabled(settings),
+        )
+
+    @app.get("/api/vpn-connection/profiles")
+    def vpn_connection_profiles():
+        gate = _require_vpn_connection_access(settings, api=True)
+        if gate is not None:
+            return gate
+        try:
+            return jsonify(_vpn_connection_snapshot(settings))
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/vpn-connection/profiles")
+    def vpn_connection_save_profile():
+        gate = _require_vpn_connection_access(settings, api=True)
+        if gate is not None:
+            return gate
+        payload = request.get_json(silent=True) or {}
+        try:
+            if _vpn_connection_uses_local_agent(settings):
+                return jsonify(_build_local_agent_client(settings).vpn_save_profile(payload))
+            profile = _get_vpn_profile_store().save_profile(payload)
+            snapshot = _vpn_connection_snapshot(settings)
+            snapshot["profile"] = profile
+            return jsonify(snapshot)
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.delete("/api/vpn-connection/profiles/<profile_id>")
+    def vpn_connection_delete_profile(profile_id: str):
+        gate = _require_vpn_connection_access(settings, api=True)
+        if gate is not None:
+            return gate
+        try:
+            if _vpn_connection_uses_local_agent(settings):
+                return jsonify(_build_local_agent_client(settings).vpn_delete_profile(profile_id))
+            _get_vpn_profile_store().delete_profile(profile_id)
+            return jsonify(_vpn_connection_snapshot(settings))
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/vpn-connection/profiles/<profile_id>/connect")
+    def vpn_connection_connect(profile_id: str):
+        gate = _require_vpn_connection_access(settings, api=True)
+        if gate is not None:
+            return gate
+        try:
+            if _vpn_connection_uses_local_agent(settings):
+                return jsonify(_build_local_agent_client(settings).vpn_connect(profile_id))
+            store = _get_vpn_profile_store()
+            profile = store.get_profile(profile_id, include_password=True)
+            vpn_status = _get_cisco_vpn_client().connect(
+                host=str(profile.get("vpn_host") or ""),
+                username=str(profile.get("username") or ""),
+                password=str(profile.get("password") or ""),
+            )
+            store.record_connected(profile_id)
+            return jsonify(_vpn_connection_snapshot(settings, status_override=vpn_status))
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/vpn-connection/disconnect")
+    def vpn_connection_disconnect():
+        gate = _require_vpn_connection_access(settings, api=True)
+        if gate is not None:
+            return gate
+        try:
+            if _vpn_connection_uses_local_agent(settings):
+                return jsonify(_build_local_agent_client(settings).vpn_disconnect())
+            vpn_status = _get_cisco_vpn_client().disconnect()
+            return jsonify(_vpn_connection_snapshot(settings, status_override=vpn_status))
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 
     register_source_code_qa_routes(app, settings, globals())
     register_prd_self_assessment_routes(
@@ -2342,6 +2440,52 @@ def _can_access_meeting_recorder(settings: Settings) -> bool:
 
 def _can_access_work_memory(settings: Settings) -> bool:
     return _is_portal_admin()
+
+
+def _can_access_vpn_connection(settings: Settings) -> bool:
+    return _is_portal_admin()
+
+
+def _require_vpn_connection_access(settings: Settings, *, api: bool):
+    if _can_access_vpn_connection(settings):
+        return None
+    message = f"VPN Connection is restricted to {PORTAL_ADMIN_EMAIL}."
+    if api:
+        return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
+    flash(message, "error")
+    return redirect(url_for("access_denied"))
+
+
+def _get_vpn_profile_store() -> VPNProfileStore:
+    return current_app.config["VPN_PROFILE_STORE"]
+
+
+def _get_cisco_vpn_client() -> CiscoVPNClient:
+    return current_app.config["CISCO_VPN_CLIENT"]
+
+
+def _vpn_connection_uses_local_agent(settings: Settings) -> bool:
+    return bool(
+        _local_agent_mode_enabled(settings)
+        and settings.local_agent_base_url
+        and settings.local_agent_hmac_secret
+    )
+
+
+def _vpn_connection_snapshot(settings: Settings, *, status_override: dict[str, Any] | None = None) -> dict[str, Any]:
+    if _vpn_connection_uses_local_agent(settings):
+        return _build_local_agent_client(settings).vpn_profiles()
+    client = _get_cisco_vpn_client()
+    status = status_override or client.status()
+    try:
+        hosts = client.hosts()
+    except ToolError:
+        hosts = []
+    return json_response_payload(
+        profiles=_get_vpn_profile_store().list_profiles(),
+        status=status,
+        hosts=hosts,
+    )
 
 
 
