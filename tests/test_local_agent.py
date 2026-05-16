@@ -215,7 +215,11 @@ class LocalAgentServerTests(unittest.TestCase):
 
         self.assertEqual(connect_response.status_code, 200)
         self.assertEqual(fake_cisco.connect_calls, [("Seabank PH", "vpn-user", "vpn-secret", "second-secret")])
-        self.assertNotIn("second-secret", str(connect_response.get_json()))
+        payload = connect_response.get_json()
+        self.assertTrue(payload["vpn_status"]["connected"])
+        self.assertEqual(payload["profiles"][0]["id"], profile_id)
+        self.assertIsNotNone(payload["profiles"][0]["last_connected_at"])
+        self.assertNotIn("second-secret", str(payload))
 
     def test_healthz_is_public_and_reports_capabilities(self):
         response = self.app.test_client().get("/healthz")

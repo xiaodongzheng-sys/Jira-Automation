@@ -29,14 +29,33 @@
     error instanceof TypeError && String(error.message || '').toLowerCase().includes('fetch')
   );
 
+  const isTransientLocalAgentError = (error) => (
+    isFetchInterrupted(error)
+    || error?.transient === true
+    || /mac local-agent is unavailable|endpoint is offline|err_ngrok_3200|context canceled/i.test(String(error?.message || ''))
+  );
+
+  const delay = (milliseconds) => new Promise((resolve) => {
+    window.setTimeout(resolve, milliseconds);
+  });
+
   const requestJson = async (url, options = {}) => {
-    const response = await fetch(url, {
-      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-      ...options,
-    });
+    let response;
+    try {
+      response = await fetch(url, {
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        ...options,
+      });
+    } catch (error) {
+      error.transient = true;
+      throw error;
+    }
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || payload.status === 'error') {
-      throw new Error(payload.message || `Request failed with ${response.status}`);
+      const error = new Error(payload.message || `Request failed with ${response.status}`);
+      error.statusCode = response.status;
+      error.transient = [502, 503, 504].includes(response.status) || isTransientLocalAgentError(error);
+      throw error;
     }
     return payload;
   };
@@ -108,6 +127,27 @@
     }
   };
 
+  const refreshProfilesAfterInterruptedConnect = async () => {
+    for (const waitMs of [1200, 2500, 5000, 8000]) {
+      await delay(waitMs);
+      try {
+        applyPayload(await requestJson(root.dataset.profilesUrl));
+        if (statusNode?.dataset.connected === 'true') {
+          setInlineStatus('VPN connected.', 'success');
+        } else {
+          setInlineStatus('Connection request was interrupted. Cisco status has been refreshed.', 'error');
+        }
+        return;
+      } catch (error) {
+        if (!isTransientLocalAgentError(error)) {
+          setInlineStatus(error.message, 'error');
+          return;
+        }
+      }
+    }
+    setInlineStatus('Connection response was interrupted while Cisco changed network. Click Refresh to check the latest status.', 'error');
+  };
+
   const resetForm = () => {
     form.reset();
     idInput.value = '';
@@ -170,21 +210,21 @@
         const url = `${root.dataset.profilesUrl}/${encodeURIComponent(connectId)}/connect`;
         const payload = await requestJson(url, { method: 'POST', body: JSON.stringify(requestBody) });
         const connectStatus = payload.vpn_status || payload.status || {};
-        await loadProfiles();
-        renderStatus(connectStatus);
+        if (Array.isArray(payload.profiles)) {
+          applyPayload(payload);
+        } else {
+          await loadProfiles();
+          renderStatus(connectStatus);
+        }
         if (connectStatus.connected) {
           setInlineStatus('VPN connected.', 'success');
         } else {
           setInlineStatus(connectStatus.message || 'VPN did not connect.', 'error');
         }
       } catch (error) {
-        if (isFetchInterrupted(error)) {
-          await loadProfiles();
-          if (statusNode?.dataset.connected === 'true') {
-            setInlineStatus('VPN connected.', 'success');
-          } else {
-            setInlineStatus('Connection request was interrupted. Cisco status has been refreshed.', 'error');
-          }
+        if (isTransientLocalAgentError(error)) {
+          setInlineStatus('Connection response was interrupted while Cisco changed network. Refreshing Cisco status...');
+          await refreshProfilesAfterInterruptedConnect();
           return;
         }
         setInlineStatus(error.message, 'error');

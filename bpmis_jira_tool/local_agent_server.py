@@ -62,7 +62,7 @@ from bpmis_jira_tool.source_code_qa_stores import (
     SourceCodeQASessionStore,
 )
 from bpmis_jira_tool.user_config import WebConfigStore
-from bpmis_jira_tool.vpn_manager import CiscoVPNClient, VPNProfileStore, json_response_payload, vpn_payload
+from bpmis_jira_tool.vpn_manager import CiscoVPNClient, VPNProfileStore, json_response_payload
 from bpmis_jira_tool.work_memory import WorkMemoryStore, meeting_record_memory_items, team_dashboard_memory_items
 from prd_briefing.confluence import ConfluenceConnector
 from prd_briefing.reviewer import PRDBriefingReviewRequest, PRDReviewRequest, PRDReviewService
@@ -236,7 +236,9 @@ def create_local_agent_app() -> Flask:
             hosts = _cisco_vpn_client().hosts()
         except ToolError:
             hosts = []
-        return jsonify(vpn_payload(profile, status=status, hosts=hosts))
+        snapshot = json_response_payload(profiles=store.list_profiles(), status=status, hosts=hosts)
+        snapshot["profile"] = profile
+        return jsonify(snapshot)
 
     @app.post("/api/local-agent/vpn/disconnect")
     def vpn_disconnect():
