@@ -606,7 +606,7 @@
           <div>Priority</div>
           <div>PM</div>
           <div>Remarks</div>
-          <div>Productization Efforts? (Y/N)</div>
+          <div>Y/N</div>
         </div>
         ${body || empty}
       </div>
@@ -803,6 +803,23 @@
       version_id: dropRow.dataset.versionId || '',
       row_ids: rowIds,
     }, 'Could not reorder Version Plan rows.');
+  };
+
+  const moveVersionPlanRowToSheet = async (targetSheet) => {
+    if (!versionPlanDragRow || !targetSheet) return;
+    const sourceScope = versionPlanDragRow.dataset.versionPlanScope || '';
+    const targetScope = targetSheet.dataset.versionPlanSheet || '';
+    const sourceVersionId = versionPlanDragRow.dataset.versionId || '';
+    const targetVersionId = targetSheet.dataset.versionId || '';
+    if (sourceScope !== 'pipeline' || targetScope !== 'bundle' || !targetVersionId) return;
+    await updateVersionPlanRows({
+      action: 'move',
+      row_id: versionPlanDragRow.dataset.versionPlanRowId || '',
+      source_scope: sourceScope,
+      source_version_id: sourceVersionId,
+      target_scope: targetScope,
+      target_version_id: targetVersionId,
+    }, 'Could not move Pipeline row into the version.');
   };
 
   const renderMarkdown = (value) => {
@@ -2648,22 +2665,40 @@
   });
   versionPlanContent?.addEventListener('dragover', (event) => {
     const row = event.target.closest('[data-version-plan-manual-row="true"]');
-    if (!row || !versionPlanDragRow) return;
-    if (row.dataset.versionPlanScope !== versionPlanDragRow.dataset.versionPlanScope) return;
-    if ((row.dataset.versionId || '') !== (versionPlanDragRow.dataset.versionId || '')) return;
-    if ((row.dataset.versionPlanPriority || '') !== (versionPlanDragRow.dataset.versionPlanPriority || '')) return;
+    const sheet = event.target.closest('[data-version-plan-sheet]');
+    if (!versionPlanDragRow || !sheet) return;
+    const sameManualBlock = row
+      && row.dataset.versionPlanScope === versionPlanDragRow.dataset.versionPlanScope
+      && (row.dataset.versionId || '') === (versionPlanDragRow.dataset.versionId || '')
+      && (row.dataset.versionPlanPriority || '') === (versionPlanDragRow.dataset.versionPlanPriority || '');
+    const pipelineToBundle = (versionPlanDragRow.dataset.versionPlanScope || '') === 'pipeline'
+      && (sheet.dataset.versionPlanSheet || '') === 'bundle'
+      && Boolean(sheet.dataset.versionId || '');
+    if (!sameManualBlock && !pipelineToBundle) return;
     event.preventDefault();
+    sheet.classList.toggle('is-drop-target', pipelineToBundle && !sameManualBlock);
     event.dataTransfer.dropEffect = 'move';
   });
   versionPlanContent?.addEventListener('drop', async (event) => {
     const row = event.target.closest('[data-version-plan-manual-row="true"]');
-    if (!row) return;
+    const sheet = event.target.closest('[data-version-plan-sheet]');
+    if (!sheet) return;
     event.preventDefault();
     try {
-      await reorderVersionPlanRows(row);
+      if (row && row.dataset.versionPlanScope === versionPlanDragRow?.dataset.versionPlanScope) {
+        await reorderVersionPlanRows(row);
+      } else {
+        await moveVersionPlanRowToSheet(sheet);
+      }
     } catch (error) {
       setVersionPlanStatus(error.message || 'Could not reorder Version Plan rows.', 'error');
+    } finally {
+      sheet.classList.remove('is-drop-target');
     }
+  });
+  versionPlanContent?.addEventListener('dragleave', (event) => {
+    const sheet = event.target.closest('[data-version-plan-sheet]');
+    if (sheet && !sheet.contains(event.relatedTarget)) sheet.classList.remove('is-drop-target');
   });
   linkBizProjectFindJira?.addEventListener('click', loadLinkBizJira);
   linkBizProjectSuggest?.addEventListener('click', suggestLinkBizProjects);

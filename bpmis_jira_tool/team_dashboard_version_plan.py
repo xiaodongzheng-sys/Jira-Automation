@@ -104,8 +104,9 @@ def normalize_version_plan_state(value: Any) -> dict[str, Any]:
             "synced_rows": _normalize_synced_rows(bundle.get("synced_rows")),
         }
 
-    pipeline_rows = _normalize_manual_rows(raw_af.get("pipeline_rows"))
-    if not pipeline_rows:
+    raw_pipeline_rows = raw_af.get("pipeline_rows")
+    pipeline_rows = _normalize_manual_rows(raw_pipeline_rows)
+    if not isinstance(raw_pipeline_rows, list):
         pipeline_rows = _pipeline_seed_rows()
 
     seen_versions = raw_af.get("seen_versions") if isinstance(raw_af.get("seen_versions"), dict) else {}
@@ -283,8 +284,14 @@ def update_version_plan_cell(config: dict[str, Any], payload: dict[str, Any]) ->
 
 def update_version_plan_rows(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     plan = normalize_version_plan_state(config.get("version_plan") if isinstance(config, dict) else {})
-    rows = _manual_rows_for_scope(plan, payload)
     action = str(payload.get("action") or "").strip().lower()
+    if action == "move":
+        _move_version_plan_manual_row(plan, payload)
+        config = dict(config)
+        config["version_plan"] = plan
+        return config
+
+    rows = _manual_rows_for_scope(plan, payload)
     if action == "add":
         rows.append(_manual_row({"sort_order": _next_sort_order(rows)}))
     elif action == "delete":
@@ -301,6 +308,37 @@ def update_version_plan_rows(config: dict[str, Any], payload: dict[str, Any]) ->
     config = dict(config)
     config["version_plan"] = plan
     return config
+
+
+def _move_version_plan_manual_row(plan: dict[str, Any], payload: dict[str, Any]) -> None:
+    row_id = str(payload.get("row_id") or "").strip()
+    if not row_id:
+        raise ValueError("row_id is required.")
+    source_payload = {
+        "scope": str(payload.get("source_scope") or payload.get("scope") or "").strip(),
+        "version_id": str(payload.get("source_version_id") or payload.get("version_id") or "").strip(),
+    }
+    target_payload = {
+        "scope": str(payload.get("target_scope") or "").strip(),
+        "version_id": str(payload.get("target_version_id") or "").strip(),
+    }
+    source_rows = _manual_rows_for_scope(plan, source_payload)
+    target_rows = _manual_rows_for_scope(plan, target_payload)
+    if source_rows is target_rows:
+        return
+    moving_row = None
+    remaining_rows = []
+    for row in source_rows:
+        if row.get("row_id") == row_id:
+            moving_row = row
+        else:
+            remaining_rows.append(row)
+    if moving_row is None:
+        raise ValueError("Version Plan manual row was not found.")
+    source_rows[:] = remaining_rows
+    moving_row["sort_order"] = _next_sort_order(target_rows)
+    moving_row["updated_at"] = _now_text()
+    target_rows.append(moving_row)
 
 
 def _pipeline_seed_rows() -> list[dict[str, Any]]:

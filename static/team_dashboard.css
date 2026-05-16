@@ -1321,7 +1321,7 @@
 }
 
 .team-dashboard-version-plan-sheet {
-  --version-plan-sheet-grid: 560px 455px 400px 190px 440px;
+  --version-plan-sheet-grid: minmax(320px, 1fr) 40px 108px minmax(150px, 0.55fr) 44px;
   display: grid;
   gap: 0;
   max-width: 100%;
@@ -1335,7 +1335,7 @@
 .team-dashboard-version-plan-row {
   display: grid;
   grid-template-columns: var(--version-plan-sheet-grid);
-  min-width: 2045px;
+  min-width: 700px;
   border-bottom: 1px solid #d9dde5;
 }
 
@@ -1355,12 +1355,27 @@
   letter-spacing: 0;
 }
 
+.team-dashboard-version-plan-sheet.is-drop-target {
+  outline: 2px solid #2f6df6;
+  outline-offset: -2px;
+  background: #f8fbff;
+}
+
 .team-dashboard-version-plan-header > div,
 .team-dashboard-version-plan-cell {
   min-width: 0;
   padding: 3px 5px;
   border-right: 1px solid #d9dde5;
   overflow-wrap: anywhere;
+}
+
+.team-dashboard-version-plan-header > div:nth-child(2),
+.team-dashboard-version-plan-header > div:nth-child(3),
+.team-dashboard-version-plan-header > div:nth-child(5),
+.team-dashboard-version-plan-row .team-dashboard-version-plan-cell:nth-child(2),
+.team-dashboard-version-plan-row .team-dashboard-version-plan-cell:nth-child(3),
+.team-dashboard-version-plan-row .team-dashboard-version-plan-cell:nth-child(5) {
+  text-align: center;
 }
 
 .team-dashboard-version-plan-header > div:last-child,
@@ -1450,6 +1465,8 @@
 .team-dashboard-version-plan-cell select[multiple]:focus {
   position: relative;
   z-index: 3;
+  width: 132px;
+  max-width: none;
   height: 86px;
 }
 
@@ -1556,7 +1573,7 @@
 
   .team-dashboard-version-plan-row {
     grid-template-columns: var(--version-plan-sheet-grid);
-    min-width: 2045px;
+    min-width: 700px;
     gap: 0;
     padding: 0;
     border: 0;

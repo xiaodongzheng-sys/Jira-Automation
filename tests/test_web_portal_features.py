@@ -3093,12 +3093,16 @@ class WebPortalFeatureTests(unittest.TestCase):
         styles = Path("static/team_dashboard.css").read_text(encoding="utf-8")
 
         self.assertIn("(PRD Final: ${versionPlanShortDate(bundle.prd_final_date)})", script)
-        self.assertIn("Productization Efforts? (Y/N)", script)
+        self.assertIn("<div>Y/N</div>", script)
         self.assertIn("└ ${escapeHtml(line)}", script)
         self.assertIn("renderLink(row.jira_link, `[${jiraId}]`)", script)
         self.assertIn("[${escapeHtml(market)}]", script)
+        self.assertIn("action: 'move'", script)
+        self.assertIn("target_scope: targetScope", script)
         self.assertIn("--version-plan-sheet-grid", styles)
         self.assertIn("grid-template-columns: var(--version-plan-sheet-grid)", styles)
+        self.assertIn("min-width: 700px", styles)
+        self.assertNotIn("min-width: 2045px", styles)
         self.assertNotIn("grid-template-columns: minmax(0, 1fr);\n    min-width: 0;\n    gap: 8px;", styles)
 
     def test_team_dashboard_daily_brief_frontend_and_template_hooks(self):

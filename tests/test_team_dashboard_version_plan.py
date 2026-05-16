@@ -217,6 +217,41 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
             [row["row_id"] for row in wrapped["version_plan"]["af"]["pipeline_rows"]],
         )
 
+    def test_pipeline_row_can_move_to_version_bundle(self) -> None:
+        config = normalize_version_plan_state(
+            {
+                "af": {
+                    "bundles": {
+                        "af-1": {
+                            "version_id": "af-1",
+                            "version_name": "AF_1.0.84_20260724",
+                            "release_date": "2026-07-24",
+                            "manual_rows": [{"row_id": "bundle-1", "feature": "Bundle item", "priority": "P0"}],
+                        }
+                    },
+                    "pipeline_rows": [{"row_id": "pipe-1", "feature": "Pipeline item", "priority": "P1"}],
+                }
+            }
+        )
+        wrapped = {"version_plan": config}
+
+        wrapped = update_version_plan_rows(
+            wrapped,
+            {
+                "action": "move",
+                "row_id": "pipe-1",
+                "source_scope": "pipeline",
+                "target_scope": "bundle",
+                "target_version_id": "af-1",
+            },
+        )
+        payload = version_plan_payload(wrapped, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
+        bundle = payload["bundles"][0]
+
+        self.assertEqual(payload["pipeline_rows"], [])
+        self.assertEqual([row["row_id"] for row in bundle["manual_rows"]], ["bundle-1", "pipe-1"])
+        self.assertEqual(bundle["manual_rows"][1]["feature"], "Pipeline item")
+
 
 if __name__ == "__main__":
     unittest.main()
