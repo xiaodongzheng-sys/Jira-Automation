@@ -1321,7 +1321,7 @@
 }
 
 .team-dashboard-version-plan-sheet {
-  --version-plan-sheet-grid: minmax(320px, 1fr) 68px 116px minmax(150px, 0.45fr) 118px;
+  --version-plan-sheet-grid: minmax(320px, 1fr) 68px 116px 118px minmax(150px, 0.45fr);
   display: grid;
   gap: 0;
   max-width: 100%;
@@ -1379,10 +1379,10 @@
 
 .team-dashboard-version-plan-header > div:nth-child(2),
 .team-dashboard-version-plan-header > div:nth-child(3),
-.team-dashboard-version-plan-header > div:nth-child(5),
+.team-dashboard-version-plan-header > div:nth-child(4),
 .team-dashboard-version-plan-row .team-dashboard-version-plan-cell:nth-child(2),
 .team-dashboard-version-plan-row .team-dashboard-version-plan-cell:nth-child(3),
-.team-dashboard-version-plan-row .team-dashboard-version-plan-cell:nth-child(5) {
+.team-dashboard-version-plan-row .team-dashboard-version-plan-cell:nth-child(4) {
   text-align: center;
 }
 

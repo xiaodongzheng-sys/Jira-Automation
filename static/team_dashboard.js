@@ -643,11 +643,11 @@
           <div class="team-dashboard-version-plan-cell" data-label="PM">
             ${versionPlanManualField(row, 'pm', readOnly)}
           </div>
-          <div class="team-dashboard-version-plan-cell" data-label="Remarks">
-            ${versionPlanManualField(row, 'remarks', readOnly)}
-          </div>
           <div class="team-dashboard-version-plan-cell" data-label="Productization Efforts?">
             ${versionPlanManualField(row, 'productization_efforts', readOnly)}
+          </div>
+          <div class="team-dashboard-version-plan-cell" data-label="Remarks">
+            ${versionPlanManualField(row, 'remarks', readOnly)}
           </div>
         </div>
       `;
@@ -658,8 +658,8 @@
           <div>${headerFeature}</div>
           <div>Priority</div>
           <div>PM</div>
-          <div>Remarks</div>
           <div>Productization Efforts? (Y/N)</div>
+          <div>Remarks</div>
         </div>
         ${body || empty}
       </div>

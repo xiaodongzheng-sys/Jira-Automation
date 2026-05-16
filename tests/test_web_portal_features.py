@@ -3119,6 +3119,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         styles = Path("static/team_dashboard.css").read_text(encoding="utf-8")
 
         self.assertIn("(PRD Final: ${versionPlanShortDate(bundle.prd_final_date || bundle.af_release_date)})", script)
+        self.assertLess(script.index('<div>Productization Efforts? (Y/N)</div>'), script.index("<div>Remarks</div>"))
         self.assertIn("<div>Productization Efforts? (Y/N)</div>", script)
         self.assertIn("└ ${escapeHtml(line)}", script)
         self.assertIn("renderLink(row.jira_link, `[${jiraId}]`)", script)
@@ -3136,6 +3137,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("team-dashboard-version-plan-delete", script)
         self.assertIn("aria-label=\"Delete row\"", script)
         self.assertIn("row.row_type === 'synced' && field === 'remarks'", script)
+        self.assertIn("68px 116px 118px minmax(150px, 0.45fr)", styles)
         self.assertIn("--version-plan-sheet-grid", styles)
         self.assertIn("grid-template-columns: var(--version-plan-sheet-grid)", styles)
         self.assertIn(".team-dashboard-version-plan-bundle-toggle-row", styles)
