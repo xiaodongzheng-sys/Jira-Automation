@@ -24,6 +24,10 @@
     inlineStatus.dataset.tone = tone;
   };
 
+  const isFetchInterrupted = (error) => (
+    error instanceof TypeError && String(error.message || '').toLowerCase().includes('fetch')
+  );
+
   const requestJson = async (url, options = {}) => {
     const response = await fetch(url, {
       headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
@@ -167,6 +171,15 @@
           setInlineStatus(connectStatus.message || 'VPN did not connect.', 'error');
         }
       } catch (error) {
+        if (isFetchInterrupted(error)) {
+          await loadProfiles();
+          if (statusNode?.dataset.connected === 'true') {
+            setInlineStatus('VPN connected.', 'success');
+          } else {
+            setInlineStatus('Connection request was interrupted. Cisco status has been refreshed.', 'error');
+          }
+          return;
+        }
         setInlineStatus(error.message, 'error');
       }
       return;

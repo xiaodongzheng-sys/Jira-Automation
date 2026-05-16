@@ -5620,6 +5620,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("approve MFA if prompted", script)
         self.assertIn("second_password", script)
         self.assertIn("Seabank PH VPN", script)
+        self.assertIn("Connection request was interrupted. Cisco status has been refreshed.", script)
+        self.assertIn("isFetchInterrupted", script)
 
 
 if __name__ == "__main__":
