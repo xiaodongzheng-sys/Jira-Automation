@@ -530,7 +530,7 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
             service.build_insights(now=datetime(2026, 4, 21, 21, 0).astimezone())
 
         self.assertTrue(prompts)
-        self.assertLess(len(prompts[0]), 700_000)
+        self.assertLess(len(prompts[0]), 120_000)
         self.assertIn("@Xiaodong please follow up Credit Risk approval", prompts[0])
         self.assertIn("[Most recent lines]", prompts[0])
 
@@ -571,7 +571,7 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
             service.build_insights(now=datetime(2026, 4, 21, 21, 0).astimezone())
 
         self.assertTrue(prompts)
-        self.assertLess(len(prompts[0]), 900_000)
+        self.assertLess(len(prompts[0]), 120_000)
         self.assertEqual(prompts[0].count("SeaTalk Chat History Export"), 1)
         self.assertIn("Initial run: use the Project update history above", prompts[0])
 

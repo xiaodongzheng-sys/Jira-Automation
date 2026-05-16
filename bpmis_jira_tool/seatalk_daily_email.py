@@ -64,10 +64,10 @@ MAX_USEFUL_AWARENESS_OTHER_UPDATES = 5
 MAX_UNANSWERED_SEATALK_QUESTION_HINTS = 10
 MAX_TEAM_MEMBER_REMINDER_HINTS = 12
 MAX_TOP_FOCUS_ITEMS = 3
-DAILY_BRIEF_SEATALK_PROMPT_MAX_CHARS = 180_000
-DAILY_BRIEF_SEATALK_PROMPT_RECENT_CHARS = 45_000
-DAILY_BRIEF_GMAIL_PROMPT_MAX_CHARS = 90_000
-DAILY_BRIEF_GMAIL_PROMPT_RECENT_CHARS = 24_000
+DAILY_BRIEF_SEATALK_PROMPT_MAX_CHARS = 70_000
+DAILY_BRIEF_SEATALK_PROMPT_RECENT_CHARS = 18_000
+DAILY_BRIEF_GMAIL_PROMPT_MAX_CHARS = 35_000
+DAILY_BRIEF_GMAIL_PROMPT_RECENT_CHARS = 8_000
 DAILY_BRIEF_TOKEN_CHARS_PER_TOKEN = 4
 LOW_SIGNAL_EMAIL_SUMMARY = "No clear action, blocker, key project update, or team follow-up was found in this window."
 EMPTY_TODO_SECTION_SUMMARY = "No Xiaodong-owned action or watch/delegate item found."
@@ -558,9 +558,9 @@ def build_daily_briefing(
         }
     history_text = service._compact_history_for_insights(
         history_text,
-        max_chars=620_000,
-        signal_max_chars=400_000,
-        recent_max_chars=180_000,
+        max_chars=160_000,
+        signal_max_chars=105_000,
+        recent_max_chars=45_000,
     )
     if gmail_history_text:
         gmail_history_text = gmail_history_text[:360_000]

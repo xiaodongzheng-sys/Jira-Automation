@@ -2245,6 +2245,7 @@ class SourceCodeQAService:
                     retrieval_latency_ms=retrieval_latency_ms,
                     evidence_pack=evidence_pack,
                     report=report,
+                    query_started_at=started_at,
                 )
                 report("completed", "LLM answer generated.", 0, 0)
             self._mark_query_phase(
@@ -2769,6 +2770,7 @@ class SourceCodeQAService:
         retrieval_latency_ms: int,
         evidence_pack: dict[str, Any],
         report: Any,
+        query_started_at: float | None = None,
     ) -> None:
         self._answer_generation.augment_query_payload_with_llm_answer(
             payload=payload,
@@ -2791,6 +2793,7 @@ class SourceCodeQAService:
             retrieval_latency_ms=retrieval_latency_ms,
             evidence_pack=evidence_pack,
             report=report,
+            query_started_at=query_started_at,
         )
 
     def _augment_query_payload_with_llm_answer_impl(
@@ -2816,38 +2819,73 @@ class SourceCodeQAService:
         retrieval_latency_ms: int,
         evidence_pack: dict[str, Any],
         report: Any,
+        query_started_at: float | None = None,
     ) -> None:
-        llm_service = self
-        payload["llm_provider"] = llm_service.llm_provider.name
-        if llm_service.llm_provider.name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
+        payload["llm_provider"] = self.llm_provider.name
+        if self.llm_provider.name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
             report("llm_generation", f"Scoped Codex search · {pm_team}:{country}. Retrieval is navigation hints.", 0, 0)
         else:
             report("llm_generation", "Calling LLM with retrieved evidence.", 0, 0)
-        llm_payload = llm_service._build_llm_answer(
-            entries=entries,
-            key=key,
-            pm_team=pm_team,
-            country=country,
-            question=question,
-            matches=matches,
-            llm_budget_mode=llm_budget_mode,
-            query_mode=query_mode,
-            trace_id=trace_id,
-            followup_context=followup_context,
-            requested_answer_mode=normalized_answer_mode,
-            request_cache=request_cache,
-            progress_callback=progress_callback,
-            attachments=attachments or [],
-            runtime_evidence=runtime_evidence or [],
-            effort_assessment=effort_assessment,
-        )
+        query_deadline_seconds = int(self.query_deadline_seconds or 0)
+        answer_timeout_seconds: int | None = None
+        if query_deadline_seconds > 0 and query_started_at:
+            remaining_seconds = int(query_deadline_seconds - (time.time() - query_started_at) - 5)
+            if remaining_seconds <= 10:
+                self._apply_query_deadline_fallback(
+                    payload,
+                    matches=matches,
+                    reason="answer_generation_deadline_reached",
+                    retrieval_latency_ms=retrieval_latency_ms,
+                    report=report,
+                )
+                return
+            answer_timeout_seconds = min(self.codex_timeout_seconds, remaining_seconds)
+        previous_answer_timeout_seconds = getattr(self, "_codex_answer_timeout_seconds", None)
+        if answer_timeout_seconds is not None:
+            self._codex_answer_timeout_seconds = answer_timeout_seconds
+        try:
+            llm_payload = self._build_llm_answer(
+                entries=entries,
+                key=key,
+                pm_team=pm_team,
+                country=country,
+                question=question,
+                matches=matches,
+                llm_budget_mode=llm_budget_mode,
+                query_mode=query_mode,
+                trace_id=trace_id,
+                followup_context=followup_context,
+                requested_answer_mode=normalized_answer_mode,
+                request_cache=request_cache,
+                progress_callback=progress_callback,
+                attachments=attachments or [],
+                runtime_evidence=runtime_evidence or [],
+                effort_assessment=effort_assessment,
+            )
+        except ToolError as error:
+            if query_deadline_seconds > 0 and "timed out" in str(error).lower():
+                self._apply_query_deadline_fallback(
+                    payload,
+                    matches=matches,
+                    reason="answer_generation_exceeded_deadline",
+                    retrieval_latency_ms=retrieval_latency_ms,
+                    report=report,
+                )
+                return
+            raise
+        finally:
+            if previous_answer_timeout_seconds is None:
+                if hasattr(self, "_codex_answer_timeout_seconds"):
+                    delattr(self, "_codex_answer_timeout_seconds")
+            else:
+                self._codex_answer_timeout_seconds = previous_answer_timeout_seconds
         payload.update(llm_payload)
         payload["query_mode"] = query_mode
         payload["requested_query_mode"] = payload.get("requested_query_mode") or ""
         payload["deadline_seconds"] = int(self.query_deadline_seconds or 0)
         payload["deadline_hit"] = bool(payload.get("deadline_hit"))
         payload["retrieval_latency_ms"] = retrieval_latency_ms
-        payload["codex_latency_ms"] = payload.get("llm_latency_ms") if llm_service.llm_provider.name == LLM_PROVIDER_CODEX_CLI_BRIDGE else 0
+        payload["codex_latency_ms"] = payload.get("llm_latency_ms") if self.llm_provider.name == LLM_PROVIDER_CODEX_CLI_BRIDGE else 0
         if isinstance(payload.get("llm_route"), dict):
             payload["llm_route"]["retrieval_hints_ms"] = retrieval_latency_ms
         if isinstance(payload.get("codex_cli_summary"), dict):
@@ -7318,6 +7356,9 @@ class SourceCodeQAService:
         )
         if reasoning_effort:
             payload["_codex_reasoning_effort"] = reasoning_effort
+        answer_timeout_seconds = getattr(self, "_codex_answer_timeout_seconds", None)
+        if answer_timeout_seconds:
+            payload["_timeout_seconds"] = max(10, int(answer_timeout_seconds))
         payload["_llm_ledger_flow"] = "source_code_qa"
         payload["_llm_ledger_route"] = str(ledger_route or (CODEX_ROUTE_REPAIR if phase == "repair" else ""))
         return payload

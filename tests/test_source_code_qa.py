@@ -3388,6 +3388,57 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(payload["llm_finish_reason"], "deadline_fallback")
         self.assertEqual(payload["slow_query_attribution"]["reason"], "retrieval_exceeded_deadline")
 
+    def test_answer_generation_timeout_uses_deadline_fallback(self):
+        payload = {
+            "summary": "Relevant code references were found.",
+            "query_mode": "deep",
+        }
+        matches = [
+            {
+                "repo": "Portal Repo",
+                "path": "bpmis/jira_client.py",
+                "line_start": 1,
+                "line_end": 3,
+            }
+        ]
+        reports = []
+        self.service.query_deadline_seconds = 30
+        with patch.object(
+            SourceCodeQAService,
+            "_build_llm_answer",
+            side_effect=ToolError("Codex unavailable; used code search fallback. Codex CLI timed out after 24s."),
+        ) as build_answer:
+            self.service._augment_query_payload_with_llm_answer(
+                payload=payload,
+                entries=[],
+                key="AF:All",
+                pm_team="AF",
+                country="All",
+                question="batchCreateJiraIssue BPMIS API",
+                matches=matches,
+                llm_budget_mode="auto",
+                query_mode="deep",
+                trace_id="trace-deadline",
+                followup_context={},
+                normalized_answer_mode="auto",
+                request_cache={},
+                progress_callback=None,
+                attachments=[],
+                runtime_evidence=[],
+                effort_assessment=False,
+                retrieval_latency_ms=1200,
+                evidence_pack={},
+                report=lambda *args: reports.append(args),
+                query_started_at=time.time(),
+            )
+
+        self.assertTrue(build_answer.called)
+        self.assertTrue(payload["deadline_hit"])
+        self.assertTrue(payload["fallback_used"])
+        self.assertEqual(payload["deadline_fallback_reason"], "answer_generation_exceeded_deadline")
+        self.assertEqual(payload["llm_finish_reason"], "deadline_fallback")
+        self.assertIn("Top evidence", payload["llm_answer"])
+
     def test_chinese_business_intent_detection(self):
         intent = self.service._question_intent("IssueService 改了会影响哪些下游，测试有没有覆盖，事务缓存边界是什么")
 
