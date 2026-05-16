@@ -489,6 +489,11 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
                                     "jira_id": "SPDBP-94945",
                                     "jira_summary": "Old summary",
                                     "remarks": "Keep this note",
+                                },
+                                {
+                                    "row_id": "sync-af-20260520-SPDBP-deleted",
+                                    "jira_id": "SPDBP-deleted",
+                                    "jira_summary": "No longer in Jira response",
                                 }
                             ]
                         }
@@ -504,7 +509,12 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
             now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
         )
         payload = version_plan_payload(synced, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
+        jira_ids = [row["jira_id"] for row in payload["bundles"][0]["synced_rows"]]
+        self.assertNotIn("SPDBP-deleted", jira_ids)
         row = next(row for row in payload["bundles"][0]["synced_rows"] if row["jira_id"] == "SPDBP-94945")
+        self.assertEqual(row["jira_summary"], "[Feature] Antifraud - UIUX Improvement for AMR")
+        self.assertEqual(row["market"], "Regional")
+        self.assertEqual(row["productization_efforts"], "Y")
         self.assertEqual(row["remarks"], "Keep this note")
 
         updated = update_version_plan_cell(

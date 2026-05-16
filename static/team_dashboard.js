@@ -494,7 +494,7 @@
     if (state === 'running') return syncState.message || 'Syncing Jira information...';
     if (state === 'error') return syncState.error || syncState.message || 'Sync failed.';
     if (syncState.last_synced_date_sgt) return `Last synced: ${syncState.last_synced_date_sgt} SGT`;
-    return 'Cached Version Plan loaded. Jira sync will start when needed.';
+    return 'Cached Version Plan loaded. Jira sync starts when this tab opens.';
   };
 
   const readVersionPlanCollapseState = () => {

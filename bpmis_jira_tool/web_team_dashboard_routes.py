@@ -40,7 +40,6 @@ from bpmis_jira_tool.team_dashboard_version_plan import (
     mark_version_plan_sync_running,
     update_version_plan_cell,
     update_version_plan_rows,
-    version_plan_auto_sync_attempted_today,
     version_plan_payload,
     version_plan_sync,
 )
@@ -114,8 +113,6 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         global _VERSION_PLAN_SYNC_RUNNING  # noqa: PLW0603
         store = _get_team_dashboard_config_store()
         config = store.save(store.load())
-        if not force and version_plan_auto_sync_attempted_today(config):
-            return False
         with _VERSION_PLAN_SYNC_LOCK:
             if _VERSION_PLAN_SYNC_RUNNING:
                 return True
