@@ -1535,6 +1535,31 @@
   background: transparent;
 }
 
+.team-dashboard-version-plan-bundle-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.team-dashboard-version-plan-bundle-toggle-row strong {
+  min-width: 0;
+  color: #111827;
+  font-size: 0.9rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.team-dashboard-version-plan-bundle-toggle {
+  width: auto !important;
+  min-height: 28px;
+  padding: 3px 8px;
+  border-radius: 3px;
+  font-size: 0.76rem;
+  line-height: 1.15;
+  flex: 0 0 auto;
+}
+
 @media (max-width: 760px) {
   .team-dashboard-version-plan-head .button-row {
     width: 100%;
@@ -1553,6 +1578,10 @@
   .team-dashboard-version-plan-archive-head {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .team-dashboard-version-plan-bundle-toggle-row {
+    align-items: flex-start;
   }
 
   .team-dashboard-version-plan-bundle-head p span {

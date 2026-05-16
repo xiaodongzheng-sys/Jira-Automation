@@ -137,6 +137,7 @@
   const jiraPageSize = 10;
   const taskCacheKey = 'team-dashboard:jira-tasks:v8';
   const monthlyReportDraftCacheKey = 'team-dashboard:monthly-report-draft:v2';
+  const versionPlanCollapseCacheKey = 'team-dashboard:version-plan:collapsed:v1';
   const seatalkNameMappingDefaultPageSize = 20;
   const seatalkNameMappingPageSizeOptions = [20, 50, 100, 200];
 
@@ -491,6 +492,35 @@
     return 'Cached Version Plan loaded. Jira sync will start when needed.';
   };
 
+  const readVersionPlanCollapseState = () => {
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(versionPlanCollapseCacheKey) || '{}');
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (error) {
+      return {};
+    }
+  };
+
+  const writeVersionPlanCollapseState = (state) => {
+    try {
+      window.localStorage.setItem(versionPlanCollapseCacheKey, JSON.stringify(state || {}));
+    } catch (error) {
+      // Ignore localStorage failures; collapse state is a browser convenience.
+    }
+  };
+
+  const versionPlanBundleKey = (bundle = {}) => String(bundle.version_id || bundle.af_version_name || '').trim();
+
+  const versionPlanBundleTitle = (bundle = {}) => (
+    `${bundle.af_version_name || 'AF Version'} (PRD Final: ${versionPlanShortDate(bundle.prd_final_date || bundle.af_release_date)})`
+  );
+
+  const isVersionPlanBundleCollapsed = (bundle = {}) => {
+    const key = versionPlanBundleKey(bundle);
+    if (!key) return false;
+    return Boolean(readVersionPlanCollapseState()[key]);
+  };
+
   const versionPlanShortDate = (value) => {
     const text = String(value || '').trim();
     if (!text) return '-';
@@ -516,6 +546,25 @@
       <div class="team-dashboard-version-plan-sheet-title">
         <strong>${escapeHtml(title || '-')}</strong>
         ${lines.map((line) => `<span>└ ${escapeHtml(line)}</span>`).join('')}
+      </div>
+    `;
+  };
+
+  const renderVersionPlanBundleToggle = (bundle, { archived = false } = {}) => {
+    const key = versionPlanBundleKey(bundle);
+    const collapsed = !archived && isVersionPlanBundleCollapsed(bundle);
+    return `
+      <div class="team-dashboard-version-plan-bundle-toggle-row">
+        ${archived ? '' : `
+          <button
+            class="button button-secondary team-dashboard-version-plan-bundle-toggle"
+            type="button"
+            data-version-plan-bundle-toggle
+            data-version-plan-bundle-id="${escapeHtml(key)}"
+            aria-expanded="${collapsed ? 'false' : 'true'}"
+          >${collapsed ? 'Expand' : 'Collapse'}</button>
+        `}
+        <strong>${escapeHtml(versionPlanBundleTitle(bundle))}</strong>
       </div>
     `;
   };
@@ -617,15 +666,16 @@
     const mapped = bundle.mapped_versions && typeof bundle.mapped_versions === 'object' ? bundle.mapped_versions : {};
     const manualRows = Array.isArray(bundle.manual_rows) ? bundle.manual_rows : [];
     const syncedRows = Array.isArray(bundle.synced_rows) ? bundle.synced_rows : [];
-    const headerFeature = versionPlanSheetTitle(
-      `${bundle.af_version_name || 'AF Version'} (PRD Final: ${versionPlanShortDate(bundle.prd_final_date)})`,
-      mapped,
-    );
+    const collapsed = isVersionPlanBundleCollapsed(bundle);
+    const headerFeature = versionPlanSheetTitle(versionPlanBundleTitle(bundle), mapped);
     return `
-      <section class="team-dashboard-version-plan-bundle">
-        ${renderVersionPlanRows([...syncedRows, ...manualRows], { scope: 'bundle', versionId: bundle.version_id, readOnly: false, title: 'rows', headerFeature })}
-        <div class="team-dashboard-version-plan-actions">
-          <button class="button button-secondary" type="button" data-version-plan-row-action="add" data-version-plan-scope="bundle" data-version-id="${escapeHtml(bundle.version_id || '')}">Add Row</button>
+      <section class="team-dashboard-version-plan-bundle${collapsed ? ' is-collapsed' : ''}" data-version-plan-bundle-id="${escapeHtml(versionPlanBundleKey(bundle))}">
+        ${renderVersionPlanBundleToggle(bundle)}
+        <div data-version-plan-bundle-body ${collapsed ? 'hidden' : ''}>
+          ${renderVersionPlanRows([...syncedRows, ...manualRows], { scope: 'bundle', versionId: bundle.version_id, readOnly: false, title: 'rows', headerFeature })}
+          <div class="team-dashboard-version-plan-actions">
+            <button class="button button-secondary" type="button" data-version-plan-row-action="add" data-version-plan-scope="bundle" data-version-id="${escapeHtml(bundle.version_id || '')}">Add Row</button>
+          </div>
         </div>
       </section>
     `;
@@ -633,12 +683,10 @@
 
   const renderVersionPlanArchivedBundle = (bundle) => {
     const mapped = bundle.mapped_versions && typeof bundle.mapped_versions === 'object' ? bundle.mapped_versions : {};
-    const headerFeature = versionPlanSheetTitle(
-      `${bundle.af_version_name || 'AF Version'} (PRD Final: ${versionPlanShortDate(bundle.prd_final_date || bundle.af_release_date)})`,
-      mapped,
-    );
+    const headerFeature = versionPlanSheetTitle(versionPlanBundleTitle(bundle), mapped);
     return `
       <section class="team-dashboard-version-plan-bundle is-archived">
+        ${renderVersionPlanBundleToggle(bundle, { archived: true })}
         ${renderVersionPlanRows(bundle.synced_rows || [], { scope: 'archived', versionId: bundle.version_id, readOnly: true, title: 'archived Jira rows', headerFeature })}
       </section>
     `;
@@ -2600,6 +2648,23 @@
     if (input) saveVersionPlanCell(input);
   });
   versionPlanContent?.addEventListener('click', async (event) => {
+    const toggle = event.target.closest('[data-version-plan-bundle-toggle]');
+    if (toggle) {
+      const bundleId = toggle.dataset.versionPlanBundleId || '';
+      if (!bundleId) return;
+      const state = readVersionPlanCollapseState();
+      const nextCollapsed = !state[bundleId];
+      if (nextCollapsed) state[bundleId] = true;
+      else delete state[bundleId];
+      writeVersionPlanCollapseState(state);
+      const bundle = toggle.closest('.team-dashboard-version-plan-bundle');
+      const body = bundle?.querySelector('[data-version-plan-bundle-body]');
+      bundle?.classList.toggle('is-collapsed', nextCollapsed);
+      if (body) body.hidden = nextCollapsed;
+      toggle.setAttribute('aria-expanded', nextCollapsed ? 'false' : 'true');
+      toggle.textContent = nextCollapsed ? 'Expand' : 'Collapse';
+      return;
+    }
     const button = event.target.closest('[data-version-plan-row-action]');
     if (!button) return;
     const action = button.dataset.versionPlanRowAction || '';

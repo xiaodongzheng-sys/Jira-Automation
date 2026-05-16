@@ -186,8 +186,8 @@ def version_plan_sync(config: dict[str, Any], bpmis_client: Any, *, now: datetim
         af["seen_versions"][version["version_id"]] = version
 
     next_bundles: dict[str, dict[str, Any]] = {}
-    all_versions_by_id = {row["version_id"]: row for row in af_versions}
-    all_versions_by_id.update(af["seen_versions"])
+    all_versions_by_id = dict(af["seen_versions"])
+    all_versions_by_id.update({row["version_id"]: row for row in af_versions})
     candidate_versions = list(upcoming)
     for seen_version in af["seen_versions"].values():
         release_date = _parse_date(seen_version.get("release_date"))
@@ -203,8 +203,6 @@ def version_plan_sync(config: dict[str, Any], bpmis_client: Any, *, now: datetim
         synced_rows = []
         if in_dev or (release_date and release_date < today):
             synced_rows = _sync_rows_for_bundle(bpmis_client, mapped_dbp_versions)
-        elif isinstance(existing, dict):
-            synced_rows = _normalize_synced_rows(existing.get("synced_rows"))
         next_bundles[version_id] = {
             **version,
             "mapped_versions": mapped_dbp_versions,

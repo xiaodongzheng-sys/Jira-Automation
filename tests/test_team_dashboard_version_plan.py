@@ -104,6 +104,38 @@ class FakeBPMISVersionPlanClient:
         return {"bizPriorityId": "P0", "market": "SG"}
 
 
+class FakeNotStartedDevVersionPlanClient(FakeBPMISVersionPlanClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.list_issue_calls: list[str] = []
+
+    def search_versions(self, query: str) -> list[dict]:
+        self.search_calls.append(query)
+        if query == "AF_":
+            return [
+                {
+                    "id": "af-20260626",
+                    "fullName": "AF_v1.0.82_20260626",
+                    "timeline": {"prdDueDate": "2026-05-29", "release": "2026-06-26"},
+                    "timelineStart": "2026-06-01T00:00:00+08:00",
+                    "timelineEnd": "2026-06-26T00:00:00+08:00",
+                }
+            ]
+        if query in {"DBPSG_", "DBPID_", "DBPPH_"}:
+            return [
+                {
+                    "id": f"{query.lower()}0730",
+                    "fullName": f"{query}v1.00_0730",
+                    "timelineEnd": "2026-07-30T00:00:00+08:00",
+                }
+            ]
+        return []
+
+    def list_issues_for_version(self, version_id: str) -> list[dict]:
+        self.list_issue_calls.append(version_id)
+        return [{"jiraKey": "SPDBP-should-not-sync", "summary": "Not started Dev"}]
+
+
 class TeamDashboardVersionPlanTest(unittest.TestCase):
     def test_pipeline_seed_is_global_and_not_deduped(self) -> None:
         plan = normalize_version_plan_state({})
@@ -251,6 +283,40 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(payload["pipeline_rows"], [])
         self.assertEqual([row["row_id"] for row in bundle["manual_rows"]], ["bundle-1", "pipe-1"])
         self.assertEqual(bundle["manual_rows"][1]["feature"], "Pipeline item")
+
+    def test_not_started_dev_version_is_manual_only_after_sync(self) -> None:
+        config = {
+            "version_plan": {
+                "af": {
+                    "bundles": {
+                        "af-20260626": {
+                            "manual_rows": [
+                                {"row_id": "manual-1", "feature": "[ID][PH] AMR Fix", "priority": "P1"}
+                            ],
+                            "synced_rows": [
+                                {"row_id": "sync-old", "jira_id": "SPDBP-old", "jira_summary": "Old synced row"}
+                            ],
+                        }
+                    },
+                    "pipeline_rows": [],
+                }
+            }
+        }
+        client = FakeNotStartedDevVersionPlanClient()
+
+        synced = version_plan_sync(
+            config,
+            client,
+            now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
+        )
+        payload = version_plan_payload(synced, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
+        bundle = payload["bundles"][0]
+
+        self.assertFalse(bundle["in_dev"])
+        self.assertEqual(bundle["af_version_name"], "AF_v1.0.82_20260626")
+        self.assertEqual(bundle["synced_rows"], [])
+        self.assertEqual(bundle["manual_rows"][0]["feature"], "[ID][PH] AMR Fix")
+        self.assertEqual(client.list_issue_calls, [])
 
 
 if __name__ == "__main__":
