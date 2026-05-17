@@ -2,6 +2,7 @@ import io
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -59,6 +60,37 @@ class SystemFullTestGateTests(unittest.TestCase):
         self.assertEqual(commands[5][1], ["node", "--check", "static/b.js"])
         self.assertEqual(parallel_workers, [3])
         self.assertEqual(result["steps"][-1]["status"], "skipped")
+
+    def test_include_browser_e2e_adds_optional_parallel_step(self):
+        commands = []
+
+        def fake_run_command(name, command):
+            commands.append((name, command))
+            return gate.GateStep(name=name, command=command)
+
+        def fake_parallel(parallel_commands, *, max_workers):
+            return [fake_run_command(name, command) for name, command in parallel_commands]
+
+        with patch.object(gate, "STATIC_JS_PATHS", []), patch.object(
+            gate,
+            "_run_command",
+            side_effect=fake_run_command,
+        ), patch.object(
+            gate,
+            "_run_parallel_commands",
+            side_effect=fake_parallel,
+        ):
+            result = gate.run_gate(
+                skip_smoke=True,
+                include_browser_e2e=True,
+                uat_url=None,
+                live_url=None,
+                expected_revision=None,
+                coverage_fail_under=100,
+            )
+
+        self.assertEqual(result["status"], "pass")
+        self.assertIn(("browser_e2e", [sys.executable, "scripts/run_browser_e2e.py"]), commands)
 
     def test_gate_stops_after_failed_command(self):
         def fake_run_command(name, command):

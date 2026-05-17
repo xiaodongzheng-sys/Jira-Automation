@@ -186,6 +186,7 @@ def _smoke_check(*, uat_url: str, live_url: str, expected_revision: str, expect_
 def run_gate(
     *,
     skip_smoke: bool,
+    include_browser_e2e: bool = False,
     smoke_only: bool = False,
     uat_url: str | None,
     live_url: str | None,
@@ -269,6 +270,8 @@ def run_gate(
     ]
     parallel_commands = [("node_check", ["node", "--check", str(path.relative_to(ROOT_DIR))]) for path in STATIC_JS_PATHS]
     parallel_commands.append(("source_code_qa_release_gate", [sys.executable, "scripts/run_source_code_qa_release_gate.py"]))
+    if include_browser_e2e:
+        parallel_commands.append(("browser_e2e", [sys.executable, "scripts/run_browser_e2e.py"]))
 
     for name, command in coverage_commands:
         step = _run_command(name, command)
@@ -312,6 +315,7 @@ def run_gate(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-smoke", action="store_true", help="Skip UAT/Live HTTP smoke checks.")
+    parser.add_argument("--include-browser-e2e", action="store_true", help="Run local Playwright browser E2E smoke tests.")
     parser.add_argument("--smoke-only", action="store_true", help="Run only the read-only UAT/Live HTTP smoke checks.")
     parser.add_argument("--uat-url", default=None, help="Cloud Run UAT tag URL.")
     parser.add_argument("--live-url", default=None, help="Mac-hosted Live portal URL.")
@@ -351,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
 
     result = run_gate(
         skip_smoke=bool(args.skip_smoke),
+        include_browser_e2e=bool(args.include_browser_e2e),
         smoke_only=bool(args.smoke_only),
         uat_url=args.uat_url,
         live_url=args.live_url,

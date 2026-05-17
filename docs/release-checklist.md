@@ -48,6 +48,20 @@ Use an explicit threshold when validating release tooling changes:
 ./.venv/bin/python scripts/run_system_full_test_gate.py --coverage-fail-under 100 --skip-smoke
 ```
 
+- For browser-level UI smoke coverage, install the optional Playwright runtime once, then run the local E2E gate. It starts a temporary Flask portal with an isolated `TEAM_PORTAL_DATA_DIR` and a signed admin session cookie, so it does not use real Google credentials or mutate production data:
+
+```bash
+./.venv/bin/python -m pip install -r requirements-e2e.txt
+./.venv/bin/python -m playwright install chromium
+ENV_FILE=/dev/null ./.venv/bin/python scripts/run_browser_e2e.py
+```
+
+To include the browser smoke in the one-command local gate:
+
+```bash
+ENV_FILE=/dev/null ./.venv/bin/python scripts/run_system_full_test_gate.py --skip-smoke --include-browser-e2e
+```
+
 - The Python coverage gate is strict in two layers. Governed modules must remain at 100% (`bpmis_jira_tool/config.py`, `bpmis_jira_tool/errors.py`, `bpmis_jira_tool/user_config.py`, `prd_briefing/models.py`, and `prd_briefing/text_generation.py`). The `risk_coverage_gate` then enforces `config/coverage_risk_policy.json`: `local_agent_client.py` >= 70%, `local_agent_server.py` >= 65%, `meeting_recorder.py` >= 75%, `web_meeting_recorder_routes.py` >= 75%, `web_work_memory_routes.py` >= 75%, `prd_briefing/reviewer.py` >= 75%, and combined `bpmis_jira_tool/` + `prd_briefing/` coverage >= 83%. Do not exclude business logic, permission checks, release safety checks, or read-only smoke behavior just to raise the percentage.
 
 - If debugging a failed step, the equivalent local commands are:
@@ -65,6 +79,7 @@ node --check static/prd_self_assessment.js
 node --check static/prd_briefing.js
 node --check static/source_code_qa.js
 ENV_FILE=/dev/null ./.venv/bin/python scripts/run_source_code_qa_release_gate.py
+ENV_FILE=/dev/null ./.venv/bin/python scripts/run_browser_e2e.py
 ```
 
 - For Source Code Q&A changes, run the release gate/evals that match the changed retrieval or provider behavior. Source Code Q&A is Codex-only for LLM answers and uses the local token hybrid index for semantic retrieval; do not configure legacy AI providers or remote embedding providers for this workflow:
