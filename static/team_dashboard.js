@@ -695,7 +695,7 @@
             data-version-id="${escapeHtml(versionId)}"
             aria-label="Add row"
             title="Add row"
-          ><span aria-hidden="true">+</span> Add one row</button>
+          ><span aria-hidden="true">+</span> Add Row</button>
         </div>
       </div>
     `;
