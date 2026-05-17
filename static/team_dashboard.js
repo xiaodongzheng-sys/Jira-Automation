@@ -653,11 +653,7 @@
 
   const renderVersionPlanRows = (rows, { scope, versionId = '', readOnly = false, title = 'Rows', headerFeature = 'Feature' } = {}) => {
     const rowItems = Array.isArray(rows) ? rows : [];
-    const empty = `
-      <div class="team-dashboard-version-plan-row team-dashboard-version-plan-empty-row">
-        <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-empty">No ${escapeHtml(title.toLowerCase())} yet.</div>
-      </div>
-    `;
+    const empty = '';
     const body = rowItems.map((row) => {
       const manual = row.row_type === 'manual' && !readOnly;
       return `
@@ -690,7 +686,7 @@
     }).join('');
     const addRow = readOnly ? '' : `
       <div class="team-dashboard-version-plan-row team-dashboard-version-plan-add-row">
-        <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-cell-feature">
+        <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-add-cell">
           <button
             class="button button-secondary team-dashboard-version-plan-add-inline"
             type="button"
@@ -699,12 +695,8 @@
             data-version-id="${escapeHtml(versionId)}"
             aria-label="Add row"
             title="Add row"
-          >+</button>
+          ><span aria-hidden="true">+</span> Add one row</button>
         </div>
-        <div class="team-dashboard-version-plan-cell"></div>
-        <div class="team-dashboard-version-plan-cell"></div>
-        <div class="team-dashboard-version-plan-cell"></div>
-        <div class="team-dashboard-version-plan-cell"></div>
       </div>
     `;
     return `
