@@ -450,7 +450,7 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual([row["row_id"] for row in af["bundles"]["af-1"]["manual_rows"]], ["pipe-1"])
         self.assertEqual(af["bundles"]["af-1"]["synced_rows"][0]["remarks"], "current note")
 
-    def test_manual_rows_sort_by_priority_then_pm(self) -> None:
+    def test_manual_rows_sort_by_priority_then_manual_order(self) -> None:
         payload = version_plan_payload(
             {
                 "version_plan": {
@@ -467,7 +467,28 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
             now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
         )
 
-        self.assertEqual([row["row_id"] for row in payload["pipeline_rows"]], ["sp", "rene", "wang", "zoey"])
+        self.assertEqual([row["row_id"] for row in payload["pipeline_rows"]], ["sp", "zoey", "rene", "wang"])
+
+    def test_pipeline_reorder_persists_across_different_pm_values(self) -> None:
+        config = {
+            "version_plan": {
+                "af": {
+                    "pipeline_rows": [
+                        {"row_id": "ker-yin", "feature": "Ker Yin item", "priority": "SP", "pm": ["Ker Yin"], "sort_order": 0},
+                        {"row_id": "rene", "feature": "Rene item", "priority": "SP", "pm": ["Rene"], "sort_order": 1},
+                        {"row_id": "zoey", "feature": "Zoey item", "priority": "SP", "pm": ["Zoey"], "sort_order": 2},
+                    ]
+                }
+            }
+        }
+
+        updated = update_version_plan_rows(
+            config,
+            {"scope": "pipeline", "action": "reorder", "row_ids": ["zoey", "ker-yin", "rene"]},
+        )
+        payload = version_plan_payload(updated, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
+
+        self.assertEqual([row["row_id"] for row in payload["pipeline_rows"]], ["zoey", "ker-yin", "rene"])
 
     def test_not_started_dev_version_is_manual_only_after_sync(self) -> None:
         config = {

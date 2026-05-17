@@ -765,8 +765,8 @@ def _sort_manual_rows(rows: Any) -> list[dict[str, Any]]:
         normalized,
         key=lambda row: (
             _priority_rank(row.get("priority")),
-            _pm_sort_key(row.get("pm")),
             _safe_int(row.get("sort_order"), 0),
+            _pm_sort_key(row.get("pm")),
             str(row.get("feature") or ""),
         ),
     )
