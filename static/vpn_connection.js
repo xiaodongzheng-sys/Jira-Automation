@@ -11,6 +11,7 @@
 
   let profiles = [];
   let currentVpnStatus = {};
+  let lastRequestedProfileId = window.sessionStorage?.getItem('vpnConnectionLastProfileId') || '';
 
   const escapeHtml = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -72,12 +73,17 @@
 
   const activeProfileId = () => {
     if (!currentVpnStatus?.connected) return '';
-    return profiles
+    const newestConnectedProfileId = profiles
       .filter((profile) => profile.last_connected_at)
       .slice()
       .sort((left, right) => (
         Date.parse(right.last_connected_at || '') - Date.parse(left.last_connected_at || '')
       ))[0]?.id || '';
+    if (newestConnectedProfileId) return newestConnectedProfileId;
+    if (lastRequestedProfileId && profiles.some((profile) => profile.id === lastRequestedProfileId)) {
+      return lastRequestedProfileId;
+    }
+    return '';
   };
 
   const renderProfiles = () => {
@@ -123,8 +129,30 @@
       applyPayload(await requestJson(root.dataset.profilesUrl));
       setInlineStatus('');
     } catch (error) {
+      if (isTransientLocalAgentError(error)) {
+        setInlineStatus('Temporary local-agent tunnel issue. Retrying Cisco status...');
+        await refreshProfilesAfterTransientLoad();
+        return;
+      }
       setInlineStatus(error.message, 'error');
     }
+  };
+
+  const refreshProfilesAfterTransientLoad = async () => {
+    for (const waitMs of [1200, 2500, 5000]) {
+      await delay(waitMs);
+      try {
+        applyPayload(await requestJson(root.dataset.profilesUrl));
+        setInlineStatus('');
+        return;
+      } catch (error) {
+        if (!isTransientLocalAgentError(error)) {
+          setInlineStatus(error.message, 'error');
+          return;
+        }
+      }
+    }
+    setInlineStatus('Temporary local-agent tunnel issue. Click Refresh to check the latest Cisco status.', 'error');
   };
 
   const refreshProfilesAfterInterruptedConnect = async () => {
@@ -206,6 +234,8 @@
         requestBody.second_password = secondPassword;
       }
       setInlineStatus('Connecting VPN... approve MFA if prompted.');
+      lastRequestedProfileId = connectId;
+      window.sessionStorage?.setItem('vpnConnectionLastProfileId', connectId);
       try {
         const url = `${root.dataset.profilesUrl}/${encodeURIComponent(connectId)}/connect`;
         const payload = await requestJson(url, { method: 'POST', body: JSON.stringify(requestBody) });
