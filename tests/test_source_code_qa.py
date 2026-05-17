@@ -2445,6 +2445,33 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(snapshot["state"], "failed")
         self.assertEqual(snapshot["stage"], "failed")
         self.assertIn("interrupted by a server restart", snapshot["error"])
+        self.assertEqual(snapshot["error_category"], "server_restart")
+        self.assertEqual(snapshot["error_code"], "job_interrupted")
+        self.assertTrue(snapshot["error_retryable"])
+        self.assertGreater(snapshot["completed_at"], 0)
+
+    def test_job_store_completed_job_clears_stale_error_fields(self):
+        path = Path(self.temp_dir.name) / "run" / "jobs.json"
+        store = JobStore(path)
+        job = store.create("source-code-qa-query", "Answer Source Code Question")
+        store.fail(
+            job.job_id,
+            "Temporary failure.",
+            error_category="codex_timeout_or_rate_limit",
+            error_code="llm_timeout",
+            error_retryable=True,
+        )
+
+        store.update(job.job_id, state="running", stage="retry", message="Retrying.")
+        store.complete(job.job_id, results=[{"status": "ok"}], notice={"summary": "done"})
+        snapshot = store.snapshot(job.job_id)
+
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["state"], "completed")
+        self.assertIsNone(snapshot["error"])
+        self.assertEqual(snapshot["error_category"], "")
+        self.assertEqual(snapshot["error_code"], "")
+        self.assertFalse(snapshot["error_retryable"])
 
     def test_source_code_qa_scheduler_fairly_rotates_between_users(self):
         path = Path(self.temp_dir.name) / "run" / "jobs.json"
@@ -2744,6 +2771,15 @@ class SourceCodeQARouteTests(unittest.TestCase):
 class SourceCodeQAServiceTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
+        self._env_patch = patch.dict(
+            os.environ,
+            {
+                "TEAM_PORTAL_DATA_DIR": self.temp_dir.name,
+                "LLM_CALL_LEDGER_PATH": str(Path(self.temp_dir.name) / "llm_call_ledger.jsonl"),
+            },
+            clear=False,
+        )
+        self._env_patch.start()
         self.service = SourceCodeQAService(
             data_root=Path(self.temp_dir.name),
             team_profiles=TEAM_PROFILE_DEFAULTS,
@@ -2753,6 +2789,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         )
 
     def tearDown(self):
+        self._env_patch.stop()
         self.temp_dir.cleanup()
 
     def test_service_uses_internal_responsibility_components(self):

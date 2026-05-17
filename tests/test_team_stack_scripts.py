@@ -2031,6 +2031,13 @@ fi
         self.assertIn("release_status()", stack_script)
         self.assertIn('"$PYTHON_BIN" "$ROOT_DIR/scripts/release_status.py"', stack_script)
 
+    def test_stack_doctor_runs_portal_runtime_doctor(self):
+        stack_script = (PROJECT_ROOT / "scripts/run_team_stack.sh").read_text(encoding="utf-8")
+
+        self.assertIn("== Portal Runtime Doctor ==", stack_script)
+        self.assertIn("portal_runtime_doctor.py", stack_script)
+        self.assertIn('"$PYTHON_BIN" "$ROOT_DIR/scripts/portal_runtime_doctor.py" --strict', stack_script)
+
     def test_stack_doctor_reports_cloudflare_tunnel_provider(self):
         stack_script = PROJECT_ROOT / "scripts/run_team_stack.sh"
 

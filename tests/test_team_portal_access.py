@@ -529,9 +529,9 @@ class TeamPortalAccessTests(unittest.TestCase):
                     "/prd-briefing/": "/access-denied",
                     "/team-dashboard": "/access-denied",
                     "/reports": "/access-denied",
-                    "/gmail-sea-talk-demo": "/",
-                    "/meeting-recorder": "/",
-                    "/meeting-translation": "/",
+                    "/gmail-sea-talk-demo": "/access-denied",
+                    "/meeting-recorder": "/access-denied",
+                    "/meeting-translation": "/access-denied",
                 }
                 for path, expected_location in blocked_pages.items():
                     with self.subTest(path=path):
@@ -777,10 +777,12 @@ class TeamPortalAccessTests(unittest.TestCase):
                 index_response = client.get("/?workspace=productization-upgrade-summary")
                 source_response = client.get("/source-code-qa")
                 prd_response = client.get("/prd-self-assessment")
+                denied_response = client.get("/access-denied")
 
         self.assertEqual(index_response.status_code, 200)
         self.assertEqual(source_response.status_code, 200)
         self.assertEqual(prd_response.status_code, 200)
+        self.assertEqual(denied_response.status_code, 403)
 
         index_soup = BeautifulSoup(index_response.get_data(as_text=True), "html.parser")
         self.assertIsNotNone(index_soup.select_one("[data-productization-llm-description-button]"))
@@ -809,6 +811,11 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertIsNone(prd_soup.select_one("[data-prd-self-assessment-action='summary']"))
         self.assertIsNotNone(prd_soup.select_one("[data-prd-self-assessment-action='review']"))
         self.assertIsNotNone(prd_soup.find("script", src=lambda value: value and "prd_self_assessment.js" in value))
+
+        denied_soup = BeautifulSoup(denied_response.get_data(as_text=True), "html.parser")
+        denied_text = denied_soup.get_text(" ", strip=True)
+        self.assertIn("PRD Self-Assessment is available to signed-in portal users", denied_text)
+        self.assertIn("PRD Briefing is restricted to the portal admin", denied_text)
 
     def test_meeting_translation_tab_follows_meeting_recorder_for_admin(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

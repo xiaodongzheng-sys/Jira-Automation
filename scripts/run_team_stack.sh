@@ -303,6 +303,16 @@ PY
     echo "ops summary unavailable"
   fi
 
+  echo
+  if [[ -x "$PYTHON_BIN" && -f "$ROOT_DIR/scripts/portal_runtime_doctor.py" ]]; then
+    if ! PYTHONPATH="$ROOT_DIR" TEAM_PORTAL_DATA_DIR="$data_dir" "$PYTHON_BIN" "$ROOT_DIR/scripts/portal_runtime_doctor.py" --strict; then
+      ok=1
+    fi
+  else
+    echo "== Portal Runtime Doctor =="
+    echo "portal runtime doctor unavailable"
+  fi
+
   return "$ok"
 }
 

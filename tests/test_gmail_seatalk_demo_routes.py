@@ -122,7 +122,7 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
             response = client.get("/gmail-sea-talk-demo", follow_redirects=False)
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.headers["Location"], "/")
+        self.assertEqual(response.headers["Location"], "/access-denied")
 
     def test_non_owner_api_is_forbidden(self):
         with self.app.test_client() as client:

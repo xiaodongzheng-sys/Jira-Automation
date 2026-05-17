@@ -1,0 +1,628 @@
+#!/usr/bin/env python3
+"""Read-only portal-wide runtime doctor for local Team Portal data."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import statistics
+import sys
+from collections import Counter
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+SGT = ZoneInfo("Asia/Singapore")
+HIGH_TOKEN_THRESHOLD = 30_000
+SLOW_LLM_THRESHOLD_MS = 180_000
+
+
+def _resolve_data_root(raw: str | None) -> Path:
+    if raw:
+        return Path(raw).expanduser().resolve()
+    env_value = (
+        str(os.getenv("LOCAL_AGENT_TEAM_PORTAL_DATA_DIR") or "").strip()
+        or str(os.getenv("TEAM_PORTAL_DATA_DIR") or "").strip()
+    )
+    if env_value:
+        return Path(env_value).expanduser().resolve()
+    return (Path.cwd() / ".team-portal").resolve()
+
+
+def _read_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _read_jsonl_tail(path: Path, limit: int) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict):
+                    rows.append(payload)
+    except OSError:
+        return []
+    return rows[-limit:]
+
+
+def _counter_dict(counter: Counter[str], *, limit: int = 8) -> dict[str, int]:
+    return {key: value for key, value in counter.most_common(limit)}
+
+
+def _counter_text(counts: dict[str, int]) -> str:
+    if not counts:
+        return "none"
+    return ", ".join(f"{key}={value}" for key, value in counts.items())
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _p95(values: list[int]) -> int:
+    if not values:
+        return 0
+    if len(values) == 1:
+        return values[0]
+    return int(statistics.quantiles(values, n=20, method="inclusive")[18])
+
+
+def _sgt_timestamp(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)) and value > 0:
+        return datetime.fromtimestamp(value, tz=SGT).strftime("%Y-%m-%d %H:%M:%S SGT")
+    return ""
+
+
+def _event_timestamp(row: dict[str, Any], *fields: str) -> float:
+    for field in fields:
+        value = row.get(field)
+        if isinstance(value, (int, float)) and value > 0:
+            return float(value)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        text = value.strip()
+        if text.endswith(" SGT"):
+            try:
+                return datetime.strptime(text, "%Y-%m-%d %H:%M:%S SGT").replace(tzinfo=SGT).timestamp()
+            except ValueError:
+                continue
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+    return 0.0
+
+
+def _issue(severity: str, code: str, message: str) -> dict[str, str]:
+    return {"severity": severity, "code": code, "message": message}
+
+
+def _top_rows(rows: list[dict[str, Any]], field: str, *, limit: int = 5) -> list[dict[str, Any]]:
+    def sort_value(row: dict[str, Any]) -> int:
+        return _safe_int(row.get(field))
+
+    top: list[dict[str, Any]] = []
+    for row in sorted(rows, key=sort_value, reverse=True)[:limit]:
+        value = sort_value(row)
+        if value <= 0:
+            continue
+        top.append(
+            {
+                "value": value,
+                "timestamp_sgt": str(row.get("timestamp_sgt") or row.get("timestamp") or ""),
+                "flow": str(row.get("flow") or "unknown"),
+                "route": str(row.get("route") or "unknown"),
+                "model_id": str(row.get("model_id") or "unknown"),
+                "prompt_mode": str(row.get("prompt_mode") or ""),
+                "status": str(row.get("status") or "unknown"),
+                "error_category": str(row.get("error_category") or ""),
+            }
+        )
+    return top
+
+
+def _is_test_fixture_llm_row(row: dict[str, Any]) -> bool:
+    prompt_mode = str(row.get("prompt_mode") or "").strip()
+    latency_ms = _safe_int(row.get("latency_ms"))
+    error = str(row.get("error") or "")
+    trace_id = str(row.get("trace_id") or "")
+    if "attempt to write a readonly database" in error and latency_ms <= 100:
+        return True
+    if latency_ms != 0:
+        return False
+    if not prompt_mode:
+        if _safe_int(row.get("estimated_prompt_tokens")) > 250:
+            return False
+        return trace_id in {"", "trace-bad"} or error in {"quota exhausted", "Bad Request"}
+    return (
+        str(row.get("route") or "") == "repair"
+        and error == "Bad Request"
+        and not trace_id
+        and _safe_int(row.get("estimated_prompt_tokens")) <= 2_000
+    )
+
+
+def _summarize_llm_ledger(data_root: Path, limit: int, *, recent_hours: float) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    ledger_path = Path(os.getenv("LLM_CALL_LEDGER_PATH") or data_root / "llm_call_ledger.jsonl")
+    rows = _read_jsonl_tail(ledger_path, limit)
+    test_fixture_rows = [row for row in rows if _is_test_fixture_llm_row(row)]
+    actionable_rows = [row for row in rows if not _is_test_fixture_llm_row(row)]
+    recent_cutoff = datetime.now(SGT).timestamp() - max(1.0, float(recent_hours)) * 3600
+    recent_actionable_rows = [
+        row
+        for row in actionable_rows
+        if _event_timestamp(row, "timestamp_sgt", "timestamp") >= recent_cutoff
+    ]
+    issues: list[dict[str, str]] = []
+    flow_counts = Counter(str(row.get("flow") or "unknown") for row in actionable_rows)
+    status_counts = Counter(str(row.get("status") or "unknown") for row in actionable_rows)
+    model_counts = Counter(str(row.get("model_id") or "unknown") for row in actionable_rows)
+    route_counts = Counter(str(row.get("route") or "unknown") for row in actionable_rows)
+    provider_counts = Counter(str(row.get("provider") or "unknown") for row in actionable_rows)
+    error_counts = Counter(str(row.get("error_category") or "uncategorized") for row in actionable_rows if str(row.get("status") or "") != "ok")
+    latencies = [_safe_int(row.get("latency_ms")) for row in actionable_rows if _safe_int(row.get("latency_ms")) > 0]
+    prompt_tokens = [_safe_int(row.get("estimated_prompt_tokens")) for row in actionable_rows if _safe_int(row.get("estimated_prompt_tokens")) > 0]
+    recent_status_counts = Counter(str(row.get("status") or "unknown") for row in recent_actionable_rows)
+    unknown_flow = sum(1 for row in recent_actionable_rows if str(row.get("flow") or "unknown") == "unknown")
+    error_total = sum(value for key, value in recent_status_counts.items() if key not in {"ok", "cached"})
+    timeout_total = recent_status_counts.get("timeout", 0)
+    high_token_rows = sum(1 for row in recent_actionable_rows if _safe_int(row.get("estimated_prompt_tokens")) >= HIGH_TOKEN_THRESHOLD)
+    slow_rows = sum(1 for row in recent_actionable_rows if _safe_int(row.get("latency_ms")) >= SLOW_LLM_THRESHOLD_MS)
+
+    if not ledger_path.exists():
+        issues.append(_issue("warn", "llm_ledger_missing", f"LLM call ledger missing: {ledger_path}"))
+    if unknown_flow:
+        issues.append(_issue("warn", "llm_unknown_flow", f"{unknown_flow} LLM ledger rows have unknown flow."))
+    if error_total:
+        issues.append(_issue("warn", "llm_errors", f"{error_total} LLM ledger rows are non-ok in the sampled window."))
+    if timeout_total:
+        issues.append(_issue("warn", "llm_timeouts", f"{timeout_total} LLM calls timed out in the sampled window."))
+    if high_token_rows:
+        issues.append(_issue("warn", "llm_high_prompt_tokens", f"{high_token_rows} LLM calls used at least {HIGH_TOKEN_THRESHOLD} estimated prompt tokens."))
+    if slow_rows:
+        issues.append(_issue("warn", "llm_slow_calls", f"{slow_rows} LLM calls took at least {SLOW_LLM_THRESHOLD_MS} ms."))
+
+    return (
+        {
+            "path": str(ledger_path),
+            "sample_size": len(rows),
+            "actionable_sample_size": len(actionable_rows),
+            "recent_actionable_sample_size": len(recent_actionable_rows),
+            "test_fixture_rows": len(test_fixture_rows),
+            "flows": _counter_dict(flow_counts),
+            "statuses": _counter_dict(status_counts),
+            "models": _counter_dict(model_counts),
+            "routes": _counter_dict(route_counts),
+            "providers": _counter_dict(provider_counts),
+            "error_categories": _counter_dict(error_counts),
+            "latency_ms": {
+                "p50": int(statistics.median(latencies)) if latencies else 0,
+                "p95": _p95(latencies),
+                "max": max(latencies) if latencies else 0,
+            },
+            "estimated_prompt_tokens": {
+                "p50": int(statistics.median(prompt_tokens)) if prompt_tokens else 0,
+                "p95": _p95(prompt_tokens),
+                "max": max(prompt_tokens) if prompt_tokens else 0,
+            },
+            "top_prompt_tokens": _top_rows(actionable_rows, "estimated_prompt_tokens"),
+            "top_latency_ms": _top_rows(actionable_rows, "latency_ms"),
+        },
+        issues,
+    )
+
+
+def _job_stores(data_root: Path) -> list[Path]:
+    return [
+        data_root / "run" / "jobs.json",
+        data_root / "run" / "team_dashboard_jobs.json",
+        data_root / "run" / "meeting_recorder_jobs.json",
+        data_root / "source_code_qa" / "sync_jobs.json",
+    ]
+
+
+def _extract_jobs(payload: Any, store: Path) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    raw_jobs = payload.get("jobs", payload)
+    if isinstance(raw_jobs, dict):
+        iterable = raw_jobs.values()
+    elif isinstance(raw_jobs, list):
+        iterable = raw_jobs
+    else:
+        return []
+    jobs: list[dict[str, Any]] = []
+    for item in iterable:
+        if isinstance(item, dict):
+            row = dict(item)
+            row["_store"] = store.name
+            jobs.append(row)
+    return jobs
+
+
+def _summarize_jobs(data_root: Path, limit: int, *, recent_hours: float) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    jobs: list[dict[str, Any]] = []
+    store_counts: Counter[str] = Counter()
+    for store in _job_stores(data_root):
+        payload = _read_json(store)
+        extracted = _extract_jobs(payload, store)
+        if extracted:
+            jobs.extend(extracted)
+            store_counts[store.name] += len(extracted)
+
+    jobs.sort(key=lambda row: _safe_int(row.get("updated_at") or row.get("completed_at") or row.get("created_at")), reverse=True)
+    sampled = jobs[:limit]
+    state_counts = Counter(str(row.get("state") or row.get("status") or "unknown") for row in sampled)
+    stage_counts = Counter(str(row.get("stage") or "unknown") for row in sampled)
+    action_counts = Counter(str(row.get("action") or "unknown") for row in sampled)
+    def is_problem_job(row: dict[str, Any]) -> bool:
+        state = str(row.get("state") or row.get("status") or "").lower()
+        stage = str(row.get("stage") or "").lower()
+        if state in {"failed", "error"} or stage in {"failed", "error", "interrupted"}:
+            return True
+        return bool(row.get("error")) and state != "completed"
+
+    problem_jobs = [row for row in sampled if is_problem_job(row)]
+    completed_with_stale_error = [
+        row
+        for row in sampled
+        if str(row.get("state") or row.get("status") or "").lower() == "completed" and bool(row.get("error"))
+    ]
+    active = [
+        row
+        for row in sampled
+        if str(row.get("state") or row.get("status") or "").lower() in {"running", "queued"}
+        or str(row.get("stage") or "").lower() in {"running", "queued"}
+    ]
+    issues: list[dict[str, str]] = []
+    if not jobs:
+        issues.append(_issue("warn", "job_store_empty", "No runtime job records found."))
+    now_ts = datetime.now(SGT).timestamp()
+    recent_cutoff = now_ts - max(1.0, float(recent_hours)) * 3600
+    recent_failed = [
+        row
+        for row in problem_jobs
+        if _safe_int(row.get("updated_at") or row.get("completed_at") or row.get("created_at")) >= recent_cutoff
+    ]
+    historical_failed = [row for row in problem_jobs if row not in recent_failed]
+    if recent_failed:
+        issues.append(_issue("warn", "job_failures", f"{len(recent_failed)} recent sampled jobs are failed, interrupted, or carry an error."))
+    if active:
+        issues.append(_issue("warn", "active_jobs", f"{len(active)} sampled jobs are still active."))
+
+    def compact(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "job_id": str(row.get("job_id") or row.get("id") or ""),
+            "store": str(row.get("_store") or ""),
+            "action": str(row.get("action") or "unknown"),
+            "state": str(row.get("state") or row.get("status") or "unknown"),
+            "stage": str(row.get("stage") or "unknown"),
+            "updated_at_sgt": _sgt_timestamp(row.get("updated_at") or row.get("completed_at") or row.get("created_at")),
+            "error_category": str(row.get("error_category") or row.get("error_code") or ""),
+            "retryable": bool(row.get("error_retryable") or row.get("stalled_retryable")),
+            "message": str(row.get("message") or row.get("error") or "")[:180],
+        }
+
+    return (
+        {
+            "sample_size": len(sampled),
+            "total_known": len(jobs),
+            "stores": _counter_dict(store_counts),
+            "states": _counter_dict(state_counts),
+            "stages": _counter_dict(stage_counts),
+            "actions": _counter_dict(action_counts),
+            "recent_problem_jobs": [compact(row) for row in recent_failed[:8]],
+            "historical_problem_jobs": [compact(row) for row in historical_failed[:8]],
+            "completed_with_stale_error": [compact(row) for row in completed_with_stale_error[:8]],
+            "active_jobs": [compact(row) for row in active[:8]],
+        },
+        issues,
+    )
+
+
+def _summarize_meeting_records(data_root: Path, limit: int, *, recent_hours: float) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    records_root = data_root / "meeting_records" / "records"
+    metadata_paths = sorted(records_root.glob("*/metadata.json"))
+    rows: list[dict[str, Any]] = []
+    for path in metadata_paths:
+        payload = _read_json(path)
+        if isinstance(payload, dict):
+            payload["_path"] = str(path)
+            rows.append(payload)
+    rows.sort(key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""), reverse=True)
+    sampled = rows[:limit]
+    statuses = Counter(str(row.get("status") or row.get("state") or "unknown") for row in sampled)
+    recent_cutoff = datetime.now(SGT).timestamp() - max(1.0, float(recent_hours)) * 3600
+    recent_rows = [
+        row
+        for row in sampled
+        if _event_timestamp(row, "updated_at", "created_at") >= recent_cutoff
+    ]
+    recent_statuses = Counter(str(row.get("status") or row.get("state") or "unknown") for row in recent_rows)
+    issues: list[dict[str, str]] = []
+    failed = recent_statuses.get("failed", 0) + recent_statuses.get("error", 0)
+    in_progress = recent_statuses.get("recorded", 0) + recent_statuses.get("processing", 0)
+    if failed:
+        issues.append(_issue("warn", "meeting_record_failures", f"{failed} sampled meeting records are failed or errored."))
+    if in_progress:
+        issues.append(_issue("warn", "meeting_records_in_progress", f"{in_progress} sampled meeting records are not completed or deleted."))
+    recent = [
+        {
+            "record_id": str(row.get("record_id") or row.get("id") or ""),
+            "status": str(row.get("status") or row.get("state") or "unknown"),
+            "updated_at": str(row.get("updated_at") or row.get("created_at") or ""),
+            "title": str(row.get("title") or row.get("meeting_title") or "")[:120],
+        }
+        for row in sampled[:5]
+    ]
+    return (
+        {
+            "records_root": str(records_root),
+            "sample_size": len(sampled),
+            "recent_sample_size": len(recent_rows),
+            "total_known": len(rows),
+            "statuses": _counter_dict(statuses),
+            "recent_statuses": _counter_dict(recent_statuses),
+            "recent": recent,
+        },
+        issues,
+    )
+
+
+def _source_code_qa_summary(data_root: Path, limit: int) -> tuple[list[str], list[dict[str, str]]]:
+    try:
+        from scripts.source_code_qa_ops_summary import build_summary
+    except Exception as error:  # pragma: no cover - defensive ops diagnostics
+        return [f"source_code_qa_ops_summary=unavailable error={type(error).__name__}: {error}"], [
+            _issue("warn", "source_code_qa_ops_unavailable", "Source Code QA ops summary import failed.")
+        ]
+    try:
+        lines = build_summary(data_root, limit=limit, strict=True)
+    except Exception as error:  # pragma: no cover - defensive ops diagnostics
+        return [f"source_code_qa_ops_summary=unavailable error={type(error).__name__}: {error}"], [
+            _issue("warn", "source_code_qa_ops_unavailable", "Source Code QA ops summary failed.")
+        ]
+    issues: list[dict[str, str]] = []
+    for line in lines:
+        if line.startswith("ops_summary_status=fail"):
+            issues.append(_issue("fail", "source_code_qa_ops_fail", "Source Code QA ops guard reports fail."))
+        elif line.startswith("ops_summary_issues="):
+            issues.append(_issue("fail", "source_code_qa_ops_issues", line.split("=", 1)[1]))
+    return lines, issues
+
+
+def _permission_matrix() -> list[dict[str, str]]:
+    return [
+        {"surface": "Source Code QA", "visibility": "signed-in portal users", "note": "repo access remains constrained by configured mappings and backend gates"},
+        {"surface": "PRD Briefing Tool", "visibility": "admin only", "note": "non-admin users are denied at route level"},
+        {"surface": "PRD Self-Assessment", "visibility": "signed-in portal users", "note": "Generate PRD Summary is admin only"},
+        {"surface": "SeaTalk Management", "visibility": "admin only", "note": "dashboard/admin operations are restricted"},
+        {"surface": "Monthly Report / Team Dashboard", "visibility": "admin only", "note": "report generation paths are privileged"},
+        {"surface": "Meeting Recorder", "visibility": "admin only", "note": "recording and processing require admin access"},
+        {"surface": "Work Memory / Superagent", "visibility": "admin only", "note": "memory and automation views are privileged"},
+        {"surface": "VPN Connection", "visibility": "admin only", "note": "network operations are privileged"},
+    ]
+
+
+def _release_status_lines() -> tuple[list[str], list[dict[str, str]]]:
+    try:
+        from scripts.release_status import build_status_lines
+
+        return build_status_lines(env=os.environ), []
+    except Exception as error:  # pragma: no cover - defensive ops diagnostics
+        return [f"release_status=unavailable error={type(error).__name__}: {error}"], [
+            _issue("warn", "release_status_unavailable", "Release status probes failed.")
+        ]
+
+
+def build_report(
+    data_root: Path,
+    *,
+    limit: int = 200,
+    recent_hours: float = 72.0,
+    include_release_status: bool = False,
+) -> dict[str, Any]:
+    data_root = data_root.expanduser().resolve()
+    issues: list[dict[str, str]] = []
+    if not data_root.exists():
+        issues.append(_issue("fail", "data_root_missing", f"Data root missing: {data_root}"))
+
+    llm, llm_issues = _summarize_llm_ledger(data_root, limit, recent_hours=recent_hours)
+    jobs, job_issues = _summarize_jobs(data_root, limit, recent_hours=recent_hours)
+    meetings, meeting_issues = _summarize_meeting_records(data_root, limit, recent_hours=recent_hours)
+    scqa_lines, scqa_issues = _source_code_qa_summary(data_root, limit)
+    issues.extend(llm_issues)
+    issues.extend(job_issues)
+    issues.extend(meeting_issues)
+    issues.extend(scqa_issues)
+
+    release_lines: list[str] = []
+    if include_release_status:
+        release_lines, release_issues = _release_status_lines()
+        issues.extend(release_issues)
+
+    if any(issue["severity"] == "fail" for issue in issues):
+        status = "fail"
+    elif issues:
+        status = "warn"
+    else:
+        status = "pass"
+
+    return {
+        "generated_at_sgt": datetime.now(SGT).strftime("%Y-%m-%d %H:%M:%S SGT"),
+        "status": status,
+        "data_root": str(data_root),
+        "limit": limit,
+        "recent_hours": recent_hours,
+        "llm": llm,
+        "jobs": jobs,
+        "meeting_records": meetings,
+        "source_code_qa": {"lines": scqa_lines},
+        "permissions": _permission_matrix(),
+        "release_status": {"included": include_release_status, "lines": release_lines},
+        "issues": issues,
+    }
+
+
+def format_report(report: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    lines.append("== Portal Runtime Doctor ==")
+    lines.append(f"generated_at_sgt={report['generated_at_sgt']}")
+    lines.append(f"data_root={report['data_root']}")
+    lines.append(f"overall_status={report['status']}")
+
+    llm = report["llm"]
+    lines.append("")
+    lines.append("== LLM Ledger ==")
+    lines.append(f"ledger_path={llm['path']}")
+    lines.append(f"ledger_sample_size={llm['sample_size']}")
+    lines.append(
+        f"llm_actionable_sample_size={llm['actionable_sample_size']} "
+        f"recent_actionable_sample_size={llm['recent_actionable_sample_size']} "
+        f"test_fixture_rows={llm['test_fixture_rows']}"
+    )
+    lines.append(f"llm_flows={_counter_text(llm['flows'])}")
+    lines.append(f"llm_statuses={_counter_text(llm['statuses'])}")
+    lines.append(f"llm_models={_counter_text(llm['models'])}")
+    lines.append(f"llm_routes={_counter_text(llm['routes'])}")
+    lines.append(f"llm_providers={_counter_text(llm['providers'])}")
+    lines.append(f"llm_error_categories={_counter_text(llm['error_categories'])}")
+    lines.append(
+        "llm_latency_ms="
+        f"p50={llm['latency_ms']['p50']} p95={llm['latency_ms']['p95']} max={llm['latency_ms']['max']}"
+    )
+    lines.append(
+        "llm_prompt_tokens="
+        f"p50={llm['estimated_prompt_tokens']['p50']} "
+        f"p95={llm['estimated_prompt_tokens']['p95']} "
+        f"max={llm['estimated_prompt_tokens']['max']}"
+    )
+    for row in llm["top_prompt_tokens"]:
+        lines.append(
+            "llm_top_prompt_tokens="
+            f"{row['value']} flow={row['flow']} route={row['route']} model={row['model_id']} "
+            f"status={row['status']} at={row['timestamp_sgt']} mode={row['prompt_mode']}"
+        )
+    for row in llm["top_latency_ms"]:
+        lines.append(
+            "llm_top_latency_ms="
+            f"{row['value']} flow={row['flow']} route={row['route']} model={row['model_id']} "
+            f"status={row['status']} at={row['timestamp_sgt']} mode={row['prompt_mode']}"
+        )
+
+    jobs = report["jobs"]
+    lines.append("")
+    lines.append("== Jobs ==")
+    lines.append(f"job_sample_size={jobs['sample_size']} total_known={jobs['total_known']}")
+    lines.append(f"job_stores={_counter_text(jobs['stores'])}")
+    lines.append(f"job_states={_counter_text(jobs['states'])}")
+    lines.append(f"job_stages={_counter_text(jobs['stages'])}")
+    lines.append(f"job_actions={_counter_text(jobs['actions'])}")
+    for row in jobs["recent_problem_jobs"]:
+        lines.append(
+            "job_problem="
+            f"{row['updated_at_sgt']} store={row['store']} action={row['action']} "
+            f"state={row['state']} stage={row['stage']} retryable={row['retryable']} message={row['message']}"
+        )
+    for row in jobs["historical_problem_jobs"]:
+        lines.append(
+            "job_historical_problem="
+            f"{row['updated_at_sgt']} store={row['store']} action={row['action']} "
+            f"state={row['state']} stage={row['stage']} retryable={row['retryable']} message={row['message']}"
+        )
+    for row in jobs["completed_with_stale_error"]:
+        lines.append(
+            "job_completed_with_stale_error="
+            f"{row['updated_at_sgt']} store={row['store']} action={row['action']} message={row['message']}"
+        )
+    for row in jobs["active_jobs"]:
+        lines.append(
+            "job_active="
+            f"{row['updated_at_sgt']} store={row['store']} action={row['action']} "
+            f"state={row['state']} stage={row['stage']} retryable={row['retryable']} message={row['message']}"
+        )
+
+    meetings = report["meeting_records"]
+    lines.append("")
+    lines.append("== Meeting Records ==")
+    lines.append(f"meeting_records_root={meetings['records_root']}")
+    lines.append(
+        f"meeting_record_sample_size={meetings['sample_size']} "
+        f"recent_sample_size={meetings['recent_sample_size']} total_known={meetings['total_known']}"
+    )
+    lines.append(f"meeting_record_statuses={_counter_text(meetings['statuses'])}")
+    lines.append(f"meeting_record_recent_statuses={_counter_text(meetings['recent_statuses'])}")
+
+    lines.append("")
+    lines.append("== Source Code QA Ops ==")
+    lines.extend(report["source_code_qa"]["lines"])
+
+    if report["release_status"]["included"]:
+        lines.append("")
+        lines.append("== Release Status ==")
+        lines.extend(report["release_status"]["lines"])
+
+    lines.append("")
+    lines.append("== Permission Snapshot ==")
+    for row in report["permissions"]:
+        lines.append(f"permission={row['surface']} visibility={row['visibility']} note={row['note']}")
+
+    lines.append("")
+    lines.append("== Doctor Issues ==")
+    if report["issues"]:
+        for issue in report["issues"]:
+            lines.append(f"{issue['severity']}:{issue['code']} {issue['message']}")
+    else:
+        lines.append("none")
+    return lines
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data-root", default=os.environ.get("TEAM_PORTAL_DATA_DIR"))
+    parser.add_argument("--limit", type=int, default=200)
+    parser.add_argument("--recent-hours", type=float, default=72.0, help="Only warn on job failures updated within this window.")
+    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON instead of text.")
+    parser.add_argument("--strict", action="store_true", help="Exit non-zero only when the doctor status is fail.")
+    parser.add_argument("--include-release-status", action="store_true", help="Include release status probes; may call gcloud/curl.")
+    args = parser.parse_args(argv)
+
+    report = build_report(
+        _resolve_data_root(args.data_root),
+        limit=max(1, args.limit),
+        recent_hours=max(1.0, float(args.recent_hours)),
+        include_release_status=bool(args.include_release_status),
+    )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        for line in format_report(report):
+            print(line)
+    return 1 if args.strict and report["status"] == "fail" else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

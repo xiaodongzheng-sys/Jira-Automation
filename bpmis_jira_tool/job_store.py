@@ -9,6 +9,10 @@ import time
 from typing import Any
 import uuid
 
+INTERRUPTED_JOB_MESSAGE = "This job was interrupted by a server restart. Please start it again."
+INTERRUPTED_JOB_ERROR_CATEGORY = "server_restart"
+INTERRUPTED_JOB_ERROR_CODE = "job_interrupted"
+
 
 @dataclass
 class JobState:
@@ -68,11 +72,20 @@ class JobStore:
             except TypeError:
                 continue
             if mark_interrupted and job.state in {"queued", "running"}:
+                now = time.time()
                 job.state = "failed"
                 job.stage = "failed"
-                job.message = "This job was interrupted by a server restart. Please start it again."
+                job.message = INTERRUPTED_JOB_MESSAGE
                 job.error = job.message
-                job.updated_at = time.time()
+                job.error_category = INTERRUPTED_JOB_ERROR_CATEGORY
+                job.error_code = INTERRUPTED_JOB_ERROR_CODE
+                job.error_retryable = True
+                job.completed_at = now
+                job.queued_position = 0
+                job.eta_seconds_range = []
+                job.last_progress_at = now
+                job.stalled_retryable = False
+                job.updated_at = now
                 self._loaded_jobs_interrupted = True
             jobs[str(job_id)] = job
         return jobs
@@ -184,6 +197,10 @@ class JobStore:
                     job.started_at = job.started_at or time.time()
                     job.queued_position = 0
                     job.eta_seconds_range = []
+                    job.error = None
+                    job.error_category = ""
+                    job.error_code = ""
+                    job.error_retryable = False
                 job.state = state
             if stage is not None:
                 job.stage = stage
@@ -212,6 +229,10 @@ class JobStore:
             job.message = "Finished."
             job.results = results
             job.notice = notice
+            job.error = None
+            job.error_category = ""
+            job.error_code = ""
+            job.error_retryable = False
             job.completed_at = time.time()
             job.queued_position = 0
             job.eta_seconds_range = []
@@ -346,4 +367,3 @@ class JobStore:
                 return None
             latest = max(candidates, key=lambda item: item.updated_at)
             return asdict(latest)
-

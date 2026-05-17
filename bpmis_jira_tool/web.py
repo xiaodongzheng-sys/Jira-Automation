@@ -2879,7 +2879,7 @@ def _require_gmail_seatalk_demo_access(settings: Settings, *, api: bool = False)
         if api:
             return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
         flash(message, "error")
-        return redirect(url_for("index"))
+        return redirect(url_for("access_denied"))
     return None
 
 
@@ -2892,7 +2892,7 @@ def _require_meeting_recorder_access(settings: Settings, *, api: bool = False):
         if api:
             return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
         flash(message, "error")
-        return redirect(url_for("index"))
+        return redirect(url_for("access_denied"))
     return None
 
 
@@ -2909,7 +2909,7 @@ def _require_work_memory_access(settings: Settings, *, api: bool = False):
         if api:
             return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
         flash(message, "error")
-        return redirect(url_for("index"))
+        return redirect(url_for("access_denied"))
     return None
 
 
