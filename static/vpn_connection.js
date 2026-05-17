@@ -12,6 +12,8 @@
   let profiles = [];
   let currentVpnStatus = {};
   let lastRequestedProfileId = window.sessionStorage?.getItem('vpnConnectionLastProfileId') || '';
+  let statusRetryTimer = 0;
+  let statusPollTimer = 0;
 
   const escapeHtml = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -39,6 +41,20 @@
   const delay = (milliseconds) => new Promise((resolve) => {
     window.setTimeout(resolve, milliseconds);
   });
+
+  const clearStatusRetry = () => {
+    if (statusRetryTimer) {
+      window.clearTimeout(statusRetryTimer);
+      statusRetryTimer = 0;
+    }
+  };
+
+  const scheduleStatusRetry = () => {
+    clearStatusRetry();
+    statusRetryTimer = window.setTimeout(() => {
+      loadProfiles({ background: true });
+    }, 10000);
+  };
 
   const requestJson = async (url, options = {}) => {
     let response;
@@ -123,11 +139,16 @@
     renderProfiles();
   };
 
-  const loadProfiles = async () => {
-    setInlineStatus('Loading VPN profiles...');
+  const loadProfiles = async ({ background = false } = {}) => {
+    if (!background) {
+      setInlineStatus('Loading VPN profiles...');
+    }
     try {
       applyPayload(await requestJson(root.dataset.profilesUrl));
-      setInlineStatus('');
+      clearStatusRetry();
+      if (!background) {
+        setInlineStatus('');
+      }
     } catch (error) {
       if (isTransientLocalAgentError(error)) {
         setInlineStatus('Temporary local-agent tunnel issue. Retrying Cisco status...');
@@ -143,6 +164,7 @@
       await delay(waitMs);
       try {
         applyPayload(await requestJson(root.dataset.profilesUrl));
+        clearStatusRetry();
         setInlineStatus('');
         return;
       } catch (error) {
@@ -152,7 +174,8 @@
         }
       }
     }
-    setInlineStatus('Temporary local-agent tunnel issue. Click Refresh to check the latest Cisco status.', 'error');
+    setInlineStatus('Temporary local-agent tunnel issue. Still retrying Cisco status automatically.', 'error');
+    scheduleStatusRetry();
   };
 
   const refreshProfilesAfterInterruptedConnect = async () => {
@@ -200,6 +223,16 @@
 
   root.querySelector('[data-vpn-refresh]')?.addEventListener('click', loadProfiles);
   root.querySelector('[data-vpn-reset]')?.addEventListener('click', resetForm);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      loadProfiles({ background: true });
+    }
+  });
+  statusPollTimer = window.setInterval(() => {
+    if (document.visibilityState === 'visible') {
+      loadProfiles({ background: true });
+    }
+  }, 30000);
 
   list.addEventListener('click', async (event) => {
     const editId = event.target.closest('[data-vpn-edit]')?.dataset.vpnEdit;
