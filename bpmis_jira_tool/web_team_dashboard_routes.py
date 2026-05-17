@@ -354,8 +354,24 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         access_gate = _require_team_dashboard_access(settings, api=True)
         if access_gate is not None:
             return access_gate
-        payload = version_plan_payload(_get_team_dashboard_config_store().load())
-        return jsonify({"status": "ok", "sync_state": payload.get("sync_state") or {}})
+        store = _get_team_dashboard_config_store()
+        payload = version_plan_payload(store.load())
+        sync_state = payload.get("sync_state") if isinstance(payload.get("sync_state"), dict) else {}
+        sync_queued = False
+        with _VERSION_PLAN_SYNC_LOCK:
+            sync_running = _VERSION_PLAN_SYNC_RUNNING
+        if str(sync_state.get("state") or "").strip() == "running" and not sync_running:
+            try:
+                sync_queued = _start_version_plan_sync_if_needed(force=False)
+            except (ConfigError, ToolError) as error:
+                payload = version_plan_payload(store.save(mark_version_plan_sync_error(store.load(), str(error))))
+            except Exception as error:  # noqa: BLE001
+                current_app.logger.exception("Team Dashboard Version Plan stale sync could not be restarted.")
+                payload = version_plan_payload(store.save(mark_version_plan_sync_error(store.load(), str(error))))
+            else:
+                if sync_queued:
+                    payload = version_plan_payload(store.load())
+        return jsonify({"status": "ok", "sync_state": payload.get("sync_state") or {}, "sync_queued": sync_queued})
 
 
     def team_dashboard_version_plan_cell():
