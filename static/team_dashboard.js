@@ -569,7 +569,8 @@
             data-version-plan-bundle-toggle
             data-version-plan-bundle-id="${escapeHtml(key)}"
             aria-expanded="${collapsed ? 'false' : 'true'}"
-          >${collapsed ? 'Expand' : 'Collapse'}</button>
+            aria-label="${collapsed ? 'Expand' : 'Collapse'} ${escapeHtml(versionPlanBundleTitle(bundle))}"
+          >${collapsed ? '+' : '-'}</button>
         `}
         <strong>${escapeHtml(versionPlanBundleTitle(bundle))}</strong>
       </div>
@@ -2821,7 +2822,8 @@
       bundle?.classList.toggle('is-collapsed', nextCollapsed);
       if (body) body.hidden = nextCollapsed;
       toggle.setAttribute('aria-expanded', nextCollapsed ? 'false' : 'true');
-      toggle.textContent = nextCollapsed ? 'Expand' : 'Collapse';
+      toggle.setAttribute('aria-label', `${nextCollapsed ? 'Expand' : 'Collapse'} ${bundleId}`);
+      toggle.textContent = nextCollapsed ? '+' : '-';
       return;
     }
     const button = event.target.closest('[data-version-plan-row-action]');
