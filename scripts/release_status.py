@@ -7,10 +7,13 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 from typing import Any, Mapping
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 
 def _env_value(key: str, env: Mapping[str, str]) -> str:
@@ -101,7 +104,7 @@ def _version_plan_firestore_status(*, env: Mapping[str, str]) -> str:
                     return None, ""
                 return snapshot.to_dict() or {}, ""
             except Exception as rest_error:
-                return None, f"{type(sdk_error).__name__}: {sdk_error}; REST fallback: {type(rest_error).__name__}: {rest_error}"
+                return None, f"{type(sdk_error).__name__}; REST fallback: {type(rest_error).__name__}"
 
     try:
         payload, error = _load_payload()
@@ -110,7 +113,7 @@ def _version_plan_firestore_status(*, env: Mapping[str, str]) -> str:
         if payload is None:
             return f"status=missing document=portal/{document} environment={stage}"
     except Exception as error:
-        return f"status=unavailable document=portal/{document} error={type(error).__name__}: {error}"
+        return f"status=unavailable document=portal/{document} error={type(error).__name__}"
     return (
         f"status=ok document=portal/{document} "
         f"environment={payload.get('environment') or stage} "

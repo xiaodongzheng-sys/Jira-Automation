@@ -439,10 +439,13 @@ def _release_status_lines() -> tuple[list[str], list[dict[str, str]]]:
 
 
 def _version_plan_firestore_summary() -> tuple[dict[str, str], list[dict[str, str]]]:
-    stage = str(os.getenv("VERSION_PLAN_FIRESTORE_ENVIRONMENT") or os.getenv("TEAM_PORTAL_STAGE") or "live").strip().lower()
-    document = str(os.getenv("VERSION_PLAN_FIRESTORE_DOCUMENT") or f"version_plan_{'uat' if stage == 'uat' else 'live'}").strip()
-    project = str(os.getenv("VERSION_PLAN_FIRESTORE_PROJECT") or os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip()
-    backend = str(os.getenv("VERSION_PLAN_STORE_BACKEND") or "").strip().lower()
+    from scripts.release_status import _env_value
+
+    env = os.environ
+    stage = str(_env_value("VERSION_PLAN_FIRESTORE_ENVIRONMENT", env) or _env_value("TEAM_PORTAL_STAGE", env) or "live").strip().lower()
+    document = str(_env_value("VERSION_PLAN_FIRESTORE_DOCUMENT", env) or f"version_plan_{'uat' if stage == 'uat' else 'live'}").strip()
+    project = str(_env_value("VERSION_PLAN_FIRESTORE_PROJECT", env) or _env_value("GOOGLE_CLOUD_PROJECT", env) or "").strip()
+    backend = str(_env_value("VERSION_PLAN_STORE_BACKEND", env) or "").strip().lower()
     summary = {
         "backend": backend or "auto",
         "document": f"portal/{document}",
