@@ -85,6 +85,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
     _backfill_team_dashboard_empty_project_jira_tasks = ctx._backfill_team_dashboard_empty_project_jira_tasks
     _remove_team_dashboard_zero_jira_pending_live_projects = ctx._remove_team_dashboard_zero_jira_pending_live_projects
     _hydrate_team_dashboard_actual_mandays = ctx._hydrate_team_dashboard_actual_mandays
+    _queue_team_dashboard_actual_mandays_refresh = ctx._queue_team_dashboard_actual_mandays_refresh
     _team_dashboard_combined_request_timings = ctx._team_dashboard_combined_request_timings
     _team_dashboard_combined_fetch_stats = ctx._team_dashboard_combined_fetch_stats
     _store_team_dashboard_task_payload = ctx._store_team_dashboard_task_payload
@@ -677,6 +678,13 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             cached_team = None if force_reload else _cached_team_dashboard_task_payload(config, team_key, emails)
             _team_dashboard_add_timing(timing_stats, "cache_check", cache_started_at)
             if cached_team is not None:
+                _queue_team_dashboard_actual_mandays_refresh(
+                    settings,
+                    store,
+                    config,
+                    [cached_team],
+                    start_background=True,
+                )
                 timing_stats["total"] = round(time.monotonic() - route_started_at, 3)
                 cached_team["timing_stats"] = timing_stats
                 cached_team["elapsed_seconds"] = timing_stats["total"]
@@ -707,8 +715,15 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
                 _remove_team_dashboard_zero_jira_pending_live_projects(team_payload)
                 _team_dashboard_add_timing(timing_stats, "backfill_zero_jira_projects", step_started_at)
                 step_started_at = time.monotonic()
-                _hydrate_team_dashboard_actual_mandays(bpmis_client, team_payload)
-                _team_dashboard_add_timing(timing_stats, "actual_mandays", step_started_at)
+                pending_manday_project_ids = _queue_team_dashboard_actual_mandays_refresh(
+                    settings,
+                    store,
+                    config,
+                    [team_payload],
+                    bpmis_client=bpmis_client,
+                    start_background=False,
+                )
+                _team_dashboard_add_timing(timing_stats, "actual_mandays_cache", step_started_at)
                 timing_stats.update(_team_dashboard_combined_request_timings(bpmis_client, biz_bpmis_client))
                 team_payload["elapsed_seconds"] = round(time.monotonic() - started_at, 2)
                 team_payload["fetch_stats"] = _team_dashboard_combined_fetch_stats(bpmis_client, biz_bpmis_client)
@@ -721,6 +736,14 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
                 timing_stats["total"] = round(time.monotonic() - started_at, 2)
                 team_payload["elapsed_seconds"] = timing_stats["total"]
                 team_payload["timing_stats"] = timing_stats
+                _queue_team_dashboard_actual_mandays_refresh(
+                    settings,
+                    store,
+                    config,
+                    [team_payload],
+                    bpmis_client=bpmis_client,
+                    start_background=True,
+                ) if pending_manday_project_ids else None
                 _log_portal_event(
                     "team_dashboard_tasks_team_loaded",
                     **_build_request_log_context(

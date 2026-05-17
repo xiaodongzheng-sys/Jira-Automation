@@ -1726,6 +1726,69 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("fetch_stats", first.get_json()["team"])
         self.assertEqual(reloaded.get_json()["team"]["under_prd"][0]["jira_tickets"][0]["jira_id"], "AF-2")
 
+    def test_team_dashboard_actual_mandays_are_queued_without_blocking_task_load(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "ENV_FILE": os.devnull,
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_DASHBOARD_JIRA_RELEASE_AFTER": "2026-04-29",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(
+                {
+                    "teams": {
+                        "AF": {"member_emails": ["af@npt.sg"]},
+                        "CRMS": {"member_emails": []},
+                        "GRC": {"member_emails": []},
+                    }
+                }
+            )
+
+            class FakeTeamDashboardClient:
+                def list_biz_projects_for_pm_email(self, email):
+                    return []
+
+                def list_jira_tasks_created_by_emails(self, emails, **kwargs):
+                    return [
+                        {
+                            "jira_id": "AF-1",
+                            "jira_title": "Queued Mandays",
+                            "pm_email": "af@npt.sg",
+                            "jira_status": "Waiting",
+                            "parent_project": {
+                                "bpmis_id": "AF-PROJ",
+                                "project_name": "AF Project",
+                                "market": "SG",
+                                "priority": "P1",
+                                "regional_pm_pic": "af@npt.sg",
+                            },
+                        }
+                    ]
+
+            fake_client = FakeTeamDashboardClient()
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
+                with patch("bpmis_jira_tool.web._start_team_dashboard_actual_mandays_refresh", return_value=["AF-PROJ"]) as start_refresh:
+                    with app.test_client() as client:
+                        with client.session_transaction() as session:
+                            session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                            session["google_credentials"] = {"token": "x"}
+                        response = client.get("/api/team-dashboard/tasks?team=AF&reload=1")
+
+        self.assertEqual(response.status_code, 200)
+        project = response.get_json()["team"]["under_prd"][0]
+        self.assertEqual(project["bpmis_id"], "AF-PROJ")
+        self.assertTrue(project["actual_mandays_pending"])
+        self.assertEqual(project["actual_mandays"], "")
+        start_refresh.assert_called_once()
+        self.assertEqual(start_refresh.call_args.args[3], ["AF-PROJ"])
+
     def test_team_dashboard_key_project_read_and_write_are_admin_only(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
@@ -1881,13 +1944,24 @@ class WebPortalFeatureTests(unittest.TestCase):
         ):
             app = create_app()
             app.testing = True
+            cached_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(
                 {
                     "teams": {
                         "AF": {"member_emails": ["af@npt.sg", "xiaodong.zheng@npt.sg"]},
                         "CRMS": {"member_emails": ["cr@npt.sg"]},
                         "GRC": {"member_emails": ["ops@npt.sg"]},
-                    }
+                    },
+                    "actual_mandays_cache": {
+                        "version": 1,
+                        "updated_at": cached_at,
+                        "projects": {
+                            "225159": {"value": 5.5, "cached_at": cached_at},
+                            "225300": {"value": 2, "cached_at": cached_at},
+                            "300000": {"value": 0, "cached_at": cached_at},
+                            "300300": {"value": 1, "cached_at": cached_at},
+                        },
+                    },
                 }
             )
 
@@ -3120,6 +3194,14 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("teamTaskUrl(normalizedTeamKey, true)", script)
         self.assertIn("loadAllTeamTasks();", script)
         self.assertIn("loadTeamTasks(loadButton.dataset.teamDashboardLoadTeam || '')", script)
+
+    def test_team_dashboard_frontend_polls_actual_mandays_cache(self):
+        script = Path("static/team_dashboard.js").read_text(encoding="utf-8")
+        self.assertIn("actualMandaysPollTimers", script)
+        self.assertIn("teamHasPendingMandays", script)
+        self.assertIn("schedulePendingActualMandaysPolls(taskTeams)", script)
+        self.assertIn("teamTaskUrl(normalizedTeamKey, false)", script)
+        self.assertIn("Actual Mandays updating", script)
 
     def test_team_dashboard_version_plan_frontend_uses_sheet_format(self):
         script = Path("static/team_dashboard.js").read_text(encoding="utf-8")

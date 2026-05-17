@@ -169,6 +169,8 @@
   const pmFilterState = {};
   const expandedPanels = {};
   const jiraPageState = {};
+  const actualMandaysPollTimers = new Map();
+  const actualMandaysPollAttempts = new Map();
   const seatalkNameMappingState = new WeakMap();
 
   const setStatus = (node, message, tone = 'neutral') => {
@@ -1224,7 +1226,10 @@
       priority_default: 'Default from SP/P0 priority',
       none: 'Not Key Project',
     }[project.key_project_source] || 'Not Key Project';
-    const actualMandays = formatMandays(project.actual_mandays);
+    const actualMandays = projectMandaysLabel(project);
+    const mandaysTitle = project.actual_mandays_pending
+      ? 'Actual Mandays is refreshing in the background.'
+      : (project.actual_mandays_cached_at ? `Actual Mandays cached at ${formatSingaporeTimestamp(project.actual_mandays_cached_at)}.` : 'Actual Mandays');
     return `
       <article class="bpmis-project-card team-dashboard-project-card">
         <div class="bpmis-project-card-main">
@@ -1255,7 +1260,7 @@
           </div>
           <div class="team-dashboard-project-mandays">
             <span>Actual Mandays</span>
-            <strong>${escapeHtml(actualMandays)}</strong>
+            <strong title="${escapeHtml(mandaysTitle)}">${escapeHtml(actualMandays)}</strong>
           </div>
           <div class="team-dashboard-project-count">
             <span>Jira</span>
@@ -1306,6 +1311,20 @@
     if (!Number.isFinite(numeric)) return String(value || '-');
     if (Number.isInteger(numeric)) return String(numeric);
     return String(Math.round(numeric * 10) / 10);
+  };
+
+  const projectMandaysLabel = (project) => {
+    const hasValue = project.actual_mandays !== null && project.actual_mandays !== undefined && project.actual_mandays !== '';
+    if (hasValue) return formatMandays(project.actual_mandays);
+    return project.actual_mandays_pending ? '...' : '-';
+  };
+
+  const teamHasPendingMandays = (team) => {
+    const projects = [
+      ...(Array.isArray(team?.under_prd) ? team.under_prd : []),
+      ...(Array.isArray(team?.pending_live) ? team.pending_live : []),
+    ];
+    return projects.some((project) => project && project.actual_mandays_pending);
   };
 
   const renderSection = (title, projects, sectionKey) => {
@@ -1364,6 +1383,11 @@
     if (elapsed > 0) parts.push(`Loaded in ${formatDuration(elapsed)}`);
     const apiCalls = Number(team.fetch_stats?.api_call_count || 0);
     if (apiCalls > 0) parts.push(`${apiCalls} upstream calls`);
+    const pendingMandays = Number(team.actual_mandays_status?.pending_count || 0);
+    const staleMandays = Number(team.actual_mandays_status?.stale_count || 0);
+    if (pendingMandays > 0) {
+      parts.push(`Actual Mandays updating ${pendingMandays}${staleMandays ? ` (${staleMandays} stale)` : ''}`);
+    }
     const rowsScanned = Number(team.fetch_stats?.issue_rows_scanned || 0);
     const issuePages = Number(team.fetch_stats?.issue_list_page_count || 0);
     const treeRows = Number(team.fetch_stats?.issue_tree_rows_scanned || 0);
@@ -1708,6 +1732,7 @@
       taskTeams = await configuredTeams();
       renderTeams(taskTeams);
       updateTaskSummary(taskTeams);
+      schedulePendingActualMandaysPolls(taskTeams);
       const restored = taskTeams.filter((team) => team.loaded).length;
       setStatus(
         taskStatus,
@@ -1737,8 +1762,52 @@
     };
   };
 
+  const scheduleActualMandaysPollForTeam = (teamKey) => {
+    const normalizedTeamKey = String(teamKey || '').trim();
+    if (!normalizedTeamKey || actualMandaysPollTimers.has(normalizedTeamKey)) return;
+    if (Number(actualMandaysPollAttempts.get(normalizedTeamKey) || 0) >= 20) return;
+    const timer = window.setTimeout(async () => {
+      actualMandaysPollTimers.delete(normalizedTeamKey);
+      const currentTeam = taskTeams.find((team) => String(team.team_key || '') === normalizedTeamKey);
+      if (!currentTeam || currentTeam.loading || !teamHasPendingMandays(currentTeam)) return;
+      actualMandaysPollAttempts.set(normalizedTeamKey, Number(actualMandaysPollAttempts.get(normalizedTeamKey) || 0) + 1);
+      try {
+        const response = await fetch(teamTaskUrl(normalizedTeamKey, false), {
+          headers: { Accept: 'application/json' },
+          credentials: 'same-origin',
+          cache: 'no-store',
+        });
+        const payload = await readJson(response, 'Could not refresh Actual Mandays.');
+        const loadedTeam = payload.team || (Array.isArray(payload.teams) ? payload.teams[0] : null);
+        if (!loadedTeam) throw new Error(`No Jira payload returned for ${currentTeam.label || normalizedTeamKey}.`);
+        const mergedTeam = mergeLoadedTeam(currentTeam, loadedTeam, payload.status);
+        taskTeams = taskTeams.map((team) => String(team.team_key || '') === normalizedTeamKey ? mergedTeam : team);
+        saveCachedTeam(mergedTeam);
+        renderTeams(taskTeams);
+        updateTaskSummary(taskTeams);
+        if (teamHasPendingMandays(mergedTeam)) {
+          scheduleActualMandaysPollForTeam(normalizedTeamKey);
+        } else {
+          actualMandaysPollAttempts.delete(normalizedTeamKey);
+        }
+      } catch (error) {
+        if (teamHasPendingMandays(currentTeam)) scheduleActualMandaysPollForTeam(normalizedTeamKey);
+      }
+    }, 3000);
+    actualMandaysPollTimers.set(normalizedTeamKey, timer);
+  };
+
+  const schedulePendingActualMandaysPolls = (teams) => {
+    (Array.isArray(teams) ? teams : []).forEach((team) => {
+      if (team?.loaded && teamHasPendingMandays(team)) scheduleActualMandaysPollForTeam(team.team_key);
+    });
+  };
+
   const loadAllTeamTasks = async () => {
     if (!taskTeams.length) return;
+    actualMandaysPollTimers.forEach((timer) => window.clearTimeout(timer));
+    actualMandaysPollTimers.clear();
+    actualMandaysPollAttempts.clear();
     const loadingCount = taskTeams.length;
     taskTeams = taskTeams.map((team) => ({
       ...team,
@@ -1798,6 +1867,7 @@
     }
     renderTeams(taskTeams);
     updateTaskSummary(taskTeams);
+    schedulePendingActualMandaysPolls(taskTeams);
   };
 
   const loadTeamTasks = async (teamKey = '') => {
@@ -1812,6 +1882,10 @@
       return;
     }
     const targetTeam = taskTeams[targetIndex];
+    const existingTimer = actualMandaysPollTimers.get(normalizedTeamKey);
+    if (existingTimer) window.clearTimeout(existingTimer);
+    actualMandaysPollTimers.delete(normalizedTeamKey);
+    actualMandaysPollAttempts.delete(normalizedTeamKey);
     taskTeams = taskTeams.map((team, index) => index === targetIndex ? {
       ...team,
       loading: true,
@@ -1851,6 +1925,7 @@
     }
     renderTeams(taskTeams);
     updateTaskSummary(taskTeams);
+    schedulePendingActualMandaysPolls(taskTeams);
   };
 
   const emailsFromTextarea = (node) => String(node?.value || '')

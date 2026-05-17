@@ -1349,13 +1349,15 @@ class BPMISDirectApiClient(BPMISClient):
         return results
 
     def _calculate_actual_mandays_for_project(self, project_issue_id: str) -> float:
-        total = 0.0
-        for task in self._list_open_project_task_rows_via_tree(project_issue_id):
-            task_id = self._extract_issue_identifier(task)
-            if not task_id:
-                continue
-            total += self._sum_open_subtask_story_points(task_id)
-        return total
+        task_ids = [
+            task_id
+            for task_id in (
+                self._extract_issue_identifier(task)
+                for task in self._list_open_project_task_rows_via_tree(project_issue_id)
+            )
+            if task_id
+        ]
+        return self._sum_open_subtask_story_points_for_tasks(task_ids)
 
     def _list_open_project_task_rows_via_tree(self, project_issue_id: str) -> list[dict[str, Any]]:
         project_id = str(project_issue_id or "").strip()
@@ -1414,45 +1416,56 @@ class BPMISDirectApiClient(BPMISClient):
         task_id = str(task_issue_id or "").strip()
         if not task_id:
             return 0.0
-        try:
-            task_id_value: int | str = int(task_id)
-        except ValueError:
-            task_id_value = task_id
+        return self._sum_open_subtask_story_points_for_tasks([task_id])
+
+    def _sum_open_subtask_story_points_for_tasks(self, task_issue_ids: list[str]) -> float:
+        task_ids = [str(task_issue_id or "").strip() for task_issue_id in task_issue_ids]
+        task_ids = list(dict.fromkeys(task_id for task_id in task_ids if task_id))
+        if not task_ids:
+            return 0.0
+        task_id_set = set(task_ids)
         total = 0.0
-        page = 1
-        page_size = 200
-        while True:
-            try:
-                response = self._api_request(
-                    "/api/v1/issues/list",
-                    params={
-                        "search": json.dumps(
-                            {
-                                "joinType": "and",
-                                "subQueries": [{"parentIds": [task_id_value]}],
-                                "page": page,
-                                "pageSize": page_size,
-                                "mapping": True,
-                            }
-                        )
-                    },
-                )
-            except (BPMISError, ValueError, TypeError):
-                return total
-            self._increment_stat("actual_mandays_subtask_list_page_count")
-            rows = ((response.get("data") or {}).get("rows") or []) if isinstance(response, dict) else []
-            self._increment_stat("actual_mandays_subtask_rows_scanned", len(rows))
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                if self._is_closed_issue(row):
-                    continue
-                if not self._is_subtask_row(row, task_id):
-                    continue
-                total += self._extract_story_points(row)
-            if len(rows) < page_size:
-                break
-            page += 1
+        for task_id_chunk in self._chunks(task_ids, 100):
+            task_id_values: list[int | str] = []
+            for task_id in task_id_chunk:
+                try:
+                    task_id_values.append(int(task_id))
+                except ValueError:
+                    task_id_values.append(task_id)
+            page = 1
+            page_size = 200
+            while True:
+                try:
+                    response = self._api_request(
+                        "/api/v1/issues/list",
+                        params={
+                            "search": json.dumps(
+                                {
+                                    "joinType": "and",
+                                    "subQueries": [{"parentIds": task_id_values}],
+                                    "page": page,
+                                    "pageSize": page_size,
+                                    "mapping": True,
+                                }
+                            )
+                        },
+                    )
+                except (BPMISError, ValueError, TypeError):
+                    return total
+                self._increment_stat("actual_mandays_subtask_list_page_count")
+                rows = ((response.get("data") or {}).get("rows") or []) if isinstance(response, dict) else []
+                self._increment_stat("actual_mandays_subtask_rows_scanned", len(rows))
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    if self._is_closed_issue(row):
+                        continue
+                    if not self._is_subtask_row_for_any_task(row, task_id_set):
+                        continue
+                    total += self._extract_story_points(row)
+                if len(rows) < page_size:
+                    break
+                page += 1
         return total
 
     def get_issue_detail(self, issue_id: str | int) -> dict[str, Any]:
@@ -2716,6 +2729,18 @@ class BPMISDirectApiClient(BPMISClient):
             normalized_type = issue_type.replace("-", " ").replace("_", " ").strip().casefold()
             if normalized_type in {"sub task", "subtask"}:
                 return True
+            if normalized_type in {"task", "biz project"} or issue_type in {str(self.TASK_TYPE_ID), str(self.BIZ_PROJECT_TYPE_ID)}:
+                return False
+        return parent_matches
+
+    def _is_subtask_row_for_any_task(self, row: dict[str, Any], task_issue_ids: set[str]) -> bool:
+        parent_ids = set(self._extract_parent_issue_ids(row))
+        parent_matches = bool(parent_ids & task_issue_ids)
+        issue_type = self._issue_type_text(row)
+        if issue_type:
+            normalized_type = issue_type.replace("-", " ").replace("_", " ").strip().casefold()
+            if normalized_type in {"sub task", "subtask"}:
+                return parent_matches or not parent_ids
             if normalized_type in {"task", "biz project"} or issue_type in {str(self.TASK_TYPE_ID), str(self.BIZ_PROJECT_TYPE_ID)}:
                 return False
         return parent_matches

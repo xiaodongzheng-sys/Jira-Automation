@@ -292,6 +292,8 @@ TEAM_DASHBOARD_LINK_BIZ_EXCLUDED_TITLE_PHRASES = (
     "productisation upgrade",
     "deployment of productization",
 )
+_team_dashboard_actual_mandays_lock = threading.Lock()
+_team_dashboard_actual_mandays_running: set[str] = set()
 _gmail_export_active_users: set[str] = set()
 _gmail_export_active_users_lock = threading.Lock()
 _source_code_qa_codex_session_locks: dict[str, threading.Lock] = {}
@@ -1331,6 +1333,7 @@ def create_app() -> Flask:
                 _backfill_team_dashboard_empty_project_jira_tasks=lambda *args, **kwargs: _backfill_team_dashboard_empty_project_jira_tasks(*args, **kwargs),
                 _remove_team_dashboard_zero_jira_pending_live_projects=lambda *args, **kwargs: _remove_team_dashboard_zero_jira_pending_live_projects(*args, **kwargs),
                 _hydrate_team_dashboard_actual_mandays=lambda *args, **kwargs: _hydrate_team_dashboard_actual_mandays(*args, **kwargs),
+                _queue_team_dashboard_actual_mandays_refresh=lambda *args, **kwargs: _queue_team_dashboard_actual_mandays_refresh(*args, **kwargs),
                 _team_dashboard_combined_request_timings=lambda *args, **kwargs: _team_dashboard_combined_request_timings(*args, **kwargs),
                 _team_dashboard_combined_fetch_stats=lambda *args, **kwargs: _team_dashboard_combined_fetch_stats(*args, **kwargs),
                 _store_team_dashboard_task_payload=lambda *args, **kwargs: _store_team_dashboard_task_payload(*args, **kwargs),
@@ -4081,9 +4084,8 @@ def _load_team_dashboard_tasks_for_all_teams_merged(
     _team_dashboard_add_timing(shared_timing, "backfill_zero_jira_projects", backfill_started_at)
 
     mandays_started_at = time.monotonic()
-    for team_payload in team_payloads:
-        _hydrate_team_dashboard_actual_mandays(bpmis_client, team_payload)
-    _team_dashboard_add_timing(shared_timing, "actual_mandays", mandays_started_at)
+    pending_manday_project_ids = _apply_team_dashboard_actual_mandays_cache(config, team_payloads)
+    _team_dashboard_add_timing(shared_timing, "actual_mandays_cache", mandays_started_at)
     shared_timing.update(_team_dashboard_combined_request_timings(bpmis_client, biz_bpmis_client))
 
     fetch_stats = _team_dashboard_combined_fetch_stats(bpmis_client, biz_bpmis_client)
@@ -4101,6 +4103,7 @@ def _load_team_dashboard_tasks_for_all_teams_merged(
         if team_payload is not None:
             _store_team_dashboard_task_payload(store, team_key, emails, team_payload)
     _team_dashboard_add_timing(shared_timing, "cache_store", cache_started_at)
+    _start_team_dashboard_actual_mandays_refresh(settings, store, bpmis_client, pending_manday_project_ids)
     elapsed = round(time.monotonic() - started_at, 2)
     for team_payload in team_payloads:
         timing_stats = dict(shared_timing)
@@ -4369,6 +4372,222 @@ def _load_team_dashboard_link_biz_project_payloads(settings: Settings, config: d
         _hydrate_team_dashboard_actual_mandays(bpmis_client, team_payload)
         team_payloads.append(team_payload)
     return team_payloads
+
+
+def _team_dashboard_actual_mandays_cache_ttl_seconds() -> int:
+    raw_value = str(os.getenv("TEAM_DASHBOARD_ACTUAL_MANDAYS_CACHE_TTL_SECONDS") or "86400").strip()
+    try:
+        return max(0, int(raw_value))
+    except ValueError:
+        return 86400
+
+
+def _team_dashboard_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _team_dashboard_parse_timestamp(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _team_dashboard_manday_value(value: Any) -> float | int | str:
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if normalized.is_integer():
+        return int(normalized)
+    return normalized
+
+
+def _team_dashboard_actual_mandays_entry_is_fresh(entry: dict[str, Any], *, now: float | None = None) -> bool:
+    if not isinstance(entry, dict) or entry.get("value") in {None, ""}:
+        return False
+    ttl_seconds = _team_dashboard_actual_mandays_cache_ttl_seconds()
+    if ttl_seconds <= 0:
+        return False
+    cached_at = _team_dashboard_parse_timestamp(entry.get("cached_at"))
+    if cached_at is None:
+        return False
+    return ((now if now is not None else time.time()) - cached_at) <= ttl_seconds
+
+
+def _team_dashboard_project_entries(team_payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    projects: list[dict[str, Any]] = []
+    for team_payload in team_payloads:
+        if not isinstance(team_payload, dict):
+            continue
+        for section_key in ("under_prd", "pending_live"):
+            section_projects = team_payload.get(section_key)
+            if isinstance(section_projects, list):
+                projects.extend(project for project in section_projects if isinstance(project, dict))
+    return projects
+
+
+def _apply_team_dashboard_actual_mandays_cache(config: dict[str, Any], team_payloads: list[dict[str, Any]]) -> list[str]:
+    cache = config.get("actual_mandays_cache") if isinstance(config.get("actual_mandays_cache"), dict) else {}
+    cached_projects = cache.get("projects") if isinstance(cache.get("projects"), dict) else {}
+    now = time.time()
+    pending_project_ids: list[str] = []
+    for project in _team_dashboard_project_entries(team_payloads):
+        bpmis_id = str(project.get("bpmis_id") or "").strip()
+        if not bpmis_id:
+            continue
+        entry = cached_projects.get(bpmis_id) if isinstance(cached_projects.get(bpmis_id), dict) else {}
+        cached_value = _team_dashboard_manday_value(entry.get("value")) if entry else ""
+        is_fresh = _team_dashboard_actual_mandays_entry_is_fresh(entry, now=now)
+        if cached_value != "":
+            project["actual_mandays"] = cached_value
+            project["actual_mandays_cached_at"] = str(entry.get("cached_at") or "")
+            project["actual_mandays_stale"] = not is_fresh
+        elif "actual_mandays" not in project:
+            project["actual_mandays"] = ""
+        if not is_fresh:
+            project["actual_mandays_pending"] = True
+            if bpmis_id not in pending_project_ids:
+                pending_project_ids.append(bpmis_id)
+        else:
+            project["actual_mandays_pending"] = False
+    for team_payload in team_payloads:
+        team_payload["actual_mandays_status"] = _team_dashboard_actual_mandays_status(team_payload)
+    return pending_project_ids
+
+
+def _team_dashboard_actual_mandays_status(team_payload: dict[str, Any]) -> dict[str, Any]:
+    projects = _team_dashboard_project_entries([team_payload])
+    pending_count = sum(1 for project in projects if project.get("actual_mandays_pending"))
+    stale_count = sum(1 for project in projects if project.get("actual_mandays_stale"))
+    cached_count = sum(1 for project in projects if str(project.get("actual_mandays_cached_at") or "").strip())
+    return {
+        "pending_count": pending_count,
+        "stale_count": stale_count,
+        "cached_count": cached_count,
+        "project_count": len([project for project in projects if str(project.get("bpmis_id") or "").strip()]),
+    }
+
+
+def _store_team_dashboard_actual_mandays_results(
+    store: TeamDashboardConfigStore | RemoteTeamDashboardConfigStore,
+    results: dict[str, Any],
+) -> None:
+    normalized_results = {
+        str(project_id or "").strip(): _team_dashboard_manday_value(value)
+        for project_id, value in (results or {}).items()
+        if str(project_id or "").strip()
+    }
+    normalized_results = {project_id: value for project_id, value in normalized_results.items() if value != ""}
+    if not normalized_results:
+        return
+    now = _team_dashboard_timestamp()
+    config = store.load()
+    actual_mandays_cache = config.get("actual_mandays_cache") if isinstance(config.get("actual_mandays_cache"), dict) else {}
+    cached_projects = actual_mandays_cache.get("projects") if isinstance(actual_mandays_cache.get("projects"), dict) else {}
+    cached_projects = dict(cached_projects)
+    for project_id, value in normalized_results.items():
+        cached_projects[project_id] = {"value": value, "cached_at": now}
+    config["actual_mandays_cache"] = {
+        "version": 1,
+        "updated_at": now,
+        "projects": cached_projects,
+    }
+    task_cache = config.get("task_cache") if isinstance(config.get("task_cache"), dict) else {}
+    cached_teams = task_cache.get("teams") if isinstance(task_cache.get("teams"), dict) else {}
+    for cached_team in cached_teams.values():
+        if not isinstance(cached_team, dict):
+            continue
+        for project in _team_dashboard_project_entries([cached_team]):
+            bpmis_id = str(project.get("bpmis_id") or "").strip()
+            if bpmis_id not in normalized_results:
+                continue
+            project["actual_mandays"] = normalized_results[bpmis_id]
+            project["actual_mandays_cached_at"] = now
+            project["actual_mandays_pending"] = False
+            project["actual_mandays_stale"] = False
+        cached_team["actual_mandays_status"] = _team_dashboard_actual_mandays_status(cached_team)
+    if isinstance(task_cache, dict):
+        task_cache["updated_at"] = now
+        config["task_cache"] = task_cache
+    store.save(config)
+
+
+def _start_team_dashboard_actual_mandays_refresh(
+    settings: Settings,
+    store: TeamDashboardConfigStore | RemoteTeamDashboardConfigStore,
+    bpmis_client: Any,
+    project_ids: list[str],
+) -> list[str]:
+    normalized_project_ids = list(dict.fromkeys(str(project_id or "").strip() for project_id in project_ids if str(project_id or "").strip()))
+    if not normalized_project_ids or not hasattr(bpmis_client, "list_actual_mandays_for_projects"):
+        return []
+    with _team_dashboard_actual_mandays_lock:
+        start_ids = [project_id for project_id in normalized_project_ids if project_id not in _team_dashboard_actual_mandays_running]
+        _team_dashboard_actual_mandays_running.update(start_ids)
+    if not start_ids:
+        return []
+    app_obj = current_app._get_current_object() if has_app_context() else None
+
+    def refresh() -> None:
+        try:
+            if app_obj is not None:
+                with app_obj.app_context():
+                    results = bpmis_client.list_actual_mandays_for_projects(start_ids) or {}
+                    _store_team_dashboard_actual_mandays_results(store, results)
+                    current_app.logger.info("Team Dashboard Actual Mandays refreshed for %s project(s).", len(results or {}))
+            else:
+                results = bpmis_client.list_actual_mandays_for_projects(start_ids) or {}
+                _store_team_dashboard_actual_mandays_results(store, results)
+        except Exception as error:  # noqa: BLE001 - Actual Mandays should never break Team Dashboard loading.
+            if app_obj is not None:
+                with app_obj.app_context():
+                    current_app.logger.warning("Team Dashboard Actual Mandays background refresh failed: %s", error)
+        finally:
+            with _team_dashboard_actual_mandays_lock:
+                for project_id in start_ids:
+                    _team_dashboard_actual_mandays_running.discard(project_id)
+
+    threading.Thread(target=refresh, name="team-dashboard-actual-mandays-refresh", daemon=True).start()
+    return start_ids
+
+
+def _queue_team_dashboard_actual_mandays_refresh(
+    settings: Settings,
+    store: TeamDashboardConfigStore | RemoteTeamDashboardConfigStore,
+    config: dict[str, Any],
+    team_payloads: list[dict[str, Any]],
+    *,
+    bpmis_client: Any | None = None,
+    start_background: bool = True,
+) -> list[str]:
+    pending_project_ids = _apply_team_dashboard_actual_mandays_cache(config, team_payloads)
+    if not pending_project_ids:
+        return []
+    if not start_background:
+        return pending_project_ids
+    try:
+        actual_mandays_client = bpmis_client or _build_bpmis_client_for_current_user(settings)
+    except Exception as error:  # noqa: BLE001 - keep cached Jira data renderable if BPMIS config is unavailable.
+        current_app.logger.warning("Team Dashboard Actual Mandays background client unavailable: %s", error)
+        return []
+    started_project_ids = _start_team_dashboard_actual_mandays_refresh(
+        settings,
+        store,
+        actual_mandays_client,
+        pending_project_ids,
+    )
+    for team_payload in team_payloads:
+        status = dict(team_payload.get("actual_mandays_status") or {})
+        status["refreshing_count"] = len(started_project_ids)
+        team_payload["actual_mandays_status"] = status
+    return started_project_ids
 
 
 def _hydrate_team_dashboard_actual_mandays(bpmis_client: Any, team_payload: dict[str, Any]) -> None:

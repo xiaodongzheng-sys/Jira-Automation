@@ -140,6 +140,12 @@ class BPMISClientTests(unittest.TestCase):
                                     "parentIds": [{"id": 225159}],
                                 },
                                 {
+                                    "id": 993,
+                                    "typeId": "Task",
+                                    "statusId": "Testing",
+                                    "parentIds": [{"id": 225159}],
+                                },
+                                {
                                     "id": 992,
                                     "typeId": "Task",
                                     "statusId": "Closed",
@@ -149,13 +155,15 @@ class BPMISClientTests(unittest.TestCase):
                         }
                     }
                 if path == "/api/v1/issues/list":
-                    self.assertEqual(search["subQueries"], [{"parentIds": [991]}])
+                    self.assertEqual(search["subQueries"], [{"parentIds": [991, 993]}])
                     return {
                         "data": {
                             "rows": [
                                 {"id": 1001, "typeId": "Sub Task", "statusId": "Open", "storyPoints": 2},
                                 {"id": 1002, "typeId": "Sub Task", "statusId": "Testing", "storyPoints": "3.5"},
                                 {"id": 1004, "typeId": 5, "parentIds": [991], "statusId": "Open", "storyPoints": 1},
+                                {"id": 1005, "typeId": "Sub Task", "parentIds": [993], "statusId": "Open", "storyPoints": 4},
+                                {"id": 1006, "typeId": "Sub Task", "parentIds": [999], "statusId": "Open", "storyPoints": 10},
                                 {"id": 1003, "typeId": "Sub Task", "statusId": "Closed", "storyPoints": 8},
                             ]
                         }
@@ -166,7 +174,7 @@ class BPMISClientTests(unittest.TestCase):
 
             actual_mandays = client.list_actual_mandays_for_projects(["225159"])
 
-        self.assertEqual(actual_mandays, {"225159": 6.5})
+        self.assertEqual(actual_mandays, {"225159": 10.5})
         self.assertEqual([path for path, _params in calls], ["/api/v1/issues/tree", "/api/v1/issues/list"])
         self.assertEqual(client.request_stats["actual_mandays_project_tree_lookup_count"], 1)
         self.assertEqual(client.request_stats["actual_mandays_subtask_list_page_count"], 1)

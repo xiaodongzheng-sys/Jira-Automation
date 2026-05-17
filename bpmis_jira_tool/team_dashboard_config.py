@@ -123,6 +123,7 @@ class TeamDashboardConfigStore:
             "key_project_overrides": {},
             "monthly_report_template": DEFAULT_MONTHLY_REPORT_TEMPLATE,
             "report_intelligence_config": normalize_report_intelligence_config({}),
+            "actual_mandays_cache": self._normalize_actual_mandays_cache({}),
             "version_plan": normalize_version_plan_state({}),
         }
 
@@ -135,6 +136,8 @@ class TeamDashboardConfigStore:
         raw_report_intelligence_config = config.get("report_intelligence_config") if isinstance(config, dict) else {}
         raw_task_cache = config.get("task_cache") if isinstance(config, dict) else {}
         raw_task_cache = raw_task_cache if isinstance(raw_task_cache, dict) else {}
+        raw_actual_mandays_cache = config.get("actual_mandays_cache") if isinstance(config, dict) else {}
+        raw_actual_mandays_cache = raw_actual_mandays_cache if isinstance(raw_actual_mandays_cache, dict) else {}
         raw_version_plan = config.get("version_plan") if isinstance(config, dict) else {}
         default = self.default_config()
         normalized_teams: dict[str, dict[str, Any]] = {}
@@ -166,6 +169,7 @@ class TeamDashboardConfigStore:
             "monthly_report_template": normalize_monthly_report_template(raw_monthly_report_template),
             "report_intelligence_config": normalize_report_intelligence_config(raw_report_intelligence_config),
             "task_cache": self._normalize_task_cache(raw_task_cache),
+            "actual_mandays_cache": self._normalize_actual_mandays_cache(raw_actual_mandays_cache),
             "version_plan": normalize_version_plan_state(raw_version_plan),
         }
 
@@ -199,6 +203,31 @@ class TeamDashboardConfigStore:
             "version": TEAM_DASHBOARD_TASK_CACHE_VERSION,
             "updated_at": str(task_cache.get("updated_at") or "").strip(),
             "teams": teams,
+        }
+
+    def _normalize_actual_mandays_cache(self, actual_mandays_cache: dict[str, Any]) -> dict[str, Any]:
+        raw_projects = actual_mandays_cache.get("projects") if isinstance(actual_mandays_cache.get("projects"), dict) else {}
+        projects: dict[str, dict[str, Any]] = {}
+        for raw_project_id, raw_entry in raw_projects.items():
+            project_id = str(raw_project_id or "").strip()
+            if not project_id or not isinstance(raw_entry, dict):
+                continue
+            value = raw_entry.get("value")
+            try:
+                normalized_value: float | int | str = float(value)
+            except (TypeError, ValueError):
+                normalized_value = ""
+            else:
+                if float(normalized_value).is_integer():
+                    normalized_value = int(normalized_value)
+            projects[project_id] = {
+                "value": normalized_value,
+                "cached_at": str(raw_entry.get("cached_at") or "").strip(),
+            }
+        return {
+            "version": 1,
+            "updated_at": str(actual_mandays_cache.get("updated_at") or "").strip(),
+            "projects": projects,
         }
 
     def _ensure_db(self) -> None:
