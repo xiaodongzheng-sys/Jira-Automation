@@ -114,6 +114,58 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self.assertNotIn(b"Report Intelligence", response.data)
                 self.assertNotIn(b"PRD Self-Assessment", response.data)
 
+    def test_cloud_home_renders_without_mac_portal_for_anonymous_user(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
+                "TEAM_PORTAL_MAC_FULL_PORTAL_URL": "https://app.bankpmtool.uk/portal-home",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                response = client.get("/", follow_redirects=False)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b"Risk PM Cloud", response.data)
+            self.assertIn(b"/cloud-auth/google/login", response.data)
+            self.assertIn(b"/portal-home", response.data)
+
+    def test_cloud_version_plan_page_requires_login_then_renders_standalone(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                blocked = client.get("/version-plan")
+                self.assertEqual(blocked.status_code, 302)
+                self.assertEqual(blocked.headers["Location"], "/")
+
+                self._login_non_admin(client)
+                response = client.get("/version-plan")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b"Version Plan", response.data)
+            self.assertIn(b"data-version-plan-content", response.data)
+            self.assertNotIn(b"data-team-dashboard-tab=\"tasks\"", response.data)
+
     def test_login_image_gate_css_contract_is_present(self):
         stylesheet = Path("static/style.css").read_text(encoding="utf-8")
 

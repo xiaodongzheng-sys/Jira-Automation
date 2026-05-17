@@ -831,6 +831,9 @@ def create_app() -> Flask:
             "google_login",
             "google_callback",
             "google_logout",
+            "cloud_google_login",
+            "cloud_google_callback",
+            "cloud_google_logout",
             "access_denied",
             "prd_briefing.image_proxy",
         }:
@@ -896,6 +899,17 @@ def create_app() -> Flask:
             flash("This Google account is not authorized for the team portal. Please contact the maintainer.", "error")
             return redirect(url_for("access_denied"))
 
+        if settings.cloud_home_enabled:
+            return render_template(
+                "cloud_home.html",
+                page_title="Risk PM Cloud",
+                user_identity=_get_user_identity(settings),
+                signed_in=_google_session_is_connected(),
+                version_plan_url=url_for("version_plan_page"),
+                full_portal_url=settings.mac_full_portal_url or url_for("portal_home"),
+                cloud_auth_mode=True,
+            )
+
         if _site_requires_google_login(settings) and not _google_session_is_connected():
             return render_template("login_gate.html", page_title="Sign In")
 
@@ -931,6 +945,69 @@ def create_app() -> Flask:
         config_data = _hydrate_setup_defaults(config_data, user_identity, team_profiles=effective_team_profiles)
         _apply_sync_email_policy(config_data, user_identity)
         has_saved_config = bool(config_key and raw_config_data)
+        default_workspace_tab = session.pop("default_workspace_tab", "run" if has_saved_config else "setup")
+        allowed_workspace_tabs = {"setup", "run", "productization-upgrade-summary"}
+        if _is_team_profile_admin(user_identity):
+            allowed_workspace_tabs.add("team-default-admin")
+        if requested_workspace_tab in allowed_workspace_tabs:
+            default_workspace_tab = requested_workspace_tab
+
+        return render_template(
+            "index.html",
+            settings=settings,
+            shared_portal_enabled=_shared_portal_enabled(settings),
+            google_connected="google_credentials" in session,
+            user_identity=user_identity,
+            sync_email_editable=_can_edit_sync_email(user_identity),
+            results=results,
+            run_notice=run_notice,
+            mapping_fields=CONFIGURED_FIELDS,
+            mapping_config=config_data,
+            team_profiles=_build_team_profiles_for_display(
+                config_data,
+                user_identity,
+                team_profiles=effective_team_profiles,
+            ),
+            team_profile_admin_configs=effective_team_profiles,
+            team_profile_admin_enabled=_is_team_profile_admin(user_identity),
+            default_workspace_tab=default_workspace_tab,
+            input_headers=[],
+            google_authorized=True,
+        )
+
+    @app.get("/portal-home")
+    def portal_home():
+        if _current_google_user_is_blocked(settings):
+            session.pop("google_credentials", None)
+            session.pop("google_profile", None)
+            flash("This Google account is not authorized for the team portal. Please contact the maintainer.", "error")
+            return redirect(url_for("access_denied"))
+
+        if _site_requires_google_login(settings) and not _google_session_is_connected():
+            return render_template("login_gate.html", page_title="Sign In")
+
+        results = _results_for_display(session.pop("last_results", []))
+        run_notice = session.pop("run_notice", None)
+        user_identity = _get_user_identity(settings)
+        config_key = user_identity.get("config_key")
+        raw_config_data = None
+        effective_team_profiles = {team_key: dict(profile) for team_key, profile in TEAM_PROFILE_DEFAULTS.items()}
+        try:
+            raw_config_data = _load_user_config_for_identity(settings, user_identity) if config_key else None
+            effective_team_profiles = _load_effective_team_profiles(config_store)
+        except ToolError as error:
+            if not _is_local_agent_unavailable_error(error):
+                raise
+            current_app.logger.warning(
+                "Mac local-agent is unavailable while rendering portal home; falling back to empty setup/default profiles.",
+                exc_info=True,
+            )
+            flash("Mac local-agent is not reachable right now. The portal is open, but local-agent backed data and actions are temporarily unavailable.", "warning")
+        config_data = raw_config_data or config_store._normalize({})
+        config_data = _hydrate_setup_defaults(config_data, user_identity, team_profiles=effective_team_profiles)
+        _apply_sync_email_policy(config_data, user_identity)
+        has_saved_config = bool(config_key and raw_config_data)
+        requested_workspace_tab = str(request.args.get("workspace") or "").strip()
         default_workspace_tab = session.pop("default_workspace_tab", "run" if has_saved_config else "setup")
         allowed_workspace_tabs = {"setup", "run", "productization-upgrade-summary"}
         if _is_team_profile_admin(user_identity):
@@ -1115,6 +1192,25 @@ def create_app() -> Flask:
             flash(str(error), "error")
             return redirect(url_for("index"))
 
+    @app.get("/cloud-auth/google/login")
+    def cloud_google_login():
+        try:
+            authorization_url = create_google_authorization_url(
+                settings,
+                redirect_path="cloud-auth/google/callback",
+                callback_endpoint="cloud_google_callback",
+            )
+            return redirect(authorization_url)
+        except ConfigError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "cloud_google_login_config_error",
+                level=logging.WARNING,
+                **_build_request_log_context(settings, extra=error_details),
+            )
+            flash(str(error), "error")
+            return redirect(url_for("index"))
+
     @app.get("/auth/google/callback")
     def google_callback():
         try:
@@ -1138,6 +1234,40 @@ def create_app() -> Flask:
             error_details = _classify_portal_error(error)
             _log_portal_event(
                 "google_callback_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(settings, extra=error_details),
+            )
+            flash(str(error), "error")
+        return redirect(url_for("index"))
+
+    @app.get("/cloud-auth/google/callback")
+    def cloud_google_callback():
+        try:
+            previous_identity = _get_user_identity(settings)
+            finish_google_oauth(
+                settings,
+                request.url,
+                redirect_path="cloud-auth/google/callback",
+                callback_endpoint="cloud_google_callback",
+            )
+            if _current_google_user_is_blocked(settings):
+                session.pop("google_credentials", None)
+                session.pop("google_profile", None)
+                flash("This Google account is not authorized for the team portal. Please contact the maintainer.", "error")
+                return redirect(url_for("access_denied"))
+            current_identity = _get_user_identity(settings)
+            if previous_identity.get("config_key") and current_identity.get("config_key"):
+                _migrate_user_config(settings, previous_identity["config_key"], current_identity["config_key"])
+            _persist_owner_google_credentials(settings)
+            _log_portal_event(
+                "cloud_google_callback_success",
+                **_build_request_log_context(settings, user_identity=current_identity),
+            )
+            flash("Google account connected successfully.", "success")
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "cloud_google_callback_tool_error",
                 level=logging.WARNING,
                 **_build_request_log_context(settings, extra=error_details),
             )
@@ -1173,6 +1303,13 @@ def create_app() -> Flask:
 
     @app.post("/auth/google/logout")
     def google_logout():
+        session.pop("google_credentials", None)
+        session.pop("google_profile", None)
+        flash("Google session cleared.", "success")
+        return redirect(url_for("index"))
+
+    @app.post("/cloud-auth/google/logout")
+    def cloud_google_logout():
         session.pop("google_credentials", None)
         session.pop("google_profile", None)
         flash("Google session cleared.", "success")

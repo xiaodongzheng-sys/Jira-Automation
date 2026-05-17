@@ -29,12 +29,21 @@ GOOGLE_SCOPES = [
 ]
 
 
-def _resolve_google_redirect_uri(settings: Settings) -> str:
+def _resolve_google_redirect_uri(
+    settings: Settings,
+    *,
+    redirect_path: str = "auth/google/callback",
+    callback_endpoint: str = "google_callback",
+) -> str:
+    if redirect_path.strip("/").startswith("cloud-auth/"):
+        cloud_redirect_uri = os.getenv("GOOGLE_CLOUD_OAUTH_REDIRECT_URI", "").strip()
+        if cloud_redirect_uri:
+            return cloud_redirect_uri
     if settings.google_oauth_redirect_uri:
         return settings.google_oauth_redirect_uri
     if settings.team_portal_base_url:
-        return urljoin(settings.team_portal_base_url.rstrip("/") + "/", "auth/google/callback")
-    return url_for("google_callback", _external=True)
+        return urljoin(settings.team_portal_base_url.rstrip("/") + "/", redirect_path.lstrip("/"))
+    return url_for(callback_endpoint, _external=True)
 
 
 def build_google_flow(settings: Settings) -> Flow:
@@ -76,9 +85,18 @@ def _normalize_authorization_response(authorization_response: str, redirect_uri:
     )
 
 
-def create_google_authorization_url(settings: Settings) -> str:
+def create_google_authorization_url(
+    settings: Settings,
+    *,
+    redirect_path: str = "auth/google/callback",
+    callback_endpoint: str = "google_callback",
+) -> str:
     flow = build_google_flow(settings)
-    redirect_uri = _resolve_google_redirect_uri(settings)
+    redirect_uri = _resolve_google_redirect_uri(
+        settings,
+        redirect_path=redirect_path,
+        callback_endpoint=callback_endpoint,
+    )
     _allow_localhost_oauth_http(redirect_uri)
     flow.redirect_uri = redirect_uri
     authorization_url, state = flow.authorization_url(
@@ -90,13 +108,23 @@ def create_google_authorization_url(settings: Settings) -> str:
     return authorization_url
 
 
-def finish_google_oauth(settings: Settings, authorization_response: str) -> None:
+def finish_google_oauth(
+    settings: Settings,
+    authorization_response: str,
+    *,
+    redirect_path: str = "auth/google/callback",
+    callback_endpoint: str = "google_callback",
+) -> None:
     state = session.get("google_oauth_state")
     if not state:
         raise AuthenticationError("Missing OAuth state. Start the Google sign-in flow again.")
 
     flow = build_google_flow(settings)
-    redirect_uri = _resolve_google_redirect_uri(settings)
+    redirect_uri = _resolve_google_redirect_uri(
+        settings,
+        redirect_path=redirect_path,
+        callback_endpoint=callback_endpoint,
+    )
     flow.redirect_uri = redirect_uri
     _allow_localhost_oauth_http(redirect_uri)
     if redirect_uri.startswith("https://"):

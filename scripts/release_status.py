@@ -77,6 +77,32 @@ def _health_probe(url: str, *, env: Mapping[str, str], runner: Any = _run) -> st
     return " ".join(details)
 
 
+def _version_plan_firestore_status(*, env: Mapping[str, str]) -> str:
+    backend = _env_value("VERSION_PLAN_STORE_BACKEND", env).strip().lower()
+    stage = (_env_value("VERSION_PLAN_FIRESTORE_ENVIRONMENT", env) or _env_value("TEAM_PORTAL_STAGE", env) or "live").strip().lower()
+    project = _env_value("VERSION_PLAN_FIRESTORE_PROJECT", env) or _env_value("GOOGLE_CLOUD_PROJECT", env)
+    document = _env_value("VERSION_PLAN_FIRESTORE_DOCUMENT", env) or f"version_plan_{'uat' if stage == 'uat' else 'live'}"
+    if backend not in {"firestore", "cloud_firestore"} and not project:
+        return "status=not_configured"
+    try:
+        from google.cloud import firestore  # type: ignore
+    except Exception as error:
+        return f"status=unavailable document=portal/{document} error={type(error).__name__}: {error}"
+    try:
+        snapshot = firestore.Client(project=project or None).collection("portal").document(document).get()
+        if not getattr(snapshot, "exists", False):
+            return f"status=missing document=portal/{document} environment={stage}"
+        payload = snapshot.to_dict() or {}
+    except Exception as error:
+        return f"status=unavailable document=portal/{document} error={type(error).__name__}: {error}"
+    return (
+        f"status=ok document=portal/{document} "
+        f"environment={payload.get('environment') or stage} "
+        f"updated_at_sgt={payload.get('updated_at_sgt') or '<missing>'} "
+        f"source_hash={payload.get('source_hash') or '<missing>'}"
+    )
+
+
 def _revision_release_value(
     revision_name: str,
     *,
@@ -210,6 +236,7 @@ def build_status_lines(*, env: Mapping[str, str] | None = None, runner: Any = _r
         "Public local-agent proxy: "
         f"{_health_probe(f'{public_url}/api/local-agent/healthz' if public_url else '', env=env, runner=runner)}"
     )
+    lines.append(f"Version Plan Firestore: {_version_plan_firestore_status(env=env)}")
     return lines
 
 

@@ -438,6 +438,42 @@ def _release_status_lines() -> tuple[list[str], list[dict[str, str]]]:
         ]
 
 
+def _version_plan_firestore_summary() -> tuple[dict[str, str], list[dict[str, str]]]:
+    stage = str(os.getenv("VERSION_PLAN_FIRESTORE_ENVIRONMENT") or os.getenv("TEAM_PORTAL_STAGE") or "live").strip().lower()
+    document = str(os.getenv("VERSION_PLAN_FIRESTORE_DOCUMENT") or f"version_plan_{'uat' if stage == 'uat' else 'live'}").strip()
+    project = str(os.getenv("VERSION_PLAN_FIRESTORE_PROJECT") or os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip()
+    backend = str(os.getenv("VERSION_PLAN_STORE_BACKEND") or "").strip().lower()
+    summary = {
+        "backend": backend or "auto",
+        "document": f"portal/{document}",
+        "environment": stage or "live",
+        "status": "not_configured",
+        "updated_at_sgt": "",
+        "source_hash": "",
+    }
+    if backend not in {"firestore", "cloud_firestore"} and not project:
+        return summary, []
+    try:
+        from google.cloud import firestore  # type: ignore
+    except Exception as error:
+        summary["status"] = f"unavailable:{type(error).__name__}"
+        return summary, [_issue("warn", "version_plan_firestore_unavailable", "Version Plan Firestore client is unavailable.")]
+    try:
+        snapshot = firestore.Client(project=project or None).collection("portal").document(document).get()
+        if not getattr(snapshot, "exists", False):
+            summary["status"] = "missing"
+            return summary, [_issue("warn", "version_plan_firestore_missing", f"Version Plan Firestore document is missing: portal/{document}")]
+        payload = snapshot.to_dict() or {}
+    except Exception as error:
+        summary["status"] = f"unavailable:{type(error).__name__}"
+        return summary, [_issue("warn", "version_plan_firestore_unavailable", "Version Plan Firestore document check failed.")]
+    summary["status"] = "ok"
+    summary["environment"] = str(payload.get("environment") or summary["environment"])
+    summary["updated_at_sgt"] = str(payload.get("updated_at_sgt") or "")
+    summary["source_hash"] = str(payload.get("source_hash") or "")
+    return summary, []
+
+
 def build_report(
     data_root: Path,
     *,
@@ -454,10 +490,12 @@ def build_report(
     jobs, job_issues = _summarize_jobs(data_root, limit, recent_hours=recent_hours)
     meetings, meeting_issues = _summarize_meeting_records(data_root, limit, recent_hours=recent_hours)
     scqa_lines, scqa_issues = _source_code_qa_summary(data_root, limit)
+    version_plan, version_plan_issues = _version_plan_firestore_summary()
     issues.extend(llm_issues)
     issues.extend(job_issues)
     issues.extend(meeting_issues)
     issues.extend(scqa_issues)
+    issues.extend(version_plan_issues)
 
     release_lines: list[str] = []
     if include_release_status:
@@ -481,6 +519,7 @@ def build_report(
         "jobs": jobs,
         "meeting_records": meetings,
         "source_code_qa": {"lines": scqa_lines},
+        "version_plan_firestore": version_plan,
         "permissions": _permission_matrix(),
         "release_status": {"included": include_release_status, "lines": release_lines},
         "issues": issues,
@@ -579,6 +618,16 @@ def format_report(report: dict[str, Any]) -> list[str]:
     lines.append("")
     lines.append("== Source Code QA Ops ==")
     lines.extend(report["source_code_qa"]["lines"])
+
+    version_plan = report["version_plan_firestore"]
+    lines.append("")
+    lines.append("== Version Plan Firestore ==")
+    lines.append(
+        f"version_plan_firestore_status={version_plan['status']} "
+        f"backend={version_plan['backend']} document={version_plan['document']} "
+        f"environment={version_plan['environment']} updated_at_sgt={version_plan['updated_at_sgt'] or '<missing>'} "
+        f"source_hash={version_plan['source_hash'] or '<missing>'}"
+    )
 
     if report["release_status"]["included"]:
         lines.append("")

@@ -313,6 +313,9 @@ exit 0
             self.assertIn("--tag uat", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_STAGE=uat", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_BASE_URL=https://uat---team-portal-ekaykywtvq-as.a.run.app", deploy_calls[0])
+            self.assertIn("TEAM_PORTAL_CLOUD_HOME_ENABLED=true", deploy_calls[0])
+            self.assertIn("VERSION_PLAN_STORE_BACKEND=firestore", deploy_calls[0])
+            self.assertIn("VERSION_PLAN_FIRESTORE_ENVIRONMENT=uat", deploy_calls[0])
             self.assertIn("LOCAL_AGENT_BASE_URL=https://app.bankpmtool.uk/uat-local-agent", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_RELEASE_REVISION=", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_DEPLOY_HASH=", deploy_calls[0])
@@ -2023,6 +2026,7 @@ fi
         self.assertIn("Local portal: url=http://127.0.0.1:5000/healthz status=ok revision=d8fb5fb59c743dadfce1f8a106a7846c8ebe2fbc", output)
         self.assertIn("Direct local-agent: url=http://127.0.0.1:7007/healthz status=ok source_code_qa=True codex_ready=True", output)
         self.assertIn("Public local-agent proxy: url=https://app.bankpmtool.uk/api/local-agent/healthz status=ok source_code_qa=True codex_ready=True", output)
+        self.assertIn("Version Plan Firestore:", output)
 
     def test_stack_doctor_exposes_release_status_command(self):
         stack_script = (PROJECT_ROOT / "scripts/run_team_stack.sh").read_text(encoding="utf-8")

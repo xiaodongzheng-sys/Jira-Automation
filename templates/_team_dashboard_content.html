@@ -1,5 +1,6 @@
 {% set reports_only = reports_only|default(false) %}
-{% set initial_team_dashboard_tab = 'monthly-report' if reports_only else ('tasks' if can_manage_team_dashboard else 'version-plan') %}
+{% set version_plan_only = version_plan_only|default(false) %}
+{% set initial_team_dashboard_tab = 'version-plan' if version_plan_only else ('monthly-report' if reports_only else ('tasks' if can_manage_team_dashboard else 'version-plan')) %}
 
 <section class="panel panel-wide glass-panel team-dashboard-panel"
   data-team-dashboard
@@ -31,9 +32,11 @@
 >
   <div class="panel-head">
     <div>
-      <h2>{{ 'Reports' if reports_only else 'Team Dashboard' }}</h2>
+      <h2>{{ 'Version Plan' if version_plan_only else ('Reports' if reports_only else 'Team Dashboard') }}</h2>
       <p class="step-copy">
-        {% if reports_only %}
+        {% if version_plan_only %}
+          Anti-fraud version bundles, pipeline, and archived Jira rows.
+        {% elif reports_only %}
           Generate Monthly Reports, review Daily Brief archives, and maintain report intelligence.
         {% else %}
           Review team Jira tasks by reporter and keep team member email lists up to date.
@@ -42,6 +45,7 @@
     </div>
   </div>
 
+  {% if not version_plan_only %}
   <div class="workspace-tabs team-dashboard-tabs" role="tablist" aria-label="{{ 'Reports sections' if reports_only else 'Team Dashboard sections' }}">
     {% if reports_only %}
       {% if can_view_team_dashboard_monthly_report %}
@@ -63,8 +67,9 @@
       {% endif %}
     {% endif %}
   </div>
+  {% endif %}
 
-  {% if not reports_only %}
+  {% if not reports_only and not version_plan_only %}
     <section data-team-dashboard-panel="tasks" {% if initial_team_dashboard_tab != 'tasks' %}hidden{% endif %}>
       <div class="productization-section-head">
         <div>

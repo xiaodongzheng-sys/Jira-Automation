@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block body %}
+  <section class="panel panel-wide glass-panel cloud-home-panel">
+    <div class="panel-head">
+      <div>
+        <h2>Risk PM Cloud</h2>
+        <p class="step-copy">Cloud-backed Version Plan remains available when the Mac full portal is offline.</p>
+      </div>
+    </div>
+
+    <div class="dashboard-grid">
+      <article class="dashboard-card">
+        <h3>Version Plan</h3>
+        <p>Cloud Run and Firestore backed AF version planning.</p>
+        {% if signed_in %}
+          <a class="button button-primary" href="{{ version_plan_url }}">Open Version Plan</a>
+        {% else %}
+          <a class="button button-primary" href="{{ url_for('cloud_google_login') }}">Sign in with Google</a>
+        {% endif %}
+      </article>
+      <article class="dashboard-card">
+        <h3>Full Portal</h3>
+        <p>Mac-backed BPMIS, Source Code Q&amp;A, reports, and admin tools.</p>
+        <a class="button button-secondary" href="{{ full_portal_url }}">Open Full Portal</a>
+        <p class="productization-inline-status" data-cloud-mac-status>Checking Mac portal status...</p>
+      </article>
+    </div>
+  </section>
+  <script>
+    (() => {
+      const status = document.querySelector('[data-cloud-mac-status]');
+      if (!status) return;
+      fetch('/api/local-agent/healthz', { headers: { Accept: 'application/json' }, credentials: 'same-origin' })
+        .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+        .then((payload) => {
+          status.textContent = payload?.status === 'ok' ? 'Mac local-agent online.' : 'Mac local-agent status is unknown.';
+          status.dataset.tone = payload?.status === 'ok' ? 'success' : 'neutral';
+        })
+        .catch(() => {
+          status.textContent = 'Mac full portal actions are offline. Version Plan is still available.';
+          status.dataset.tone = 'error';
+        });
+    })();
+  </script>
+{% endblock %}

@@ -28,11 +28,11 @@
           </div>
           <div class="session-actions">
             {% if user_identity.mode == "google" %}
-              <form method="post" action="{{ url_for('google_logout') }}">
+              <form method="post" action="{{ url_for('cloud_google_logout') if cloud_auth_mode|default(false) else url_for('google_logout') }}">
                 <button class="button button-secondary" type="submit">Logout</button>
               </form>
             {% elif user_identity.mode == "guest" %}
-              <a class="button button-secondary" href="{{ url_for('google_login') }}">Sign in with Google</a>
+              <a class="button button-secondary" href="{{ url_for('cloud_google_login') if cloud_auth_mode|default(false) else url_for('google_login') }}">Sign in with Google</a>
             {% endif %}
           </div>
         </section>

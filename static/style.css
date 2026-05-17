@@ -1183,6 +1183,35 @@ input {
   align-items: center;
 }
 
+.cloud-home-panel .dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.cloud-home-panel .dashboard-card {
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 8px;
+  padding: 18px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.cloud-home-panel .dashboard-card h3 {
+  margin: 0 0 8px;
+  font-size: 1.08rem;
+}
+
+.cloud-home-panel .dashboard-card p {
+  margin: 0 0 14px;
+  color: #475569;
+}
+
+@media (max-width: 760px) {
+  .cloud-home-panel .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .button {
   display: inline-flex;
   align-items: center;

@@ -849,6 +849,11 @@
     }
   };
 
+  const versionPlanRevisionPayload = () => {
+    const revision = String(versionPlanState?.document_revision || '').trim();
+    return revision ? { document_revision: revision } : {};
+  };
+
   const saveVersionPlanCell = async (input) => {
     const row = input.closest('[data-version-plan-row-id]');
     if (!row) return;
@@ -860,6 +865,7 @@
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
         credentials: 'same-origin',
         body: JSON.stringify({
+          ...versionPlanRevisionPayload(),
           scope: row.dataset.versionPlanScope || '',
           version_id: row.dataset.versionId || '',
           row_id: row.dataset.versionPlanRowId || '',
@@ -880,7 +886,7 @@
       method: 'POST',
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       credentials: 'same-origin',
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ ...versionPlanRevisionPayload(), ...payload }),
     });
     const result = await readJson(response, fallbackMessage);
     renderVersionPlan(result);
