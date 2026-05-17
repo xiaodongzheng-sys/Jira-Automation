@@ -215,6 +215,110 @@ class PortalE2ESmokeTest(unittest.TestCase):
 
         self.assertIn("Source Code Q&A", page.locator("body").inner_text(timeout=5000))
 
+    def test_cloud_home_opens_standalone_version_plan_smoke(self) -> None:
+        cloud_temp_dir = tempfile.TemporaryDirectory()
+        process: subprocess.Popen[str] | None = None
+        context = None
+        try:
+            port = _free_port()
+            cloud_base_url = f"http://127.0.0.1:{port}"
+            cloud_env = {
+                **self._env,
+                "TEAM_PORTAL_DATA_DIR": cloud_temp_dir.name,
+                "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
+                "TEAM_PORTAL_MAC_FULL_PORTAL_URL": "https://app.bankpmtool.uk/portal-home",
+                "TEAM_PORTAL_BASE_URL": "",
+            }
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "flask",
+                    "--app",
+                    "app",
+                    "run",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                ],
+                cwd=PROJECT_ROOT,
+                env=cloud_env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            _wait_for_healthz(cloud_base_url)
+            session_cookie = _session_cookie_value(cloud_env, email=TEAMMATE_EMAIL, name="Team Mate")
+            context = self._browser.new_context(base_url=cloud_base_url, viewport={"width": 1280, "height": 900})
+            context.add_cookies(
+                [
+                    {
+                        "name": "session",
+                        "value": session_cookie,
+                        "url": cloud_base_url,
+                        "httpOnly": True,
+                        "sameSite": "Lax",
+                    }
+                ]
+            )
+            page = context.new_page()
+            page_errors: list[str] = []
+            page.on("pageerror", lambda error: page_errors.append(str(error)))
+
+            def version_plan(route):
+                route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(
+                        {
+                            "status": "ok",
+                            "can_sync": False,
+                            "document_revision": "cloud-home-rev-1",
+                            "store_backend": "firestore",
+                            "store_environment": "uat",
+                            "priority_order": ["SP", "P0", "P1", "P2", "P3"],
+                            "pm_options": ["TBC"],
+                            "sync_state": {"state": "idle", "last_synced_date_sgt": "2026-05-17"},
+                            "bundles": [],
+                            "pipeline_rows": [
+                                {
+                                    "row_id": "cloud-home-pipe-1",
+                                    "row_type": "manual",
+                                    "feature": "Cloud homepage version plan row",
+                                    "priority": "SP",
+                                    "pm": ["TBC"],
+                                    "productization_efforts": "",
+                                    "remarks": "",
+                                }
+                            ],
+                            "archived_bundles": [],
+                        }
+                    ),
+                )
+
+            page.route("**/api/team-dashboard/version-plan/af", version_plan)
+            page.goto("/", wait_until="domcontentloaded")
+            self.assertIn("Risk PM Cloud", page.locator("body").inner_text(timeout=5000))
+            page.get_by_role("link", name="Open Version Plan").click()
+            page.wait_for_url("**/version-plan", timeout=5000)
+            page.locator('[data-version-plan-row-id="cloud-home-pipe-1"]').get_by_text(
+                "Cloud homepage version plan row"
+            ).wait_for(timeout=5000)
+            self.assertEqual(page.locator('[data-team-dashboard-tab="tasks"]').count(), 0)
+            self.assertEqual([], page_errors)
+        finally:
+            if context is not None:
+                context.close()
+            if process is not None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+            cloud_temp_dir.cleanup()
+
     def test_auth_and_access_control_browser_smoke(self) -> None:
         logged_out = self._new_page()
 

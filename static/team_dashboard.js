@@ -2823,6 +2823,9 @@
   };
 
   setupTabs();
+  if (versionPlanContent && !root.querySelector('[data-team-dashboard-tab]')) {
+    loadVersionPlan();
+  }
   if (canManageKeyProjects) {
     loadConfiguredTeams();
   }

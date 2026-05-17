@@ -2028,6 +2028,28 @@ fi
         self.assertIn("Public local-agent proxy: url=https://app.bankpmtool.uk/api/local-agent/healthz status=ok source_code_qa=True codex_ready=True", output)
         self.assertIn("Version Plan Firestore:", output)
 
+    def test_release_status_firestore_unavailable_does_not_leak_secret_values(self):
+        from scripts.release_status import _version_plan_firestore_status
+
+        secret_text = "FIRESTORE_ACCESS_TOKEN=secret-token"
+        with patch("google.cloud.firestore.Client", side_effect=RuntimeError(f"sdk failed {secret_text}")), patch(
+            "bpmis_jira_tool.team_dashboard_version_plan_store._FirestoreRestDocument.get",
+            side_effect=RuntimeError(f"rest failed {secret_text}"),
+        ):
+            status = _version_plan_firestore_status(
+                env={
+                    "VERSION_PLAN_STORE_BACKEND": "firestore",
+                    "VERSION_PLAN_FIRESTORE_PROJECT": "risk-pm-tool",
+                    "VERSION_PLAN_FIRESTORE_ENVIRONMENT": "uat",
+                }
+            )
+
+        self.assertIn("status=unavailable", status)
+        self.assertIn("document=portal/version_plan_uat", status)
+        self.assertIn("REST fallback: RuntimeError", status)
+        self.assertNotIn("secret-token", status)
+        self.assertNotIn("FIRESTORE_ACCESS_TOKEN", status)
+
     def test_stack_doctor_exposes_release_status_command(self):
         stack_script = (PROJECT_ROOT / "scripts/run_team_stack.sh").read_text(encoding="utf-8")
 

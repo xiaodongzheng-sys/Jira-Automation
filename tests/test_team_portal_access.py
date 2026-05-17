@@ -126,6 +126,9 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "TEAM_PORTAL_MAC_FULL_PORTAL_URL": "https://app.bankpmtool.uk/portal-home",
             },
             clear=False,
+        ), patch(
+            "bpmis_jira_tool.web._build_local_agent_client",
+            side_effect=AssertionError("cloud home should not call local-agent"),
         ):
             app = create_app()
             app.testing = True

@@ -1387,6 +1387,144 @@ class WebPortalFeatureTests(unittest.TestCase):
             any(row["row_id"] == added_row_id for row in delete_response.get_json()["pipeline_rows"])
         )
 
+    def test_team_dashboard_version_plan_api_rejects_stale_revision(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "ENV_FILE": os.devnull,
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            config = app.config["TEAM_DASHBOARD_CONFIG_STORE"].load()
+            config["version_plan"]["af"]["sync_state"]["last_synced_date_sgt"] = singapore_date_text()
+            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(config)
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                    session["google_credentials"] = {"token": "x"}
+                plan_response = client.get("/api/team-dashboard/version-plan/af?sync=0")
+                row_id = plan_response.get_json()["pipeline_rows"][0]["row_id"]
+                cell_response = client.post(
+                    "/api/team-dashboard/version-plan/af/cell",
+                    json={
+                        "document_revision": "stale-revision",
+                        "scope": "pipeline",
+                        "row_id": row_id,
+                        "field": "remarks",
+                        "value": "stale update",
+                    },
+                )
+                rows_response = client.post(
+                    "/api/team-dashboard/version-plan/af/rows",
+                    json={
+                        "document_revision": "stale-revision",
+                        "scope": "pipeline",
+                        "action": "add",
+                    },
+                )
+
+        self.assertEqual(plan_response.status_code, 200)
+        self.assertEqual(cell_response.status_code, 409)
+        self.assertEqual(cell_response.get_json()["status"], "error")
+        self.assertEqual(cell_response.get_json()["error_category"], "version_plan_conflict")
+        self.assertIn("Refresh and try again", cell_response.get_json()["message"])
+        self.assertEqual(rows_response.status_code, 409)
+        self.assertEqual(rows_response.get_json()["status"], "error")
+        self.assertEqual(rows_response.get_json()["error_category"], "version_plan_conflict")
+
+    def test_team_dashboard_version_plan_route_uses_firestore_store_for_cloud_uat_auto_backend(self):
+        from bpmis_jira_tool import team_dashboard_version_plan_store as store_module
+
+        class FakeSnapshot:
+            exists = False
+
+            def to_dict(self):
+                return {}
+
+        class FakeDocument:
+            def get(self, transaction=None):
+                return FakeSnapshot()
+
+            def set(self, payload):
+                self.payload = dict(payload)
+
+        class FakeCollection:
+            def __init__(self):
+                self.document_id = ""
+                self.document_ref = FakeDocument()
+
+            def document(self, document_id):
+                self.document_id = document_id
+                return self.document_ref
+
+        class FakeFirestoreClient:
+            def __init__(self):
+                self.collection_name = ""
+                self.collection_ref = FakeCollection()
+
+            def collection(self, name):
+                self.collection_name = name
+                return self.collection_ref
+
+        fake_client = FakeFirestoreClient()
+        created_stores = []
+
+        def build_store_with_fake_firestore(settings, config_store):
+            store = store_module.build_version_plan_store(
+                settings,
+                config_store,
+                firestore_client=fake_client,
+            )
+            created_stores.append(store)
+            return store
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "ENV_FILE": os.devnull,
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                "TEAM_PORTAL_STAGE": "uat",
+                "VERSION_PLAN_STORE_BACKEND": "auto",
+                "VERSION_PLAN_FIRESTORE_PROJECT": "risk-pm-tool",
+            },
+            clear=True,
+        ), patch(
+            "bpmis_jira_tool.web_team_dashboard_routes.build_version_plan_store",
+            side_effect=build_store_with_fake_firestore,
+        ):
+            app = create_app()
+            app.testing = True
+            config = app.config["TEAM_DASHBOARD_CONFIG_STORE"].load()
+            config["version_plan"]["af"]["sync_state"]["last_synced_date_sgt"] = singapore_date_text()
+            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(config)
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.get("/api/team-dashboard/version-plan/af?sync=0")
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["store_backend"], "firestore")
+        self.assertEqual(payload["store_environment"], "uat")
+        self.assertTrue(created_stores)
+        self.assertIsInstance(created_stores[0], store_module.FirestoreVersionPlanStore)
+        self.assertEqual(fake_client.collection_name, "portal")
+        self.assertEqual(fake_client.collection_ref.document_id, "version_plan_uat")
+
     def test_team_dashboard_report_intelligence_save_normalizes_and_requires_admin(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
