@@ -1287,6 +1287,10 @@
   row-gap: 8px;
 }
 
+.team-dashboard-version-plan-pipeline {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .team-dashboard-version-plan-bundle,
 .team-dashboard-version-plan-archive {
   padding: 0;
@@ -1617,6 +1621,11 @@
 .team-dashboard-version-plan-bundle > .team-dashboard-version-plan-actions {
   grid-column: 2;
   min-width: 0;
+}
+
+.team-dashboard-version-plan-pipeline > .team-dashboard-version-plan-sheet,
+.team-dashboard-version-plan-pipeline > .team-dashboard-version-plan-actions {
+  grid-column: 1;
 }
 
 .team-dashboard-version-plan-bundle-toggle-row + [data-version-plan-bundle-body] {

@@ -714,12 +714,6 @@
       <div class="team-dashboard-version-plan-sections">
         ${activeHtml}
         <section class="team-dashboard-version-plan-bundle team-dashboard-version-plan-pipeline">
-          <div class="team-dashboard-version-plan-bundle-head">
-            <div>
-              <h4>Pipeline Section</h4>
-            </div>
-            <span class="field-badge">${escapeHtml(pipelineRows.length)} rows</span>
-          </div>
           ${renderVersionPlanRows(pipelineRows, { scope: 'pipeline', readOnly: false, title: 'pipeline rows', headerFeature: 'Pipeline Section' })}
           <div class="team-dashboard-version-plan-actions">
             <button class="button button-secondary" type="button" data-version-plan-row-action="add" data-version-plan-scope="pipeline">Add Row</button>
