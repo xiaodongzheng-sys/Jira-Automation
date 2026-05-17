@@ -21,6 +21,7 @@ from bpmis_jira_tool.monthly_report import (
     _highlight_topic_aliases,
     _monthly_report_highlight_qualifier_marker_groups,
     _monthly_report_text_matches_qualifier_marker_groups,
+    _apply_monthly_report_project_tables,
     build_monthly_report_evidence_review,
     build_monthly_highlight_deep_evidence,
     build_monthly_highlight_evidence_map,
@@ -29,6 +30,7 @@ from bpmis_jira_tool.monthly_report import (
     build_monthly_requirements_target_map,
     build_monthly_project_evidence_brief,
     build_monthly_report_final_prompt,
+    build_monthly_report_project_tables,
     build_monthly_report_query_plan,
     generate_monthly_report_with_codex,
     match_monthly_report_highlight_topics,
@@ -169,7 +171,10 @@ class MonthlyReportTests(unittest.TestCase):
 
         self.assertEqual(result["result_markdown"], "# Draft")
         self.assertEqual(mock_provider.call_args.kwargs["timeout_seconds"], 777)
-        self.assertEqual(instance.generate.call_args.kwargs["primary_model"], "gpt-5.4")
+        self.assertEqual(instance.generate.call_args.kwargs["primary_model"], "gpt-5.5")
+        payload = instance.generate.call_args.kwargs["payload"]
+        self.assertEqual(payload["_codex_reasoning_effort"], "high")
+        self.assertEqual(payload["_llm_ledger_route"], "deep")
 
     def test_report_period_resolves_four_week_anchors(self):
         first = resolve_monthly_report_period(datetime(2026, 5, 3, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE))
@@ -257,8 +262,8 @@ class MonthlyReportTests(unittest.TestCase):
 
     def test_highlight_topics_and_user_date_range_are_validated(self):
         self.assertEqual(normalize_monthly_report_highlight_topics([" AF ", "", "CRMS", "AF"]), ["AF", "CRMS"])
-        with self.assertRaises(ToolError):
-            normalize_monthly_report_highlight_topics([])
+        self.assertEqual(normalize_monthly_report_highlight_topics([]), [])
+        self.assertEqual(normalize_monthly_report_highlight_topics(" \n "), [])
         self.assertEqual(
             normalize_monthly_report_highlight_topics(["one", "two", "three", "four", "five", "six"]),
             ["one", "two", "three", "four", "five", "six"],
@@ -532,7 +537,10 @@ class MonthlyReportTests(unittest.TestCase):
                 ),
             )
 
-        self.assertEqual(result["draft_markdown"], "# Draft")
+        self.assertTrue(result["draft_markdown"].startswith("# Draft"))
+        self.assertIn("## 1. Anti-Fraud Updates", result["draft_markdown"])
+        self.assertIn("Key Fraud Project", result["draft_markdown"])
+        self.assertIn("Regards", result["draft_markdown"])
         self.assertEqual(seatalk.calls[0]["since"].isoformat(), "2026-04-20T00:00:00+08:00")
         self.assertEqual(seatalk.calls[0]["now"].isoformat(), "2026-05-04T00:00:00+08:00")
         self.assertEqual(seatalk.calls[0]["days"], 15)
@@ -815,6 +823,58 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertGreaterEqual(len(highlight_calls), 1)
         for call in highlight_calls:
             self.assertLessEqual(_estimate_token_count(call.kwargs["prompt"]), MONTHLY_REPORT_BATCH_MAX_TOKENS)
+
+    def test_generate_draft_respects_highlight_source_checkboxes_for_external_search(self):
+        gmail = _FakeGmailService("VIP evidence that should not be searched")
+        seatalk = _FakeSeaTalkService()
+        team_payloads = [
+            {
+                "team_key": "AF",
+                "label": "Anti-fraud",
+                "member_emails": ["owner@npt.sg"],
+                "under_prd": [
+                    {
+                        "bpmis_id": "AF-TEAM",
+                        "project_name": "Team Dashboard Only Project",
+                        "is_key_project": True,
+                        "priority": "SP",
+                        "jira_tickets": [
+                            {
+                                "jira_id": "AF-1",
+                                "jira_title": "Team Dashboard Only Project",
+                                "jira_status": "Developing",
+                            }
+                        ],
+                    }
+                ],
+                "pending_live": [],
+            }
+        ]
+        now = datetime(2026, 5, 3, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+        with tempfile.TemporaryDirectory() as temp_dir, patch("bpmis_jira_tool.monthly_report.generate_monthly_report_with_codex") as mock_generate:
+            mock_generate.return_value = {"result_markdown": "# Summary", "model_id": "codex-cli", "trace": {}}
+            service = MonthlyReportService(
+                settings=_settings(temp_dir),
+                workspace_root=Path(temp_dir),
+                seatalk_service=seatalk,
+                confluence=None,
+                gmail_service=gmail,
+                now=now,
+                report_intelligence_config={"vip_people": [{"display_name": "Boss", "emails": ["boss@npt.sg"]}]},
+            )
+            result = service.generate_draft(
+                template="# Template",
+                team_payloads=team_payloads,
+                highlight_topics=["Team Dashboard Only Project"],
+                highlight_topic_sources=[{"topic": "Team Dashboard Only Project", "sources": ["team_dashboard"]}],
+            )
+
+        self.assertEqual(seatalk.calls, [])
+        self.assertFalse(any("contact_emails" in call for call in gmail.calls))
+        self.assertTrue(any("monthly_requirements_configs" in call for call in gmail.calls))
+        self.assertEqual(result["evidence_summary"]["vip_gmail_thread_count"], 0)
+        self.assertEqual(result["evidence_summary"]["highlight_gmail_thread_count"], 0)
+        self.assertEqual(result["evidence_summary"]["highlight_seatalk_raw_match_count"], 0)
 
     def test_final_prompt_compacts_included_project_evidence(self):
         period = resolve_monthly_report_period(datetime(2026, 5, 3, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE))
@@ -1420,7 +1480,7 @@ class MonthlyReportTests(unittest.TestCase):
         by_id = {item["project_id"]: item for item in brief}
         self.assertEqual(by_id["BPMIS-2"]["matched_seatalk_messages"], [])
         self.assertEqual(by_id["BPMIS-2"]["matched_prd_summaries"], [])
-        self.assertTrue(by_id["BPMIS-2"]["matched_vip_gmail_threads"])
+        self.assertEqual(by_id["BPMIS-2"]["matched_vip_gmail_threads"], [])
 
     def test_key_project_cap_allows_thirty_and_excludes_thirty_first(self):
         seatalk = _FakeSeaTalkService()
@@ -1600,6 +1660,40 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(target["target_tech_live_version"], "AF_v1.1_0620")
         self.assertFalse(any("Planning_26Q4" in fact for fact in target["timeline_facts"]))
 
+    def test_current_status_uses_jira_only_and_non_highlight_skips_external_evidence(self):
+        period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
+        brief = build_monthly_project_evidence_brief(
+            key_projects=[
+                {
+                    "bpmis_id": "HL",
+                    "project_name": "Highlight External Evidence Project",
+                    "teams": ["Anti-fraud"],
+                    "jira_tickets": [],
+                },
+                {
+                    "bpmis_id": "NON-HL",
+                    "project_name": "Non Highlight External Evidence Project",
+                    "teams": ["Anti-fraud"],
+                    "jira_tickets": [],
+                },
+            ],
+            seatalk_history_text="Highlight External Evidence Project entered UAT and is live testing.",
+            vip_gmail_text="Subject: Non Highlight External Evidence Project\nBody: Non Highlight External Evidence Project entered UAT.",
+            prd_scope_summaries=[
+                {"jira_id": "", "scope_summary": "Highlight External Evidence Project PRD scope is complete."}
+            ],
+            report_period=period,
+            highlight_project_ids={"HL"},
+        )
+
+        by_id = {item["project_id"]: item for item in brief}
+        self.assertEqual(by_id["HL"]["current_status"], "BRD")
+        self.assertGreater(by_id["HL"]["material_update_score"], 0)
+        self.assertTrue(by_id["HL"]["matched_seatalk_messages"])
+        self.assertEqual(by_id["NON-HL"]["current_status"], "BRD")
+        self.assertEqual(by_id["NON-HL"]["matched_vip_gmail_threads"], [])
+        self.assertEqual(by_id["NON-HL"]["matched_seatalk_messages"], [])
+
     def test_sp_p0_target_tech_live_date_prefers_monthly_requirements_email(self):
         period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
         requirements_text = (
@@ -1631,6 +1725,25 @@ class MonthlyReportTests(unittest.TestCase):
             "From: Xinni Oon <xinni.oon@npt.sg>\n"
             "[Strategic Project] [SG] Multi Currency Account - On Track\n"
             "Timeline: Tech Live: 260324, Public Live: 2026.05.15\n"
+            "Subject: SG_2026 Monthly Requirements Biweekly Update_ Wk 0508\n"
+            "From: Xinni Oon <xinni.oon@npt.sg>\n"
+            "[Strategic Project] Corporate Internet Banking - Go Live date revised\n"
+            "Go Live: 0827 -> 1013\n"
+            "[Strategic Project] SG Last Date Wins - Go Live date revised\n"
+            "Go Live: 1013 -> 0827\n"
+            "[Strategic Project] Line Split Live Project - On track\n"
+            "PRD ETC: 0327, Dev/SIT ETC: 0529, UAT ETC: 0619, Go\n"
+            "Live: 0703 -> 0709\n"
+            "[P0] Split Bill - On track\n"
+            "PRD ETC: 0403, Dev/SIT ETC: 0529, UAT ETC: 0612, Go Live: 0618\n"
+            "2 Strategic Projects Special Projects Governance, Risk & Compliance Xiaodong Zheng\n"
+            "Phase 2: RCSA\n"
+            "pending UAT, Go Live 0918\n"
+            "Phase 3: Outsourcing\n"
+            "Subject: ID_Monthly Requirements Biweekly Update_260515\n"
+            "From: Graceful Xiong <graceful.xiong@npt.sg>\n"
+            "[ID] [TP] Credit Card - Timeline revised\n"
+            "Regression: 1019-1127 Tech live: 1217 -> TBC\n"
         )
         requirements_targets = build_monthly_requirements_target_map(requirements_text)
         brief = build_monthly_project_evidence_brief(
@@ -1710,6 +1823,111 @@ class MonthlyReportTests(unittest.TestCase):
                         }
                     ],
                 },
+                {
+                    "bpmis_id": "SG-CIB",
+                    "project_name": "Corporate Internet Banking (Singapore)",
+                    "market": "SG",
+                    "priority": "SP",
+                    "jira_tickets": [
+                        {
+                            "jira_id": "AF-4",
+                            "jira_title": "Corporate Internet Banking",
+                            "jira_status": "Testing",
+                            "release_date": "2026-07-10",
+                            "version": "AF_v1_0710",
+                        }
+                    ],
+                },
+                {
+                    "bpmis_id": "SG-LAST",
+                    "project_name": "SG Last Date Wins",
+                    "market": "SG",
+                    "priority": "SP",
+                    "jira_tickets": [
+                        {
+                            "jira_id": "AF-5",
+                            "jira_title": "SG Last Date Wins",
+                            "jira_status": "Testing",
+                            "release_date": "2026-07-10",
+                            "version": "AF_v1_0710",
+                        }
+                    ],
+                },
+                {
+                    "bpmis_id": "SG-LINE",
+                    "project_name": "Line Split Live Project",
+                    "market": "SG",
+                    "priority": "SP",
+                    "jira_tickets": [
+                        {
+                            "jira_id": "AF-6",
+                            "jira_title": "Line Split Live Project",
+                            "jira_status": "Testing",
+                            "release_date": "2026-05-10",
+                            "version": "AF_v1_0510",
+                        }
+                    ],
+                },
+                {
+                    "bpmis_id": "SG-BILL",
+                    "project_name": "Bill Split - extension of MCC Split Payment function",
+                    "market": "SG",
+                    "priority": "P0",
+                    "jira_tickets": [
+                        {
+                            "jira_id": "AF-7",
+                            "jira_title": "Bill Split",
+                            "jira_status": "Testing",
+                            "release_date": "2026-05-10",
+                            "version": "AF_v1_0510",
+                        }
+                    ],
+                },
+                {
+                    "bpmis_id": "GRC-P2",
+                    "project_name": "Governance, Risk & Compliance (GRC) - Phase 2 (RCSA + Supporting Modules)",
+                    "market": "SG",
+                    "priority": "SP",
+                    "jira_tickets": [
+                        {
+                            "jira_id": "GRC-2",
+                            "jira_title": "GRC Phase 2 RCSA",
+                            "jira_status": "Testing",
+                            "release_date": "2026-03-27",
+                            "version": "GRC_v1_0327",
+                        }
+                    ],
+                },
+                {
+                    "bpmis_id": "GRC-P3",
+                    "project_name": "Governance, Risk & Compliance (GRC) - Phase 3 (Outsourcing)",
+                    "market": "SG",
+                    "priority": "SP",
+                    "jira_tickets": [
+                        {
+                            "jira_id": "GRC-3",
+                            "jira_title": "GRC Phase 3 Outsourcing",
+                            "jira_status": "Testing",
+                            "release_date": "2026-08-14",
+                            "version": "GRC_v1_0814",
+                        }
+                    ],
+                },
+                {
+                    "bpmis_id": "ID-TBC",
+                    "project_name": "[ID] [TP] Credit Card",
+                    "market": "ID",
+                    "priority": "SP",
+                    "jira_tickets": [
+                        {
+                            "jira_id": "ID-1",
+                            "jira_title": "[ID] [TP] Credit Card",
+                            "jira_status": "Testing",
+                            "release_date": "2026-08-14",
+                            "version": "ID_v1_0814",
+                        }
+                    ],
+                },
             ],
             seatalk_history_text="",
             vip_gmail_text="",
@@ -1738,6 +1956,25 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(by_id["SG-MCA"]["target_tech_live_date"], "Mar 2026")
         self.assertEqual(by_id["SG-MCA"]["target_tech_live_source"], "monthly_requirements_email")
         self.assertEqual(by_id["SG-MCA"]["target_tech_live_source_detail"]["target_label"], "tech_live")
+        self.assertEqual(by_id["SG-CIB"]["target_tech_live_date"], "Oct 2026")
+        self.assertEqual(by_id["SG-CIB"]["target_tech_live_source"], "monthly_requirements_email")
+        self.assertEqual(by_id["SG-CIB"]["target_tech_live_source_detail"]["target_label"], "tech_live")
+        self.assertIn("Go Live", by_id["SG-CIB"]["target_tech_live_source_detail"]["matched_line"])
+        self.assertEqual(by_id["SG-LAST"]["target_tech_live_date"], "Aug 2026")
+        self.assertEqual(by_id["SG-LAST"]["target_tech_live_source"], "monthly_requirements_email")
+        self.assertEqual(by_id["SG-LINE"]["target_tech_live_date"], "Jul 2026")
+        self.assertEqual(by_id["SG-LINE"]["target_tech_live_source"], "monthly_requirements_email")
+        self.assertIn("Go Live", by_id["SG-LINE"]["target_tech_live_source_detail"]["matched_line"])
+        self.assertEqual(by_id["SG-BILL"]["target_tech_live_date"], "Jun 2026")
+        self.assertEqual(by_id["SG-BILL"]["target_tech_live_source"], "monthly_requirements_email")
+        self.assertEqual(by_id["SG-BILL"]["target_tech_live_source_detail"]["matched_alias"], "split bill")
+        self.assertEqual(by_id["GRC-P2"]["target_tech_live_date"], "Sep 2026")
+        self.assertEqual(by_id["GRC-P2"]["target_tech_live_source"], "monthly_requirements_email")
+        self.assertIn("Phase 2", by_id["GRC-P2"]["target_tech_live_source_detail"]["matched_line"])
+        self.assertEqual(by_id["GRC-P3"]["target_tech_live_date"], "Aug 2026")
+        self.assertEqual(by_id["GRC-P3"]["target_tech_live_source"], "jira_version")
+        self.assertEqual(by_id["ID-TBC"]["target_tech_live_date"], "TBC")
+        self.assertEqual(by_id["ID-TBC"]["target_tech_live_source"], "monthly_requirements_email")
 
     def test_vip_gmail_failure_does_not_fail_draft(self):
         class BrokenGmailService:
@@ -1793,6 +2030,133 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertIn('<col style="width:16%;">', table_html)
         self.assertIn('<col style="width:22%;">', table_html)
         self.assertIn('style="border:1px solid #111827;padding:6px 8px;text-align:left;vertical-align:top;white-space:normal;word-break:normal;overflow-wrap:anywhere;font-weight:700;background:#f8fafc;width:39%;"', table_html)
+
+    def test_monthly_report_project_tables_are_deterministic_from_included_json(self):
+        evidence = [
+            {
+                "include": True,
+                "project_id": "165707",
+                "project_name": "Governance, Risk & Compliance (GRC) - Phase 2 (RCSA + Supporting Modules)",
+                "product_area": "Anti-fraud",
+                "market": "Regional",
+                "priority": "SP",
+                "current_status": "UAT",
+                "target_tech_live_date": "2026-07-01",
+            },
+            {
+                "include": True,
+                "project_id": "201377",
+                "project_name": "Governance, Risk & Compliance (GRC) - Phase 3 (Outsourcing)",
+                "product_area": "Ops Risk",
+                "market": "Regional",
+                "priority": "SP",
+                "current_status": "Dev",
+                "target_tech_live_date": "Q3 2026",
+            },
+            {
+                "include": True,
+                "project_id": "211471",
+                "project_name": "Credit Risk Productization Phase 1",
+                "product_area": "Credit Risk",
+                "market": "SG",
+                "priority": "P1",
+                "current_status": "PRD",
+                "target_tech_live_date": "May 2026",
+            },
+            {
+                "include": True,
+                "project_id": "205938",
+                "project_name": "[PH] MariBank Credit Card Shopee Instant Checkout",
+                "product_area": "Anti-fraud",
+                "teams": ["Anti-fraud", "Credit Risk"],
+                "market": "PH",
+                "priority": "SP",
+                "current_status": "Dev",
+                "target_tech_live_date": "Jun 2026",
+            },
+            {
+                "include": True,
+                "project_id": "217733",
+                "project_name": "[ID] [TP] Credit Card",
+                "product_area": "Credit Risk",
+                "market": "ID",
+                "priority": "SP",
+                "current_status": "Dev",
+                "target_tech_live_date": "TBC",
+            },
+            {
+                "include": False,
+                "project_id": "239510",
+                "project_name": "Viber as Primary Channel with SMS Fallback AAF Requirements",
+                "product_area": "Anti-fraud",
+                "market": "PH",
+                "priority": "P0",
+                "current_status": "Dev",
+                "target_tech_live_date": "Jun 2026",
+            },
+        ]
+
+        tables = build_monthly_report_project_tables(evidence)
+
+        self.assertIn("## 2. Credit Risk Updates", tables)
+        self.assertIn("## 3. Ops Risk (GRC System) Updates", tables)
+        self.assertIn("Governance, Risk & Compliance (GRC) - Phase 2", tables)
+        self.assertIn("Governance, Risk & Compliance (GRC) - Phase 3", tables)
+        self.assertIn("Credit Risk Productization Phase 1", tables)
+        self.assertIn("[PH] MariBank Credit Card Shopee Instant Checkout", tables)
+        self.assertIn("| Regional | SP | Governance, Risk & Compliance (GRC) - Phase 2", tables)
+        self.assertIn("| PH | SP | [PH] MariBank Credit Card Shopee Instant Checkout | Dev | Jun 2026 |", tables)
+        self.assertIn("| ID | SP | [ID] [TP] Credit Card | Dev | TBC |", tables)
+        self.assertIn("| SG | P1 | Credit Risk Productization Phase 1 | PRD | May 2026 |", tables)
+        self.assertNotIn("Viber as Primary Channel with SMS Fallback AAF Requirements", tables)
+
+    def test_monthly_report_project_tables_replace_llm_generated_update_sections(self):
+        draft = (
+            "Subject: [Banking] Product Update\n\n"
+            "Highlights\n"
+            "- GRC delivery remains the main Ops Risk update.\n\n"
+            "## 1. Anti-Fraud Updates\n\n"
+            "| Region | Priority | Project | Current Status | Target Tech Live Date |\n"
+            "| --- | --- | --- | --- | --- |\n"
+            "| PH | P0 | Model invented row | Dev | Jun 2026 |\n\n"
+            "## 3. Ops Risk (GRC System) Updates\n\n"
+            "| Region | Priority | Project | Current Status | Target Tech Live Date |\n"
+            "| --- | --- | --- | --- | --- |\n"
+            "| Regional | SP | Governance, Risk & Compliance (GRC) - Phase 3 (Outsourcing) | Dev | Q3 2026 |\n\n"
+            "Regards\n"
+            "Xiaodong"
+        )
+        evidence = [
+            {
+                "include": True,
+                "project_id": "165707",
+                "project_name": "Governance, Risk & Compliance (GRC) - Phase 2 (RCSA + Supporting Modules)",
+                "product_area": "Ops Risk",
+                "market": "Regional",
+                "priority": "SP",
+                "current_status": "UAT",
+                "target_tech_live_date": "Jul 2026",
+            },
+            {
+                "include": True,
+                "project_id": "211471",
+                "project_name": "Credit Risk Productization Phase 1",
+                "product_area": "Credit Risk",
+                "market": "SG",
+                "priority": "P1",
+                "current_status": "PRD",
+                "target_tech_live_date": "May 2026",
+            },
+        ]
+
+        result = _apply_monthly_report_project_tables(draft, evidence)
+
+        self.assertIn("Highlights", result)
+        self.assertIn("Credit Risk Productization Phase 1", result)
+        self.assertIn("Governance, Risk & Compliance (GRC) - Phase 2", result)
+        self.assertNotIn("Model invented row", result)
+        self.assertNotIn("Governance, Risk & Compliance (GRC) - Phase 3", result)
+        self.assertTrue(result.endswith("Regards\nXiaodong"))
 
 
 if __name__ == "__main__":

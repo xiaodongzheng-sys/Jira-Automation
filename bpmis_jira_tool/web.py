@@ -2921,7 +2921,7 @@ def _require_team_dashboard_access(settings: Settings, *, api: bool = False):
     if login_gate is not None:
         return login_gate
     user_identity = _get_user_identity(settings)
-    message = f"Team Dashboard is restricted to {PORTAL_ADMIN_EMAIL}."
+    message = "Team Dashboard is available to signed-in npt.sg users and the configured test account."
     if not _can_access_team_dashboard(user_identity):
         if api:
             return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
@@ -4340,6 +4340,7 @@ def _load_all_team_dashboard_task_payloads(settings: Settings, config: dict[str,
             key_project_overrides=key_project_overrides,
         )
         _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client, team_payload)
+        _remove_team_dashboard_zero_jira_pending_live_projects(team_payload)
         _hydrate_team_dashboard_actual_mandays(bpmis_client, team_payload)
         team_payloads.append(team_payload)
     return team_payloads

@@ -285,9 +285,6 @@
       .map((node) => String(node?.value || '').trim())
       .filter(Boolean);
     const uniqueTopics = [...new Set(topics)];
-    if (strict && uniqueTopics.length === 0) {
-      throw new Error('Add 1 to 6 highlight topics before generating the Monthly Report.');
-    }
     if (strict && uniqueTopics.length > 6) {
       throw new Error('Monthly Report supports at most 6 highlight topics.');
     }

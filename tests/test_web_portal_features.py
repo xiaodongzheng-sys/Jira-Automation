@@ -1128,9 +1128,11 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b'data-tab-trigger="team-dashboard"', admin_response.data)
         self.assertNotIn(b"data-team-dashboard", admin_response.data)
         self.assertNotIn(b">Team Default Admin<", user_response.data)
-        self.assertNotIn(b">Team Dashboard<", user_response.data)
+        self.assertIn(b">Team Dashboard<", user_response.data)
+        self.assertIn(b'href="/team-dashboard"', user_response.data)
         self.assertNotIn(b">Team Default Admin<", sophia_response.data)
-        self.assertNotIn(b">Team Dashboard<", sophia_response.data)
+        self.assertIn(b">Team Dashboard<", sophia_response.data)
+        self.assertIn(b'href="/team-dashboard"', sophia_response.data)
         self.assertIn(b">PRDs<", user_response.data)
         self.assertIn(b">Source Code<", user_response.data)
 
@@ -1228,8 +1230,17 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn(b"Monthly Report Template", reports_response.data)
         self.assertNotIn(b'data-team-dashboard-tab="tasks"', reports_response.data)
         self.assertNotIn(b'data-team-dashboard-tab="admin"', reports_response.data)
-        self.assertEqual(sophia_dashboard_response.status_code, 302)
-        self.assertEqual(sophia_dashboard_response.headers["Location"], "/access-denied")
+        self.assertEqual(sophia_dashboard_response.status_code, 200)
+        sophia_dashboard_soup = BeautifulSoup(sophia_dashboard_response.get_data(as_text=True), "html.parser")
+        sophia_dashboard_tabs = [
+            node.get_text(strip=True)
+            for node in sophia_dashboard_soup.select(".team-dashboard-tabs > .workspace-tab")
+        ]
+        self.assertEqual(sophia_dashboard_tabs, ["Version Plan"])
+        self.assertNotIn(b'data-team-dashboard-tab="admin"', sophia_dashboard_response.data)
+        self.assertNotIn(b'data-team-dashboard-tab="tasks"', sophia_dashboard_response.data)
+        self.assertNotIn(b'data-team-dashboard-tab="link-biz-project"', sophia_dashboard_response.data)
+        self.assertNotIn(b'data-team-dashboard-tab="monthly-report"', sophia_dashboard_response.data)
 
     def test_team_dashboard_config_defaults_and_save_are_admin_only(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -3462,6 +3473,52 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(fake_client.request_stats["team_dashboard_zero_jira_bulk_project_count"], 1)
         self.assertEqual(fake_client.request_stats["team_dashboard_zero_jira_per_project_fallback_skipped_count"], 1)
 
+    def test_monthly_report_payload_uses_team_dashboard_zero_jira_pending_live_filter(self):
+        class FakeTeamDashboardClient:
+            def list_jira_tasks_created_by_emails(self, emails, **_kwargs):
+                return []
+
+        team_payload = {
+            "team_key": "AF",
+            "under_prd": [],
+            "pending_live": [
+                {
+                    "bpmis_id": "182923",
+                    "project_name": "[PH] Viber as Primary OTP Channel with SMS Fallback",
+                    "jira_tickets": [],
+                },
+                {
+                    "bpmis_id": "205938",
+                    "project_name": "[PH] MariBank Credit Card Shopee Instant Checkout",
+                    "jira_tickets": [{"jira_id": "SPDBP-1"}],
+                },
+            ],
+        }
+
+        with patch.object(web_module, "TEAM_DASHBOARD_TEAMS", {"AF": "Anti-fraud"}), patch(
+            "bpmis_jira_tool.web._build_bpmis_client_for_current_user",
+            return_value=FakeTeamDashboardClient(),
+        ), patch(
+            "bpmis_jira_tool.web._team_dashboard_biz_projects_for_emails",
+            return_value=[],
+        ), patch(
+            "bpmis_jira_tool.web._build_team_dashboard_task_group",
+            return_value=team_payload,
+        ), patch(
+            "bpmis_jira_tool.web._backfill_team_dashboard_empty_project_jira_tasks"
+        ), patch(
+            "bpmis_jira_tool.web._hydrate_team_dashboard_actual_mandays"
+        ):
+            payloads = web_module._load_all_team_dashboard_task_payloads(
+                Settings.from_env(),
+                {"teams": {"AF": {"member_emails": ["pm@example.com"]}}},
+            )
+
+        self.assertEqual(
+            [project["bpmis_id"] for project in payloads[0]["pending_live"]],
+            ["205938"],
+        )
+
     def test_team_dashboard_pending_live_fallback_excludes_done_jira_tasks(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
@@ -5120,7 +5177,7 @@ class WebPortalFeatureTests(unittest.TestCase):
 
     @patch("bpmis_jira_tool.web._load_all_team_dashboard_task_payloads", return_value=[{"team_key": "AF"}])
     @patch("bpmis_jira_tool.web._build_monthly_report_service", return_value=_FakeMonthlyReportService())
-    def test_team_dashboard_monthly_report_draft_requires_highlight_topics(self, _mock_service, _mock_payloads):
+    def test_team_dashboard_monthly_report_draft_allows_empty_highlight_topics(self, _mock_service, _mock_payloads):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -5140,8 +5197,8 @@ class WebPortalFeatureTests(unittest.TestCase):
                     session["google_credentials"] = {"token": "x"}
                 response = client.post("/api/team-dashboard/monthly-report/draft", json={})
 
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("highlight topics", response.get_json()["message"])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(_mock_service.return_value.request["highlight_topics"], [])
 
     @patch("bpmis_jira_tool.web.send_monthly_report_email")
     def test_team_dashboard_monthly_report_send_sends_edited_draft(self, mock_send):

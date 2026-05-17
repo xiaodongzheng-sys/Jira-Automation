@@ -238,14 +238,49 @@ class PortalE2ESmokeTest(unittest.TestCase):
         self.assertEqual(source_config["status"], 200)
         self.assertFalse(source_config["body"]["auth"]["can_manage"])
 
+        def teammate_version_plan(route):
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "status": "ok",
+                        "can_sync": False,
+                        "priority_order": ["SP", "P0", "P1", "P2", "P3"],
+                        "pm_options": ["TBC"],
+                        "sync_state": {"state": "idle", "last_synced_date_sgt": "2026-05-17"},
+                        "bundles": [],
+                        "pipeline_rows": [
+                            {
+                                "row_id": "pipe-readonly-1",
+                                "row_type": "manual",
+                                "feature": "Visible version plan row",
+                                "priority": "SP",
+                                "pm": ["TBC"],
+                                "productization_efforts": "",
+                                "remarks": "",
+                            }
+                        ],
+                        "archived_bundles": [],
+                    }
+                ),
+            )
+
+        teammate.route("**/api/team-dashboard/version-plan/af", teammate_version_plan)
+        teammate.goto("/team-dashboard", wait_until="domcontentloaded")
+        teammate.locator('[data-team-dashboard-tab="version-plan"]').wait_for(timeout=5000)
+        self.assertEqual(teammate.locator('[data-team-dashboard-tab="tasks"]').count(), 0)
+        self.assertEqual(teammate.locator('[data-team-dashboard-tab="admin"]').count(), 0)
+        self.assertEqual(teammate.locator('[data-team-dashboard-tab="monthly-report"]').count(), 0)
+        teammate.locator('[data-version-plan-row-id="pipe-readonly-1"]').get_by_text("Visible version plan row").wait_for(timeout=5000)
+        self.assertFalse(teammate.locator("[data-version-plan-sync]").is_visible())
+
         blocked_pages = [
-            ("/team-dashboard", "/access-denied"),
-            ("/reports", "/access-denied"),
             ("/prd-briefing/", "/access-denied"),
             ("/vpn-connection", "/access-denied"),
-            ("/meeting-recorder", "/source-code-qa"),
-            ("/meeting-translation", "/source-code-qa"),
-            ("/work-memory", "/source-code-qa"),
+            ("/meeting-recorder", "/access-denied"),
+            ("/meeting-translation", "/access-denied"),
+            ("/work-memory", "/access-denied"),
         ]
         for path, expected_final_path in blocked_pages:
             with self.subTest(path=path):
@@ -748,6 +783,124 @@ class PortalE2ESmokeTest(unittest.TestCase):
         self.assertEqual(captured_cell_updates[-1]["field"], "remarks")
         self.assertEqual(captured_cell_updates[-1]["value"], "Updated via Playwright")
 
+    def test_team_dashboard_version_plan_manual_row_controls_smoke(self) -> None:
+        page = self._new_admin_page()
+        captured_row_actions: list[dict[str, object]] = []
+        captured_cell_updates: list[dict[str, object]] = []
+        version_plan_payload = {
+            "status": "ok",
+            "can_sync": True,
+            "priority_order": ["SP", "P0", "P1", "P2", "P3"],
+            "pm_options": ["Wang Chang", "Zoey", "Rene", "TBC"],
+            "sync_state": {"state": "idle", "last_synced_date_sgt": "2026-05-17"},
+            "bundles": [],
+            "pipeline_rows": [
+                {
+                    "row_id": "pipe-1",
+                    "row_type": "manual",
+                    "feature": "Existing pipeline row",
+                    "priority": "SP",
+                    "pm": ["TBC"],
+                    "productization_efforts": "",
+                    "remarks": "",
+                }
+            ],
+            "archived_bundles": [],
+        }
+
+        def json_response(payload: dict[str, object]):
+            return {
+                "status": 200,
+                "content_type": "application/json",
+                "body": json.dumps(payload),
+            }
+
+        def config(route):
+            route.fulfill(**json_response({
+                "status": "ok",
+                "config": {
+                    "teams": {"AF": {"label": "Anti-fraud", "member_emails": [ADMIN_EMAIL]}},
+                    "task_cache": {},
+                },
+            }))
+
+        def version_plan(route):
+            route.fulfill(**json_response(version_plan_payload))
+
+        def save_rows(route):
+            payload = route.request.post_data_json
+            captured_row_actions.append(payload)
+            action = payload.get("action")
+            if action == "add":
+                version_plan_payload["pipeline_rows"].append(
+                    {
+                        "row_id": "pipe-added-1",
+                        "row_type": "manual",
+                        "feature": "",
+                        "priority": "SP",
+                        "pm": ["TBC"],
+                        "productization_efforts": "",
+                        "remarks": "",
+                    }
+                )
+            elif action == "reorder":
+                order = [str(item) for item in payload.get("row_ids", [])]
+                by_id = {row["row_id"]: row for row in version_plan_payload["pipeline_rows"]}
+                version_plan_payload["pipeline_rows"] = [by_id[row_id] for row_id in order if row_id in by_id]
+            elif action == "delete":
+                row_id = payload.get("row_id")
+                version_plan_payload["pipeline_rows"] = [
+                    row for row in version_plan_payload["pipeline_rows"] if row["row_id"] != row_id
+                ]
+            route.fulfill(**json_response(version_plan_payload))
+
+        def save_cell(route):
+            payload = route.request.post_data_json
+            captured_cell_updates.append(payload)
+            for row in version_plan_payload["pipeline_rows"]:
+                if row["row_id"] == payload.get("row_id"):
+                    row[str(payload.get("field") or "")] = payload.get("value")
+            route.fulfill(**json_response(version_plan_payload))
+
+        page.route("**/api/team-dashboard/config", config)
+        page.route("**/api/team-dashboard/version-plan/af", version_plan)
+        page.route("**/api/team-dashboard/version-plan/af/rows", save_rows)
+        page.route("**/api/team-dashboard/version-plan/af/cell", save_cell)
+
+        page.goto("/team-dashboard", wait_until="domcontentloaded")
+        page.locator('[data-team-dashboard-tab="version-plan"]').click()
+        page.locator('[data-version-plan-row-id="pipe-1"]').get_by_text("Existing pipeline row").wait_for(timeout=5000)
+
+        page.locator('[data-version-plan-row-action="add"][data-version-plan-scope="pipeline"]').click()
+        added_row = page.locator('[data-version-plan-row-id="pipe-added-1"]')
+        added_row.wait_for(timeout=5000)
+        self.assertEqual(captured_row_actions[-1]["action"], "add")
+        self.assertEqual(captured_row_actions[-1]["scope"], "pipeline")
+
+        feature_input = added_row.locator('[data-version-plan-cell="feature"]')
+        feature_input.fill("Manual row from browser smoke")
+        feature_input.dispatch_event("change")
+        page.wait_for_function(
+            "() => document.querySelector('[data-version-plan-status]')?.textContent?.includes('Saved.')",
+            timeout=5000,
+        )
+        self.assertEqual(captured_cell_updates[-1]["row_id"], "pipe-added-1")
+        self.assertEqual(captured_cell_updates[-1]["field"], "feature")
+        self.assertEqual(captured_cell_updates[-1]["value"], "Manual row from browser smoke")
+
+        page.locator('[data-version-plan-row-id="pipe-added-1"] [data-version-plan-row-action="up"]').click()
+        page.wait_for_function(
+            "() => document.querySelector('[data-version-plan-status]')?.textContent?.includes('Saved.')",
+            timeout=5000,
+        )
+        self.assertEqual(captured_row_actions[-1]["action"], "reorder")
+        self.assertEqual(captured_row_actions[-1]["row_ids"], ["pipe-added-1", "pipe-1"])
+
+        page.locator('[data-version-plan-row-id="pipe-added-1"] [data-version-plan-row-action="delete"]').click()
+        page.locator('[data-version-plan-row-id="pipe-added-1"]').wait_for(state="detached", timeout=5000)
+        self.assertEqual(captured_row_actions[-1]["action"], "delete")
+        self.assertEqual(captured_row_actions[-1]["row_id"], "pipe-added-1")
+
     def test_team_dashboard_prd_summary_and_review_async_smoke(self) -> None:
         page = self._new_admin_page()
         captured_summary_payloads: list[dict[str, object]] = []
@@ -872,7 +1025,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
         page.goto("/team-dashboard", wait_until="domcontentloaded")
         page.locator('[data-team-dashboard-track="AF"]').wait_for(timeout=5000)
         page.locator("[data-team-dashboard-load-team]").click()
-        page.locator("[data-team-dashboard-task-status]").get_by_text("Reloaded Jira for 1 teams.").wait_for(timeout=5000)
+        page.locator("[data-team-dashboard-task-status]").get_by_text("Reloaded Jira for Anti-fraud.").wait_for(timeout=5000)
         page.get_by_text("Risk Launch Workflow").wait_for(timeout=5000)
         page.locator("[data-team-dashboard-toggle]").click()
         row = page.locator("tr", has_text="SPDBP-PRD-1").first
@@ -1079,6 +1232,101 @@ class PortalE2ESmokeTest(unittest.TestCase):
         self.assertEqual(captured_send_payloads[-1]["subject"], "Banking Product Update")
         self.assertEqual(captured_send_payloads[-1]["recipient"], ADMIN_EMAIL)
         self.assertNotIn("secret-token-should-not-render", page.locator("body").inner_text(timeout=5000))
+
+    def test_team_dashboard_monthly_report_empty_highlights_browser_smoke(self) -> None:
+        page = self._new_admin_page()
+        captured_draft_payloads: list[dict[str, object]] = []
+        requested_job_ids: list[str] = []
+        job_id = "monthly-report-empty-highlights-e2e-job-1"
+        draft_markdown = "## Monthly Report\n- Project tables are generated from dashboard evidence."
+
+        def json_response(payload: dict[str, object], *, status: int = 200):
+            return {
+                "status": status,
+                "content_type": "application/json",
+                "body": json.dumps(payload),
+            }
+
+        def config(route):
+            route.fulfill(**json_response({
+                "status": "ok",
+                "config": {
+                    "teams": {"AF": {"label": "Anti-fraud", "member_emails": [ADMIN_EMAIL]}},
+                    "task_cache": {},
+                },
+            }))
+
+        def template(route):
+            route.fulfill(**json_response({
+                "status": "ok",
+                "subject": "Banking Product Update",
+                "recipient": ADMIN_EMAIL,
+                "template": "## Monthly Report\n- {{highlights}}",
+                "highlight_topics": [],
+                "highlight_topic_sources": [],
+                "period_start": "2026-05-01",
+                "period_end": "2026-05-17",
+            }))
+
+        def latest_draft(route):
+            route.fulfill(**json_response({"status": "ok", "draft_markdown": ""}))
+
+        def draft(route):
+            captured_draft_payloads.append(route.request.post_data_json)
+            route.fulfill(**json_response({"status": "queued", "job_id": job_id}))
+
+        def job_status(route):
+            requested_job_ids.append(urlparse(route.request.url).path.rsplit("/", 1)[-1])
+            route.fulfill(**json_response({
+                "status": "ok",
+                "state": "completed",
+                "message": "Monthly Report draft generated.",
+                "progress": {
+                    "state": "completed",
+                    "stage": "done",
+                    "message": "Monthly Report draft generated.",
+                    "current": 1,
+                    "total": 1,
+                },
+                "results": [
+                    {
+                        "status": "ok",
+                        "draft_markdown": draft_markdown,
+                        "subject": "Banking Product Update",
+                        "highlight_topics": [],
+                        "highlight_topic_sources": [],
+                        "period_start": "2026-05-01",
+                        "period_end": "2026-05-17",
+                        "evidence_summary": {"key_project_count": 1, "jira_ticket_count": 2},
+                        "generation_summary": {"elapsed_seconds": 4, "highlight_topic_sources": []},
+                        "evidence_review": [],
+                        "evidence_debug": [],
+                    }
+                ],
+            }))
+
+        page.route("**/api/team-dashboard/config", config)
+        page.route("**/api/team-dashboard/monthly-report/template", template)
+        page.route("**/api/team-dashboard/monthly-report/latest-draft", latest_draft)
+        page.route("**/api/team-dashboard/monthly-report/draft", draft)
+        page.route("**/api/jobs/*", job_status)
+
+        page.goto("/reports", wait_until="domcontentloaded")
+        page.locator('[data-team-dashboard-tab="monthly-report"]').wait_for(timeout=5000)
+        self.assertEqual(page.locator("[data-monthly-report-topic-input]").first.input_value(timeout=5000), "")
+        page.locator("[data-monthly-report-period-start]").fill("2026-05-01")
+        page.locator("[data-monthly-report-period-end]").fill("2026-05-17")
+        page.locator("[data-monthly-report-generate]").click()
+
+        page.locator("[data-monthly-report-status]").get_by_text("Draft generated in 4s").wait_for(timeout=5000)
+        self.assertEqual(page.locator("[data-monthly-report-draft]").input_value(timeout=5000), draft_markdown)
+        page.locator("[data-monthly-report-preview]").get_by_text("Project tables are generated").wait_for(timeout=5000)
+        self.assertFalse(page.locator("[data-monthly-report-send]").is_disabled(timeout=5000))
+        self.assertEqual(captured_draft_payloads[-1]["highlight_topics"], [])
+        self.assertEqual(captured_draft_payloads[-1]["highlight_topic_sources"], [])
+        self.assertEqual(captured_draft_payloads[-1]["period_start"], "2026-05-01")
+        self.assertEqual(captured_draft_payloads[-1]["period_end"], "2026-05-17")
+        self.assertIn(job_id, requested_job_ids)
 
     def test_admin_vpn_entrypoint_renders_navigation_and_assets(self) -> None:
         page = self._new_admin_page()

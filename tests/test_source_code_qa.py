@@ -82,7 +82,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         html = response.get_data(as_text=True)
         self.assertIn("Source Code Q&amp;A", html)
         self.assertIn('href="/source-code-qa">Source Code</a>', html)
-        self.assertIn('href="/?workspace=run">Projects</a>', html)
+        self.assertIn('href="/team-dashboard">Projects</a>', html)
         self.assertIn('data-source-question rows="2"', html)
         self.assertLess(html.index("data-source-attachments"), html.index("data-source-question"))
         self.assertLess(html.index("data-source-question"), html.index("data-source-attachment-upload"))
