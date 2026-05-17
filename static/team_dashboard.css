@@ -1280,6 +1280,13 @@
   max-width: 100%;
 }
 
+.team-dashboard-version-plan-bundle {
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: start;
+  column-gap: 6px;
+  row-gap: 8px;
+}
+
 .team-dashboard-version-plan-bundle,
 .team-dashboard-version-plan-archive {
   padding: 0;
@@ -1567,13 +1574,15 @@
 
 .team-dashboard-version-plan-bundle-toggle-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  justify-content: center;
   gap: 8px;
   min-width: 0;
-  position: relative;
+  padding-top: 6px;
 }
 
-.team-dashboard-version-plan-bundle-toggle-row strong {
+.team-dashboard-version-plan-collapsed-title {
+  display: none;
   min-width: 0;
   color: #111827;
   font-size: 0.9rem;
@@ -1581,10 +1590,17 @@
   overflow-wrap: anywhere;
 }
 
+.team-dashboard-version-plan-bundle.is-collapsed .team-dashboard-version-plan-bundle-toggle-row {
+  grid-column: 1 / -1;
+  justify-content: flex-start;
+  padding-top: 0;
+}
+
+.team-dashboard-version-plan-bundle.is-collapsed .team-dashboard-version-plan-collapsed-title {
+  display: block;
+}
+
 .team-dashboard-version-plan-bundle-toggle {
-  position: absolute;
-  top: 54px;
-  left: -32px;
   width: 24px !important;
   min-width: 24px !important;
   height: 24px;
@@ -1596,8 +1612,24 @@
   flex: 0 0 auto;
 }
 
-.team-dashboard-version-plan-bundle.is-collapsed .team-dashboard-version-plan-bundle-toggle {
-  top: 0;
+.team-dashboard-version-plan-bundle > [data-version-plan-bundle-body],
+.team-dashboard-version-plan-bundle > .team-dashboard-version-plan-sheet,
+.team-dashboard-version-plan-bundle > .team-dashboard-version-plan-actions {
+  grid-column: 2;
+  min-width: 0;
+}
+
+.team-dashboard-version-plan-bundle-toggle-row + [data-version-plan-bundle-body] {
+  grid-column: 2;
+  min-width: 0;
+}
+
+.team-dashboard-version-plan-bundle.is-archived .team-dashboard-version-plan-bundle-toggle-row {
+  display: none;
+}
+
+.team-dashboard-version-plan-bundle.is-archived > .team-dashboard-version-plan-sheet {
+  grid-column: 1 / -1;
 }
 
 @media (max-width: 760px) {
@@ -1625,8 +1657,7 @@
   }
 
   .team-dashboard-version-plan-bundle-toggle {
-    position: static;
-    margin-right: 2px;
+    margin-right: 0;
   }
 
   .team-dashboard-version-plan-bundle-head p span {

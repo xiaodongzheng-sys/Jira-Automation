@@ -573,7 +573,7 @@
             aria-label="${collapsed ? 'Expand' : 'Collapse'} ${escapeHtml(versionPlanBundleTitle(bundle))}"
           >${collapsed ? '+' : '-'}</button>
         `}
-        <strong>${escapeHtml(versionPlanBundleTitle(bundle))}</strong>
+        <strong class="team-dashboard-version-plan-collapsed-title">${escapeHtml(versionPlanBundleTitle(bundle))}</strong>
       </div>
     `;
   };
