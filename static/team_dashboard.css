@@ -1589,6 +1589,10 @@
   line-height: 1;
 }
 
+.team-dashboard-version-plan-add-inline span {
+  margin-right: 4px;
+}
+
 .team-dashboard-version-plan-actions {
   display: flex;
   justify-content: flex-start;
