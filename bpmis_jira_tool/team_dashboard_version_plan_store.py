@@ -24,6 +24,7 @@ from bpmis_jira_tool.team_dashboard_version_plan import normalize_version_plan_s
 
 SGT = ZoneInfo("Asia/Singapore")
 VERSION_PLAN_SCHEMA_VERSION = 1
+_METADATA_ACCESS_TOKEN_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
 
 
 class VersionPlanConflictError(ValueError):
@@ -182,9 +183,12 @@ def _gcloud_access_token() -> str:
     explicit = os.environ.get("FIRESTORE_ACCESS_TOKEN", "").strip()
     if explicit:
         return explicit
+    metadata_token = _metadata_server_access_token()
+    if metadata_token:
+        return metadata_token
     gcloud = shutil.which("gcloud") or (os.path.expanduser("~/google-cloud-sdk/bin/gcloud"))
     if not gcloud or not os.path.exists(gcloud):
-        raise RuntimeError("Firestore REST fallback requires gcloud or FIRESTORE_ACCESS_TOKEN.")
+        raise RuntimeError("Firestore REST fallback requires Cloud Run metadata token, gcloud, or FIRESTORE_ACCESS_TOKEN.")
     completed = subprocess.run(
         [gcloud, "auth", "print-access-token"],
         capture_output=True,
@@ -196,6 +200,24 @@ def _gcloud_access_token() -> str:
     if not token:
         raise RuntimeError("gcloud auth print-access-token returned an empty token.")
     return token
+
+
+def _metadata_server_access_token() -> str:
+    try:
+        response = requests.get(
+            _METADATA_ACCESS_TOKEN_URL,
+            headers={"Metadata-Flavor": "Google"},
+            timeout=5,
+        )
+    except requests.RequestException:
+        return ""
+    if response.status_code != 200:
+        return ""
+    try:
+        payload = response.json()
+    except ValueError:
+        return ""
+    return str(payload.get("access_token") or "").strip()
 
 
 def _encode_firestore_fields(payload: dict[str, Any]) -> dict[str, Any]:

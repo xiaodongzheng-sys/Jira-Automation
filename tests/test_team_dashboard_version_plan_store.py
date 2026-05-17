@@ -12,6 +12,7 @@ from bpmis_jira_tool.team_dashboard_version_plan_store import (
     VersionPlanConflictError,
     _decode_firestore_fields,
     _encode_firestore_fields,
+    _gcloud_access_token,
     build_version_plan_store,
     firestore_document_id,
     should_use_firestore_version_plan,
@@ -57,6 +58,13 @@ class _FakeFirestoreClient:
     def collection(self, name):
         self.collection_name = name
         return _FakeCollection(self.document_ref)
+
+
+class _FakeMetadataResponse:
+    status_code = 200
+
+    def json(self):
+        return {"access_token": "metadata-token"}
 
 
 class VersionPlanStoreTests(unittest.TestCase):
@@ -161,6 +169,17 @@ class VersionPlanStoreTests(unittest.TestCase):
             },
         }
         self.assertEqual(_decode_firestore_fields(_encode_firestore_fields(payload)), payload)
+
+    def test_firestore_rest_token_uses_metadata_server_before_gcloud(self):
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "bpmis_jira_tool.team_dashboard_version_plan_store.requests.get",
+            return_value=_FakeMetadataResponse(),
+        ) as metadata_get, patch(
+            "bpmis_jira_tool.team_dashboard_version_plan_store.shutil.which",
+            side_effect=AssertionError("gcloud should not be needed on Cloud Run"),
+        ):
+            self.assertEqual(_gcloud_access_token(), "metadata-token")
+        metadata_get.assert_called_once()
 
 
 if __name__ == "__main__":
