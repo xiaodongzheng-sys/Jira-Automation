@@ -34,6 +34,7 @@ VERSION_PLAN_PM_ALIASES = {
 }
 VERSION_PLAN_TIMEZONE = ZoneInfo("Asia/Singapore")
 VERSION_PLAN_SYNC_OPERATION = "af_version_plan"
+VERSION_PLAN_AUDIT_LIMIT = 500
 
 
 PIPELINE_SEED_ROWS: tuple[tuple[str, str, str], ...] = (
@@ -132,12 +133,14 @@ def normalize_version_plan_state(value: Any) -> dict[str, Any]:
         "message": str(sync_state.get("message") or "").strip(),
         "error": str(sync_state.get("error") or "").strip(),
     }
+    audit_log = _normalize_audit_log(raw_af.get("audit_log"))
     return {
         "af": {
             "bundles": normalized_bundles,
             "pipeline_rows": pipeline_rows,
             "seen_versions": normalized_seen,
             "sync_state": normalized_sync_state,
+            "audit_log": audit_log,
         }
     }
 
@@ -287,6 +290,7 @@ def merge_version_plan_editable_state(synced_config: dict[str, Any], current_con
     synced_af = synced_plan["af"]
     current_af = current_plan["af"]
     synced_af["pipeline_rows"] = _normalize_manual_rows(current_af.get("pipeline_rows"))
+    synced_af["audit_log"] = _normalize_audit_log(current_af.get("audit_log"))
     for version_id, current_bundle in current_af["bundles"].items():
         synced_bundle = synced_af["bundles"].get(version_id)
         if not isinstance(synced_bundle, dict):
@@ -302,6 +306,23 @@ def merge_version_plan_editable_state(synced_config: dict[str, Any], current_con
     merged = dict(synced_config)
     merged["version_plan"] = synced_plan
     return merged
+
+
+def append_version_plan_audit(
+    config: dict[str, Any],
+    *,
+    action: str,
+    actor: dict[str, Any] | None = None,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    plan = normalize_version_plan_state(config.get("version_plan") if isinstance(config, dict) else {})
+    entry = _audit_entry(action=action, actor=actor or {}, details=details or {})
+    audit_log = _normalize_audit_log(plan["af"].get("audit_log"))
+    audit_log.append(entry)
+    plan["af"]["audit_log"] = audit_log[-VERSION_PLAN_AUDIT_LIMIT:]
+    updated = dict(config)
+    updated["version_plan"] = plan
+    return updated
 
 
 def _merge_synced_row_remarks(synced_bundle: dict[str, Any], current_bundle: dict[str, Any]) -> None:
@@ -1055,6 +1076,53 @@ def _parse_date(value: Any) -> date | None:
 def _offset_date_text(value: Any, days: int) -> str:
     parsed = _parse_date(value)
     return (parsed + timedelta(days=days)).isoformat() if parsed else ""
+
+
+def _normalize_audit_log(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    entries = [_normalize_audit_entry(item) for item in value if isinstance(item, dict)]
+    return entries[-VERSION_PLAN_AUDIT_LIMIT:]
+
+
+def _normalize_audit_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    actor = entry.get("actor") if isinstance(entry.get("actor"), dict) else {}
+    details = entry.get("details") if isinstance(entry.get("details"), dict) else {}
+    return {
+        "audit_id": str(entry.get("audit_id") or f"audit-{uuid.uuid4().hex}").strip(),
+        "timestamp": str(entry.get("timestamp") or "").strip(),
+        "action": str(entry.get("action") or "").strip(),
+        "actor": {
+            "email": str(actor.get("email") or "").strip().lower(),
+            "name": str(actor.get("name") or "").strip(),
+        },
+        "details": _sanitize_audit_value(details),
+    }
+
+
+def _audit_entry(*, action: str, actor: dict[str, Any], details: dict[str, Any]) -> dict[str, Any]:
+    normalized_actor = {
+        "email": str(actor.get("email") or "").strip().lower(),
+        "name": str(actor.get("name") or "").strip(),
+    }
+    return {
+        "audit_id": f"audit-{uuid.uuid4().hex}",
+        "timestamp": _now_text(),
+        "action": str(action or "").strip(),
+        "actor": normalized_actor,
+        "details": _sanitize_audit_value(details),
+    }
+
+
+def _sanitize_audit_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _sanitize_audit_value(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_audit_value(item) for item in value[:50]]
+    if isinstance(value, (bool, int, float)) or value is None:
+        return value
+    text = str(value)
+    return text[:500]
 
 
 def _now_text(now: datetime | None = None) -> str:

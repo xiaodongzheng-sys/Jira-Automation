@@ -36,6 +36,7 @@ from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.seatalk_stores import SeaTalkNameMappingStore
 from bpmis_jira_tool.team_dashboard_config import TEAM_DASHBOARD_TEAMS
 from bpmis_jira_tool.team_dashboard_version_plan import (
+    append_version_plan_audit,
     mark_version_plan_sync_error,
     mark_version_plan_sync_running,
     merge_version_plan_editable_state,
@@ -111,6 +112,61 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
     resolve_monthly_report_period = ctx.resolve_monthly_report_period
     send_monthly_report_email = ctx.send_monthly_report_email
 
+    def _can_sync_version_plan() -> bool:
+        return _can_manage_team_dashboard(_get_user_identity(settings))
+
+    def _require_team_dashboard_admin_api():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        if not _can_manage_team_dashboard(_get_user_identity(settings)):
+            return jsonify({"status": "error", "message": "Team Dashboard admin access is restricted."}), HTTPStatus.FORBIDDEN
+        return None
+
+    def _version_plan_actor() -> dict[str, str]:
+        user_identity = _get_user_identity(settings)
+        return {
+            "email": str(user_identity.get("email") or "").strip().lower(),
+            "name": str(user_identity.get("name") or "").strip(),
+        }
+
+    def _version_plan_audit_details(payload: dict[str, Any]) -> dict[str, Any]:
+        allowed_keys = {
+            "action",
+            "scope",
+            "source_scope",
+            "target_scope",
+            "version_id",
+            "source_version_id",
+            "target_version_id",
+            "row_id",
+            "target_before_row_id",
+            "field",
+            "value",
+            "row_ids",
+        }
+        return {key: payload.get(key) for key in allowed_keys if key in payload}
+
+    def _audit_version_plan_config(config: dict[str, Any], *, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        actor = _version_plan_actor()
+        details = _version_plan_audit_details(payload)
+        audited = append_version_plan_audit(config, action=action, actor=actor, details=details)
+        _log_portal_event(
+            "team_dashboard_version_plan_audit",
+            **_build_request_log_context(
+                settings,
+                user_identity=_get_user_identity(settings),
+                extra={
+                    "action": action,
+                    "scope": str(payload.get("scope") or payload.get("target_scope") or "").strip(),
+                    "version_id": str(payload.get("version_id") or payload.get("target_version_id") or "").strip(),
+                    "row_id": str(payload.get("row_id") or "").strip(),
+                    "field": str(payload.get("field") or "").strip(),
+                },
+            ),
+        )
+        return audited
+
     def _start_version_plan_sync_if_needed(*, force: bool = False) -> bool:
         global _VERSION_PLAN_SYNC_RUNNING  # noqa: PLW0603
         store = _get_team_dashboard_config_store()
@@ -155,6 +211,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
     def _version_plan_json_response(config: dict[str, Any], *, sync_queued: bool = False):
         payload = version_plan_payload(config)
         payload["sync_queued"] = bool(sync_queued)
+        payload["can_sync"] = _can_sync_version_plan()
         return jsonify(payload)
 
     def team_dashboard_page():
@@ -265,7 +322,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
 
 
     def team_dashboard_config():
-        access_gate = _require_team_dashboard_access(settings, api=True)
+        access_gate = _require_team_dashboard_admin_api()
         if access_gate is not None:
             return access_gate
         return jsonify({"status": "ok", "config": _get_team_dashboard_config_store().load()})
@@ -322,7 +379,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         sync_queued = False
         should_auto_sync = str(request.args.get("sync") or "1").strip().lower() not in {"0", "false", "no"}
         try:
-            if should_auto_sync:
+            if should_auto_sync and _can_sync_version_plan():
                 sync_queued = _start_version_plan_sync_if_needed(force=False)
         except (ConfigError, ToolError) as error:
             config = store.save(mark_version_plan_sync_error(config, str(error)))
@@ -338,6 +395,16 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         access_gate = _require_team_dashboard_access(settings, api=True)
         if access_gate is not None:
             return access_gate
+        if not _can_sync_version_plan():
+            _log_portal_event(
+                "team_dashboard_version_plan_sync_denied",
+                **_build_request_log_context(
+                    settings,
+                    user_identity=_get_user_identity(settings),
+                    extra={"reason": "admin_required"},
+                ),
+            )
+            return jsonify({"status": "error", "message": "Version Plan Jira sync is admin-only."}), HTTPStatus.FORBIDDEN
         store = _get_team_dashboard_config_store()
         config = store.save(store.load())
         try:
@@ -360,7 +427,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         sync_queued = False
         with _VERSION_PLAN_SYNC_LOCK:
             sync_running = _VERSION_PLAN_SYNC_RUNNING
-        if str(sync_state.get("state") or "").strip() == "running" and not sync_running:
+        if str(sync_state.get("state") or "").strip() == "running" and not sync_running and _can_sync_version_plan():
             try:
                 sync_queued = _start_version_plan_sync_if_needed(force=False)
             except (ConfigError, ToolError) as error:
@@ -371,7 +438,12 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             else:
                 if sync_queued:
                     payload = version_plan_payload(store.load())
-        return jsonify({"status": "ok", "sync_state": payload.get("sync_state") or {}, "sync_queued": sync_queued})
+        return jsonify({
+            "status": "ok",
+            "sync_state": payload.get("sync_state") or {},
+            "sync_queued": sync_queued,
+            "can_sync": _can_sync_version_plan(),
+        })
 
 
     def team_dashboard_version_plan_cell():
@@ -383,7 +455,8 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             return jsonify({"status": "error", "message": "JSON payload is required."}), HTTPStatus.BAD_REQUEST
         store = _get_team_dashboard_config_store()
         try:
-            saved = store.save(update_version_plan_cell(store.load(), payload))
+            updated = update_version_plan_cell(store.load(), payload)
+            saved = store.save(_audit_version_plan_config(updated, action="cell_update", payload=payload))
             return _version_plan_json_response(saved)
         except ValueError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
@@ -398,7 +471,9 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             return jsonify({"status": "error", "message": "JSON payload is required."}), HTTPStatus.BAD_REQUEST
         store = _get_team_dashboard_config_store()
         try:
-            saved = store.save(update_version_plan_rows(store.load(), payload))
+            row_action = str(payload.get("action") or "").strip().lower()
+            updated = update_version_plan_rows(store.load(), payload)
+            saved = store.save(_audit_version_plan_config(updated, action=f"row_{row_action}", payload=payload))
             return _version_plan_json_response(saved)
         except ValueError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
@@ -631,7 +706,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
 
 
     def team_dashboard_tasks():
-        access_gate = _require_team_dashboard_access(settings, api=True)
+        access_gate = _require_team_dashboard_admin_api()
         if access_gate is not None:
             return access_gate
         route_started_at = time.monotonic()
@@ -874,7 +949,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
 
 
     def team_dashboard_link_biz_projects():
-        access_gate = _require_team_dashboard_access(settings, api=True)
+        access_gate = _require_team_dashboard_admin_api()
         if access_gate is not None:
             return access_gate
         try:
@@ -902,7 +977,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
 
 
     def team_dashboard_link_biz_project_jira():
-        access_gate = _require_team_dashboard_access(settings, api=True)
+        access_gate = _require_team_dashboard_admin_api()
         if access_gate is not None:
             return access_gate
         user_identity = _get_user_identity(settings)
@@ -943,7 +1018,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
 
 
     def team_dashboard_link_biz_project_suggestions():
-        access_gate = _require_team_dashboard_access(settings, api=True)
+        access_gate = _require_team_dashboard_admin_api()
         if access_gate is not None:
             return access_gate
         payload = request.get_json(silent=True) or {}
@@ -1246,7 +1321,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
 
 
     def team_dashboard_prd_review():
-        access_gate = _require_team_dashboard_access(settings, api=True)
+        access_gate = _require_team_dashboard_admin_api()
         if access_gate is not None:
             return access_gate
         payload = request.get_json(silent=True) or {}
@@ -1320,7 +1395,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
 
 
     def team_dashboard_prd_summary():
-        access_gate = _require_team_dashboard_access(settings, api=True)
+        access_gate = _require_team_dashboard_admin_api()
         if access_gate is not None:
             return access_gate
         payload = request.get_json(silent=True) or {}

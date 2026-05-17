@@ -3301,7 +3301,7 @@ def _is_team_profile_admin(user_identity: dict[str, str | None]) -> bool:
 
 
 def _can_access_team_dashboard(user_identity: dict[str, str | None]) -> bool:
-    return _is_portal_admin(str(user_identity.get("email") or ""))
+    return _is_portal_user(str(user_identity.get("email") or ""))
 
 
 def _can_manage_team_dashboard(user_identity: dict[str, str | None]) -> bool:

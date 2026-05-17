@@ -5,6 +5,7 @@ import unittest
 
 from bpmis_jira_tool.team_dashboard_version_plan import (
     PIPELINE_SEED_ROWS,
+    append_version_plan_audit,
     merge_version_plan_editable_state,
     normalize_version_plan_state,
     update_version_plan_cell,
@@ -651,6 +652,36 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
                 now=datetime.fromisoformat("2026-05-17T09:00:00+08:00"),
             )
         )
+
+    def test_version_plan_audit_log_is_global_and_capped(self) -> None:
+        config = {"version_plan": normalize_version_plan_state({})}
+
+        for index in range(505):
+            config = append_version_plan_audit(
+                config,
+                action="row_add",
+                actor={"email": "teammate@npt.sg", "name": "Teammate"},
+                details={"scope": "pipeline", "row_id": f"manual-{index}", "value": "x" * 600},
+            )
+
+        audit_log = config["version_plan"]["af"]["audit_log"]
+        self.assertEqual(len(audit_log), 500)
+        self.assertEqual(audit_log[0]["details"]["row_id"], "manual-5")
+        self.assertEqual(audit_log[-1]["actor"]["email"], "teammate@npt.sg")
+        self.assertEqual(len(audit_log[-1]["details"]["value"]), 500)
+
+    def test_merge_preserves_latest_audit_log_during_sync(self) -> None:
+        synced = {"version_plan": normalize_version_plan_state({})}
+        current = append_version_plan_audit(
+            {"version_plan": normalize_version_plan_state({})},
+            action="cell_update",
+            actor={"email": "teammate@npt.sg"},
+            details={"scope": "pipeline", "field": "remarks"},
+        )
+
+        merged = merge_version_plan_editable_state(synced, current)
+
+        self.assertEqual(merged["version_plan"]["af"]["audit_log"][0]["action"], "cell_update")
 
 
 if __name__ == "__main__":

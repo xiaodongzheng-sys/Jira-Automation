@@ -128,6 +128,7 @@
   const versionPlanStatus = root.querySelector('[data-version-plan-status]');
   const versionPlanSyncButton = root.querySelector('[data-version-plan-sync]');
   const canManageKeyProjects = root.dataset.canManageKeyProjects === 'true';
+  let canSyncVersionPlan = root.dataset.canSyncVersionPlan === 'true';
   const teamLabels = {
     AF: 'Anti-fraud',
     CRMS: 'Credit Risk',
@@ -702,6 +703,7 @@
   const renderVersionPlan = (payload) => {
     if (!versionPlanContent) return;
     versionPlanState = payload || {};
+    updateVersionPlanSyncControl(payload);
     const bundles = Array.isArray(payload?.bundles) ? payload.bundles : [];
     const pipelineRows = Array.isArray(payload?.pipeline_rows) ? payload.pipeline_rows : [];
     const archived = Array.isArray(payload?.archived_bundles) ? payload.archived_bundles : [];
@@ -733,6 +735,13 @@
       </div>
     `;
     setVersionPlanStatus(versionPlanSyncText(payload?.sync_state || {}), payload?.sync_state?.state === 'error' ? 'error' : 'neutral');
+  };
+
+  const updateVersionPlanSyncControl = (payload = {}) => {
+    canSyncVersionPlan = root.dataset.canSyncVersionPlan === 'true' && payload?.can_sync !== false;
+    if (!versionPlanSyncButton) return;
+    versionPlanSyncButton.hidden = !canSyncVersionPlan;
+    versionPlanSyncButton.disabled = !canSyncVersionPlan;
   };
 
   const loadVersionPlan = async ({ force = false } = {}) => {
@@ -785,6 +794,10 @@
 
   const syncVersionPlan = async () => {
     if (!versionPlanSyncButton) return;
+    if (!canSyncVersionPlan) {
+      setVersionPlanStatus('Sync Jira is admin-only.', 'neutral');
+      return;
+    }
     versionPlanSyncButton.disabled = true;
     setVersionPlanStatus('Starting Jira sync...', 'neutral');
     try {
@@ -799,7 +812,7 @@
     } catch (error) {
       setVersionPlanStatus(error.message || 'Could not start Version Plan sync.', 'error');
     } finally {
-      versionPlanSyncButton.disabled = false;
+      versionPlanSyncButton.disabled = !canSyncVersionPlan;
     }
   };
 
@@ -2771,7 +2784,9 @@
   };
 
   setupTabs();
-  loadConfiguredTeams();
+  if (canManageKeyProjects) {
+    loadConfiguredTeams();
+  }
   restoreMonthlyReportDraft();
   adminForm?.addEventListener('submit', saveMembers);
   reportIntelligenceForm?.addEventListener('submit', saveReportIntelligence);

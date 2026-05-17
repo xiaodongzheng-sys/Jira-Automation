@@ -527,8 +527,6 @@ class TeamPortalAccessTests(unittest.TestCase):
 
                 blocked_pages = {
                     "/prd-briefing/": "/access-denied",
-                    "/team-dashboard": "/access-denied",
-                    "/reports": "/access-denied",
                     "/gmail-sea-talk-demo": "/access-denied",
                     "/meeting-recorder": "/access-denied",
                     "/meeting-translation": "/access-denied",
@@ -538,6 +536,10 @@ class TeamPortalAccessTests(unittest.TestCase):
                         response = client.get(path, follow_redirects=False)
                         self.assertEqual(response.status_code, 302)
                         self.assertEqual(response.headers["Location"], expected_location)
+                for allowed_path in ("/team-dashboard", "/reports"):
+                    with self.subTest(path=allowed_path):
+                        response = client.get(allowed_path, follow_redirects=False)
+                        self.assertEqual(response.status_code, 200)
 
                 blocked_requests = [
                     ("post", "/api/source-code-qa/config", {"pm_team": "AF", "country": "All", "repositories": []}),
@@ -545,11 +547,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     ("get", "/api/source-code-qa/runtime-evidence?pm_team=AF&country=SG", None),
                     ("post", "/api/source-code-qa/effort-assessment", {"pm_team": "AF", "country": "All", "requirement": "new flow"}),
                     ("get", "/api/team-dashboard/config", None),
-                    ("get", "/api/team-dashboard/version-plan/af", None),
                     ("post", "/api/team-dashboard/version-plan/af/sync", {}),
-                    ("get", "/api/team-dashboard/version-plan/af/sync-status", None),
-                    ("post", "/api/team-dashboard/version-plan/af/cell", {}),
-                    ("post", "/api/team-dashboard/version-plan/af/rows", {}),
                     ("post", "/admin/team-dashboard/members", {"teams": {"AF": {"member_emails": ["teammate@npt.sg"]}}}),
                     ("get", "/api/team-dashboard/monthly-report/template", None),
                     ("post", "/admin/team-dashboard/monthly-report-template", {"template": "x"}),
@@ -564,6 +562,18 @@ class TeamPortalAccessTests(unittest.TestCase):
                         response = caller(path, json=payload) if payload is not None else caller(path)
                         self.assertEqual(response.status_code, 403)
                         self.assertEqual(response.get_json()["status"], "error")
+                allowed_version_plan_requests = [
+                    ("get", "/api/team-dashboard/version-plan/af", 200, None),
+                    ("get", "/api/team-dashboard/version-plan/af/sync-status", 200, None),
+                    ("post", "/api/team-dashboard/version-plan/af/cell", 400, {}),
+                    ("post", "/api/team-dashboard/version-plan/af/rows", 400, {}),
+                ]
+                for method, path, expected_status, payload in allowed_version_plan_requests:
+                    with self.subTest(method=method, path=path):
+                        caller = getattr(client, method)
+                        response = caller(path, json=payload) if payload is not None else caller(path)
+                        self.assertEqual(response.status_code, expected_status)
+                        self.assertEqual(response.get_json()["status"], "ok" if expected_status == 200 else "error")
 
     def test_non_admin_related_routes_are_explicitly_classified(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -731,12 +741,15 @@ class TeamPortalAccessTests(unittest.TestCase):
                     ("get", "/api/productization-upgrade-summary/llm-descriptions?version_id=88", {200}),
                     ("post", "/api/jobs/sync-bpmis-projects", {200}),
                     ("get", "/api/jobs/missing", {404}),
-                    ("get", "/team-dashboard", {302}),
-                    ("get", "/reports", {302}),
+                    ("get", "/team-dashboard?tab=version-plan", {200}),
+                    ("get", "/reports", {200}),
                     ("get", "/meeting-recorder", {302}),
                     ("get", "/meeting-translation", {302}),
                     ("get", "/gmail-sea-talk-demo", {302}),
                     ("get", "/api/team-dashboard/config", {403}),
+                    ("get", "/api/team-dashboard/version-plan/af", {200}),
+                    ("post", "/api/team-dashboard/version-plan/af/sync", {403}, {}),
+                    ("post", "/api/team-dashboard/version-plan/af/rows", {200}, {"scope": "pipeline", "action": "add"}),
                     ("post", "/api/team-dashboard/key-projects", {403}, {}),
                     ("get", "/api/team-dashboard/tasks", {403}),
                     ("post", "/admin/team-dashboard/members", {403}, {}),
@@ -757,6 +770,8 @@ class TeamPortalAccessTests(unittest.TestCase):
                             caller = getattr(client, method)
                             response = caller(path, json=payload) if payload is not None else caller(path)
                             self.assertIn(response.status_code, expected_statuses)
+                audit_log = app.config["TEAM_DASHBOARD_CONFIG_STORE"].load()["version_plan"]["af"]["audit_log"]
+                self.assertTrue(any(entry["action"] == "row_add" and entry["actor"]["email"] == "teammate@npt.sg" for entry in audit_log))
 
     def test_non_admin_rendered_pages_have_expected_smoke_contracts(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -777,11 +792,13 @@ class TeamPortalAccessTests(unittest.TestCase):
                 index_response = client.get("/?workspace=productization-upgrade-summary")
                 source_response = client.get("/source-code-qa")
                 prd_response = client.get("/prd-self-assessment")
+                team_dashboard_response = client.get("/team-dashboard?tab=version-plan")
                 denied_response = client.get("/access-denied")
 
         self.assertEqual(index_response.status_code, 200)
         self.assertEqual(source_response.status_code, 200)
         self.assertEqual(prd_response.status_code, 200)
+        self.assertEqual(team_dashboard_response.status_code, 200)
         self.assertEqual(denied_response.status_code, 403)
 
         index_soup = BeautifulSoup(index_response.get_data(as_text=True), "html.parser")
@@ -811,6 +828,15 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertIsNone(prd_soup.select_one("[data-prd-self-assessment-action='summary']"))
         self.assertIsNotNone(prd_soup.select_one("[data-prd-self-assessment-action='review']"))
         self.assertIsNotNone(prd_soup.find("script", src=lambda value: value and "prd_self_assessment.js" in value))
+
+        team_dashboard_soup = BeautifulSoup(team_dashboard_response.get_data(as_text=True), "html.parser")
+        self.assertIsNotNone(team_dashboard_soup.select_one("[data-team-dashboard-tab='version-plan'].is-active"))
+        self.assertIsNone(team_dashboard_soup.select_one("[data-team-dashboard-tab='tasks']"))
+        self.assertIsNone(team_dashboard_soup.select_one("[data-team-dashboard-tab='admin']"))
+        sync_button = team_dashboard_soup.select_one("[data-version-plan-sync]")
+        self.assertIsNotNone(sync_button)
+        self.assertIn("hidden", sync_button.attrs)
+        self.assertIn("disabled", sync_button.attrs)
 
         denied_soup = BeautifulSoup(denied_response.get_data(as_text=True), "html.parser")
         denied_text = denied_soup.get_text(" ", strip=True)

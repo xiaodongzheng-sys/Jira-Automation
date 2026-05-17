@@ -1,5 +1,5 @@
 {% set reports_only = reports_only|default(false) %}
-{% set initial_team_dashboard_tab = 'monthly-report' if reports_only else 'tasks' %}
+{% set initial_team_dashboard_tab = 'monthly-report' if reports_only else ('tasks' if can_manage_team_dashboard else 'version-plan') %}
 
 <section class="panel panel-wide glass-panel team-dashboard-panel"
   data-team-dashboard
@@ -27,6 +27,7 @@
     data-seatalk-configured="{{ 'true' if seatalk_configured else 'false' }}"
   {% endif %}
   data-can-manage-key-projects="{{ 'true' if can_manage_team_dashboard else 'false' }}"
+  data-can-sync-version-plan="{{ 'true' if can_manage_team_dashboard else 'false' }}"
 >
   <div class="panel-head">
     <div>
@@ -50,9 +51,13 @@
         <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="seatalk-name-mapping">SeaTalk Name Mapping</button>
       {% endif %}
     {% else %}
-      <button class="workspace-tab is-active" type="button" role="tab" aria-selected="true" data-team-dashboard-tab="tasks">Task List</button>
-      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="version-plan">Version Plan</button>
-      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="link-biz-project">Link Biz Project</button>
+      {% if can_manage_team_dashboard %}
+        <button class="workspace-tab {% if initial_team_dashboard_tab == 'tasks' %}is-active{% endif %}" type="button" role="tab" aria-selected="{{ 'true' if initial_team_dashboard_tab == 'tasks' else 'false' }}" data-team-dashboard-tab="tasks">Task List</button>
+      {% endif %}
+      <button class="workspace-tab {% if initial_team_dashboard_tab == 'version-plan' %}is-active{% endif %}" type="button" role="tab" aria-selected="{{ 'true' if initial_team_dashboard_tab == 'version-plan' else 'false' }}" data-team-dashboard-tab="version-plan">Version Plan</button>
+      {% if can_manage_team_dashboard %}
+        <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="link-biz-project">Link Biz Project</button>
+      {% endif %}
       {% if can_manage_team_dashboard %}
         <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="admin">Team Admin</button>
       {% endif %}
@@ -60,7 +65,7 @@
   </div>
 
   {% if not reports_only %}
-    <section data-team-dashboard-panel="tasks">
+    <section data-team-dashboard-panel="tasks" {% if initial_team_dashboard_tab != 'tasks' %}hidden{% endif %}>
       <div class="productization-section-head">
         <div>
           <h3>Task List</h3>
@@ -75,14 +80,14 @@
   {% endif %}
 
   {% if not reports_only %}
-    <section data-team-dashboard-panel="version-plan" hidden>
+    <section data-team-dashboard-panel="version-plan" {% if initial_team_dashboard_tab != 'version-plan' %}hidden{% endif %}>
       <div class="productization-section-head team-dashboard-version-plan-head">
         <div>
           <h3>Version Plan</h3>
           <span>Anti-fraud version bundles, pipeline, and archived Jira rows.</span>
         </div>
         <div class="button-row">
-          <button class="button button-secondary" type="button" data-version-plan-sync>Sync Jira</button>
+          <button class="button button-secondary" type="button" data-version-plan-sync {% if not can_manage_team_dashboard %}hidden disabled{% endif %}>Sync Jira</button>
         </div>
       </div>
       <p class="productization-inline-status" data-version-plan-status></p>
