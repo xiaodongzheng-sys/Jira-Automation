@@ -1130,9 +1130,11 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b">Team Default Admin<", user_response.data)
         self.assertIn(b">Team Dashboard<", user_response.data)
         self.assertIn(b'href="/team-dashboard"', user_response.data)
+        self.assertNotIn(b">Reports<", user_response.data)
         self.assertNotIn(b">Team Default Admin<", sophia_response.data)
         self.assertIn(b">Team Dashboard<", sophia_response.data)
         self.assertIn(b'href="/team-dashboard"', sophia_response.data)
+        self.assertNotIn(b">Reports<", sophia_response.data)
         self.assertIn(b">PRDs<", user_response.data)
         self.assertIn(b">Source Code<", user_response.data)
 
@@ -1167,6 +1169,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                     session["google_profile"] = {"email": "sophia.wangzj@npt.sg", "name": "Sophia"}
                     session["google_credentials"] = {"token": "x"}
                 sophia_dashboard_response = client.get("/team-dashboard")
+                sophia_reports_response = client.get("/reports")
 
         self.assertEqual(source_response.status_code, 200)
         self.assertIn(b'href="/team-dashboard"', source_response.data)
@@ -1241,6 +1244,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b'data-team-dashboard-tab="tasks"', sophia_dashboard_response.data)
         self.assertNotIn(b'data-team-dashboard-tab="link-biz-project"', sophia_dashboard_response.data)
         self.assertNotIn(b'data-team-dashboard-tab="monthly-report"', sophia_dashboard_response.data)
+        self.assertEqual(sophia_reports_response.status_code, 302)
+        self.assertEqual(sophia_reports_response.headers["Location"], "/access-denied")
 
     def test_team_dashboard_config_defaults_and_save_are_admin_only(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

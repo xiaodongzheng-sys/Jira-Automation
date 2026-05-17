@@ -707,6 +707,7 @@ def create_app() -> Flask:
             }
         user_identity = _get_user_identity(settings)
         can_access_team_dashboard = _can_access_team_dashboard(user_identity)
+        can_access_reports = _can_access_team_dashboard_monthly_report(user_identity)
         site_tabs = []
         if _can_access_source_code_qa(settings):
             site_tabs.append(
@@ -768,7 +769,7 @@ def create_app() -> Flask:
                 "active": current_endpoint == "index",
             }
         )
-        if can_access_team_dashboard:
+        if can_access_reports:
             project_tabs.append(
                 {
                     "label": "Reports",

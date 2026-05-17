@@ -276,6 +276,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
         self.assertFalse(teammate.locator("[data-version-plan-sync]").is_visible())
 
         blocked_pages = [
+            ("/reports", "/access-denied"),
             ("/prd-briefing/", "/access-denied"),
             ("/vpn-connection", "/access-denied"),
             ("/meeting-recorder", "/access-denied"),

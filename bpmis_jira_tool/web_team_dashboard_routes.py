@@ -232,7 +232,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
 
 
     def reports_page():
-        access_gate = _require_team_dashboard_access(settings)
+        access_gate = _require_team_dashboard_monthly_report_access(settings)
         if access_gate is not None:
             return access_gate
         return render_template(
