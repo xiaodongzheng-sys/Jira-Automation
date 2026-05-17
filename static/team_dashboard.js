@@ -476,16 +476,25 @@
   const versionPlanPmOptions = (selectedValues = []) => {
     const selected = (Array.isArray(selectedValues) ? selectedValues : [selectedValues])
       .map((item) => String(item || '').trim())
-      .find(Boolean) || '';
+      .filter(Boolean);
     const options = Array.isArray(versionPlanState?.pm_options) && versionPlanState.pm_options.length
       ? versionPlanState.pm_options
-      : ['Wang Chang', 'Zoey', 'Jireh', 'Ker Yin', 'Rene', 'Jun Wei', 'TBC'];
+      : ['Wang Chang', 'Zoey', 'Jireh', 'Ker Yin', 'Rene', 'Jun Wei'];
+    const visibleOptions = options
+      .map((pm) => String(pm || '').trim())
+      .filter((pm) => pm && pm !== 'TBC');
     return [
-      '<option value="">-</option>',
-      ...options.map((pm) => (
-        `<option value="${escapeHtml(pm)}"${selected === pm ? ' selected' : ''}>${escapeHtml(pm)}</option>`
+      ...visibleOptions.map((pm) => (
+        `<option value="${escapeHtml(pm)}"${selected.includes(pm) ? ' selected' : ''}>${escapeHtml(pm)}</option>`
       )),
     ].join('');
+  };
+
+  const versionPlanPmDisplay = (values = []) => {
+    const items = (Array.isArray(values) ? values : [values])
+      .map((item) => String(item || '').trim())
+      .filter((item) => item && item !== 'TBC');
+    return items.length ? items.slice(0, 2).join(', ') : '-';
   };
 
   const setVersionPlanStatus = (message, tone = 'neutral') => {
@@ -602,14 +611,14 @@
       return `<textarea rows="1" spellcheck="true" data-version-plan-cell="remarks">${escapeHtml(row.remarks || '')}</textarea>`;
     }
     if (readOnly || row.row_type !== 'manual') {
-      if (field === 'pm') return escapeHtml((Array.isArray(row.pm) ? row.pm : []).join(', ') || '-');
+      if (field === 'pm') return escapeHtml(versionPlanPmDisplay(row.pm || []));
       return escapeHtml(row[field] || '-');
     }
     if (field === 'priority') {
       return `<select data-version-plan-cell="priority" aria-label="Priority">${versionPlanPriorityOptions(row.priority || '')}</select>`;
     }
     if (field === 'pm') {
-      return `<select data-version-plan-cell="pm" aria-label="PM">${versionPlanPmOptions(row.pm || [])}</select>`;
+      return `<select multiple size="2" data-version-plan-cell="pm" aria-label="PM">${versionPlanPmOptions(row.pm || [])}</select>`;
     }
     if (field === 'productization_efforts') {
       return `

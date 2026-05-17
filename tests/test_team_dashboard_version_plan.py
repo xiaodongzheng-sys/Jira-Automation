@@ -468,6 +468,7 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         )
 
         self.assertEqual([row["row_id"] for row in payload["pipeline_rows"]], ["sp", "zoey", "rene", "wang"])
+        self.assertEqual(payload["pipeline_rows"][0]["pm"], [])
 
     def test_pipeline_reorder_persists_across_different_pm_values(self) -> None:
         config = {
@@ -489,6 +490,28 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         payload = version_plan_payload(updated, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
 
         self.assertEqual([row["row_id"] for row in payload["pipeline_rows"]], ["zoey", "ker-yin", "rene"])
+
+    def test_manual_pm_options_exclude_tbc_and_support_multiple_values(self) -> None:
+        payload = version_plan_payload(
+            {
+                "version_plan": {
+                    "af": {
+                        "pipeline_rows": [
+                            {
+                                "row_id": "multi-pm",
+                                "feature": "Multi PM item",
+                                "priority": "P0",
+                                "pm": ["Wang Chang", "Ker Yin", "TBC", "xiaodong.zheng@npt.sg"],
+                            }
+                        ]
+                    }
+                }
+            },
+            now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
+        )
+
+        self.assertNotIn("TBC", payload["pm_options"])
+        self.assertEqual(payload["pipeline_rows"][0]["pm"], ["Wang Chang", "Ker Yin"])
 
     def test_not_started_dev_version_is_manual_only_after_sync(self) -> None:
         config = {
