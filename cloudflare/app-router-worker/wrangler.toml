@@ -1,6 +1,6 @@
 name = "bankpmtool-app-router"
 main = "src/index.js"
-compatibility_date = "2026-05-18"
+compatibility_date = "2026-05-17"
 
 routes = [
   { pattern = "app.bankpmtool.uk/*", zone_name = "bankpmtool.uk" }
