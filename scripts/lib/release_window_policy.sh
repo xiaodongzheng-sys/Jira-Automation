@@ -41,7 +41,7 @@ business_start = 10 * 60
 business_end = 19 * 60
 is_business_hours = now.weekday() < 5 and business_start <= minutes < business_end
 is_weekday = now.weekday() < 5
-is_live_window = is_weekday and not is_business_hours
+is_live_window = not is_business_hours
 target = "live" if is_live_window else "uat"
 allowed_targets = ["uat"]
 if is_live_window:
@@ -97,7 +97,7 @@ enforce_release_window_target() {
     echo "Default target: $allowed_target"
     echo "Allowed targets: $allowed_targets"
     echo "Business hours: $business_hours"
-    echo "Policy: UAT may be deployed anytime; Live may be deployed only Monday-Friday outside 10:00-19:00 Asia/Singapore."
+    echo "Policy: UAT may be deployed anytime; Live may be deployed except Monday-Friday 10:00-19:00 Asia/Singapore."
     echo "Set RELEASE_WINDOW_POLICY_BYPASS=1 only for an explicitly approved exception."
   } >&2
   return 1
