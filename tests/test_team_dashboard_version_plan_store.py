@@ -10,6 +10,8 @@ from bpmis_jira_tool.team_dashboard_config import TeamDashboardConfigStore
 from bpmis_jira_tool.team_dashboard_version_plan_store import (
     FirestoreVersionPlanStore,
     VersionPlanConflictError,
+    _decode_firestore_fields,
+    _encode_firestore_fields,
     build_version_plan_store,
     firestore_document_id,
     should_use_firestore_version_plan,
@@ -120,6 +122,20 @@ class VersionPlanStoreTests(unittest.TestCase):
         second, migrated_again = store.migrate_from_config(source_revision="def456")
         self.assertFalse(migrated_again)
         self.assertEqual(second.metadata["source_hash"], first.metadata["source_hash"])
+
+    def test_firestore_rest_field_round_trip(self):
+        payload = {
+            "environment": "live",
+            "schema_version": 1,
+            "enabled": True,
+            "version_plan": {
+                "rows": [
+                    {"id": "row-1", "remarks": "Keep", "priority": 2},
+                    {"id": "row-2", "remarks": "", "priority": None},
+                ]
+            },
+        }
+        self.assertEqual(_decode_firestore_fields(_encode_firestore_fields(payload)), payload)
 
 
 if __name__ == "__main__":

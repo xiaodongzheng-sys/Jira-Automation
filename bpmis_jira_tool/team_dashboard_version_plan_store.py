@@ -10,8 +10,13 @@ from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 import json
+import os
+import shutil
+import subprocess
 from typing import Any
 from zoneinfo import ZoneInfo
+
+import requests
 
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.team_dashboard_version_plan import normalize_version_plan_state
@@ -107,6 +112,141 @@ class LocalTeamDashboardVersionPlanStore(TeamDashboardVersionPlanStore):
         return self._snapshot(self.config_store.save(config))
 
 
+class _FirestoreRestSnapshot:
+    def __init__(self, payload: dict[str, Any] | None) -> None:
+        self.payload = payload
+        self.exists = payload is not None
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.payload or {})
+
+
+class _FirestoreRestDocument:
+    def __init__(self, *, project: str, document_id: str, token_provider: Any | None = None) -> None:
+        self.project = project
+        self.document_id = document_id
+        self._token_provider = token_provider or _gcloud_access_token
+
+    @property
+    def url(self) -> str:
+        return (
+            "https://firestore.googleapis.com/v1/projects/"
+            f"{self.project}/databases/(default)/documents/portal/{self.document_id}"
+        )
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._token_provider()}", "Content-Type": "application/json"}
+
+    def get(self, transaction: Any | None = None) -> _FirestoreRestSnapshot:
+        response = requests.get(self.url, headers=self._headers(), timeout=20)
+        if response.status_code == 404:
+            return _FirestoreRestSnapshot(None)
+        response.raise_for_status()
+        return _FirestoreRestSnapshot(_decode_firestore_fields(response.json().get("fields") or {}))
+
+    def set(self, payload: dict[str, Any]) -> None:
+        response = requests.patch(
+            self.url,
+            headers=self._headers(),
+            json={"fields": _encode_firestore_fields(payload)},
+            timeout=20,
+        )
+        response.raise_for_status()
+
+
+class _FirestoreRestCollection:
+    def __init__(self, *, project: str, token_provider: Any | None = None) -> None:
+        self.project = project
+        self._token_provider = token_provider
+
+    def document(self, document_id: str) -> _FirestoreRestDocument:
+        return _FirestoreRestDocument(
+            project=self.project,
+            document_id=document_id,
+            token_provider=self._token_provider,
+        )
+
+
+class _FirestoreRestClient:
+    def __init__(self, *, project: str, token_provider: Any | None = None) -> None:
+        self.project = project
+        self._token_provider = token_provider
+
+    def collection(self, name: str) -> _FirestoreRestCollection:
+        if name != "portal":
+            raise ValueError(f"Unsupported Firestore collection for Version Plan: {name}")
+        return _FirestoreRestCollection(project=self.project, token_provider=self._token_provider)
+
+
+def _gcloud_access_token() -> str:
+    explicit = os.environ.get("FIRESTORE_ACCESS_TOKEN", "").strip()
+    if explicit:
+        return explicit
+    gcloud = shutil.which("gcloud") or (os.path.expanduser("~/google-cloud-sdk/bin/gcloud"))
+    if not gcloud or not os.path.exists(gcloud):
+        raise RuntimeError("Firestore REST fallback requires gcloud or FIRESTORE_ACCESS_TOKEN.")
+    completed = subprocess.run(
+        [gcloud, "auth", "print-access-token"],
+        capture_output=True,
+        check=True,
+        text=True,
+        timeout=20,
+    )
+    token = completed.stdout.strip()
+    if not token:
+        raise RuntimeError("gcloud auth print-access-token returned an empty token.")
+    return token
+
+
+def _encode_firestore_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    return {str(key): _encode_firestore_value(value) for key, value in payload.items()}
+
+
+def _encode_firestore_value(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {"nullValue": None}
+    if isinstance(value, bool):
+        return {"booleanValue": value}
+    if isinstance(value, int) and not isinstance(value, bool):
+        return {"integerValue": str(value)}
+    if isinstance(value, float):
+        return {"doubleValue": value}
+    if isinstance(value, str):
+        return {"stringValue": value}
+    if isinstance(value, list):
+        return {"arrayValue": {"values": [_encode_firestore_value(item) for item in value]}}
+    if isinstance(value, dict):
+        return {"mapValue": {"fields": _encode_firestore_fields(value)}}
+    return {"stringValue": str(value)}
+
+
+def _decode_firestore_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    return {key: _decode_firestore_value(value) for key, value in fields.items()}
+
+
+def _decode_firestore_value(value: dict[str, Any]) -> Any:
+    if "nullValue" in value:
+        return None
+    if "booleanValue" in value:
+        return bool(value["booleanValue"])
+    if "integerValue" in value:
+        try:
+            return int(value["integerValue"])
+        except (TypeError, ValueError):
+            return value["integerValue"]
+    if "doubleValue" in value:
+        return float(value["doubleValue"])
+    if "stringValue" in value:
+        return value["stringValue"]
+    if "arrayValue" in value:
+        return [_decode_firestore_value(item) for item in value.get("arrayValue", {}).get("values", [])]
+    if "mapValue" in value:
+        return _decode_firestore_fields(value.get("mapValue", {}).get("fields") or {})
+    if "timestampValue" in value:
+        return value["timestampValue"]
+    return None
+
+
 class FirestoreVersionPlanStore(TeamDashboardVersionPlanStore):
     def __init__(self, *, settings: Settings, config_store: Any, firestore_client: Any | None = None) -> None:
         self.settings = settings
@@ -121,9 +261,13 @@ class FirestoreVersionPlanStore(TeamDashboardVersionPlanStore):
             return self._client
         try:
             from google.cloud import firestore  # type: ignore
-        except ImportError as error:  # pragma: no cover - depends on runtime deps
-            raise RuntimeError("google-cloud-firestore is required for Version Plan Firestore storage.") from error
-        self._client = firestore.Client(project=self.settings.version_plan_firestore_project)
+            self._client = firestore.Client(project=self.settings.version_plan_firestore_project)
+            return self._client
+        except Exception as error:  # pragma: no cover - depends on runtime deps/credentials
+            project = str(self.settings.version_plan_firestore_project or "").strip()
+            if not project:
+                raise RuntimeError("VERSION_PLAN_FIRESTORE_PROJECT is required for Version Plan Firestore storage.") from error
+            self._client = _FirestoreRestClient(project=project)
         return self._client
 
     @property
@@ -194,7 +338,8 @@ class FirestoreVersionPlanStore(TeamDashboardVersionPlanStore):
         }
 
     def save_config(self, config: dict[str, Any], *, expected_revision: str | None = None) -> VersionPlanSnapshot:
-        if self._client is not None and not hasattr(self._client, "transaction"):
+        client = self.client
+        if not hasattr(client, "transaction"):
             snapshot = self.document_ref.get()
             existing = snapshot.to_dict() if getattr(snapshot, "exists", False) else self._default_firestore_doc()
             current_revision = str((existing or {}).get("revision") or (existing or {}).get("source_hash") or "")
