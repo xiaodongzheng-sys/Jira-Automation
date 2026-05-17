@@ -84,15 +84,31 @@ def _version_plan_firestore_status(*, env: Mapping[str, str]) -> str:
     document = _env_value("VERSION_PLAN_FIRESTORE_DOCUMENT", env) or f"version_plan_{'uat' if stage == 'uat' else 'live'}"
     if backend not in {"firestore", "cloud_firestore"} and not project:
         return "status=not_configured"
+    def _load_payload() -> tuple[dict[str, Any] | None, str]:
+        try:
+            from google.cloud import firestore  # type: ignore
+
+            snapshot = firestore.Client(project=project or None).collection("portal").document(document).get()
+            if not getattr(snapshot, "exists", False):
+                return None, ""
+            return snapshot.to_dict() or {}, ""
+        except Exception as sdk_error:
+            try:
+                from bpmis_jira_tool.team_dashboard_version_plan_store import _FirestoreRestDocument
+
+                snapshot = _FirestoreRestDocument(project=project, document_id=document).get()
+                if not getattr(snapshot, "exists", False):
+                    return None, ""
+                return snapshot.to_dict() or {}, ""
+            except Exception as rest_error:
+                return None, f"{type(sdk_error).__name__}: {sdk_error}; REST fallback: {type(rest_error).__name__}: {rest_error}"
+
     try:
-        from google.cloud import firestore  # type: ignore
-    except Exception as error:
-        return f"status=unavailable document=portal/{document} error={type(error).__name__}: {error}"
-    try:
-        snapshot = firestore.Client(project=project or None).collection("portal").document(document).get()
-        if not getattr(snapshot, "exists", False):
+        payload, error = _load_payload()
+        if error:
+            return f"status=unavailable document=portal/{document} error={error}"
+        if payload is None:
             return f"status=missing document=portal/{document} environment={stage}"
-        payload = snapshot.to_dict() or {}
     except Exception as error:
         return f"status=unavailable document=portal/{document} error={type(error).__name__}: {error}"
     return (

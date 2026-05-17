@@ -453,17 +453,33 @@ def _version_plan_firestore_summary() -> tuple[dict[str, str], list[dict[str, st
     }
     if backend not in {"firestore", "cloud_firestore"} and not project:
         return summary, []
+    def _load_payload() -> tuple[dict[str, Any] | None, str]:
+        try:
+            from google.cloud import firestore  # type: ignore
+
+            snapshot = firestore.Client(project=project or None).collection("portal").document(document).get()
+            if not getattr(snapshot, "exists", False):
+                return None, ""
+            return snapshot.to_dict() or {}, ""
+        except Exception as sdk_error:
+            try:
+                from bpmis_jira_tool.team_dashboard_version_plan_store import _FirestoreRestDocument
+
+                snapshot = _FirestoreRestDocument(project=project, document_id=document).get()
+                if not getattr(snapshot, "exists", False):
+                    return None, ""
+                return snapshot.to_dict() or {}, ""
+            except Exception as rest_error:
+                return None, f"{type(sdk_error).__name__}: {sdk_error}; REST fallback: {type(rest_error).__name__}: {rest_error}"
+
     try:
-        from google.cloud import firestore  # type: ignore
-    except Exception as error:
-        summary["status"] = f"unavailable:{type(error).__name__}"
-        return summary, [_issue("warn", "version_plan_firestore_unavailable", "Version Plan Firestore client is unavailable.")]
-    try:
-        snapshot = firestore.Client(project=project or None).collection("portal").document(document).get()
-        if not getattr(snapshot, "exists", False):
+        payload, error = _load_payload()
+        if error:
+            summary["status"] = "unavailable"
+            return summary, [_issue("warn", "version_plan_firestore_unavailable", "Version Plan Firestore document check failed.")]
+        if payload is None:
             summary["status"] = "missing"
             return summary, [_issue("warn", "version_plan_firestore_missing", f"Version Plan Firestore document is missing: portal/{document}")]
-        payload = snapshot.to_dict() or {}
     except Exception as error:
         summary["status"] = f"unavailable:{type(error).__name__}"
         return summary, [_issue("warn", "version_plan_firestore_unavailable", "Version Plan Firestore document check failed.")]
