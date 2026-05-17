@@ -653,7 +653,11 @@
 
   const renderVersionPlanRows = (rows, { scope, versionId = '', readOnly = false, title = 'Rows', headerFeature = 'Feature' } = {}) => {
     const rowItems = Array.isArray(rows) ? rows : [];
-    const empty = `<div class="team-dashboard-version-plan-empty">No ${escapeHtml(title.toLowerCase())} yet.</div>`;
+    const empty = `
+      <div class="team-dashboard-version-plan-row team-dashboard-version-plan-empty-row">
+        <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-empty">No ${escapeHtml(title.toLowerCase())} yet.</div>
+      </div>
+    `;
     const body = rowItems.map((row) => {
       const manual = row.row_type === 'manual' && !readOnly;
       return `
@@ -684,6 +688,25 @@
         </div>
       `;
     }).join('');
+    const addRow = readOnly ? '' : `
+      <div class="team-dashboard-version-plan-row team-dashboard-version-plan-add-row">
+        <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-cell-feature">
+          <button
+            class="button button-secondary team-dashboard-version-plan-add-inline"
+            type="button"
+            data-version-plan-row-action="add"
+            data-version-plan-scope="${escapeHtml(scope)}"
+            data-version-id="${escapeHtml(versionId)}"
+            aria-label="Add row"
+            title="Add row"
+          >+</button>
+        </div>
+        <div class="team-dashboard-version-plan-cell"></div>
+        <div class="team-dashboard-version-plan-cell"></div>
+        <div class="team-dashboard-version-plan-cell"></div>
+        <div class="team-dashboard-version-plan-cell"></div>
+      </div>
+    `;
     return `
       <div class="team-dashboard-version-plan-sheet" data-version-plan-sheet="${escapeHtml(scope)}" data-version-id="${escapeHtml(versionId)}">
         <div class="team-dashboard-version-plan-row team-dashboard-version-plan-header" aria-hidden="true">
@@ -694,6 +717,7 @@
           <div>Remarks</div>
         </div>
         ${body || empty}
+        ${addRow}
       </div>
     `;
   };
@@ -709,9 +733,6 @@
         ${renderVersionPlanBundleToggle(bundle)}
         <div data-version-plan-bundle-body ${collapsed ? 'hidden' : ''}>
           ${renderVersionPlanRows([...syncedRows, ...manualRows], { scope: 'bundle', versionId: bundle.version_id, readOnly: false, title: 'rows', headerFeature })}
-          <div class="team-dashboard-version-plan-actions">
-            <button class="button button-secondary" type="button" data-version-plan-row-action="add" data-version-plan-scope="bundle" data-version-id="${escapeHtml(bundle.version_id || '')}">Add Row</button>
-          </div>
         </div>
       </section>
     `;
@@ -746,9 +767,6 @@
           ${renderVersionPlanPipelineToggle()}
           <div data-version-plan-bundle-body ${pipelineCollapsed ? 'hidden' : ''}>
             ${renderVersionPlanRows(pipelineRows, { scope: 'pipeline', readOnly: false, title: 'pipeline rows', headerFeature: 'Pipeline Section' })}
-            <div class="team-dashboard-version-plan-actions">
-              <button class="button button-secondary" type="button" data-version-plan-row-action="add" data-version-plan-scope="pipeline">Add Row</button>
-            </div>
           </div>
         </section>
         <section class="team-dashboard-version-plan-archive">

@@ -1557,9 +1557,32 @@
 }
 
 .team-dashboard-version-plan-empty {
-  padding: 12px;
   color: #667085;
   font-size: 0.86rem;
+}
+
+.team-dashboard-version-plan-empty-row .team-dashboard-version-plan-cell {
+  grid-column: 1 / -1;
+  min-height: 36px;
+}
+
+.team-dashboard-version-plan-add-row .team-dashboard-version-plan-cell {
+  min-height: 34px;
+}
+
+.team-dashboard-version-plan-add-row .team-dashboard-version-plan-cell:not(:first-child) {
+  background: #fbfcff;
+}
+
+.team-dashboard-version-plan-add-inline {
+  width: 24px !important;
+  min-width: 24px !important;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  border-radius: 3px;
+  font-size: 1rem;
+  line-height: 1;
 }
 
 .team-dashboard-version-plan-actions {
