@@ -536,10 +536,11 @@ class TeamPortalAccessTests(unittest.TestCase):
                         response = client.get(path, follow_redirects=False)
                         self.assertEqual(response.status_code, 302)
                         self.assertEqual(response.headers["Location"], expected_location)
-                for allowed_path in ("/team-dashboard", "/reports"):
-                    with self.subTest(path=allowed_path):
-                        response = client.get(allowed_path, follow_redirects=False)
-                        self.assertEqual(response.status_code, 200)
+                response = client.get("/team-dashboard", follow_redirects=False)
+                self.assertEqual(response.status_code, 200)
+                reports_response = client.get("/reports", follow_redirects=False)
+                self.assertEqual(reports_response.status_code, 302)
+                self.assertEqual(reports_response.headers["Location"], "/access-denied")
 
                 blocked_requests = [
                     ("post", "/api/source-code-qa/config", {"pm_team": "AF", "country": "All", "repositories": []}),
@@ -742,7 +743,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     ("post", "/api/jobs/sync-bpmis-projects", {200}),
                     ("get", "/api/jobs/missing", {404}),
                     ("get", "/team-dashboard?tab=version-plan", {200}),
-                    ("get", "/reports", {200}),
+                    ("get", "/reports", {302}),
                     ("get", "/meeting-recorder", {302}),
                     ("get", "/meeting-translation", {302}),
                     ("get", "/gmail-sea-talk-demo", {302}),
