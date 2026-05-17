@@ -588,6 +588,24 @@
     `;
   };
 
+  const renderVersionPlanPipelineToggle = () => {
+    const key = 'pipeline';
+    const collapsed = Boolean(readVersionPlanCollapseState()[key]);
+    return `
+      <div class="team-dashboard-version-plan-bundle-toggle-row">
+        <button
+          class="button button-secondary team-dashboard-version-plan-bundle-toggle"
+          type="button"
+          data-version-plan-bundle-toggle
+          data-version-plan-bundle-id="${key}"
+          aria-expanded="${collapsed ? 'false' : 'true'}"
+          aria-label="${collapsed ? 'Expand' : 'Collapse'} Pipeline Section"
+        >${collapsed ? '+' : '-'}</button>
+        <strong class="team-dashboard-version-plan-collapsed-title">Pipeline Section</strong>
+      </div>
+    `;
+  };
+
   const versionPlanRowFeature = (row, readOnly) => {
     if (row.row_type === 'synced') {
       const jiraId = row.jira_id || '-';
@@ -717,16 +735,20 @@
     const bundles = Array.isArray(payload?.bundles) ? payload.bundles : [];
     const pipelineRows = Array.isArray(payload?.pipeline_rows) ? payload.pipeline_rows : [];
     const archived = Array.isArray(payload?.archived_bundles) ? payload.archived_bundles : [];
+    const pipelineCollapsed = Boolean(readVersionPlanCollapseState().pipeline);
     const activeHtml = bundles.length
       ? bundles.map(renderVersionPlanBundle).join('')
       : '<section class="team-dashboard-version-plan-bundle"><p class="productization-inline-status">No active or upcoming AF version bundles in range.</p></section>';
     versionPlanContent.innerHTML = `
       <div class="team-dashboard-version-plan-sections">
         ${activeHtml}
-        <section class="team-dashboard-version-plan-bundle team-dashboard-version-plan-pipeline">
-          ${renderVersionPlanRows(pipelineRows, { scope: 'pipeline', readOnly: false, title: 'pipeline rows', headerFeature: 'Pipeline Section' })}
-          <div class="team-dashboard-version-plan-actions">
-            <button class="button button-secondary" type="button" data-version-plan-row-action="add" data-version-plan-scope="pipeline">Add Row</button>
+        <section class="team-dashboard-version-plan-bundle team-dashboard-version-plan-pipeline${pipelineCollapsed ? ' is-collapsed' : ''}" data-version-plan-bundle-id="pipeline">
+          ${renderVersionPlanPipelineToggle()}
+          <div data-version-plan-bundle-body ${pipelineCollapsed ? 'hidden' : ''}>
+            ${renderVersionPlanRows(pipelineRows, { scope: 'pipeline', readOnly: false, title: 'pipeline rows', headerFeature: 'Pipeline Section' })}
+            <div class="team-dashboard-version-plan-actions">
+              <button class="button button-secondary" type="button" data-version-plan-row-action="add" data-version-plan-scope="pipeline">Add Row</button>
+            </div>
           </div>
         </section>
         <section class="team-dashboard-version-plan-archive">
