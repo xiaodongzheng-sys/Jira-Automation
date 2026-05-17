@@ -821,6 +821,7 @@ def _normalize_pm_values(value: Any) -> list[str]:
             continue
         if canonical not in normalized:
             normalized.append(canonical)
+            break
     return normalized
 
 

@@ -473,8 +473,8 @@
     ].join('');
   };
 
-  const versionPlanPmOptions = (selectedValues = []) => {
-    const selected = (Array.isArray(selectedValues) ? selectedValues : [selectedValues])
+  const versionPlanPmOptions = (selectedValue = '') => {
+    const selected = (Array.isArray(selectedValue) ? selectedValue : [selectedValue])
       .map((item) => String(item || '').trim())
       .filter(Boolean);
     const options = Array.isArray(versionPlanState?.pm_options) && versionPlanState.pm_options.length
@@ -484,8 +484,9 @@
       .map((pm) => String(pm || '').trim())
       .filter((pm) => pm && pm !== 'TBC');
     return [
+      `<option value=""${selected.length ? '' : ' selected'}>-</option>`,
       ...visibleOptions.map((pm) => (
-        `<option value="${escapeHtml(pm)}"${selected.includes(pm) ? ' selected' : ''}>${escapeHtml(pm)}</option>`
+        `<option value="${escapeHtml(pm)}"${pm === selected[0] ? ' selected' : ''}>${escapeHtml(pm)}</option>`
       )),
     ].join('');
   };
@@ -494,7 +495,7 @@
     const items = (Array.isArray(values) ? values : [values])
       .map((item) => String(item || '').trim())
       .filter((item) => item && item !== 'TBC');
-    return items.length ? items.slice(0, 2).join(', ') : '-';
+    return items.length ? items[0] : '-';
   };
 
   const setVersionPlanStatus = (message, tone = 'neutral') => {
@@ -618,7 +619,7 @@
       return `<select data-version-plan-cell="priority" aria-label="Priority">${versionPlanPriorityOptions(row.priority || '')}</select>`;
     }
     if (field === 'pm') {
-      return `<select multiple size="2" data-version-plan-cell="pm" aria-label="PM">${versionPlanPmOptions(row.pm || [])}</select>`;
+      return `<select data-version-plan-cell="pm" aria-label="PM">${versionPlanPmOptions(row.pm || [])}</select>`;
     }
     if (field === 'productization_efforts') {
       return `

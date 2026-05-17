@@ -491,7 +491,7 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
 
         self.assertEqual([row["row_id"] for row in payload["pipeline_rows"]], ["zoey", "ker-yin", "rene"])
 
-    def test_manual_pm_options_exclude_tbc_and_support_multiple_values(self) -> None:
+    def test_manual_pm_options_exclude_tbc_and_keep_first_valid_value(self) -> None:
         payload = version_plan_payload(
             {
                 "version_plan": {
@@ -511,7 +511,7 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         )
 
         self.assertNotIn("TBC", payload["pm_options"])
-        self.assertEqual(payload["pipeline_rows"][0]["pm"], ["Wang Chang", "Ker Yin"])
+        self.assertEqual(payload["pipeline_rows"][0]["pm"], ["Wang Chang"])
 
     def test_not_started_dev_version_is_manual_only_after_sync(self) -> None:
         config = {
