@@ -5,6 +5,7 @@ import unittest
 
 from bpmis_jira_tool.team_dashboard_version_plan import (
     PIPELINE_SEED_ROWS,
+    merge_version_plan_editable_state,
     normalize_version_plan_state,
     update_version_plan_cell,
     update_version_plan_rows,
@@ -385,6 +386,68 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual([row["row_id"] for row in payload["pipeline_rows"]], ["pipe-1"])
         self.assertEqual(first_bundle["manual_rows"], [])
         self.assertEqual([row["row_id"] for row in second_bundle["manual_rows"]], ["bundle-1", "bundle-2"])
+
+    def test_sync_result_preserves_concurrent_manual_moves_and_synced_remarks(self) -> None:
+        synced_config = {
+            "version_plan": normalize_version_plan_state(
+                {
+                    "af": {
+                        "bundles": {
+                            "af-1": {
+                                "version_id": "af-1",
+                                "version_name": "AF_1.0.84_20260724",
+                                "release_date": "2026-07-24",
+                                "manual_rows": [],
+                                "synced_rows": [
+                                    {
+                                        "row_id": "sync-af-1-SPDBP-1",
+                                        "jira_id": "SPDBP-1",
+                                        "jira_summary": "Synced row",
+                                        "remarks": "old",
+                                    }
+                                ],
+                            }
+                        },
+                        "pipeline_rows": [{"row_id": "pipe-1", "feature": "Pipeline item", "priority": "P1"}],
+                        "sync_state": {"state": "fresh_today", "last_synced_date_sgt": "2026-05-17"},
+                    }
+                }
+            )
+        }
+        current_config = {
+            "version_plan": normalize_version_plan_state(
+                {
+                    "af": {
+                        "bundles": {
+                            "af-1": {
+                                "version_id": "af-1",
+                                "version_name": "AF_1.0.84_20260724",
+                                "release_date": "2026-07-24",
+                                "manual_rows": [{"row_id": "pipe-1", "feature": "Pipeline item", "priority": "P1"}],
+                                "synced_rows": [
+                                    {
+                                        "row_id": "sync-af-1-SPDBP-1",
+                                        "jira_id": "SPDBP-1",
+                                        "jira_summary": "Synced row",
+                                        "remarks": "current note",
+                                    }
+                                ],
+                            }
+                        },
+                        "pipeline_rows": [],
+                        "sync_state": {"state": "running"},
+                    }
+                }
+            )
+        }
+
+        merged = merge_version_plan_editable_state(synced_config, current_config)
+        af = merged["version_plan"]["af"]
+
+        self.assertEqual(af["sync_state"]["state"], "fresh_today")
+        self.assertEqual(af["pipeline_rows"], [])
+        self.assertEqual([row["row_id"] for row in af["bundles"]["af-1"]["manual_rows"]], ["pipe-1"])
+        self.assertEqual(af["bundles"]["af-1"]["synced_rows"][0]["remarks"], "current note")
 
     def test_manual_rows_sort_by_priority_then_pm(self) -> None:
         payload = version_plan_payload(

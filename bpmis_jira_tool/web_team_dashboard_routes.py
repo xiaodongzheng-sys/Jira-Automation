@@ -38,6 +38,7 @@ from bpmis_jira_tool.team_dashboard_config import TEAM_DASHBOARD_TEAMS
 from bpmis_jira_tool.team_dashboard_version_plan import (
     mark_version_plan_sync_error,
     mark_version_plan_sync_running,
+    merge_version_plan_editable_state,
     update_version_plan_cell,
     update_version_plan_rows,
     version_plan_payload,
@@ -134,7 +135,8 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
                 with app.app_context():
                     sync_store = _get_team_dashboard_config_store()
                     latest_config = sync_store.load()
-                    sync_store.save(version_plan_sync(latest_config, bpmis_client))
+                    synced_config = version_plan_sync(latest_config, bpmis_client)
+                    sync_store.save(merge_version_plan_editable_state(synced_config, sync_store.load()))
             except Exception as error:  # noqa: BLE001
                 try:
                     with app.app_context():
@@ -318,8 +320,10 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         store = _get_team_dashboard_config_store()
         config = store.save(store.load())
         sync_queued = False
+        should_auto_sync = str(request.args.get("sync") or "1").strip().lower() not in {"0", "false", "no"}
         try:
-            sync_queued = _start_version_plan_sync_if_needed(force=False)
+            if should_auto_sync:
+                sync_queued = _start_version_plan_sync_if_needed(force=False)
         except (ConfigError, ToolError) as error:
             config = store.save(mark_version_plan_sync_error(config, str(error)))
         except Exception as error:  # noqa: BLE001

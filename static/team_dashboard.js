@@ -739,7 +739,9 @@
     versionPlanLoaded = true;
     setVersionPlanStatus('Loading cached Version Plan...', 'neutral');
     try {
-      const response = await fetch(root.dataset.versionPlanUrl || '/api/team-dashboard/version-plan/af', {
+      const planUrl = new URL(root.dataset.versionPlanUrl || '/api/team-dashboard/version-plan/af', window.location.origin);
+      if (force) planUrl.searchParams.set('sync', '0');
+      const response = await fetch(planUrl.toString(), {
         headers: { Accept: 'application/json' },
         credentials: 'same-origin',
       });

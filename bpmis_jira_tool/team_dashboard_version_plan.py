@@ -281,6 +281,45 @@ def mark_version_plan_sync_error(config: dict[str, Any], error: str) -> dict[str
     return config
 
 
+def merge_version_plan_editable_state(synced_config: dict[str, Any], current_config: dict[str, Any]) -> dict[str, Any]:
+    synced_plan = normalize_version_plan_state(synced_config.get("version_plan") if isinstance(synced_config, dict) else {})
+    current_plan = normalize_version_plan_state(current_config.get("version_plan") if isinstance(current_config, dict) else {})
+    synced_af = synced_plan["af"]
+    current_af = current_plan["af"]
+    synced_af["pipeline_rows"] = _normalize_manual_rows(current_af.get("pipeline_rows"))
+    for version_id, current_bundle in current_af["bundles"].items():
+        synced_bundle = synced_af["bundles"].get(version_id)
+        if not isinstance(synced_bundle, dict):
+            if current_bundle.get("manual_rows"):
+                synced_af["bundles"][version_id] = {
+                    **{key: deepcopy(value) for key, value in current_bundle.items() if key not in {"manual_rows", "synced_rows"}},
+                    "manual_rows": _normalize_manual_rows(current_bundle.get("manual_rows")),
+                    "synced_rows": _normalize_synced_rows(current_bundle.get("synced_rows")),
+                }
+            continue
+        synced_bundle["manual_rows"] = _normalize_manual_rows(current_bundle.get("manual_rows"))
+        _merge_synced_row_remarks(synced_bundle, current_bundle)
+    merged = dict(synced_config)
+    merged["version_plan"] = synced_plan
+    return merged
+
+
+def _merge_synced_row_remarks(synced_bundle: dict[str, Any], current_bundle: dict[str, Any]) -> None:
+    current_rows = _normalize_synced_rows(current_bundle.get("synced_rows"))
+    current_by_key: dict[str, dict[str, Any]] = {}
+    for row in current_rows:
+        for key in (row.get("jira_id"), row.get("row_id")):
+            normalized_key = str(key or "").strip()
+            if normalized_key:
+                current_by_key[normalized_key] = row
+    synced_rows = _normalize_synced_rows(synced_bundle.get("synced_rows"))
+    for row in synced_rows:
+        current = current_by_key.get(str(row.get("jira_id") or "").strip()) or current_by_key.get(str(row.get("row_id") or "").strip())
+        if current is not None:
+            row["remarks"] = str(current.get("remarks") or "").strip()
+    synced_bundle["synced_rows"] = synced_rows
+
+
 def version_plan_synced_today(config: dict[str, Any], *, now: datetime | None = None) -> bool:
     plan = normalize_version_plan_state(config.get("version_plan") if isinstance(config, dict) else {})
     return str(plan["af"]["sync_state"].get("last_synced_date_sgt") or "") == singapore_date_text(now)
