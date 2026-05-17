@@ -1800,8 +1800,57 @@
     updateTaskSummary(taskTeams);
   };
 
-  const loadTeamTasks = async () => {
-    await loadAllTeamTasks();
+  const loadTeamTasks = async (teamKey = '') => {
+    const normalizedTeamKey = String(teamKey || '').trim();
+    if (!normalizedTeamKey) {
+      await loadAllTeamTasks();
+      return;
+    }
+    const targetIndex = taskTeams.findIndex((team) => String(team.team_key || '') === normalizedTeamKey);
+    if (targetIndex < 0) {
+      await loadAllTeamTasks();
+      return;
+    }
+    const targetTeam = taskTeams[targetIndex];
+    taskTeams = taskTeams.map((team, index) => index === targetIndex ? {
+      ...team,
+      loading: true,
+      error: '',
+      progress_text: `Loading ${team.label || team.team_key} Jira tasks...`,
+    } : team);
+    renderTeams(taskTeams);
+    updateTaskSummary(taskTeams);
+    setStatus(taskStatus, `Loading Jira tasks for ${targetTeam.label || normalizedTeamKey}...`, 'neutral');
+    try {
+      const response = await fetch(teamTaskUrl(normalizedTeamKey, true), {
+        headers: { Accept: 'application/json' },
+        credentials: 'same-origin',
+        cache: 'no-store',
+      });
+      const payload = await readJson(response, 'Could not load team Jira tasks.');
+      const loadedTeam = payload.team || (Array.isArray(payload.teams) ? payload.teams[0] : null);
+      if (!loadedTeam) {
+        throw new Error(`No Jira payload returned for ${targetTeam.label || normalizedTeamKey}.`);
+      }
+      const mergedTeam = mergeLoadedTeam(targetTeam, loadedTeam, payload.status);
+      taskTeams = taskTeams.map((team, index) => index === targetIndex ? mergedTeam : team);
+      if (mergedTeam.error) {
+        setStatus(taskStatus, mergedTeam.error || `Could not load Jira tasks for ${targetTeam.label || normalizedTeamKey}.`, 'error');
+      } else {
+        saveCachedTeam(mergedTeam);
+        setStatus(taskStatus, `Reloaded Jira for ${mergedTeam.label || normalizedTeamKey}.`, 'success');
+      }
+    } catch (error) {
+      taskTeams = taskTeams.map((team, index) => index === targetIndex ? {
+        ...team,
+        loading: false,
+        error: error.message || 'Could not load team Jira tasks.',
+        progress_text: 'Failed',
+      } : team);
+      setStatus(taskStatus, error.message || 'Could not load team Jira tasks.', 'error');
+    }
+    renderTeams(taskTeams);
+    updateTaskSummary(taskTeams);
   };
 
   const emailsFromTextarea = (node) => String(node?.value || '')

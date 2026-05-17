@@ -3114,6 +3114,13 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("activeTrigger", script)
         self.assertIn("activate(activeTrigger.dataset.teamDashboardTab || 'tasks')", script)
 
+    def test_team_dashboard_frontend_reloads_requested_team_only(self):
+        script = Path("static/team_dashboard.js").read_text(encoding="utf-8")
+        self.assertIn("const loadTeamTasks = async (teamKey = '')", script)
+        self.assertIn("teamTaskUrl(normalizedTeamKey, true)", script)
+        self.assertIn("loadAllTeamTasks();", script)
+        self.assertIn("loadTeamTasks(loadButton.dataset.teamDashboardLoadTeam || '')", script)
+
     def test_team_dashboard_version_plan_frontend_uses_sheet_format(self):
         script = Path("static/team_dashboard.js").read_text(encoding="utf-8")
         styles = Path("static/team_dashboard.css").read_text(encoding="utf-8")
