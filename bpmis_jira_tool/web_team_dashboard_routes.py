@@ -288,6 +288,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             can_view_team_dashboard_monthly_report=False,
             seatalk_configured=False,
             version_plan_only=True,
+            cloud_auth_mode=True,
         )
 
 

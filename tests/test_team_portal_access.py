@@ -139,6 +139,7 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn(b"Risk PM Cloud", response.data)
             self.assertIn(b"/cloud-auth/google/login", response.data)
+            self.assertIn(b"/cloud-static/style.css", response.data)
             self.assertIn(b"/portal-home", response.data)
 
     def test_cloud_version_plan_page_requires_login_then_renders_standalone(self):
@@ -167,6 +168,7 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn(b"Version Plan", response.data)
             self.assertIn(b"data-version-plan-content", response.data)
+            self.assertIn(b"/cloud-static/team_dashboard.js", response.data)
             self.assertNotIn(b"data-team-dashboard-tab=\"tasks\"", response.data)
 
     def test_login_image_gate_css_contract_is_present(self):

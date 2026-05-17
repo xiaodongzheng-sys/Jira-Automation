@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, urlparse
 import uuid
 import zipfile
 
-from flask import Flask, Response, current_app, flash, g, has_app_context, jsonify, redirect, render_template, request, send_file, session, stream_with_context, url_for
+from flask import Flask, Response, current_app, flash, g, has_app_context, jsonify, redirect, render_template, request, send_file, send_from_directory, session, stream_with_context, url_for
 from dotenv import load_dotenv
 import google_auth_httplib2
 from google.oauth2.credentials import Credentials
@@ -834,6 +834,7 @@ def create_app() -> Flask:
             "cloud_google_login",
             "cloud_google_callback",
             "cloud_google_logout",
+            "cloud_static",
             "access_denied",
             "prd_briefing.image_proxy",
         }:
@@ -867,7 +868,7 @@ def create_app() -> Flask:
             response.headers["Cache-Control"] = "no-store, private, max-age=0"
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
-        if request.endpoint == "static" and request.path.endswith((".css", ".js")):
+        if request.endpoint in {"static", "cloud_static"} and request.path.endswith((".css", ".js")):
             response.headers["Cache-Control"] = "no-store, private, max-age=0, must-revalidate"
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
@@ -890,6 +891,10 @@ def create_app() -> Flask:
                 ),
             )
         return response
+
+    @app.get("/cloud-static/<path:filename>")
+    def cloud_static(filename: str):
+        return send_from_directory(app.static_folder, filename)
 
     @app.get("/")
     def index():
