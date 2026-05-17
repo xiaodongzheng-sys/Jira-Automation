@@ -30,11 +30,13 @@ class _FakeSnapshot:
 class _FakeDocument:
     def __init__(self):
         self.payload = None
+        self.set_calls = 0
 
     def get(self, transaction=None):
         return _FakeSnapshot(self.payload)
 
     def set(self, payload):
+        self.set_calls += 1
         self.payload = dict(payload)
 
 
@@ -60,6 +62,7 @@ class _FakeFirestoreClient:
 class VersionPlanStoreTests(unittest.TestCase):
     def _settings(self, **env):
         base = {
+            "ENV_FILE": "",
             "FLASK_SECRET_KEY": "test-secret",
             "TEAM_PORTAL_DATA_DIR": tempfile.mkdtemp(),
         }
@@ -106,6 +109,28 @@ class VersionPlanStoreTests(unittest.TestCase):
 
         with self.assertRaises(VersionPlanConflictError):
             store.save_config(config_store.load(), expected_revision="stale")
+
+    def test_firestore_missing_document_loads_default_without_writing(self):
+        settings = self._settings(
+            TEAM_PORTAL_STAGE="uat",
+            VERSION_PLAN_STORE_BACKEND="firestore",
+            VERSION_PLAN_FIRESTORE_PROJECT="test-project",
+        )
+        config_store = TeamDashboardConfigStore(settings.team_portal_data_dir / "team_dashboard.db")
+        config = config_store.load()
+        config["version_plan"]["af"]["pipeline_rows"][0]["feature"] = "Default fallback row"
+        config_store.save(config)
+        fake_client = _FakeFirestoreClient()
+        store = FirestoreVersionPlanStore(settings=settings, config_store=config_store, firestore_client=fake_client)
+
+        snapshot = store.load_snapshot()
+
+        self.assertEqual(snapshot.metadata["backend"], "firestore")
+        self.assertEqual(snapshot.metadata["environment"], "uat")
+        self.assertEqual(fake_client.document_ref.set_calls, 0)
+        self.assertTrue(
+            any(row["feature"] == "Default fallback row" for row in snapshot.config["version_plan"]["af"]["pipeline_rows"])
+        )
 
     def test_migration_is_idempotent_when_document_exists(self):
         settings = self._settings(
