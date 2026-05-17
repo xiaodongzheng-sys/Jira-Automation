@@ -21,6 +21,7 @@ if str(ROOT_DIR) not in sys.path:
 SGT = ZoneInfo("Asia/Singapore")
 HIGH_TOKEN_THRESHOLD = 30_000
 SLOW_LLM_THRESHOLD_MS = 180_000
+DEFAULT_RECENT_HOURS = 24.0
 
 
 def _resolve_data_root(raw: str | None) -> Path:
@@ -497,7 +498,7 @@ def build_report(
     data_root: Path,
     *,
     limit: int = 200,
-    recent_hours: float = 72.0,
+    recent_hours: float = DEFAULT_RECENT_HOURS,
     include_release_status: bool = False,
 ) -> dict[str, Any]:
     data_root = data_root.expanduser().resolve()
@@ -672,7 +673,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", default=os.environ.get("TEAM_PORTAL_DATA_DIR"))
     parser.add_argument("--limit", type=int, default=200)
-    parser.add_argument("--recent-hours", type=float, default=72.0, help="Only warn on job failures updated within this window.")
+    parser.add_argument("--recent-hours", type=float, default=DEFAULT_RECENT_HOURS, help="Only warn on runtime issues updated within this window.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON instead of text.")
     parser.add_argument("--strict", action="store_true", help="Exit non-zero only when the doctor status is fail.")
     parser.add_argument("--include-release-status", action="store_true", help="Include release status probes; may call gcloud/curl.")

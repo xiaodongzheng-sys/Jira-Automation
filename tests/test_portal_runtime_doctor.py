@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,11 +18,12 @@ class PortalRuntimeDoctorTests(unittest.TestCase):
     def test_build_report_summarizes_portal_runtime_signals(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_root = Path(temp_dir)
+            now_sgt = datetime.now(portal_runtime_doctor.SGT).strftime("%Y-%m-%d %H:%M:%S SGT")
             self._write_jsonl(
                 data_root / "llm_call_ledger.jsonl",
                 [
                     {
-                        "timestamp_sgt": "2026-05-17 10:00:00 SGT",
+                        "timestamp_sgt": now_sgt,
                         "flow": "seatalk",
                         "route": "cheap",
                         "model_id": "gpt-5.4-mini",
@@ -32,7 +34,7 @@ class PortalRuntimeDoctorTests(unittest.TestCase):
                         "prompt_mode": "seatalk_7_day_insights_v4",
                     },
                     {
-                        "timestamp_sgt": "2026-05-17 10:01:00 SGT",
+                        "timestamp_sgt": now_sgt,
                         "flow": "unknown",
                         "route": "",
                         "model_id": "codex-cli",
@@ -44,7 +46,7 @@ class PortalRuntimeDoctorTests(unittest.TestCase):
                         "prompt_mode": "ad_hoc",
                     },
                     {
-                        "timestamp_sgt": "2026-05-17 10:02:00 SGT",
+                        "timestamp_sgt": now_sgt,
                         "flow": "source_code_qa",
                         "route": "repair",
                         "model_id": "gpt-5.5",
@@ -87,7 +89,7 @@ class PortalRuntimeDoctorTests(unittest.TestCase):
             record_dir = data_root / "meeting_records" / "records" / "rec-1"
             record_dir.mkdir(parents=True)
             (record_dir / "metadata.json").write_text(
-                json.dumps({"record_id": "rec-1", "status": "failed", "updated_at": "2026-05-17 10:02:00 SGT"}),
+                json.dumps({"record_id": "rec-1", "status": "failed", "updated_at": now_sgt}),
                 encoding="utf-8",
             )
 
@@ -112,6 +114,41 @@ class PortalRuntimeDoctorTests(unittest.TestCase):
         self.assertIn("llm_high_prompt_tokens", issue_codes)
         self.assertIn("job_failures", issue_codes)
         self.assertIn("meeting_record_failures", issue_codes)
+
+    def test_build_report_ignores_historical_llm_failures_by_default(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_root = Path(temp_dir)
+            self._write_jsonl(
+                data_root / "llm_call_ledger.jsonl",
+                [
+                    {
+                        "timestamp_sgt": "2026-05-16 06:11:43 SGT",
+                        "flow": "source_code_qa",
+                        "route": "deep",
+                        "model_id": "gpt-5.5",
+                        "provider": "codex_cli_bridge",
+                        "status": "error",
+                        "error_category": "nonzero_exit",
+                        "latency_ms": 1967990,
+                        "estimated_prompt_tokens": 9000,
+                        "prompt_mode": "codex_investigation_brief_v5",
+                    }
+                ],
+            )
+            (data_root / "run").mkdir()
+            (data_root / "run" / "jobs.json").write_text(json.dumps({"jobs": {}}), encoding="utf-8")
+
+            with patch.object(
+                portal_runtime_doctor,
+                "_source_code_qa_summary",
+                return_value=(["telemetry_window=0", "ops_summary_status=pass"], []),
+            ):
+                report = portal_runtime_doctor.build_report(data_root, limit=10)
+
+        self.assertEqual(report["recent_hours"], portal_runtime_doctor.DEFAULT_RECENT_HOURS)
+        issue_codes = {issue["code"] for issue in report["issues"]}
+        self.assertNotIn("llm_errors", issue_codes)
+        self.assertNotIn("llm_slow_calls", issue_codes)
 
     def test_format_report_exposes_key_sections(self):
         with tempfile.TemporaryDirectory() as temp_dir:
