@@ -55,7 +55,9 @@
             versionPlanCard.hidden = false;
           }
         } else {
-          status.textContent = 'Full portal is currently offline.';
+          status.textContent = signedIn
+            ? 'Full portal is currently offline. AF Version Plan remains available.'
+            : 'Full portal is currently offline. AF Version Plan remains available after Google sign-in.';
         }
       };
       fetch('/healthz', { headers: { Accept: 'application/json' }, credentials: 'same-origin' })

@@ -149,6 +149,7 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertIn(b"/cloud-static/style.css", response.data)
             self.assertIn(b"/auth/google/login?next=/portal-home?workspace%3Drun", response.data)
             self.assertIn(b"Checking Mac portal availability", response.data)
+            self.assertIn(b"AF Version Plan remains available after Google sign-in.", response.data)
             self.assertIn(b"fetch('/healthz'", response.data)
 
     def test_cloud_home_hides_version_plan_for_non_af_user(self):
