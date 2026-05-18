@@ -96,6 +96,53 @@ class GoogleAuthTests(unittest.TestCase):
             "https://jira-tool.example.com/auth/google/callback",
         )
 
+    def test_resolve_google_redirect_uri_uses_cloud_base_path_for_cloud_callback(self):
+        settings = Settings(
+            flask_secret_key="secret",
+            google_oauth_client_secret_file=Path("client.json"),
+            google_oauth_redirect_uri="https://jira-tool.example.com/auth/google/callback",
+            team_portal_host="127.0.0.1",
+            team_portal_port=5000,
+            team_portal_base_url="https://app.bankpmtool.uk",
+            team_allowed_emails=(),
+            team_allowed_email_domains=("npt.sg",),
+            team_portal_data_dir=Path("."),
+            spreadsheet_id="sheet",
+            common_tab_name="Common",
+            input_tab_name="Projects",
+            bpmis_base_url="https://example.com",
+            bpmis_api_access_token=None,
+        )
+
+        self.assertEqual(
+            _resolve_google_redirect_uri(settings, redirect_path="cloud-auth/google/callback"),
+            "https://app.bankpmtool.uk/cloud-auth/google/callback",
+        )
+
+    def test_resolve_google_redirect_uri_prefers_explicit_cloud_redirect_uri(self):
+        settings = Settings(
+            flask_secret_key="secret",
+            google_oauth_client_secret_file=Path("client.json"),
+            google_oauth_redirect_uri="https://jira-tool.example.com/auth/google/callback",
+            team_portal_host="127.0.0.1",
+            team_portal_port=5000,
+            team_portal_base_url="https://app.bankpmtool.uk",
+            team_allowed_emails=(),
+            team_allowed_email_domains=("npt.sg",),
+            team_portal_data_dir=Path("."),
+            spreadsheet_id="sheet",
+            common_tab_name="Common",
+            input_tab_name="Projects",
+            bpmis_base_url="https://example.com",
+            bpmis_api_access_token=None,
+        )
+
+        with patch.dict(os.environ, {"GOOGLE_CLOUD_OAUTH_REDIRECT_URI": "https://app.bankpmtool.uk/cloud-auth/google/callback"}, clear=False):
+            self.assertEqual(
+                _resolve_google_redirect_uri(settings, redirect_path="cloud-auth/google/callback"),
+                "https://app.bankpmtool.uk/cloud-auth/google/callback",
+            )
+
     def test_normalize_authorization_response_rewrites_local_proxy_callback_to_https_redirect(self):
         normalized = _normalize_authorization_response(
             "http://127.0.0.1:5000/auth/google/callback?state=abc&code=xyz",

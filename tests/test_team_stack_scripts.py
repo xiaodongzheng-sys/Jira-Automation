@@ -1497,6 +1497,7 @@ exit 0
                     "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "config-key",
                     "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
                     "BPMIS_BASE_URL": "https://bpmis.example.test",
+                    "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
                 },
                 cwd=PROJECT_ROOT,
             )
@@ -1509,7 +1510,9 @@ exit 0
             self.assertEqual(update_calls, [], msg=calls)
             self.assertIn("TEAM_PORTAL_DATA_DIR=/workspace/team-portal-runtime", deploy_calls[0])
             self.assertNotIn("/tmp/team-portal", deploy_calls[0])
-            self.assertIn("TEAM_PORTAL_BASE_URL=https://team-portal-example.run.app", deploy_calls[0])
+            self.assertIn("TEAM_PORTAL_BASE_URL=https://app.bankpmtool.uk", deploy_calls[0])
+            self.assertIn("GOOGLE_CLOUD_OAUTH_REDIRECT_URI=https://app.bankpmtool.uk/cloud-auth/google/callback", deploy_calls[0])
+            self.assertIn("TEAM_PORTAL_MAC_FULL_PORTAL_URL=https://app.bankpmtool.uk/portal-home", deploy_calls[0])
             self.assertIn("base URL update skipped", completed.stdout)
             self.assertNotIn("unexpected update", completed.stderr)
 

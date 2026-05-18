@@ -54,7 +54,12 @@ record_cloud_run_full_timing_on_exit() {
 trap record_cloud_run_full_timing_on_exit EXIT
 
 EXISTING_SERVICE_URL="$("$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format='value(status.url)' 2>/dev/null || true)"
-BASE_URL="${CLOUD_RUN_TEAM_PORTAL_BASE_URL:-${EXISTING_SERVICE_URL:-}}"
+PUBLIC_BASE_URL="${CLOUD_RUN_TEAM_PORTAL_BASE_URL:-$(read_env_value TEAM_PORTAL_BASE_URL)}"
+BASE_URL="${PUBLIC_BASE_URL:-${EXISTING_SERVICE_URL:-}}"
+GOOGLE_CLOUD_REDIRECT_URI="${GOOGLE_CLOUD_OAUTH_REDIRECT_URI:-}"
+if [[ -z "$GOOGLE_CLOUD_REDIRECT_URI" && -n "$BASE_URL" ]]; then
+  GOOGLE_CLOUD_REDIRECT_URI="${BASE_URL%/}/cloud-auth/google/callback"
+fi
 PROJECT_NUMBER="$("$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 RUNTIME_SERVICE_ACCOUNT="${CLOUD_RUN_SERVICE_ACCOUNT:-$PROJECT_NUMBER-compute@developer.gserviceaccount.com}"
 LOCAL_AGENT_URL="$(resolve_cloud_run_local_agent_url)"
@@ -201,6 +206,7 @@ ENV_VARS=(
   "VERSION_PLAN_FIRESTORE_ENVIRONMENT=${CLOUD_RUN_TEAM_PORTAL_STAGE:-live}"
   "VERSION_PLAN_FIRESTORE_PROJECT=${VERSION_PLAN_FIRESTORE_PROJECT:-$(read_env_value VERSION_PLAN_FIRESTORE_PROJECT)}"
   "GOOGLE_OAUTH_CLIENT_SECRET_FILE=/secrets/google/client_secret.json"
+  "GOOGLE_CLOUD_OAUTH_REDIRECT_URI=$GOOGLE_CLOUD_REDIRECT_URI"
   "PRD_BRIEFING_EDGE_MANDARIN_VOICE=${PRD_BRIEFING_EDGE_MANDARIN_VOICE:-$(read_env_value PRD_BRIEFING_EDGE_MANDARIN_VOICE)}"
 )
 if [[ -n "$BASE_URL" ]]; then
@@ -267,5 +273,6 @@ fi
 
 echo "Cloud Run deployed: $SERVICE_URL"
 echo "Cloud Run full script completed in $((UPDATE_FINISHED_AT - SCRIPT_STARTED_AT))s"
-echo "Add this Google OAuth redirect URI if it is not already configured:"
-echo "$SERVICE_URL/auth/google/callback"
+echo "Ensure these Google OAuth redirect URIs are configured:"
+echo "${BASE_URL:-$SERVICE_URL}/auth/google/callback"
+echo "${BASE_URL:-$SERVICE_URL}/cloud-auth/google/callback"

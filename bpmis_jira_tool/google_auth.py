@@ -39,6 +39,8 @@ def _resolve_google_redirect_uri(
         cloud_redirect_uri = os.getenv("GOOGLE_CLOUD_OAUTH_REDIRECT_URI", "").strip()
         if cloud_redirect_uri:
             return cloud_redirect_uri
+        if settings.team_portal_base_url:
+            return urljoin(settings.team_portal_base_url.rstrip("/") + "/", redirect_path.lstrip("/"))
     if settings.google_oauth_redirect_uri:
         return settings.google_oauth_redirect_uri
     if settings.team_portal_base_url:

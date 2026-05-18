@@ -184,7 +184,12 @@ EXISTING_SERVICE_URL="$(printf '%s\n' "$DESCRIBE_VALUES" | sed -n '1p')"
 INVOKER_IAM_DISABLED="$(printf '%s\n' "$DESCRIBE_VALUES" | sed -n '2p')"
 DESCRIBE_FINISHED_AT="$(date +%s)"
 echo "Cloud Run describe completed in $((DESCRIBE_FINISHED_AT - DESCRIBE_STARTED_AT))s"
-BASE_URL="${CLOUD_RUN_TEAM_PORTAL_BASE_URL:-${EXISTING_SERVICE_URL:-}}"
+PUBLIC_BASE_URL="${CLOUD_RUN_TEAM_PORTAL_BASE_URL:-$(read_env_value TEAM_PORTAL_BASE_URL)}"
+BASE_URL="${PUBLIC_BASE_URL:-${EXISTING_SERVICE_URL:-}}"
+GOOGLE_CLOUD_REDIRECT_URI="${GOOGLE_CLOUD_OAUTH_REDIRECT_URI:-}"
+if [[ -z "$GOOGLE_CLOUD_REDIRECT_URI" && -n "$BASE_URL" ]]; then
+  GOOGLE_CLOUD_REDIRECT_URI="${BASE_URL%/}/cloud-auth/google/callback"
+fi
 LOCAL_AGENT_URL="$(resolve_cloud_run_local_agent_url)"
 if is_loopback_http_url "$LOCAL_AGENT_URL"; then
   echo "Cloud Run cannot reach a localhost LOCAL_AGENT_BASE_URL."
@@ -213,6 +218,7 @@ ENV_VARS=(
   "TEAM_PORTAL_MAC_FULL_PORTAL_URL=${TEAM_PORTAL_MAC_FULL_PORTAL_URL:-${BASE_URL:-$(read_env_value TEAM_PORTAL_BASE_URL)}/portal-home}"
   "VERSION_PLAN_STORE_BACKEND=firestore"
   "VERSION_PLAN_FIRESTORE_ENVIRONMENT=${CLOUD_RUN_TEAM_PORTAL_STAGE:-live}"
+  "GOOGLE_CLOUD_OAUTH_REDIRECT_URI=$GOOGLE_CLOUD_REDIRECT_URI"
   "TEAM_PORTAL_RELEASE_REVISION=$(current_release_revision)"
 )
 append_optional_env_var() {
