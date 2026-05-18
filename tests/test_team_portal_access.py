@@ -140,7 +140,7 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertIn(b"Risk PM Workspace", response.data)
             self.assertNotIn(b"Open Version Plan", response.data)
             self.assertIn(b"/cloud-static/style.css", response.data)
-            self.assertIn(b"/auth/google/login?next=/portal-home", response.data)
+            self.assertIn(b"/auth/google/login?next=/portal-home?workspace%3Drun", response.data)
             self.assertIn(b"Checking Mac portal availability", response.data)
             self.assertIn(b"fetch('/healthz'", response.data)
 
@@ -169,7 +169,8 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn(b"Risk PM Workspace", response.data)
             self.assertIn(b"Open Full Portal", response.data)
-            self.assertIn(b"/auth/google/login?next=/portal-home", response.data)
+            self.assertIn(b"https://app.bankpmtool.uk/portal-home?workspace=run", response.data)
+            self.assertNotIn(b"https://app.bankpmtool.uk/?workspace=run", response.data)
             self.assertNotIn(b"Open Version Plan", response.data)
             self.assertNotIn(b"Version Plan</h3>", response.data)
             self.assertNotIn(b"Cloud Run", response.data)
@@ -196,14 +197,19 @@ class TeamPortalAccessTests(unittest.TestCase):
             with app.test_client() as client:
                 self._login_non_admin(client, email="jireh.tanyx@npt.sg")
                 response = client.get("/", follow_redirects=False)
+                dashboard_response = client.get("/team-dashboard", follow_redirects=False)
 
             self.assertEqual(response.status_code, 200)
             self.assertIn(b"Risk PM Workspace", response.data)
             self.assertIn(b"Open Version Plan", response.data)
             self.assertIn(b"Open Full Portal", response.data)
-            self.assertIn(b"/auth/google/login?next=/portal-home", response.data)
+            self.assertIn(b"https://app.bankpmtool.uk/portal-home?workspace=run", response.data)
+            self.assertNotIn(b"https://app.bankpmtool.uk/?workspace=run", response.data)
             self.assertNotIn(b'BPMIS Automation Tool</a>', response.data)
             self.assertNotIn(b'site-switcher-subtab is-active" href="/portal-home?workspace=run"', response.data)
+            self.assertEqual(dashboard_response.status_code, 200)
+            self.assertIn(b'href="https://app.bankpmtool.uk/portal-home?workspace=run"', dashboard_response.data)
+            self.assertNotIn(b'href="https://app.bankpmtool.uk/?workspace=run"', dashboard_response.data)
 
     def test_cloud_and_mac_apps_share_login_session_when_secret_matches(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

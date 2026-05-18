@@ -23,7 +23,7 @@ import threading
 import time
 from typing import Any
 from types import SimpleNamespace
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 import uuid
 import zipfile
 
@@ -768,7 +768,7 @@ def create_app() -> Flask:
         project_tabs.append(
             {
                 "label": "BPMIS Automation Tool",
-                "href": url_for("portal_home", workspace="run"),
+                "href": _bpmis_run_portal_url(settings, url_for("portal_home", workspace="run")),
                 "active": current_endpoint == "portal_home" or (current_endpoint == "index" and not settings.cloud_home_enabled),
             }
         )
@@ -788,7 +788,7 @@ def create_app() -> Flask:
                     "active": request.path.startswith("/work-memory"),
                 }
             )
-        project_href = url_for("team_dashboard_page") if can_access_team_dashboard else url_for("index", workspace="run")
+        project_href = url_for("team_dashboard_page") if can_access_team_dashboard else _bpmis_run_portal_url(settings, url_for("portal_home", workspace="run"))
         site_tabs.append(_nav_group("Projects", project_href, project_tabs))
         if _can_access_vpn_connection(settings):
             site_tabs.append(
@@ -909,7 +909,8 @@ def create_app() -> Flask:
 
         if settings.cloud_home_enabled:
             user_identity = _get_user_identity(settings)
-            full_portal_path = url_for("portal_home")
+            full_portal_path = url_for("portal_home", workspace="run")
+            full_portal_url = _bpmis_run_portal_url(settings, full_portal_path)
             return render_template(
                 "cloud_home.html",
                 page_title="Risk PM Workspace",
@@ -917,8 +918,8 @@ def create_app() -> Flask:
                 signed_in=_google_session_is_connected(),
                 can_access_version_plan=_can_access_team_dashboard_version_plan(user_identity),
                 version_plan_url=url_for("version_plan_page"),
-                full_portal_url=settings.mac_full_portal_url or full_portal_path,
-                full_portal_login_url=url_for("google_login", next=full_portal_path),
+                full_portal_url=full_portal_url,
+                full_portal_login_url=None if _google_session_is_connected() else url_for("google_login", next=full_portal_path),
                 cloud_auth_mode=True,
             )
 
@@ -2605,6 +2606,18 @@ def _safe_relative_redirect_target(value: Any) -> str:
     if parsed.scheme or parsed.netloc:
         return ""
     return target
+
+
+def _url_with_query_value(url: str, key: str, value: str) -> str:
+    parsed = urlsplit(str(url or "").strip())
+    query_items = [(item_key, item_value) for item_key, item_value in parse_qsl(parsed.query, keep_blank_values=True) if item_key != key]
+    query_items.append((key, value))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query_items), parsed.fragment))
+
+
+def _bpmis_run_portal_url(settings: Settings, fallback_url: str) -> str:
+    base_url = str(settings.mac_full_portal_url or "").strip() if settings.cloud_home_enabled else ""
+    return _url_with_query_value(base_url or fallback_url, "workspace", "run")
 
 
 def _remember_post_google_login_redirect(value: Any) -> None:
