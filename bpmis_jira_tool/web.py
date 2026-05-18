@@ -292,6 +292,7 @@ TEAM_DASHBOARD_LINK_BIZ_EXCLUDED_TITLE_PHRASES = (
     "productisation upgrade",
     "deployment of productization",
 )
+DEFAULT_FLASK_SESSION_SECRET_VALUES = {"", "dev-secret-key", "local-dev-secret-change-me"}
 _team_dashboard_actual_mandays_lock = threading.Lock()
 _team_dashboard_actual_mandays_running: set[str] = set()
 _gmail_export_active_users: set[str] = set()
@@ -621,6 +622,8 @@ def create_app() -> Flask:
     )
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
     app.config["SECRET_KEY"] = settings.flask_secret_key
+    if settings.cloud_home_enabled and _default_flask_session_secret(settings.flask_secret_key):
+        app.logger.warning("TEAM_PORTAL_CLOUD_HOME_ENABLED is set but FLASK_SECRET_KEY is still using a local default value.")
     app.config["SETTINGS"] = settings
     app.config["CONFIG_STORE"] = config_store
     app.config["BPMIS_PROJECT_STORE"] = BPMISProjectStore(config_store.db_path)
@@ -1049,7 +1052,13 @@ def create_app() -> Flask:
 
     @app.get("/healthz")
     def healthz():
-        return jsonify({"status": "ok", "revision": _current_release_revision()}), HTTPStatus.OK
+        return jsonify(
+            {
+                "status": "ok",
+                "revision": _current_release_revision(),
+                "shared_session_ready": not _default_flask_session_secret(settings.flask_secret_key),
+            }
+        ), HTTPStatus.OK
 
     @app.get("/access-denied")
     def access_denied():
@@ -2582,6 +2591,10 @@ def _site_requires_google_login(settings: Settings) -> bool:
 
 def _google_session_is_connected() -> bool:
     return "google_credentials" in session and bool(_current_google_email())
+
+
+def _default_flask_session_secret(value: Any) -> bool:
+    return str(value or "").strip() in DEFAULT_FLASK_SESSION_SECRET_VALUES
 
 
 def _safe_relative_redirect_target(value: Any) -> str:

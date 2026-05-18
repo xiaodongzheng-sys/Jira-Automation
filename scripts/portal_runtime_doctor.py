@@ -494,6 +494,42 @@ def _version_plan_firestore_summary() -> tuple[dict[str, str], list[dict[str, st
     return summary, []
 
 
+def _mac_portal_runtime_summary() -> tuple[dict[str, str], list[dict[str, str]]]:
+    from scripts.release_status import _mac_portal_availability_status
+
+    summary = {
+        "status": "unknown",
+        "details": _mac_portal_availability_status(env=os.environ),
+    }
+    details = summary["details"]
+    if "status=online" in details:
+        summary["status"] = "online"
+        return summary, []
+    if "status=degraded" in details:
+        summary["status"] = "degraded"
+        return summary, [_issue("warn", "mac_portal_degraded", "Mac portal availability is degraded.")]
+    summary["status"] = "offline"
+    return summary, [_issue("warn", "mac_portal_offline", "Mac portal availability is offline.")]
+
+
+def _shared_session_summary() -> tuple[dict[str, str], list[dict[str, str]]]:
+    from scripts.release_status import _shared_session_status
+
+    details = _shared_session_status(env=os.environ)
+    summary = {"status": "unknown", "details": details}
+    if "status=not_applicable" in details:
+        summary["status"] = "not_applicable"
+        return summary, []
+    if "status=ok" in details:
+        summary["status"] = "ok"
+        return summary, []
+    if "status=warn" in details:
+        summary["status"] = "warn"
+        return summary, [_issue("warn", "shared_session_unverified", "Shared Cloud/Mac session configuration is not fully verified.")]
+    summary["status"] = "fail"
+    return summary, [_issue("fail", "shared_session_misconfigured", "Shared Cloud/Mac session configuration is misconfigured.")]
+
+
 def build_report(
     data_root: Path,
     *,
@@ -511,11 +547,15 @@ def build_report(
     meetings, meeting_issues = _summarize_meeting_records(data_root, limit, recent_hours=recent_hours)
     scqa_lines, scqa_issues = _source_code_qa_summary(data_root, limit)
     version_plan, version_plan_issues = _version_plan_firestore_summary()
+    mac_portal, mac_portal_issues = _mac_portal_runtime_summary()
+    shared_session, shared_session_issues = _shared_session_summary()
     issues.extend(llm_issues)
     issues.extend(job_issues)
     issues.extend(meeting_issues)
     issues.extend(scqa_issues)
     issues.extend(version_plan_issues)
+    issues.extend(mac_portal_issues)
+    issues.extend(shared_session_issues)
 
     release_lines: list[str] = []
     if include_release_status:
@@ -540,6 +580,8 @@ def build_report(
         "meeting_records": meetings,
         "source_code_qa": {"lines": scqa_lines},
         "version_plan_firestore": version_plan,
+        "mac_portal": mac_portal,
+        "shared_session": shared_session,
         "permissions": _permission_matrix(),
         "release_status": {"included": include_release_status, "lines": release_lines},
         "issues": issues,
@@ -648,6 +690,16 @@ def format_report(report: dict[str, Any]) -> list[str]:
         f"environment={version_plan['environment']} updated_at_sgt={version_plan['updated_at_sgt'] or '<missing>'} "
         f"source_hash={version_plan['source_hash'] or '<missing>'}"
     )
+
+    mac_portal = report["mac_portal"]
+    lines.append("")
+    lines.append("== Mac Portal Availability ==")
+    lines.append(f"mac_portal_status={mac_portal['status']} details={mac_portal['details']}")
+
+    shared_session = report["shared_session"]
+    lines.append("")
+    lines.append("== Shared Session Configuration ==")
+    lines.append(f"shared_session_status={shared_session['status']} details={shared_session['details']}")
 
     if report["release_status"]["included"]:
         lines.append("")

@@ -1994,6 +1994,8 @@ fi
                         ),
                         stderr="",
                     )
+                if command[0] == str(gcloud_path) and "secrets versions access latest --secret=team-portal-flask-secret" in joined:
+                    return subprocess.CompletedProcess(command, 0, stdout="shared-secret\n", stderr="")
                 if command[0] == "curl":
                     url = command[-1]
                     if url.endswith("/api/local-agent/healthz") or url.endswith(":7007/healthz"):
@@ -2013,6 +2015,8 @@ fi
                     "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
                     "TEAM_PORTAL_PORT": "5000",
                     "LOCAL_AGENT_BASE_URL": "http://127.0.0.1:7007",
+                    "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
+                    "FLASK_SECRET_KEY": "shared-secret",
                 },
                 runner=fake_run,
             )
@@ -2022,11 +2026,27 @@ fi
         self.assertIn("git_revision=d8fb5fb59c743dadfce1f8a106a7846c8ebe2fbc", output)
         self.assertIn("Cloud Run service live traffic: revision=team-portal-00200-n7q percent=100", output)
         self.assertIn("(Cloud Run traffic, not Mac public Live)", output)
+        self.assertIn("Mac portal availability: status=online", output)
+        self.assertIn("Shared session configuration: status=ok", output)
+        self.assertIn("match=yes", output)
         self.assertIn("Public Live URL (Mac/Cloudflare): url=https://app.bankpmtool.uk/healthz status=ok revision=d8fb5fb59c743dadfce1f8a106a7846c8ebe2fbc", output)
         self.assertIn("Local portal: url=http://127.0.0.1:5000/healthz status=ok revision=d8fb5fb59c743dadfce1f8a106a7846c8ebe2fbc", output)
         self.assertIn("Direct local-agent: url=http://127.0.0.1:7007/healthz status=ok source_code_qa=True codex_ready=True", output)
         self.assertIn("Public local-agent proxy: url=https://app.bankpmtool.uk/api/local-agent/healthz status=ok source_code_qa=True codex_ready=True", output)
         self.assertIn("Version Plan Firestore:", output)
+
+    def test_release_status_flags_default_local_secret_for_cloud_home(self):
+        from scripts.release_status import _shared_session_status
+
+        status = _shared_session_status(
+            env={
+                "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
+                "FLASK_SECRET_KEY": "local-dev-secret-change-me",
+            }
+        )
+
+        self.assertIn("status=fail", status)
+        self.assertIn("reason=local_flask_secret_default", status)
 
     def test_release_status_firestore_unavailable_does_not_leak_secret_values(self):
         from scripts.release_status import _version_plan_firestore_status

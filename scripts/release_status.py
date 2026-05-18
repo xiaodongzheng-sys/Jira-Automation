@@ -12,6 +12,8 @@ from typing import Any, Mapping
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_SESSION_SECRET_VALUES = {"", "dev-secret-key", "local-dev-secret-change-me"}
+TEAM_PORTAL_FLASK_SECRET_GCP_SECRET = "team-portal-flask-secret"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
@@ -78,6 +80,83 @@ def _health_probe(url: str, *, env: Mapping[str, str], runner: Any = _run) -> st
         if "codex_ready" in capabilities:
             details.append(f"codex_ready={capabilities.get('codex_ready')}")
     return " ".join(details)
+
+
+def _sanitize_error_text(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return " ".join(text.split())[:240]
+
+
+def _gcloud_binary(*, env: Mapping[str, str]) -> str:
+    configured = env.get("GCLOUD_BIN") or "gcloud"
+    resolved = shutil.which(configured) or configured
+    if Path(resolved).exists():
+        return resolved
+    fallback = shutil.which("gcloud")
+    if fallback:
+        return fallback
+    bundled = Path.home() / "google-cloud-sdk/bin/gcloud"
+    return str(bundled)
+
+
+def _gcloud_secret_value(secret_name: str, *, env: Mapping[str, str], runner: Any = _run) -> tuple[str, str]:
+    project = _env_value("GOOGLE_CLOUD_PROJECT", env)
+    gcloud_bin = _gcloud_binary(env=env)
+    if not gcloud_bin or not Path(gcloud_bin).exists():
+        return "", "gcloud unavailable"
+    command = [gcloud_bin, "secrets", "versions", "access", "latest", f"--secret={secret_name}"]
+    if project:
+        command.extend(["--project", project])
+    completed = runner(command, env=env)
+    if completed.returncode != 0:
+        return "", _sanitize_error_text(completed.stderr or completed.stdout or f"exit {completed.returncode}")
+    return str(completed.stdout or "").strip(), ""
+
+
+def _is_default_flask_secret(value: str) -> bool:
+    return str(value or "").strip() in DEFAULT_SESSION_SECRET_VALUES
+
+
+def _shared_session_status(*, env: Mapping[str, str], runner: Any = _run) -> str:
+    cloud_home_enabled = str(_env_value("TEAM_PORTAL_CLOUD_HOME_ENABLED", env) or "").strip().lower() in {"1", "true", "yes", "on"}
+    mac_full_portal_url = str(_env_value("TEAM_PORTAL_MAC_FULL_PORTAL_URL", env) or "").strip()
+    public_base_url = str(_env_value("TEAM_PORTAL_BASE_URL", env) or "").strip()
+    if not (cloud_home_enabled or mac_full_portal_url or public_base_url):
+        return "status=not_applicable cloud_home_enabled=false"
+    local_secret = str(_env_value("FLASK_SECRET_KEY", env) or "").strip()
+    if not local_secret:
+        return "status=fail cloud_home_enabled=true reason=local_flask_secret_missing"
+    if _is_default_flask_secret(local_secret):
+        return "status=fail cloud_home_enabled=true reason=local_flask_secret_default"
+    remote_secret, remote_error = _gcloud_secret_value(TEAM_PORTAL_FLASK_SECRET_GCP_SECRET, env=env, runner=runner)
+    if remote_error:
+        return (
+            "status=warn cloud_home_enabled=true "
+            f"local_secret=configured gcp_secret=unverified error={remote_error}"
+        )
+    if not remote_secret:
+        return "status=warn cloud_home_enabled=true local_secret=configured gcp_secret=empty"
+    if remote_secret != local_secret:
+        return "status=fail cloud_home_enabled=true local_secret=configured gcp_secret=configured match=no"
+    return "status=ok cloud_home_enabled=true local_secret=configured gcp_secret=configured match=yes"
+
+
+def _mac_portal_availability_status(*, env: Mapping[str, str], runner: Any = _run) -> str:
+    local_port = _env_value("TEAM_PORTAL_PORT", env) or "5000"
+    public_url = (_env_value("TEAM_PORTAL_BASE_URL", env) or "").rstrip("/")
+    local_probe = _health_probe(f"http://127.0.0.1:{local_port}/healthz", env=env, runner=runner)
+    public_probe = _health_probe(f"{public_url}/healthz" if public_url else "", env=env, runner=runner)
+    local_ok = " status=ok" in local_probe
+    public_ok = " status=ok" in public_probe
+    if local_ok and public_ok:
+        status = "online"
+    elif local_ok or public_ok:
+        status = "degraded"
+    else:
+        status = "offline"
+    return f"status={status} local_probe=({local_probe}) public_probe=({public_probe})"
 
 
 def _version_plan_firestore_status(*, env: Mapping[str, str]) -> str:
@@ -167,10 +246,7 @@ def build_status_lines(*, env: Mapping[str, str] | None = None, runner: Any = _r
     region = _env_value("CLOUD_RUN_REGION", env) or "asia-southeast1"
     uat_tag = _env_value("CLOUD_RUN_UAT_TAG", env) or "uat"
     project = _env_value("GOOGLE_CLOUD_PROJECT", env)
-    configured_gcloud = env.get("GCLOUD_BIN") or "gcloud"
-    gcloud_bin = shutil.which(configured_gcloud) or configured_gcloud
-    if not Path(gcloud_bin).exists():
-        gcloud_bin = shutil.which("gcloud") or str(Path.home() / "google-cloud-sdk/bin/gcloud")
+    gcloud_bin = _gcloud_binary(env=env)
     project_args = ["--project", project] if project else []
 
     lines.append(f"Cloud Run service: {service} region={region}")
@@ -245,6 +321,8 @@ def build_status_lines(*, env: Mapping[str, str] | None = None, runner: Any = _r
         local_agent_port = _env_value("LOCAL_AGENT_PORT", env) or "7007"
         local_agent_base = f"http://{local_agent_host}:{local_agent_port}"
 
+    lines.append(f"Mac portal availability: {_mac_portal_availability_status(env=env, runner=runner)}")
+    lines.append(f"Shared session configuration: {_shared_session_status(env=env, runner=runner)}")
     lines.append(f"Local portal: {_health_probe(f'http://127.0.0.1:{local_port}/healthz', env=env, runner=runner)}")
     lines.append(
         "Public Live URL (Mac/Cloudflare): "

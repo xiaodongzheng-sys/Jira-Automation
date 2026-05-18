@@ -17,7 +17,7 @@
 
     <div class="dashboard-grid">
       {% if can_access_version_plan %}
-      <article class="dashboard-card">
+      <article class="dashboard-card" data-version-plan-card>
         <h3>Version Plan</h3>
         <p>AF version planning remains available independently from full portal actions.</p>
         {% if signed_in %}
@@ -27,31 +27,49 @@
         {% endif %}
       </article>
       {% endif %}
-      <article class="dashboard-card">
+      <article class="dashboard-card" data-full-portal-card>
         <h3>Full Portal</h3>
         <p>BPMIS, Source Code Q&amp;A, reports, and admin tools.</p>
-        <a class="button button-secondary" href="{{ full_portal_login_url or full_portal_url }}">Open Full Portal</a>
-        <p class="productization-inline-status" data-cloud-mac-status>Checking Mac portal status...</p>
+        <a class="button button-secondary" href="{{ full_portal_login_url or full_portal_url }}" data-full-portal-link>Open Full Portal</a>
+        <p class="productization-inline-status" data-cloud-mac-status>Checking Mac portal availability...</p>
       </article>
     </div>
   </section>
   <script>
     (() => {
       const status = document.querySelector('[data-cloud-mac-status]');
-      if (!status) return;
+      const fullPortalLink = document.querySelector('[data-full-portal-link]');
+      const fullPortalCard = document.querySelector('[data-full-portal-card]');
+      const versionPlanCard = document.querySelector('[data-version-plan-card]');
+      if (!status || !fullPortalLink || !fullPortalCard) return;
       const canAccessVersionPlan = {{ 'true' if can_access_version_plan else 'false' }};
-      fetch('/api/local-agent/healthz', { headers: { Accept: 'application/json' }, credentials: 'same-origin' })
+      const signedIn = {{ 'true' if signed_in else 'false' }};
+      const setOfflineState = () => {
+        fullPortalLink.hidden = true;
+        status.dataset.tone = 'error';
+        if (canAccessVersionPlan) {
+          status.textContent = signedIn
+            ? 'Mac full portal is offline. Version Plan remains available.'
+            : 'Mac full portal is offline. Sign in to use Version Plan only.';
+          if (versionPlanCard) {
+            versionPlanCard.hidden = false;
+          }
+        } else {
+          status.textContent = 'Full portal is currently offline.';
+        }
+      };
+      fetch('/healthz', { headers: { Accept: 'application/json' }, credentials: 'same-origin' })
         .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
         .then((payload) => {
-          status.textContent = payload?.status === 'ok' ? 'Full portal online.' : 'Full portal status is unknown.';
-          status.dataset.tone = payload?.status === 'ok' ? 'success' : 'neutral';
+          if (payload?.status === 'ok') {
+            fullPortalLink.hidden = false;
+            status.textContent = 'Mac full portal is online.';
+            status.dataset.tone = 'success';
+            return;
+          }
+          setOfflineState();
         })
-        .catch(() => {
-          status.textContent = canAccessVersionPlan
-            ? 'Full portal actions are offline. Version Plan is still available.'
-            : 'Full portal is currently offline.';
-          status.dataset.tone = 'error';
-        });
+        .catch(setOfflineState);
     })();
   </script>
 {% endblock %}

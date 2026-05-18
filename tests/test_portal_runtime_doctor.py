@@ -99,6 +99,14 @@ class PortalRuntimeDoctorTests(unittest.TestCase):
                 portal_runtime_doctor,
                 "_source_code_qa_summary",
                 return_value=(["index_health=ready ready=2/2 stale_or_missing=0", "ops_summary_status=pass"], []),
+            ), patch.object(
+                portal_runtime_doctor,
+                "_mac_portal_runtime_summary",
+                return_value=({"status": "online", "details": "status=online"}, []),
+            ), patch.object(
+                portal_runtime_doctor,
+                "_shared_session_summary",
+                return_value=({"status": "ok", "details": "status=ok"}, []),
             ):
                 report = portal_runtime_doctor.build_report(data_root, limit=10)
 
@@ -144,6 +152,14 @@ class PortalRuntimeDoctorTests(unittest.TestCase):
                 portal_runtime_doctor,
                 "_source_code_qa_summary",
                 return_value=(["telemetry_window=0", "ops_summary_status=pass"], []),
+            ), patch.object(
+                portal_runtime_doctor,
+                "_mac_portal_runtime_summary",
+                return_value=({"status": "online", "details": "status=online"}, []),
+            ), patch.object(
+                portal_runtime_doctor,
+                "_shared_session_summary",
+                return_value=({"status": "ok", "details": "status=ok"}, []),
             ):
                 report = portal_runtime_doctor.build_report(data_root, limit=10)
 
@@ -159,6 +175,14 @@ class PortalRuntimeDoctorTests(unittest.TestCase):
                 portal_runtime_doctor,
                 "_source_code_qa_summary",
                 return_value=(["telemetry_window=0", "ops_summary_status=pass"], []),
+            ), patch.object(
+                portal_runtime_doctor,
+                "_mac_portal_runtime_summary",
+                return_value=({"status": "online", "details": "status=online"}, []),
+            ), patch.object(
+                portal_runtime_doctor,
+                "_shared_session_summary",
+                return_value=({"status": "ok", "details": "status=ok"}, []),
             ):
                 report = portal_runtime_doctor.build_report(data_root, limit=5)
             output = "\n".join(portal_runtime_doctor.format_report(report))
@@ -167,6 +191,8 @@ class PortalRuntimeDoctorTests(unittest.TestCase):
         self.assertIn("== LLM Ledger ==", output)
         self.assertIn("== Jobs ==", output)
         self.assertIn("== Meeting Records ==", output)
+        self.assertIn("== Mac Portal Availability ==", output)
+        self.assertIn("== Shared Session Configuration ==", output)
         self.assertIn("== Permission Snapshot ==", output)
         self.assertIn("permission=PRD Briefing Tool visibility=admin only", output)
 

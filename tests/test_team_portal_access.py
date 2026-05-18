@@ -141,6 +141,8 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertNotIn(b"Open Version Plan", response.data)
             self.assertIn(b"/cloud-static/style.css", response.data)
             self.assertIn(b"/auth/google/login?next=/portal-home", response.data)
+            self.assertIn(b"Checking Mac portal availability", response.data)
+            self.assertIn(b"fetch('/healthz'", response.data)
 
     def test_cloud_home_hides_version_plan_for_non_af_user(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -200,6 +202,79 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertIn(b"Open Version Plan", response.data)
             self.assertIn(b"Open Full Portal", response.data)
             self.assertIn(b"/auth/google/login?next=/portal-home", response.data)
+
+    def test_cloud_and_mac_apps_share_login_session_when_secret_matches(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "shared-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
+                "TEAM_PORTAL_MAC_FULL_PORTAL_URL": "https://app.bankpmtool.uk/portal-home",
+            },
+            clear=False,
+        ):
+            cloud_app = create_app()
+            cloud_app.testing = True
+            mac_app = create_app()
+            mac_app.testing = True
+
+            with cloud_app.test_client() as cloud_client:
+                self._login_non_admin(cloud_client, email="jireh.tanyx@npt.sg")
+                session_cookie = cloud_client.get_cookie("session")
+                self.assertIsNotNone(session_cookie)
+
+            with mac_app.test_client() as mac_client:
+                mac_client.set_cookie("session", session_cookie.value, domain="localhost", path="/")
+                portal_response = mac_client.get("/portal-home", follow_redirects=False)
+                dashboard_response = mac_client.get("/team-dashboard", follow_redirects=False)
+
+            self.assertEqual(portal_response.status_code, 200)
+            self.assertIn(b"Manage My Projects", portal_response.data)
+            self.assertEqual(dashboard_response.status_code, 200)
+            self.assertIn(b"Version Plan", dashboard_response.data)
+
+    def test_cloud_and_mac_apps_do_not_share_login_session_when_secret_differs(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "cloud-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
+                "TEAM_PORTAL_MAC_FULL_PORTAL_URL": "https://app.bankpmtool.uk/portal-home",
+            },
+            clear=False,
+        ):
+            cloud_app = create_app()
+            cloud_app.testing = True
+            with cloud_app.test_client() as cloud_client:
+                self._login_non_admin(cloud_client, email="jireh.tanyx@npt.sg")
+                session_cookie = cloud_client.get_cookie("session")
+                self.assertIsNotNone(session_cookie)
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "mac-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+            },
+            clear=False,
+        ):
+            mac_app = create_app()
+            mac_app.testing = True
+
+            with mac_app.test_client() as mac_client:
+                mac_client.set_cookie("session", session_cookie.value, domain="localhost", path="/")
+                portal_response = mac_client.get("/portal-home", follow_redirects=False)
+
+        self.assertEqual(portal_response.status_code, 302)
+        self.assertIn(portal_response.headers["Location"], {"/", "/access-denied"})
 
     def test_cloud_version_plan_page_requires_login_then_renders_standalone(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
