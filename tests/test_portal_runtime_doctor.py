@@ -18,7 +18,9 @@ class PortalRuntimeDoctorTests(unittest.TestCase):
     def test_build_report_summarizes_portal_runtime_signals(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_root = Path(temp_dir)
-            now_sgt = datetime.now(portal_runtime_doctor.SGT).strftime("%Y-%m-%d %H:%M:%S SGT")
+            now = datetime.now(portal_runtime_doctor.SGT)
+            now_sgt = now.strftime("%Y-%m-%d %H:%M:%S SGT")
+            now_epoch = int(now.timestamp())
             self._write_jsonl(
                 data_root / "llm_call_ledger.jsonl",
                 [
@@ -70,7 +72,7 @@ class PortalRuntimeDoctorTests(unittest.TestCase):
                                 "action": "source-code-qa-query",
                                 "state": "failed",
                                 "stage": "interrupted",
-                                "updated_at": 1778976000,
+                                "updated_at": now_epoch,
                                 "message": "Interrupted by restart.",
                                 "error_retryable": True,
                             },
@@ -79,7 +81,7 @@ class PortalRuntimeDoctorTests(unittest.TestCase):
                                 "action": "meeting-recorder-process",
                                 "state": "completed",
                                 "stage": "completed",
-                                "updated_at": 1778975900,
+                                "updated_at": now_epoch,
                             },
                         }
                     }

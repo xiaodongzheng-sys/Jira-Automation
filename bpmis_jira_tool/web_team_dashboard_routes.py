@@ -63,10 +63,12 @@ def _add_route(app: Any, rule: str, view_func: Callable[..., Any], *, methods: l
 def build_team_dashboard_handlers(ctx: Any) -> Any:
     settings = ctx.settings
     _require_team_dashboard_access = ctx._require_team_dashboard_access
+    _require_team_dashboard_version_plan_access = ctx._require_team_dashboard_version_plan_access
     _require_team_dashboard_monthly_report_access = ctx._require_team_dashboard_monthly_report_access
     _get_user_identity = ctx._get_user_identity
     _get_team_dashboard_config_store = ctx._get_team_dashboard_config_store
     _can_manage_team_dashboard = ctx._can_manage_team_dashboard
+    _can_access_team_dashboard_version_plan = ctx._can_access_team_dashboard_version_plan
     _can_access_team_dashboard_monthly_report = ctx._can_access_team_dashboard_monthly_report
     _seatalk_dashboard_is_configured = ctx._seatalk_dashboard_is_configured
     _log_portal_event = ctx._log_portal_event
@@ -265,6 +267,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             user_identity=_get_user_identity(settings),
             team_dashboard_config=_get_team_dashboard_config_store().load(),
             can_manage_team_dashboard=_can_manage_team_dashboard(_get_user_identity(settings)),
+            can_access_version_plan=_can_access_team_dashboard_version_plan(_get_user_identity(settings)),
             can_view_team_dashboard_monthly_report=_can_access_team_dashboard_monthly_report(
                 _get_user_identity(settings)
             ),
@@ -272,7 +275,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         )
 
     def version_plan_page():
-        access_gate = _require_team_dashboard_access(settings)
+        access_gate = _require_team_dashboard_version_plan_access(settings)
         if access_gate is not None:
             return access_gate
         try:
@@ -285,6 +288,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             user_identity=_get_user_identity(settings),
             team_dashboard_config=team_dashboard_config_value,
             can_manage_team_dashboard=_can_manage_team_dashboard(_get_user_identity(settings)),
+            can_access_version_plan=True,
             can_view_team_dashboard_monthly_report=False,
             seatalk_configured=False,
             version_plan_only=True,
@@ -302,6 +306,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             user_identity=_get_user_identity(settings),
             team_dashboard_config=_get_team_dashboard_config_store().load(),
             can_manage_team_dashboard=_can_manage_team_dashboard(_get_user_identity(settings)),
+            can_access_version_plan=_can_access_team_dashboard_version_plan(_get_user_identity(settings)),
             can_view_team_dashboard_monthly_report=_can_access_team_dashboard_monthly_report(
                 _get_user_identity(settings)
             ),
@@ -432,7 +437,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
 
 
     def team_dashboard_version_plan_af():
-        access_gate = _require_team_dashboard_access(settings, api=True)
+        access_gate = _require_team_dashboard_version_plan_access(settings, api=True)
         if access_gate is not None:
             return access_gate
         store = _get_version_plan_store()
@@ -453,7 +458,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
 
 
     def team_dashboard_version_plan_sync():
-        access_gate = _require_team_dashboard_access(settings, api=True)
+        access_gate = _require_team_dashboard_version_plan_access(settings, api=True)
         if access_gate is not None:
             return access_gate
         if not _can_sync_version_plan():
@@ -479,7 +484,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
 
 
     def team_dashboard_version_plan_sync_status():
-        access_gate = _require_team_dashboard_access(settings, api=True)
+        access_gate = _require_team_dashboard_version_plan_access(settings, api=True)
         if access_gate is not None:
             return access_gate
         store = _get_version_plan_store()
@@ -518,7 +523,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
 
 
     def team_dashboard_version_plan_cell():
-        access_gate = _require_team_dashboard_access(settings, api=True)
+        access_gate = _require_team_dashboard_version_plan_access(settings, api=True)
         if access_gate is not None:
             return access_gate
         payload = request.get_json(silent=True)
@@ -538,7 +543,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
 
 
     def team_dashboard_version_plan_rows():
-        access_gate = _require_team_dashboard_access(settings, api=True)
+        access_gate = _require_team_dashboard_version_plan_access(settings, api=True)
         if access_gate is not None:
             return access_gate
         payload = request.get_json(silent=True)

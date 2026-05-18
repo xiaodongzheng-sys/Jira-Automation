@@ -4,25 +4,33 @@
   <section class="panel panel-wide glass-panel cloud-home-panel">
     <div class="panel-head">
       <div>
-        <h2>Risk PM Cloud</h2>
-        <p class="step-copy">Cloud-backed Version Plan remains available when the Mac full portal is offline.</p>
+        <h2>Risk PM Workspace</h2>
+        <p class="step-copy">
+          {% if can_access_version_plan %}
+            Open AF Version Plan or continue to the full portal.
+          {% else %}
+            Continue to the full team portal.
+          {% endif %}
+        </p>
       </div>
     </div>
 
     <div class="dashboard-grid">
+      {% if can_access_version_plan %}
       <article class="dashboard-card">
         <h3>Version Plan</h3>
-        <p>Cloud Run and Firestore backed AF version planning.</p>
+        <p>AF version planning remains available independently from full portal actions.</p>
         {% if signed_in %}
           <a class="button button-primary" href="{{ version_plan_url }}">Open Version Plan</a>
         {% else %}
           <a class="button button-primary" href="{{ url_for('cloud_google_login') }}">Sign in with Google</a>
         {% endif %}
       </article>
+      {% endif %}
       <article class="dashboard-card">
         <h3>Full Portal</h3>
-        <p>Mac-backed BPMIS, Source Code Q&amp;A, reports, and admin tools.</p>
-        <a class="button button-secondary" href="{{ full_portal_url }}">Open Full Portal</a>
+        <p>BPMIS, Source Code Q&amp;A, reports, and admin tools.</p>
+        <a class="button button-secondary" href="{{ full_portal_login_url or full_portal_url }}">Open Full Portal</a>
         <p class="productization-inline-status" data-cloud-mac-status>Checking Mac portal status...</p>
       </article>
     </div>
@@ -31,14 +39,17 @@
     (() => {
       const status = document.querySelector('[data-cloud-mac-status]');
       if (!status) return;
+      const canAccessVersionPlan = {{ 'true' if can_access_version_plan else 'false' }};
       fetch('/api/local-agent/healthz', { headers: { Accept: 'application/json' }, credentials: 'same-origin' })
         .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
         .then((payload) => {
-          status.textContent = payload?.status === 'ok' ? 'Mac local-agent online.' : 'Mac local-agent status is unknown.';
+          status.textContent = payload?.status === 'ok' ? 'Full portal online.' : 'Full portal status is unknown.';
           status.dataset.tone = payload?.status === 'ok' ? 'success' : 'neutral';
         })
         .catch(() => {
-          status.textContent = 'Mac full portal actions are offline. Version Plan is still available.';
+          status.textContent = canAccessVersionPlan
+            ? 'Full portal actions are offline. Version Plan is still available.'
+            : 'Full portal is currently offline.';
           status.dataset.tone = 'error';
         });
     })();

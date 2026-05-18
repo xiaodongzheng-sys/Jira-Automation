@@ -249,7 +249,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
                 text=True,
             )
             _wait_for_healthz(cloud_base_url)
-            session_cookie = _session_cookie_value(cloud_env, email=TEAMMATE_EMAIL, name="Team Mate")
+            session_cookie = _session_cookie_value(cloud_env, email="jireh.tanyx@npt.sg", name="AF Team Mate")
             context = self._browser.new_context(base_url=cloud_base_url, viewport={"width": 1280, "height": 900})
             context.add_cookies(
                 [
@@ -299,7 +299,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
 
             page.route("**/api/team-dashboard/version-plan/af", version_plan)
             page.goto("/", wait_until="domcontentloaded")
-            self.assertIn("Risk PM Cloud", page.locator("body").inner_text(timeout=5000))
+            self.assertIn("Risk PM Workspace", page.locator("body").inner_text(timeout=5000))
             page.get_by_role("link", name="Open Version Plan").click()
             page.wait_for_url("**/version-plan", timeout=5000)
             page.locator('[data-version-plan-row-id="cloud-home-pipe-1"]').get_by_text(

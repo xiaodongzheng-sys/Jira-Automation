@@ -1239,7 +1239,9 @@ class WebPortalFeatureTests(unittest.TestCase):
             node.get_text(strip=True)
             for node in sophia_dashboard_soup.select(".team-dashboard-tabs > .workspace-tab")
         ]
-        self.assertEqual(sophia_dashboard_tabs, ["Version Plan"])
+        self.assertEqual(sophia_dashboard_tabs, [])
+        self.assertNotIn(b'data-team-dashboard-tab="version-plan"', sophia_dashboard_response.data)
+        self.assertNotIn(b'data-team-dashboard-panel="version-plan"', sophia_dashboard_response.data)
         self.assertNotIn(b'data-team-dashboard-tab="admin"', sophia_dashboard_response.data)
         self.assertNotIn(b'data-team-dashboard-tab="tasks"', sophia_dashboard_response.data)
         self.assertNotIn(b'data-team-dashboard-tab="link-biz-project"', sophia_dashboard_response.data)
@@ -1512,7 +1514,7 @@ class WebPortalFeatureTests(unittest.TestCase):
 
             with app.test_client() as client:
                 with client.session_transaction() as session:
-                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_profile"] = {"email": "jireh.tanyx@npt.sg", "name": "AF Teammate"}
                     session["google_credentials"] = {"token": "x"}
                 response = client.get("/api/team-dashboard/version-plan/af?sync=0")
 

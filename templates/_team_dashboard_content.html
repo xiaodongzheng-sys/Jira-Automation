@@ -1,6 +1,7 @@
 {% set reports_only = reports_only|default(false) %}
 {% set version_plan_only = version_plan_only|default(false) %}
-{% set initial_team_dashboard_tab = 'version-plan' if version_plan_only else ('monthly-report' if reports_only else ('tasks' if can_manage_team_dashboard else 'version-plan')) %}
+{% set can_access_version_plan = can_access_version_plan|default(false) %}
+{% set initial_team_dashboard_tab = 'version-plan' if version_plan_only else ('monthly-report' if reports_only else ('tasks' if can_manage_team_dashboard else ('version-plan' if can_access_version_plan else ''))) %}
 
 <section class="panel panel-wide glass-panel team-dashboard-panel"
   data-team-dashboard
@@ -11,11 +12,13 @@
   data-link-biz-project-url="{{ url_for('team_dashboard_link_biz_projects') }}"
   data-link-biz-project-jira-url="{{ url_for('team_dashboard_link_biz_project_jira') }}"
   data-link-biz-project-suggestions-url="{{ url_for('team_dashboard_link_biz_project_suggestions') }}"
-  data-version-plan-url="{{ url_for('team_dashboard_version_plan_af') }}"
-  data-version-plan-sync-url="{{ url_for('team_dashboard_version_plan_sync') }}"
-  data-version-plan-sync-status-url="{{ url_for('team_dashboard_version_plan_sync_status') }}"
-  data-version-plan-cell-url="{{ url_for('team_dashboard_version_plan_cell') }}"
-  data-version-plan-rows-url="{{ url_for('team_dashboard_version_plan_rows') }}"
+  {% if can_access_version_plan %}
+    data-version-plan-url="{{ url_for('team_dashboard_version_plan_af') }}"
+    data-version-plan-sync-url="{{ url_for('team_dashboard_version_plan_sync') }}"
+    data-version-plan-sync-status-url="{{ url_for('team_dashboard_version_plan_sync_status') }}"
+    data-version-plan-cell-url="{{ url_for('team_dashboard_version_plan_cell') }}"
+    data-version-plan-rows-url="{{ url_for('team_dashboard_version_plan_rows') }}"
+  {% endif %}
   {% if can_view_team_dashboard_monthly_report %}
     data-monthly-report-template-url="{{ url_for('team_dashboard_monthly_report_template') }}"
     data-monthly-report-template-save-url="{{ url_for('save_team_dashboard_monthly_report_template') }}"
@@ -58,7 +61,9 @@
       {% if can_manage_team_dashboard %}
         <button class="workspace-tab {% if initial_team_dashboard_tab == 'tasks' %}is-active{% endif %}" type="button" role="tab" aria-selected="{{ 'true' if initial_team_dashboard_tab == 'tasks' else 'false' }}" data-team-dashboard-tab="tasks">Task List</button>
       {% endif %}
-      <button class="workspace-tab {% if initial_team_dashboard_tab == 'version-plan' %}is-active{% endif %}" type="button" role="tab" aria-selected="{{ 'true' if initial_team_dashboard_tab == 'version-plan' else 'false' }}" data-team-dashboard-tab="version-plan">Version Plan</button>
+      {% if can_access_version_plan %}
+        <button class="workspace-tab {% if initial_team_dashboard_tab == 'version-plan' %}is-active{% endif %}" type="button" role="tab" aria-selected="{{ 'true' if initial_team_dashboard_tab == 'version-plan' else 'false' }}" data-team-dashboard-tab="version-plan">Version Plan</button>
+      {% endif %}
       {% if can_manage_team_dashboard %}
         <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="link-biz-project">Link Biz Project</button>
       {% endif %}
@@ -84,7 +89,7 @@
     </section>
   {% endif %}
 
-  {% if not reports_only %}
+  {% if not reports_only and can_access_version_plan %}
     <section data-team-dashboard-panel="version-plan" {% if initial_team_dashboard_tab != 'version-plan' %}hidden{% endif %}>
       <div class="productization-section-head team-dashboard-version-plan-head">
         <div>

@@ -137,10 +137,69 @@ class TeamPortalAccessTests(unittest.TestCase):
                 response = client.get("/", follow_redirects=False)
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn(b"Risk PM Cloud", response.data)
-            self.assertIn(b"/cloud-auth/google/login", response.data)
+            self.assertIn(b"Risk PM Workspace", response.data)
+            self.assertNotIn(b"Open Version Plan", response.data)
             self.assertIn(b"/cloud-static/style.css", response.data)
-            self.assertIn(b"/portal-home", response.data)
+            self.assertIn(b"/auth/google/login?next=/portal-home", response.data)
+
+    def test_cloud_home_hides_version_plan_for_non_af_user(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
+                "TEAM_PORTAL_MAC_FULL_PORTAL_URL": "https://app.bankpmtool.uk/portal-home",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                self._login_non_admin(client, email="sophia.wangzj@npt.sg")
+                response = client.get("/", follow_redirects=False)
+                blocked_plan = client.get("/version-plan", follow_redirects=False)
+                blocked_api = client.get("/api/team-dashboard/version-plan/af")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b"Risk PM Workspace", response.data)
+            self.assertIn(b"Open Full Portal", response.data)
+            self.assertIn(b"/auth/google/login?next=/portal-home", response.data)
+            self.assertNotIn(b"Open Version Plan", response.data)
+            self.assertNotIn(b"Version Plan</h3>", response.data)
+            self.assertNotIn(b"Cloud Run", response.data)
+            self.assertEqual(blocked_plan.status_code, 302)
+            self.assertEqual(blocked_plan.headers["Location"], "/access-denied")
+            self.assertEqual(blocked_api.status_code, 403)
+
+    def test_cloud_home_shows_version_plan_for_af_user(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
+                "TEAM_PORTAL_MAC_FULL_PORTAL_URL": "https://app.bankpmtool.uk/portal-home",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                self._login_non_admin(client, email="jireh.tanyx@npt.sg")
+                response = client.get("/", follow_redirects=False)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b"Risk PM Workspace", response.data)
+            self.assertIn(b"Open Version Plan", response.data)
+            self.assertIn(b"Open Full Portal", response.data)
+            self.assertIn(b"/auth/google/login?next=/portal-home", response.data)
 
     def test_cloud_version_plan_page_requires_login_then_renders_standalone(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -162,7 +221,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self.assertEqual(blocked.status_code, 302)
                 self.assertEqual(blocked.headers["Location"], "/")
 
-                self._login_non_admin(client)
+                self._login_non_admin(client, email="jireh.tanyx@npt.sg")
                 response = client.get("/version-plan")
 
             self.assertEqual(response.status_code, 200)
@@ -605,7 +664,11 @@ class TeamPortalAccessTests(unittest.TestCase):
                     ("get", "/api/source-code-qa/runtime-evidence?pm_team=AF&country=SG", None),
                     ("post", "/api/source-code-qa/effort-assessment", {"pm_team": "AF", "country": "All", "requirement": "new flow"}),
                     ("get", "/api/team-dashboard/config", None),
+                    ("get", "/api/team-dashboard/version-plan/af", None),
+                    ("get", "/api/team-dashboard/version-plan/af/sync-status", None),
                     ("post", "/api/team-dashboard/version-plan/af/sync", {}),
+                    ("post", "/api/team-dashboard/version-plan/af/cell", {}),
+                    ("post", "/api/team-dashboard/version-plan/af/rows", {}),
                     ("post", "/admin/team-dashboard/members", {"teams": {"AF": {"member_emails": ["teammate@npt.sg"]}}}),
                     ("get", "/api/team-dashboard/monthly-report/template", None),
                     ("post", "/admin/team-dashboard/monthly-report-template", {"template": "x"}),
@@ -620,19 +683,6 @@ class TeamPortalAccessTests(unittest.TestCase):
                         response = caller(path, json=payload) if payload is not None else caller(path)
                         self.assertEqual(response.status_code, 403)
                         self.assertEqual(response.get_json()["status"], "error")
-                allowed_version_plan_requests = [
-                    ("get", "/api/team-dashboard/version-plan/af", 200, None),
-                    ("get", "/api/team-dashboard/version-plan/af/sync-status", 200, None),
-                    ("post", "/api/team-dashboard/version-plan/af/cell", 400, {}),
-                    ("post", "/api/team-dashboard/version-plan/af/rows", 400, {}),
-                ]
-                for method, path, expected_status, payload in allowed_version_plan_requests:
-                    with self.subTest(method=method, path=path):
-                        caller = getattr(client, method)
-                        response = caller(path, json=payload) if payload is not None else caller(path)
-                        self.assertEqual(response.status_code, expected_status)
-                        self.assertEqual(response.get_json()["status"], "ok" if expected_status == 200 else "error")
-
     def test_non_admin_related_routes_are_explicitly_classified(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
@@ -805,9 +855,9 @@ class TeamPortalAccessTests(unittest.TestCase):
                     ("get", "/meeting-translation", {302}),
                     ("get", "/gmail-sea-talk-demo", {302}),
                     ("get", "/api/team-dashboard/config", {403}),
-                    ("get", "/api/team-dashboard/version-plan/af", {200}),
+                    ("get", "/api/team-dashboard/version-plan/af", {403}),
                     ("post", "/api/team-dashboard/version-plan/af/sync", {403}, {}),
-                    ("post", "/api/team-dashboard/version-plan/af/rows", {200}, {"scope": "pipeline", "action": "add"}),
+                    ("post", "/api/team-dashboard/version-plan/af/rows", {403}, {"scope": "pipeline", "action": "add"}),
                     ("post", "/api/team-dashboard/key-projects", {403}, {}),
                     ("get", "/api/team-dashboard/tasks", {403}),
                     ("post", "/admin/team-dashboard/members", {403}, {}),
@@ -829,7 +879,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                             response = caller(path, json=payload) if payload is not None else caller(path)
                             self.assertIn(response.status_code, expected_statuses)
                 audit_log = app.config["TEAM_DASHBOARD_CONFIG_STORE"].load()["version_plan"]["af"]["audit_log"]
-                self.assertTrue(any(entry["action"] == "row_add" and entry["actor"]["email"] == "teammate@npt.sg" for entry in audit_log))
+                self.assertFalse(any(entry["action"] == "row_add" for entry in audit_log))
 
     def test_non_admin_rendered_pages_have_expected_smoke_contracts(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -846,7 +896,7 @@ class TeamPortalAccessTests(unittest.TestCase):
             app = create_app()
             app.testing = True
             with app.test_client() as client:
-                self._login_non_admin(client)
+                self._login_non_admin(client, email="jireh.tanyx@npt.sg")
                 index_response = client.get("/?workspace=productization-upgrade-summary")
                 source_response = client.get("/source-code-qa")
                 prd_response = client.get("/prd-self-assessment")

@@ -905,13 +905,17 @@ def create_app() -> Flask:
             return redirect(url_for("access_denied"))
 
         if settings.cloud_home_enabled:
+            user_identity = _get_user_identity(settings)
+            full_portal_path = url_for("portal_home")
             return render_template(
                 "cloud_home.html",
-                page_title="Risk PM Cloud",
-                user_identity=_get_user_identity(settings),
+                page_title="Risk PM Workspace",
+                user_identity=user_identity,
                 signed_in=_google_session_is_connected(),
+                can_access_version_plan=_can_access_team_dashboard_version_plan(user_identity),
                 version_plan_url=url_for("version_plan_page"),
-                full_portal_url=settings.mac_full_portal_url or url_for("portal_home"),
+                full_portal_url=settings.mac_full_portal_url or full_portal_path,
+                full_portal_login_url=url_for("google_login", next=full_portal_path),
                 cloud_auth_mode=True,
             )
 
@@ -1185,6 +1189,7 @@ def create_app() -> Flask:
     @app.get("/auth/google/login")
     def google_login():
         try:
+            _remember_post_google_login_redirect(request.args.get("next"))
             authorization_url = create_google_authorization_url(settings)
             return redirect(authorization_url)
         except ConfigError as error:
@@ -1200,6 +1205,7 @@ def create_app() -> Flask:
     @app.get("/cloud-auth/google/login")
     def cloud_google_login():
         try:
+            _remember_post_google_login_redirect(request.args.get("next"))
             authorization_url = create_google_authorization_url(
                 settings,
                 redirect_path="cloud-auth/google/callback",
@@ -1243,7 +1249,7 @@ def create_app() -> Flask:
                 **_build_request_log_context(settings, extra=error_details),
             )
             flash(str(error), "error")
-        return redirect(url_for("index"))
+        return redirect(_pop_post_google_login_redirect() or url_for("index"))
 
     @app.get("/cloud-auth/google/callback")
     def cloud_google_callback():
@@ -1277,7 +1283,7 @@ def create_app() -> Flask:
                 **_build_request_log_context(settings, extra=error_details),
             )
             flash(str(error), "error")
-        return redirect(url_for("index"))
+        return redirect(_pop_post_google_login_redirect() or url_for("index"))
 
     register_gmail_seatalk_routes(
         app,
@@ -1448,10 +1454,12 @@ def create_app() -> Flask:
             SimpleNamespace(
                 settings=settings,
                 _require_team_dashboard_access=lambda *args, **kwargs: _require_team_dashboard_access(*args, **kwargs),
+                _require_team_dashboard_version_plan_access=lambda *args, **kwargs: _require_team_dashboard_version_plan_access(*args, **kwargs),
                 _require_team_dashboard_monthly_report_access=lambda *args, **kwargs: _require_team_dashboard_monthly_report_access(*args, **kwargs),
                 _get_user_identity=lambda *args, **kwargs: _get_user_identity(*args, **kwargs),
                 _get_team_dashboard_config_store=lambda *args, **kwargs: _get_team_dashboard_config_store(*args, **kwargs),
                 _can_manage_team_dashboard=lambda *args, **kwargs: _can_manage_team_dashboard(*args, **kwargs),
+                _can_access_team_dashboard_version_plan=lambda *args, **kwargs: _can_access_team_dashboard_version_plan(*args, **kwargs),
                 _can_access_team_dashboard_monthly_report=lambda *args, **kwargs: _can_access_team_dashboard_monthly_report(*args, **kwargs),
                 _seatalk_dashboard_is_configured=lambda *args, **kwargs: _seatalk_dashboard_is_configured(*args, **kwargs),
                 _log_portal_event=lambda *args, **kwargs: _log_portal_event(*args, **kwargs),
@@ -2576,6 +2584,26 @@ def _google_session_is_connected() -> bool:
     return "google_credentials" in session and bool(_current_google_email())
 
 
+def _safe_relative_redirect_target(value: Any) -> str:
+    target = str(value or "").strip()
+    if not target or not target.startswith("/") or target.startswith("//"):
+        return ""
+    parsed = urlparse(target)
+    if parsed.scheme or parsed.netloc:
+        return ""
+    return target
+
+
+def _remember_post_google_login_redirect(value: Any) -> None:
+    target = _safe_relative_redirect_target(value)
+    if target:
+        session["post_google_login_redirect"] = target
+
+
+def _pop_post_google_login_redirect() -> str:
+    return _safe_relative_redirect_target(session.pop("post_google_login_redirect", ""))
+
+
 def _can_access_prd_briefing(settings: Settings) -> bool:
     return _is_portal_admin()
 
@@ -3073,6 +3101,20 @@ def _require_team_dashboard_access(settings: Settings, *, api: bool = False):
     return None
 
 
+def _require_team_dashboard_version_plan_access(settings: Settings, *, api: bool = False):
+    access_gate = _require_team_dashboard_access(settings, api=api)
+    if access_gate is not None:
+        return access_gate
+    user_identity = _get_user_identity(settings)
+    if _can_access_team_dashboard_version_plan(user_identity):
+        return None
+    message = "Version Plan is restricted to AF team users."
+    if api:
+        return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
+    flash(message, "error")
+    return redirect(url_for("access_denied"))
+
+
 def _require_prd_self_assessment_access(settings: Settings, *, api: bool = False):
     login_gate = _require_google_login(settings, api=api)
     if login_gate is not None:
@@ -3449,6 +3491,22 @@ def _can_access_team_dashboard(user_identity: dict[str, str | None]) -> bool:
 
 def _can_manage_team_dashboard(user_identity: dict[str, str | None]) -> bool:
     return _is_portal_admin(str(user_identity.get("email") or ""))
+
+
+def _can_access_team_dashboard_version_plan(user_identity: dict[str, str | None]) -> bool:
+    email = str(user_identity.get("email") or "").strip().lower()
+    if not email:
+        return False
+    if _is_portal_admin(email):
+        return True
+    try:
+        store = _get_team_dashboard_config_store()
+        config = store.load()
+    except Exception:
+        config = {"teams": {"AF": {"member_emails": list(TEAM_DASHBOARD_DEFAULT_MEMBER_EMAILS_BY_TEAM.get("AF", ()))}}}
+    team_config = (config.get("teams") or {}).get("AF") or {}
+    af_emails = _normalize_team_dashboard_emails(team_config.get("member_emails") or [])
+    return email in af_emails
 
 
 def _can_access_team_dashboard_monthly_report(user_identity: dict[str, str | None]) -> bool:
