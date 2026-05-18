@@ -56,6 +56,23 @@ _VERSION_PLAN_SYNC_LOCK = threading.Lock()
 _VERSION_PLAN_SYNC_RUNNING = False
 
 
+def _fallback_team_dashboard_config() -> dict[str, Any]:
+    return {
+        "teams": {
+            team_key: {
+                "label": label,
+                "member_emails": [],
+            }
+            for team_key, label in TEAM_DASHBOARD_TEAMS.items()
+        },
+        "key_project_overrides": {},
+        "monthly_report_template": "",
+        "report_intelligence_config": {},
+        "actual_mandays_cache": {},
+        "version_plan": {},
+    }
+
+
 def _add_route(app: Any, rule: str, view_func: Callable[..., Any], *, methods: list[str] | None = None) -> None:
     app.add_url_rule(rule, endpoint=view_func.__name__, view_func=view_func, methods=methods)
 
@@ -281,7 +298,8 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         try:
             team_dashboard_config_value = _get_team_dashboard_config_store().load()
         except Exception:
-            team_dashboard_config_value = {}
+            current_app.logger.exception("Failed to load Team Dashboard config for Version Plan page")
+            team_dashboard_config_value = _fallback_team_dashboard_config()
         return render_template(
             "version_plan.html",
             page_title="Version Plan",

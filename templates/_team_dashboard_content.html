@@ -378,7 +378,7 @@
     </section>
   {% endif %}
 
-  {% if can_manage_team_dashboard and not reports_only %}
+  {% if can_manage_team_dashboard and not reports_only and not version_plan_only %}
     <section data-team-dashboard-panel="admin" hidden>
       <form method="post" action="{{ url_for('save_team_dashboard_members') }}" class="stack" data-team-dashboard-admin-form>
         <div class="config-grid setup-grid">

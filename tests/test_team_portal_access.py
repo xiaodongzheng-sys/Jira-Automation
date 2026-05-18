@@ -49,6 +49,12 @@ class _UnavailableLocalAgentClient:
     def source_code_qa_config(self, *, llm_provider=None):
         raise ToolError("Mac local-agent is unavailable: connection refused")
 
+
+class _UnavailableTeamDashboardConfigStore:
+    def load(self):
+        raise ToolError("Mac local-agent is unavailable: connection refused")
+
+
 class _NoStartThread:
     def __init__(self, *args, **kwargs):
         self.args = args
@@ -312,6 +318,37 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertIn(b"data-version-plan-content", response.data)
             self.assertIn(b"/cloud-static/team_dashboard.js", response.data)
             self.assertNotIn(b"data-team-dashboard-tab=\"tasks\"", response.data)
+
+    def test_cloud_version_plan_page_renders_when_team_dashboard_config_unavailable_for_admin(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
+                    session["google_credentials"] = {"token": "x", "scopes": []}
+
+                with patch(
+                    "bpmis_jira_tool.web._get_team_dashboard_config_store",
+                    return_value=_UnavailableTeamDashboardConfigStore(),
+                ):
+                    response = client.get("/version-plan")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Version Plan", response.data)
+        self.assertIn(b"data-version-plan-content", response.data)
+        self.assertNotIn(b'data-team-dashboard-panel="admin"', response.data)
 
     def test_login_image_gate_css_contract_is_present(self):
         stylesheet = Path("static/style.css").read_text(encoding="utf-8")
