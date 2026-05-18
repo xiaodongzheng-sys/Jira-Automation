@@ -35,10 +35,6 @@
       "min_percent": 75.0
     },
     {
-      "path": "bpmis_jira_tool/web_work_memory_routes.py",
-      "min_percent": 75.0
-    },
-    {
       "path": "prd_briefing/reviewer.py",
       "min_percent": 75.0
     }

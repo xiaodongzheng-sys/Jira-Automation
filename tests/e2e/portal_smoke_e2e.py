@@ -385,18 +385,20 @@ class PortalE2ESmokeTest(unittest.TestCase):
             ("/vpn-connection", "/access-denied"),
             ("/meeting-recorder", "/access-denied"),
             ("/meeting-translation", "/access-denied"),
-            ("/work-memory", "/access-denied"),
         ]
         for path, expected_final_path in blocked_pages:
             with self.subTest(path=path):
                 teammate.goto(path, wait_until="domcontentloaded")
                 self.assertEqual(urlparse(teammate.url).path, expected_final_path)
 
+        removed_surface_response = teammate.goto("/work-memory", wait_until="domcontentloaded")
+        self.assertIsNotNone(removed_surface_response)
+        self.assertEqual(removed_surface_response.status, 404)
+
         blocked_apis = [
             ("GET", "/api/team-dashboard/config", None),
             ("GET", "/api/team-dashboard/monthly-report/template", None),
             ("GET", "/api/meeting-recorder/diagnostics", None),
-            ("GET", "/api/work-memory/health", None),
             ("GET", "/api/vpn-connection/profiles", None),
             ("POST", "/api/meeting-translation/start", {"target_language": "en"}),
             ("POST", "/api/source-code-qa/sync", {"pm_team": "AF", "country": "All"}),
@@ -1658,240 +1660,6 @@ class PortalE2ESmokeTest(unittest.TestCase):
         page.locator("[data-meeting-record-detail]").get_by_text("Download audio file").wait_for(timeout=5000)
         page.locator("[data-meeting-record-detail]").get_by_text("Process").wait_for(timeout=5000)
         self.assertEqual(captured_stop_ids, [record_id])
-
-    def test_work_memory_local_agent_failure_graceful_degradation_smoke(self) -> None:
-        page = self._new_admin_page()
-
-        def json_response(payload: dict[str, object], *, status: int = 200):
-            return {
-                "status": status,
-                "content_type": "application/json",
-                "body": json.dumps(payload),
-            }
-
-        def work_memory_api(route):
-            request = route.request
-            parsed = urlparse(request.url)
-            path = parsed.path
-            if request.method == "GET" and path.endswith("/api/work-memory/health"):
-                route.fulfill(**json_response({
-                    "status": "error",
-                    "message": "Mac local-agent is unavailable. Memory health is temporarily offline.",
-                    "debug_secret": "work-memory-secret-should-not-render",
-                }, status=503))
-                return
-            if request.method == "GET" and path.endswith("/api/work-memory/review-candidates"):
-                route.fulfill(**json_response({
-                    "status": "error",
-                    "message": "Mac local-agent is unavailable. Review candidates are temporarily offline.",
-                }, status=503))
-                return
-            if request.method == "GET" and path.endswith("/api/work-memory/project-timeline"):
-                route.fulfill(**json_response({
-                    "status": "error",
-                    "message": "Timeline temporarily unavailable. Reconnect the Mac local-agent and retry.",
-                    "debug_secret": "timeline-secret-should-not-render",
-                }, status=503))
-                return
-            route.fulfill(**json_response({"status": "error", "message": f"Unhandled Work Memory route: {request.method} {path}"}, status=404))
-
-        def superagent_api(route):
-            request = route.request
-            parsed = urlparse(request.url)
-            path = parsed.path
-            if request.method == "POST" and path.endswith("/api/superagent/query"):
-                route.fulfill(**json_response({
-                    "status": "error",
-                    "message": "Superagent provider unavailable. Reconnect local-agent and retry.",
-                    "debug_secret": "superagent-secret-should-not-render",
-                }, status=503))
-                return
-            if request.method == "POST" and path.endswith("/api/superagent/quality-gate"):
-                route.fulfill(**json_response({
-                    "status": "error",
-                    "message": "Quality gate unavailable while local-agent is offline.",
-                    "debug_secret": "quality-gate-secret-should-not-render",
-                }, status=503))
-                return
-            route.fulfill(**json_response({"status": "error", "message": f"Unhandled Superagent route: {request.method} {path}"}, status=404))
-
-        page.route("**/api/work-memory/**", work_memory_api)
-        page.route("**/api/superagent/**", superagent_api)
-        page.goto("/work-memory", wait_until="domcontentloaded")
-
-        self.assertEqual("AI Memory", page.locator("h1").first.inner_text(timeout=5000))
-        page.locator("[data-memory-status]").get_by_text("Mac local-agent is unavailable").wait_for(timeout=5000)
-        self.assertEqual(page.locator("[data-memory-item-count]").inner_text(timeout=5000), "0")
-        self.assertNotIn("work-memory-secret-should-not-render", page.locator("body").inner_text(timeout=5000))
-
-        page.locator('[data-memory-timeline-form] input[name="project_ref"]').fill("SPDBP-12345")
-        page.locator('[data-memory-timeline-form] button[type="submit"]').click()
-        page.locator("[data-memory-status]").get_by_text("Timeline temporarily unavailable").wait_for(timeout=5000)
-        self.assertNotIn("timeline-secret-should-not-render", page.locator("body").inner_text(timeout=5000))
-
-        page.locator('[data-superagent-form] select[name="task_type"]').select_option("project_status")
-        page.locator('[data-superagent-form] input[name="query"]').fill("SPDBP-12345 launch status")
-        page.locator('[data-superagent-form] button[type="submit"]').click()
-        page.locator("[data-superagent-answer]").get_by_text("Superagent provider unavailable").wait_for(timeout=5000)
-        self.assertNotIn("superagent-secret-should-not-render", page.locator("body").inner_text(timeout=5000))
-
-        page.locator("[data-superagent-quality-gate]").click()
-        page.locator("[data-superagent-answer]").get_by_text("Quality gate unavailable").wait_for(timeout=5000)
-        self.assertNotIn("quality-gate-secret-should-not-render", page.locator("body").inner_text(timeout=5000))
-
-    def test_work_memory_superagent_feedback_timeline_and_gate_smoke(self) -> None:
-        page = self._new_admin_page()
-        captured_feedback: list[dict[str, object]] = []
-        captured_superagent_queries: list[dict[str, object]] = []
-        captured_quality_gates: list[dict[str, object]] = []
-
-        def json_response(payload: dict[str, object], *, status: int = 200):
-            return {
-                "status": status,
-                "content_type": "application/json",
-                "body": json.dumps(payload),
-            }
-
-        def work_memory_api(route):
-            request = route.request
-            parsed = urlparse(request.url)
-            path = parsed.path
-            if request.method == "GET" and path.endswith("/api/work-memory/health"):
-                route.fulfill(**json_response({
-                    "status": "ok",
-                    "item_count": 12,
-                    "feedback_count": 3,
-                    "materialized_count": 2,
-                    "by_source": [{"source_type": "meeting_recorder", "count": 7}, {"source_type": "team_dashboard", "count": 5}],
-                    "ingestion_runs": [
-                        {
-                            "source_type": "meeting_recorder",
-                            "status": "completed",
-                            "completed_at": "2026-05-17T03:00:00Z",
-                            "scanned_count": 4,
-                            "matched_count": 3,
-                            "recorded_count": 2,
-                            "duplicate_count": 1,
-                            "failed_count": 0,
-                        }
-                    ],
-                }))
-                return
-            if request.method == "GET" and path.endswith("/api/work-memory/review-candidates"):
-                route.fulfill(**json_response({
-                    "status": "ok",
-                    "items": [
-                        {
-                            "item_id": "memory-e2e-1",
-                            "source_type": "meeting_recorder",
-                            "item_type": "decision",
-                            "visibility": "owner",
-                            "summary": "SPDBP-12345 launch scope changed after risk review.",
-                            "observed_at": "2026-05-17T02:40:00Z",
-                            "metadata": {"attribution_scope": "meeting"},
-                        }
-                    ],
-                }))
-                return
-            if request.method == "POST" and path.endswith("/api/work-memory/feedback"):
-                payload = request.post_data_json
-                captured_feedback.append(payload)
-                route.fulfill(**json_response({"status": "ok", "item_id": payload.get("item_id"), "action": payload.get("action")}))
-                return
-            if request.method == "GET" and path.endswith("/api/work-memory/project-timeline"):
-                self.assertEqual(parsed.query, "project_ref=SPDBP-12345")
-                route.fulfill(**json_response({
-                    "status": "ok",
-                    "items": [
-                        {
-                            "item_id": "timeline-e2e-1",
-                            "source_type": "team_dashboard",
-                            "item_type": "project_update",
-                            "visibility": "owner",
-                            "summary": "Risk launch timeline event is ready for PM follow-up.",
-                            "observed_at": "2026-05-17T03:15:00Z",
-                            "metadata": {},
-                        }
-                    ],
-                }))
-                return
-            route.fulfill(**json_response({"status": "error", "message": f"Unhandled Work Memory route: {request.method} {path}"}, status=404))
-
-        def superagent_api(route):
-            request = route.request
-            parsed = urlparse(request.url)
-            path = parsed.path
-            if request.method == "POST" and path.endswith("/api/superagent/query"):
-                payload = request.post_data_json
-                captured_superagent_queries.append(payload)
-                route.fulfill(**json_response({
-                    "status": "ok",
-                    "answer_contract_version": "superagent_quality_gate_v1",
-                    "confidence": "high",
-                    "direct_answer": "Risk project is on track with one follow-up on launch readiness.",
-                    "sections": [
-                        {"title": "Next actions", "items": ["Confirm launch owner", "Close scope note"]}
-                    ],
-                    "evidence": [
-                        {
-                            "source_type": "meeting_recorder",
-                            "item_type": "decision",
-                            "visibility": "owner",
-                            "summary": "Decision evidence from Meeting Recorder.",
-                            "excerpt": "Launch scope was agreed.",
-                        }
-                    ],
-                    "unknowns": ["Final UAT owner not confirmed"],
-                }))
-                return
-            if request.method == "POST" and path.endswith("/api/superagent/quality-gate"):
-                payload = request.post_data_json
-                captured_quality_gates.append(payload)
-                route.fulfill(**json_response({
-                    "status": "ok",
-                    "answer_contract_version": "superagent_quality_gate_v1",
-                    "quality_gate": {
-                        "gate_status": "pass",
-                        "passed_count": 3,
-                        "failed_count": 0,
-                        "case_count": 3,
-                        "failed_cases": [],
-                    },
-                }))
-                return
-            route.fulfill(**json_response({"status": "error", "message": f"Unhandled Superagent route: {request.method} {path}"}, status=404))
-
-        page.route("**/api/work-memory/**", work_memory_api)
-        page.route("**/api/superagent/**", superagent_api)
-        page.goto("/work-memory", wait_until="domcontentloaded")
-
-        self.assertEqual("AI Memory", page.locator("h1").first.inner_text(timeout=5000))
-        self.assertEqual(page.locator("[data-memory-item-count]").inner_text(timeout=5000), "12")
-        page.locator("[data-memory-status]").get_by_text("meeting_recorder: 7").wait_for(timeout=5000)
-        page.locator("[data-memory-candidates]").get_by_text("SPDBP-12345 launch scope changed").wait_for(timeout=5000)
-
-        page.locator('[data-memory-action="accept"][data-item-id="memory-e2e-1"]').click()
-        page.wait_for_function("() => document.querySelector('[data-memory-feedback-count]')?.textContent === '3'", timeout=5000)
-        self.assertEqual(captured_feedback[-1]["item_id"], "memory-e2e-1")
-        self.assertEqual(captured_feedback[-1]["action"], "accept")
-
-        page.locator('[data-memory-timeline-form] input[name="project_ref"]').fill("SPDBP-12345")
-        page.locator('[data-memory-timeline-form] button[type="submit"]').click()
-        page.locator("[data-memory-timeline]").get_by_text("Risk launch timeline event is ready").wait_for(timeout=5000)
-
-        page.locator('[data-superagent-form] select[name="task_type"]').select_option("project_status")
-        page.locator('[data-superagent-form] input[name="query"]').fill("SPDBP-12345 launch status")
-        page.locator('[data-superagent-form] button[type="submit"]').click()
-        page.locator("[data-superagent-answer]").get_by_text("Risk project is on track").wait_for(timeout=5000)
-        page.locator("[data-superagent-answer]").get_by_text("answer contract").wait_for(timeout=5000)
-        self.assertEqual(captured_superagent_queries[-1]["task_type"], "project_status")
-        self.assertEqual(captured_superagent_queries[-1]["visibility_scope"], "owner")
-
-        page.locator("[data-superagent-quality-gate]").click()
-        page.locator("[data-superagent-answer]").get_by_text("Quality gate: pass").wait_for(timeout=5000)
-        self.assertEqual(captured_quality_gates[-1]["suite_id"], "gold_v1")
-        self.assertEqual(captured_quality_gates[-1]["min_cases"], 1)
-
 
 if __name__ == "__main__":
     unittest.main()

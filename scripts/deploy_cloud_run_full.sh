@@ -54,7 +54,7 @@ record_cloud_run_full_timing_on_exit() {
 trap record_cloud_run_full_timing_on_exit EXIT
 
 EXISTING_SERVICE_URL="$("$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format='value(status.url)' 2>/dev/null || true)"
-PUBLIC_BASE_URL="${CLOUD_RUN_TEAM_PORTAL_BASE_URL:-$(read_env_value TEAM_PORTAL_BASE_URL)}"
+PUBLIC_BASE_URL="${CLOUD_RUN_TEAM_PORTAL_BASE_URL:-${TEAM_PORTAL_BASE_URL:-$(read_env_value TEAM_PORTAL_BASE_URL)}}"
 BASE_URL="${PUBLIC_BASE_URL:-${EXISTING_SERVICE_URL:-}}"
 GOOGLE_CLOUD_REDIRECT_URI="${GOOGLE_CLOUD_OAUTH_REDIRECT_URI:-}"
 if [[ -z "$GOOGLE_CLOUD_REDIRECT_URI" && -n "$BASE_URL" ]]; then

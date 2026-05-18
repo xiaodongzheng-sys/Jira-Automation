@@ -1163,6 +1163,8 @@ class WebPortalFeatureTests(unittest.TestCase):
                 legacy_response = client.get("/?workspace=team-dashboard")
                 dashboard_response = client.get("/team-dashboard")
                 reports_response = client.get("/reports")
+                removed_page_response = client.get("/work-memory")
+                removed_api_response = client.get("/api/work-memory/health")
 
             with app.test_client() as client:
                 with client.session_transaction() as session:
@@ -1180,6 +1182,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b">AI Memory<", source_response.data)
         self.assertEqual(legacy_response.status_code, 302)
         self.assertEqual(legacy_response.headers["Location"], "/team-dashboard")
+        self.assertEqual(removed_page_response.status_code, 404)
+        self.assertEqual(removed_api_response.status_code, 404)
         self.assertEqual(dashboard_response.status_code, 200)
         dashboard_soup = BeautifulSoup(dashboard_response.get_data(as_text=True), "html.parser")
         dashboard_main_tabs = [

@@ -240,7 +240,6 @@ from bpmis_jira_tool.web_prd_self_assessment_routes import build_prd_self_assess
 from bpmis_jira_tool.web_productization_routes import build_productization_handlers, register_productization_routes
 from bpmis_jira_tool.web_source_code_qa_routes import register_source_code_qa_routes
 from bpmis_jira_tool.web_team_dashboard_routes import build_team_dashboard_handlers, register_team_dashboard_routes
-from bpmis_jira_tool.web_work_memory_routes import register_work_memory_routes
 from bpmis_jira_tool.work_memory import (
     WorkMemoryStore,
     gmail_attachment_memory_item,
@@ -780,14 +779,6 @@ def create_app() -> Flask:
                     "active": current_endpoint == "reports_page",
                 }
             )
-        if _can_access_work_memory(settings):
-            project_tabs.append(
-                {
-                    "label": "AI Memory",
-                    "href": url_for("work_memory_page"),
-                    "active": request.path.startswith("/work-memory"),
-                }
-            )
         project_href = url_for("team_dashboard_page") if can_access_team_dashboard else _bpmis_run_portal_url(settings, url_for("portal_home", workspace="run"))
         site_tabs.append(_nav_group("Projects", project_href, project_tabs))
         if _can_access_vpn_connection(settings):
@@ -1171,28 +1162,6 @@ def create_app() -> Flask:
                 _get_prd_latest_result=_get_prd_latest_result,
                 web_globals=globals(),
             )
-        ),
-    )
-
-    register_work_memory_routes(
-        app,
-        settings,
-        SimpleNamespace(
-            require_work_memory_access=_require_work_memory_access,
-            local_agent_work_memory_enabled=_local_agent_work_memory_enabled,
-            build_local_agent_client=_build_local_agent_client,
-            get_work_memory_store=_get_work_memory_store,
-            current_google_email=_current_google_email,
-            ingest_sent_monthly_reports_from_gmail=_ingest_sent_monthly_reports_from_gmail,
-            classify_portal_error=_classify_portal_error,
-            ingest_existing_work_memory_sources=_ingest_existing_work_memory_sources,
-            run_incremental_memory_ingestion=_run_incremental_memory_ingestion,
-            google_credentials_have_scopes=_google_credentials_have_scopes,
-            get_team_dashboard_config_store=_get_team_dashboard_config_store,
-            run_work_memory_gmail_backfill_job=_run_work_memory_gmail_backfill_job,
-            GMAIL_READONLY_SCOPE=GMAIL_READONLY_SCOPE,
-            GOOGLE_DRIVE_READONLY_SCOPE=GOOGLE_DRIVE_READONLY_SCOPE,
-            WORK_MEMORY_GMAIL_BACKFILL_ACTION=WORK_MEMORY_GMAIL_BACKFILL_ACTION,
         ),
     )
 
@@ -2656,16 +2625,6 @@ def _can_access_gmail_seatalk_demo(settings: Settings) -> bool:
 
 def _can_access_meeting_recorder(settings: Settings) -> bool:
     return _is_portal_admin()
-
-
-
-
-
-
-def _can_access_work_memory(settings: Settings) -> bool:
-    return _is_portal_admin()
-
-
 def _can_access_vpn_connection(settings: Settings) -> bool:
     return _is_portal_admin()
 
@@ -3106,24 +3065,6 @@ def _require_meeting_recorder_access(settings: Settings, *, api: bool = False):
         flash(message, "error")
         return redirect(url_for("access_denied"))
     return None
-
-
-
-
-
-
-def _require_work_memory_access(settings: Settings, *, api: bool = False):
-    login_gate = _require_google_login(settings, api=api)
-    if login_gate is not None:
-        return login_gate
-    message = f"AI Memory is restricted to {PORTAL_ADMIN_EMAIL}."
-    if not _can_access_work_memory(settings):
-        if api:
-            return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
-        flash(message, "error")
-        return redirect(url_for("access_denied"))
-    return None
-
 
 def _require_team_dashboard_access(settings: Settings, *, api: bool = False):
     login_gate = _require_google_login(settings, api=api)

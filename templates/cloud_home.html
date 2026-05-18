@@ -44,6 +44,12 @@
       if (!status || !fullPortalLink || !fullPortalCard) return;
       const canAccessVersionPlan = {{ 'true' if can_access_version_plan else 'false' }};
       const signedIn = {{ 'true' if signed_in else 'false' }};
+      const MAX_FAST_RETRIES = 4;
+      const FAST_RETRY_DELAY_MS = 1500;
+      const POLL_INTERVAL_MS = 10000;
+      let retryCount = 0;
+      let pollHandle = null;
+
       const setOfflineState = () => {
         fullPortalLink.hidden = true;
         status.dataset.tone = 'error';
@@ -60,18 +66,41 @@
             : 'Full portal is currently offline. AF Version Plan remains available after Google sign-in.';
         }
       };
-      fetch('/healthz', { headers: { Accept: 'application/json' }, credentials: 'same-origin' })
-        .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
-        .then((payload) => {
-          if (payload?.status === 'ok') {
-            fullPortalLink.hidden = false;
-            status.textContent = 'Mac full portal is online.';
-            status.dataset.tone = 'success';
-            return;
-          }
-          setOfflineState();
-        })
-        .catch(setOfflineState);
+
+      const setOnlineState = () => {
+        fullPortalLink.hidden = false;
+        status.textContent = 'Mac full portal is online.';
+        status.dataset.tone = 'success';
+        retryCount = 0;
+      };
+
+      const schedulePoll = () => {
+        if (pollHandle) return;
+        pollHandle = window.setInterval(checkHealth, POLL_INTERVAL_MS);
+      };
+
+      const checkHealth = () => {
+        fetch('/healthz', { headers: { Accept: 'application/json' }, credentials: 'same-origin' })
+          .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+          .then((payload) => {
+            if (payload?.status === 'ok') {
+              setOnlineState();
+              schedulePoll();
+              return;
+            }
+            throw new Error('bad payload');
+          })
+          .catch(() => {
+            setOfflineState();
+            schedulePoll();
+            if (retryCount < MAX_FAST_RETRIES) {
+              retryCount += 1;
+              window.setTimeout(checkHealth, FAST_RETRY_DELAY_MS);
+            }
+          });
+      };
+
+      checkHealth();
     })();
   </script>
 {% endblock %}
