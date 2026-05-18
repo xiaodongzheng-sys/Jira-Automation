@@ -769,7 +769,7 @@ def create_app() -> Flask:
             {
                 "label": "BPMIS Automation Tool",
                 "href": url_for("portal_home", workspace="run"),
-                "active": current_endpoint in {"index", "portal_home"},
+                "active": current_endpoint == "portal_home" or (current_endpoint == "index" and not settings.cloud_home_enabled),
             }
         )
         if can_access_reports:
