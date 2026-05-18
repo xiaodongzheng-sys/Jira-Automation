@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from bs4 import BeautifulSoup
+from flask import session
 
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.web import _current_release_revision, _run_background_job, create_app
@@ -349,6 +350,57 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertIn(b"Version Plan", response.data)
         self.assertIn(b"data-version-plan-content", response.data)
         self.assertNotIn(b'data-team-dashboard-panel="admin"', response.data)
+
+    def test_cloud_home_google_login_defaults_to_version_plan_for_af_user_without_explicit_next(self):
+        def fake_finish_google_oauth(*_args, **_kwargs):
+            session["google_profile"] = {"email": "jireh.tanyx@npt.sg", "name": "Jireh"}
+            session["google_credentials"] = {"token": "x", "scopes": []}
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
+            },
+            clear=False,
+        ), patch("bpmis_jira_tool.web.finish_google_oauth", side_effect=fake_finish_google_oauth):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                response = client.get("/cloud-auth/google/callback?code=fake&state=fake", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/version-plan")
+
+    def test_cloud_home_google_login_preserves_explicit_full_portal_next(self):
+        def fake_finish_google_oauth(*_args, **_kwargs):
+            session["google_profile"] = {"email": "jireh.tanyx@npt.sg", "name": "Jireh"}
+            session["google_credentials"] = {"token": "x", "scopes": []}
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
+            },
+            clear=False,
+        ), patch("bpmis_jira_tool.web.finish_google_oauth", side_effect=fake_finish_google_oauth):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                client.get("/cloud-auth/google/login?next=/portal-home?workspace%3Drun", follow_redirects=False)
+                response = client.get("/cloud-auth/google/callback?code=fake&state=fake", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/portal-home?workspace=run")
 
     def test_login_image_gate_css_contract_is_present(self):
         stylesheet = Path("static/style.css").read_text(encoding="utf-8")

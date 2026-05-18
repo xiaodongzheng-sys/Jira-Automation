@@ -1259,7 +1259,10 @@ def create_app() -> Flask:
                 **_build_request_log_context(settings, extra=error_details),
             )
             flash(str(error), "error")
-        return redirect(_pop_post_google_login_redirect() or url_for("index"))
+        redirect_target = _pop_post_google_login_redirect()
+        if not redirect_target:
+            redirect_target = _cloud_home_default_post_login_redirect(settings, _get_user_identity(settings))
+        return redirect(redirect_target or url_for("index"))
 
     @app.get("/cloud-auth/google/callback")
     def cloud_google_callback():
@@ -1293,7 +1296,10 @@ def create_app() -> Flask:
                 **_build_request_log_context(settings, extra=error_details),
             )
             flash(str(error), "error")
-        return redirect(_pop_post_google_login_redirect() or url_for("index"))
+        redirect_target = _pop_post_google_login_redirect()
+        if not redirect_target:
+            redirect_target = _cloud_home_default_post_login_redirect(settings, _get_user_identity(settings))
+        return redirect(redirect_target or url_for("index"))
 
     register_gmail_seatalk_routes(
         app,
@@ -2628,6 +2634,12 @@ def _remember_post_google_login_redirect(value: Any) -> None:
 
 def _pop_post_google_login_redirect() -> str:
     return _safe_relative_redirect_target(session.pop("post_google_login_redirect", ""))
+
+
+def _cloud_home_default_post_login_redirect(settings: Settings, user_identity: dict[str, str | None]) -> str:
+    if settings.cloud_home_enabled and _can_access_team_dashboard_version_plan(user_identity):
+        return url_for("version_plan_page")
+    return ""
 
 
 def _can_access_prd_briefing(settings: Settings) -> bool:
