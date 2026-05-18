@@ -292,6 +292,7 @@ exit 0
                     "PATH": f"{fake_bin}:{os.environ['PATH']}",
                     "PYTHON_BIN": sys.executable,
                     "FAKE_GCLOUD_CALLS": str(calls_path),
+                    "GOOGLE_CLOUD_PROJECT": "demo-project",
                     "CLOUD_RUN_UAT_SKIP_GIT_CHECK": "1",
                     "CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY": "0",
                     "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
@@ -316,6 +317,7 @@ exit 0
             self.assertIn("TEAM_PORTAL_CLOUD_HOME_ENABLED=true", deploy_calls[0])
             self.assertIn("VERSION_PLAN_STORE_BACKEND=firestore", deploy_calls[0])
             self.assertIn("VERSION_PLAN_FIRESTORE_ENVIRONMENT=uat", deploy_calls[0])
+            self.assertIn("VERSION_PLAN_FIRESTORE_PROJECT=demo-project", deploy_calls[0])
             self.assertIn("LOCAL_AGENT_BASE_URL=https://app.bankpmtool.uk/uat-local-agent", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_RELEASE_REVISION=", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_DEPLOY_HASH=", deploy_calls[0])
@@ -818,6 +820,7 @@ exit 0
                     "PATH": f"{fake_bin}:{os.environ['PATH']}",
                     "PYTHON_BIN": sys.executable,
                     "FAKE_GCLOUD_CALLS": str(calls_path),
+                    "GOOGLE_CLOUD_PROJECT": "demo-project",
                     "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://app.bankpmtool.uk",
                     "CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY": "0",
                     "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
@@ -836,6 +839,7 @@ exit 0
             self.assertIn("TEAM_PORTAL_DATA_DIR=/workspace/team-portal-runtime", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_STAGE=live", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_RELEASE_REVISION=", deploy_calls[0])
+            self.assertIn("VERSION_PLAN_FIRESTORE_PROJECT=demo-project", deploy_calls[0])
             self.assertIn("LOCAL_AGENT_BASE_URL=https://app.bankpmtool.uk", deploy_calls[0])
             self.assertNotIn("/tmp/team-portal", deploy_calls[0])
             self.assertNotIn("--image", deploy_calls[0])
@@ -1513,6 +1517,7 @@ exit 0
             self.assertIn("TEAM_PORTAL_BASE_URL=https://app.bankpmtool.uk", deploy_calls[0])
             self.assertIn("GOOGLE_CLOUD_OAUTH_REDIRECT_URI=https://app.bankpmtool.uk/cloud-auth/google/callback", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_MAC_FULL_PORTAL_URL=https://app.bankpmtool.uk/portal-home", deploy_calls[0])
+            self.assertIn("VERSION_PLAN_FIRESTORE_PROJECT=demo-project", deploy_calls[0])
             self.assertIn("base URL update skipped", completed.stdout)
             self.assertNotIn("unexpected update", completed.stderr)
 
