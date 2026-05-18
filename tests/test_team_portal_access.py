@@ -202,6 +202,7 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertIn(b"Open Version Plan", response.data)
             self.assertIn(b"Open Full Portal", response.data)
             self.assertIn(b"/auth/google/login?next=/portal-home", response.data)
+            self.assertIn(b'href="/portal-home?workspace=run"', response.data)
 
     def test_cloud_and_mac_apps_share_login_session_when_secret_matches(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

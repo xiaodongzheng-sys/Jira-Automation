@@ -768,8 +768,8 @@ def create_app() -> Flask:
         project_tabs.append(
             {
                 "label": "BPMIS Automation Tool",
-                "href": url_for("index", workspace="run"),
-                "active": current_endpoint == "index",
+                "href": url_for("portal_home", workspace="run"),
+                "active": current_endpoint in {"index", "portal_home"},
             }
         )
         if can_access_reports:
