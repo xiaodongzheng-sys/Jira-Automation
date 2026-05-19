@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 from flask import Flask
 
-from bpmis_jira_tool.bpmis_client import build_bpmis_client, build_bpmis_direct_client
+from bpmis_jira_tool.bpmis_client import build_bpmis_client
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.local_agent_protocol import verify_signature
@@ -49,19 +49,6 @@ class SmallModuleCoverageTests(unittest.TestCase):
         )
         with patch("bpmis_jira_tool.bpmis_client.BPMISDirectApiClient", return_value="direct") as direct:
             client = build_bpmis_client(settings, access_token="user-token")
-
-        self.assertEqual(client, "direct")
-        direct.assert_called_once_with(settings, access_token="user-token")
-
-    def test_bpmis_direct_client_factory_ignores_local_agent_mode(self):
-        settings = _settings(
-            local_agent_base_url="https://agent.example",
-            local_agent_hmac_secret="shared-secret",
-            local_agent_bpmis_enabled=True,
-            bpmis_call_mode="local_agent",
-        )
-        with patch("bpmis_jira_tool.bpmis_client.BPMISDirectApiClient", return_value="direct") as direct:
-            client = build_bpmis_direct_client(settings, access_token="user-token")
 
         self.assertEqual(client, "direct")
         direct.assert_called_once_with(settings, access_token="user-token")

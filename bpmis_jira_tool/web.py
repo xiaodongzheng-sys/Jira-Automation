@@ -104,7 +104,7 @@ from bpmis_jira_tool.productization_codex import (
 )
 from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.seatalk_stores import SeaTalkNameMappingStore, SeaTalkTodoStore
-from bpmis_jira_tool.bpmis_client import build_bpmis_client, build_bpmis_direct_client
+from bpmis_jira_tool.bpmis_client import build_bpmis_client
 from bpmis_jira_tool.bpmis_projects import BPMISProjectStore, PortalJiraCreationService, PortalProjectSyncService
 from bpmis_jira_tool.source_code_qa import CRMS_COUNTRIES, ALL_COUNTRY, IDENTIFIER_PATTERN, CodexCliBridgeSourceCodeQALLMProvider, SourceCodeQAService
 from bpmis_jira_tool.source_code_qa_factory import build_source_code_qa_service_from_settings
@@ -1464,7 +1464,6 @@ def create_app() -> Flask:
                 _normalize_team_dashboard_emails=lambda *args, **kwargs: _normalize_team_dashboard_emails(*args, **kwargs),
                 _cached_team_dashboard_task_payload=lambda *args, **kwargs: _cached_team_dashboard_task_payload(*args, **kwargs),
                 _build_bpmis_client_for_current_user=lambda *args, **kwargs: _build_bpmis_client_for_current_user(*args, **kwargs),
-                _build_version_plan_bpmis_client=lambda *args, **kwargs: _build_version_plan_bpmis_client(*args, **kwargs),
                 _team_dashboard_load_jira_and_biz_projects=lambda *args, **kwargs: _team_dashboard_load_jira_and_biz_projects(*args, **kwargs),
                 _build_team_dashboard_task_group=lambda *args, **kwargs: _build_team_dashboard_task_group(*args, **kwargs),
                 _backfill_team_dashboard_empty_project_jira_tasks=lambda *args, **kwargs: _backfill_team_dashboard_empty_project_jira_tasks(*args, **kwargs),
@@ -1533,12 +1532,6 @@ def _build_bpmis_client_for_current_user(settings: Settings):
     config_data = _load_current_user_config(settings)
     access_token = _resolve_bpmis_access_token(config_data, settings)
     return build_bpmis_client(settings, access_token=access_token)
-
-
-def _build_version_plan_bpmis_client(settings: Settings):
-    config_data = _load_current_user_config(settings)
-    access_token = _resolve_bpmis_access_token(config_data, settings)
-    return build_bpmis_direct_client(settings, access_token=access_token)
 
 
 def _load_current_user_config(settings: Settings) -> dict[str, Any]:

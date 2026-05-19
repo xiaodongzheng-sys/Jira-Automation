@@ -105,7 +105,6 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
     _normalize_team_dashboard_emails = ctx._normalize_team_dashboard_emails
     _cached_team_dashboard_task_payload = ctx._cached_team_dashboard_task_payload
     _build_bpmis_client_for_current_user = ctx._build_bpmis_client_for_current_user
-    _build_version_plan_bpmis_client = getattr(ctx, "_build_version_plan_bpmis_client", _build_bpmis_client_for_current_user)
     _team_dashboard_load_jira_and_biz_projects = ctx._team_dashboard_load_jira_and_biz_projects
     _build_team_dashboard_task_group = ctx._build_team_dashboard_task_group
     _backfill_team_dashboard_empty_project_jira_tasks = ctx._backfill_team_dashboard_empty_project_jira_tasks
@@ -198,6 +197,9 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         return jsonify({"status": "error", "message": str(error), "error_category": "version_plan_conflict"}), HTTPStatus.CONFLICT
 
     def _version_plan_sync_error_message(error: Exception) -> str:
+        normalized = str(error or "").strip().lower()
+        if "local-agent" in normalized or "local agent" in normalized:
+            return "BPMIS Sync requires Mac local-agent online"
         try:
             details = _classify_portal_error(error)
         except Exception:
@@ -205,6 +207,16 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         if details.get("error_category") == "local_agent_unavailable":
             return "BPMIS Sync requires Mac local-agent online"
         return str(error)
+
+    def _version_plan_error_is_local_agent_unavailable(error: Exception) -> bool:
+        normalized = str(error or "").strip().lower()
+        if "local-agent" in normalized or "local agent" in normalized:
+            return True
+        try:
+            details = _classify_portal_error(error)
+        except Exception:
+            details = {}
+        return details.get("error_category") == "local_agent_unavailable"
 
     def _start_version_plan_sync_if_needed(*, force: bool = False) -> bool:
         global _VERSION_PLAN_SYNC_RUNNING  # noqa: PLW0603
@@ -216,7 +228,8 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
                 return True
             _VERSION_PLAN_SYNC_RUNNING = True
         try:
-            bpmis_client = _build_version_plan_bpmis_client(settings)
+            bpmis_client = _build_bpmis_client_for_current_user(settings)
+            bpmis_client.ping()
             app = current_app._get_current_object()
             store.save_config(mark_version_plan_sync_running(config), expected_revision=snapshot.revision)
         except Exception as error:  # noqa: BLE001
@@ -467,7 +480,10 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             if should_auto_sync and _can_sync_version_plan():
                 sync_queued = _start_version_plan_sync_if_needed(force=False)
         except (ConfigError, ToolError) as error:
-            snapshot = store.save_config(mark_version_plan_sync_error(snapshot.config, _version_plan_sync_error_message(error)))
+            if _version_plan_error_is_local_agent_unavailable(error):
+                current_app.logger.info("Team Dashboard Version Plan auto-sync skipped because local-agent is unavailable.")
+            else:
+                snapshot = store.save_config(mark_version_plan_sync_error(snapshot.config, _version_plan_sync_error_message(error)))
         except Exception as error:  # noqa: BLE001
             current_app.logger.exception("Team Dashboard Version Plan auto-sync could not be queued.")
             snapshot = store.save_config(mark_version_plan_sync_error(snapshot.config, _version_plan_sync_error_message(error)))
