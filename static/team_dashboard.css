@@ -1436,6 +1436,11 @@
   text-align: center;
 }
 
+.team-dashboard-version-plan-row:not(:hover):not(:focus-within):not(.is-dragging) .team-dashboard-version-plan-drag {
+  opacity: 0;
+  pointer-events: none;
+}
+
 .team-dashboard-version-plan-sheet-title {
   display: grid;
   align-content: start;
@@ -1546,8 +1551,15 @@
 }
 
 .team-dashboard-version-plan-drag {
+  min-width: 24px;
   cursor: grab;
   color: #1d5fd0;
+}
+
+.team-dashboard-version-plan-drag span {
+  display: block;
+  font-size: 0.9rem;
+  line-height: 1;
 }
 
 .team-dashboard-version-plan-row.is-dragging .team-dashboard-version-plan-drag {
@@ -1762,6 +1774,11 @@
   .team-dashboard-version-plan-row-tools .button {
     width: auto !important;
     min-height: 28px;
+  }
+
+  .team-dashboard-version-plan-row .team-dashboard-version-plan-drag {
+    opacity: 1 !important;
+    pointer-events: auto !important;
   }
 
   .team-dashboard-version-plan-actions {

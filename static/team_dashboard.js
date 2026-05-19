@@ -663,7 +663,7 @@
           ${manual ? 'data-version-plan-manual-row="true"' : ''}
         >
           <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-cell-drag" data-label="Move">
-            ${manual ? '<button class="button button-secondary team-dashboard-version-plan-drag" type="button" draggable="true" aria-label="Drag row" title="Drag row">Drag</button>' : ''}
+            ${manual ? '<button class="button button-secondary team-dashboard-version-plan-drag" type="button" draggable="true" aria-label="Drag row" title="Drag row"><span aria-hidden="true">↕</span></button>' : ''}
           </div>
           <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-cell-feature" data-label="Feature">
             ${manual ? '<div class="team-dashboard-version-plan-row-tools"><button class="button button-secondary team-dashboard-version-plan-delete" type="button" data-version-plan-row-action="delete" aria-label="Delete row" title="Delete row"><span aria-hidden="true">🗑</span></button></div>' : ''}
