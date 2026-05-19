@@ -233,12 +233,45 @@ append_optional_env_var() {
     ENV_VARS+=("$key=$value")
   fi
 }
+read_existing_cloud_env_var() {
+  local key="$1"
+  "$GCLOUD_BIN" run services describe "$SERVICE" \
+    ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} \
+    ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} \
+    --region "$REGION" \
+    --format=json 2>/dev/null | "$PYTHON_BIN" -c '
+import json
+import sys
+
+key = sys.argv[1]
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+containers = (((payload.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers") or []
+for item in (containers[0].get("env") if containers else []) or []:
+    if item.get("name") == key and item.get("value"):
+        print(item["value"])
+        break
+' "$key" || true
+}
+append_optional_or_existing_cloud_env_var() {
+  local key="$1"
+  local value="${!key:-$(read_env_value "$key")}"
+  if [[ -z "$value" ]]; then
+    value="$(read_existing_cloud_env_var "$key")"
+  fi
+  if [[ -n "$value" ]]; then
+    ENV_VARS+=("$key=$value")
+  fi
+}
 append_optional_env_var TRELLO_API_KEY
 append_optional_env_var TRELLO_API_TOKEN
 append_optional_env_var TRELLO_BOARD_ID
 append_optional_env_var TRELLO_DAILY_LIST_NAME
 append_optional_env_var PRD_BRIEFING_EDGE_MANDARIN_VOICE
 append_optional_env_var VERSION_PLAN_FIRESTORE_PROJECT
+append_optional_or_existing_cloud_env_var BPMIS_API_ACCESS_TOKEN
 if [[ -n "$BASE_URL" ]]; then
   ENV_VARS+=("TEAM_PORTAL_BASE_URL=$BASE_URL")
 fi
