@@ -1328,7 +1328,7 @@
 }
 
 .team-dashboard-version-plan-sheet {
-  --version-plan-sheet-grid: minmax(320px, 1fr) 68px 116px 118px minmax(150px, 0.45fr);
+  --version-plan-sheet-grid: 42px minmax(320px, 1fr) 76px 116px 118px minmax(150px, 0.45fr);
   display: grid;
   gap: 0;
   max-width: 100%;
@@ -1342,7 +1342,7 @@
 .team-dashboard-version-plan-row {
   display: grid;
   grid-template-columns: var(--version-plan-sheet-grid);
-  min-width: 772px;
+  min-width: 822px;
   border-bottom: 1px solid #d9dde5;
 }
 
@@ -1390,16 +1390,16 @@
   align-items: start;
 }
 
-.team-dashboard-version-plan-header > div:nth-child(2),
 .team-dashboard-version-plan-header > div:nth-child(3),
 .team-dashboard-version-plan-header > div:nth-child(4),
-.team-dashboard-version-plan-row .team-dashboard-version-plan-cell:nth-child(2),
+.team-dashboard-version-plan-header > div:nth-child(5),
 .team-dashboard-version-plan-row .team-dashboard-version-plan-cell:nth-child(3),
-.team-dashboard-version-plan-row .team-dashboard-version-plan-cell:nth-child(4) {
+.team-dashboard-version-plan-row .team-dashboard-version-plan-cell:nth-child(4),
+.team-dashboard-version-plan-row .team-dashboard-version-plan-cell:nth-child(5) {
   text-align: center;
 }
 
-.team-dashboard-version-plan-header > div:nth-child(2) {
+.team-dashboard-version-plan-header > div:nth-child(3) {
   overflow-wrap: normal;
   white-space: nowrap;
 }
@@ -1425,6 +1425,15 @@
 .team-dashboard-version-plan-cell-feature {
   position: relative;
   min-width: 0;
+}
+
+.team-dashboard-version-plan-row.is-manual .team-dashboard-version-plan-cell-feature {
+  padding-right: 34px;
+}
+
+.team-dashboard-version-plan-cell-drag {
+  justify-items: center;
+  text-align: center;
 }
 
 .team-dashboard-version-plan-sheet-title {
@@ -1521,24 +1530,8 @@
   pointer-events: auto;
 }
 
-.team-dashboard-version-plan-row-tools .button:not(.team-dashboard-version-plan-delete) {
-  opacity: 0;
-  pointer-events: none;
-}
-
-.team-dashboard-version-plan-row:hover .team-dashboard-version-plan-row-tools,
-.team-dashboard-version-plan-row:focus-within .team-dashboard-version-plan-row-tools {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.team-dashboard-version-plan-row:hover .team-dashboard-version-plan-row-tools .button,
-.team-dashboard-version-plan-row:focus-within .team-dashboard-version-plan-row-tools .button {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.team-dashboard-version-plan-row-tools .button {
+.team-dashboard-version-plan-row-tools .button,
+.team-dashboard-version-plan-drag {
   min-height: 22px;
   width: auto;
   padding: 2px 5px;
@@ -1550,6 +1543,15 @@
 .team-dashboard-version-plan-delete {
   min-width: 24px;
   color: #b42318;
+}
+
+.team-dashboard-version-plan-drag {
+  cursor: grab;
+  color: #1d5fd0;
+}
+
+.team-dashboard-version-plan-row.is-dragging .team-dashboard-version-plan-drag {
+  cursor: grabbing;
 }
 
 .team-dashboard-version-plan-row.is-dragging {
@@ -1716,7 +1718,7 @@
 
   .team-dashboard-version-plan-row {
     grid-template-columns: var(--version-plan-sheet-grid);
-    min-width: 772px;
+    min-width: 822px;
     gap: 0;
     padding: 0;
     border: 0;

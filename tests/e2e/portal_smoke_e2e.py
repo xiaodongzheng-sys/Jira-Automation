@@ -995,13 +995,9 @@ class PortalE2ESmokeTest(unittest.TestCase):
         self.assertEqual(captured_cell_updates[-1]["field"], "feature")
         self.assertEqual(captured_cell_updates[-1]["value"], "Manual row from browser smoke")
 
-        page.locator('[data-version-plan-row-id="pipe-added-1"] [data-version-plan-row-action="up"]').click()
-        page.wait_for_function(
-            "() => document.querySelector('[data-version-plan-status]')?.textContent?.includes('Saved.')",
-            timeout=5000,
-        )
-        self.assertEqual(captured_row_actions[-1]["action"], "reorder")
-        self.assertEqual(captured_row_actions[-1]["row_ids"], ["pipe-added-1", "pipe-1"])
+        self.assertEqual(added_row.locator('[data-version-plan-row-action="up"]').count(), 0)
+        self.assertEqual(added_row.locator('[data-version-plan-row-action="down"]').count(), 0)
+        self.assertEqual(added_row.locator(".team-dashboard-version-plan-drag").count(), 1)
 
         page.locator('[data-version-plan-row-id="pipe-added-1"] [data-version-plan-row-action="delete"]').click()
         page.locator('[data-version-plan-row-id="pipe-added-1"]').wait_for(state="detached", timeout=5000)

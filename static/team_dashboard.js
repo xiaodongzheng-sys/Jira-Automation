@@ -660,10 +660,13 @@
           data-version-plan-scope="${escapeHtml(scope)}"
           data-version-id="${escapeHtml(versionId)}"
           data-version-plan-priority="${escapeHtml(row.priority || '')}"
-          ${manual ? 'data-version-plan-manual-row="true" draggable="true"' : ''}
+          ${manual ? 'data-version-plan-manual-row="true"' : ''}
         >
+          <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-cell-drag" data-label="Move">
+            ${manual ? '<button class="button button-secondary team-dashboard-version-plan-drag" type="button" draggable="true" aria-label="Drag row" title="Drag row">Drag</button>' : ''}
+          </div>
           <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-cell-feature" data-label="Feature">
-            ${manual ? '<div class="team-dashboard-version-plan-row-tools"><button class="button button-secondary team-dashboard-version-plan-drag" type="button" aria-label="Drag row">Drag</button><button class="button button-secondary" type="button" data-version-plan-row-action="up">Up</button><button class="button button-secondary" type="button" data-version-plan-row-action="down">Down</button><button class="button button-secondary team-dashboard-version-plan-delete" type="button" data-version-plan-row-action="delete" aria-label="Delete row" title="Delete row"><span aria-hidden="true">🗑</span></button></div>' : ''}
+            ${manual ? '<div class="team-dashboard-version-plan-row-tools"><button class="button button-secondary team-dashboard-version-plan-delete" type="button" data-version-plan-row-action="delete" aria-label="Delete row" title="Delete row"><span aria-hidden="true">🗑</span></button></div>' : ''}
             ${versionPlanRowFeature(row, readOnly)}
           </div>
           <div class="team-dashboard-version-plan-cell" data-label="Priority">
@@ -699,6 +702,7 @@
     return `
       <div class="team-dashboard-version-plan-sheet" data-version-plan-sheet="${escapeHtml(scope)}" data-version-id="${escapeHtml(versionId)}">
         <div class="team-dashboard-version-plan-row team-dashboard-version-plan-header" aria-hidden="true">
+          <div></div>
           <div>${headerFeature}</div>
           <div>Priority</div>
           <div>PM</div>
@@ -2903,38 +2907,12 @@
         }, 'Could not delete Version Plan row.');
         return;
       }
-      if ((action === 'up' || action === 'down') && row) {
-        const sheet = row.closest('[data-version-plan-sheet]');
-        const groupRows = Array.from(sheet?.querySelectorAll('[data-version-plan-manual-row="true"]') || [])
-          .filter((item) => (item.dataset.versionPlanPriority || '') === (row.dataset.versionPlanPriority || ''));
-        const index = groupRows.indexOf(row);
-        const swapWith = action === 'up' ? groupRows[index - 1] : groupRows[index + 1];
-        if (!swapWith) return;
-        if (action === 'up') sheet.insertBefore(row, swapWith);
-        else sheet.insertBefore(swapWith, row);
-        const rowIds = groupRows
-          .map((item) => item.dataset.versionPlanRowId || '')
-          .filter(Boolean);
-        const moved = row.dataset.versionPlanRowId || '';
-        const target = swapWith.dataset.versionPlanRowId || '';
-        const movedIndex = rowIds.indexOf(moved);
-        const targetIndex = rowIds.indexOf(target);
-        if (movedIndex >= 0 && targetIndex >= 0) {
-          rowIds[movedIndex] = target;
-          rowIds[targetIndex] = moved;
-        }
-        await updateVersionPlanRows({
-          action: 'reorder',
-          scope,
-          version_id: versionId,
-          row_ids: rowIds,
-        }, 'Could not reorder Version Plan rows.');
-      }
     } catch (error) {
       setVersionPlanStatus(error.message || 'Could not update Version Plan rows.', 'error');
     }
   });
   versionPlanContent?.addEventListener('dragstart', (event) => {
+    if (!event.target.closest('.team-dashboard-version-plan-drag')) return;
     const row = event.target.closest('[data-version-plan-manual-row="true"]');
     if (!row) return;
     versionPlanDragRow = row;
