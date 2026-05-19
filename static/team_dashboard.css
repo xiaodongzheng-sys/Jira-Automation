@@ -1328,7 +1328,7 @@
 }
 
 .team-dashboard-version-plan-sheet {
-  --version-plan-sheet-grid: 42px minmax(320px, 1fr) 76px 116px 118px minmax(150px, 0.45fr);
+  --version-plan-sheet-grid: 32px minmax(320px, 1fr) 76px 116px 118px minmax(150px, 0.45fr);
   display: grid;
   gap: 0;
   max-width: 100%;
@@ -1342,7 +1342,7 @@
 .team-dashboard-version-plan-row {
   display: grid;
   grid-template-columns: var(--version-plan-sheet-grid);
-  min-width: 822px;
+  min-width: 812px;
   border-bottom: 1px solid #d9dde5;
 }
 
@@ -1433,6 +1433,8 @@
 
 .team-dashboard-version-plan-cell-drag {
   justify-items: center;
+  padding-right: 2px;
+  padding-left: 2px;
   text-align: center;
 }
 
@@ -1730,7 +1732,7 @@
 
   .team-dashboard-version-plan-row {
     grid-template-columns: var(--version-plan-sheet-grid);
-    min-width: 822px;
+    min-width: 812px;
     gap: 0;
     padding: 0;
     border: 0;
