@@ -105,6 +105,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
     _normalize_team_dashboard_emails = ctx._normalize_team_dashboard_emails
     _cached_team_dashboard_task_payload = ctx._cached_team_dashboard_task_payload
     _build_bpmis_client_for_current_user = ctx._build_bpmis_client_for_current_user
+    _build_version_plan_bpmis_client = getattr(ctx, "_build_version_plan_bpmis_client", _build_bpmis_client_for_current_user)
     _team_dashboard_load_jira_and_biz_projects = ctx._team_dashboard_load_jira_and_biz_projects
     _build_team_dashboard_task_group = ctx._build_team_dashboard_task_group
     _backfill_team_dashboard_empty_project_jira_tasks = ctx._backfill_team_dashboard_empty_project_jira_tasks
@@ -215,7 +216,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
                 return True
             _VERSION_PLAN_SYNC_RUNNING = True
         try:
-            bpmis_client = _build_bpmis_client_for_current_user(settings)
+            bpmis_client = _build_version_plan_bpmis_client(settings)
             app = current_app._get_current_object()
             store.save_config(mark_version_plan_sync_running(config), expected_revision=snapshot.revision)
         except Exception as error:  # noqa: BLE001

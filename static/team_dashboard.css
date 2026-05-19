@@ -1439,8 +1439,14 @@
 }
 
 .team-dashboard-version-plan-row:not(:hover):not(:focus-within):not(.is-dragging) .team-dashboard-version-plan-drag {
-  opacity: 0;
-  pointer-events: none;
+  opacity: 0.36;
+}
+
+.team-dashboard-version-plan-row:hover .team-dashboard-version-plan-drag,
+.team-dashboard-version-plan-row:focus-within .team-dashboard-version-plan-drag,
+.team-dashboard-version-plan-row.is-dragging .team-dashboard-version-plan-drag {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .team-dashboard-version-plan-sheet-title {

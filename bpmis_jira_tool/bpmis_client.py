@@ -19,6 +19,10 @@ def build_bpmis_client(settings: Settings, access_token: str | None = None) -> B
     return BPMISDirectApiClient(settings, access_token=access_token)
 
 
+def build_bpmis_direct_client(settings: Settings, access_token: str | None = None) -> BPMISClient:
+    return BPMISDirectApiClient(settings, access_token=access_token)
+
+
 def _local_agent_bpmis_enabled(settings: Settings) -> bool:
     mode = (settings.bpmis_call_mode or "").strip().lower()
     return bool(
