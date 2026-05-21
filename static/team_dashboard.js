@@ -858,6 +858,18 @@
     return revision ? { document_revision: revision } : {};
   };
 
+  const refreshVersionPlanRevision = async () => {
+    const planUrl = new URL(root.dataset.versionPlanUrl || '/api/team-dashboard/version-plan/af', window.location.origin);
+    planUrl.searchParams.set('sync', '0');
+    const response = await fetch(planUrl.toString(), {
+      headers: { Accept: 'application/json' },
+      credentials: 'same-origin',
+    });
+    const payload = await readJson(response, 'Could not refresh Version Plan.');
+    renderVersionPlan(payload);
+    return payload;
+  };
+
   const saveVersionPlanCell = async (input) => {
     const row = input.closest('[data-version-plan-row-id]');
     if (!row) return;
@@ -885,14 +897,23 @@
     }
   };
 
-  const updateVersionPlanRows = async (payload, fallbackMessage = 'Could not update Version Plan rows.') => {
+  const updateVersionPlanRows = async (payload, fallbackMessage = 'Could not update Version Plan rows.', retryOnConflict = true) => {
     const response = await fetch(root.dataset.versionPlanRowsUrl || '/api/team-dashboard/version-plan/af/rows', {
       method: 'POST',
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       credentials: 'same-origin',
       body: JSON.stringify({ ...versionPlanRevisionPayload(), ...payload }),
     });
-    const result = await readJson(response, fallbackMessage);
+    let result;
+    try {
+      result = await readJson(response, fallbackMessage);
+    } catch (error) {
+      if (retryOnConflict && error?.payload?.error_category === 'version_plan_conflict') {
+        await refreshVersionPlanRevision();
+        return updateVersionPlanRows(payload, fallbackMessage, false);
+      }
+      throw error;
+    }
     renderVersionPlan(result);
     setVersionPlanStatus('Saved.', 'success');
   };

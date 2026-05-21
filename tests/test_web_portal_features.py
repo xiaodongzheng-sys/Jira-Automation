@@ -3377,6 +3377,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("action: 'move'", script)
         self.assertIn("target_scope: targetScope", script)
         self.assertIn("target_before_row_id: targetBeforeRowId", script)
+        self.assertIn("refreshVersionPlanRevision", script)
+        self.assertIn("error?.payload?.error_category === 'version_plan_conflict'", script)
         self.assertIn("versionPlanSheetAcceptsDrop", script)
         self.assertIn("clearVersionPlanDropIndicators", script)
         self.assertIn("team-dashboard:version-plan:collapsed:v1", script)
