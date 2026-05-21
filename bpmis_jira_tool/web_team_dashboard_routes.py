@@ -280,6 +280,9 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         payload = version_plan_payload(config)
         payload["sync_queued"] = bool(sync_queued)
         payload["can_sync"] = _can_sync_version_plan()
+        sync_state = payload.get("sync_state") if isinstance(payload.get("sync_state"), dict) else {}
+        if str(sync_state.get("state") or "").strip() == "error":
+            payload["message"] = str(sync_state.get("error") or sync_state.get("message") or "Version Plan sync failed.")
         if metadata:
             payload["document_revision"] = str(metadata.get("revision") or "")
             payload["source_hash"] = str(metadata.get("source_hash") or "")

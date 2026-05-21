@@ -38,7 +38,8 @@
       payload = {};
     }
     if (!response.ok || payload.status === 'error') {
-      const error = new Error(payload.message || fallbackMessage);
+      const syncState = payload.sync_state && typeof payload.sync_state === 'object' ? payload.sync_state : {};
+      const error = new Error(payload.message || syncState.error || syncState.message || fallbackMessage);
       error.payload = payload;
       throw error;
     }
