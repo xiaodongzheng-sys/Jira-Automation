@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 
+import bpmis_jira_tool.seatalk_daily_email as seatalk_daily_email
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.daily_brief_archive import DailyBriefArchiveStore, daily_brief_archive_path
 from bpmis_jira_tool.errors import ConfigError
@@ -741,6 +742,110 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
 
         self.assertEqual(payload["watch_delegate_todos"], [])
 
+    def test_build_daily_briefing_uses_gmail_ref_for_project_update_evidence(self):
+        class GmailRefService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [
+                        {
+                            "domain": "Credit Risk",
+                            "title": "CR rollout approval",
+                            "summary": "BSP launch approval is pending and needs Xiaodong review.",
+                            "status": "in_progress",
+                            "evidence": "Gmail thread",
+                            "evidence_ref_id": "gm-ref-001",
+                            "source_type": "gmail",
+                        }
+                    ],
+                    "other_updates": [],
+                    "team_member_reminders": [],
+                    "my_todos": [],
+                    "team_todos": [],
+                }
+
+        gmail_history = "\n".join(
+            [
+                "Gmail thread history export",
+                "================================================================================",
+                "Thread 1",
+                "Thread ID: thread-123",
+                "Gmail Thread Link: https://mail.google.com/mail/u/0/#inbox/thread-123",
+                "Subject: CR rollout approval",
+                "Participants: Alice <alice@example.com>",
+                "",
+                "Message 1",
+                "Date: 2026-05-13T12:00:00+08:00",
+                "From: Alice <alice@example.com>",
+                "To: Xiaodong <xiaodong@example.com>",
+                "Cc: [no cc listed]",
+                "Use: in-window evidence",
+                "",
+                "Body:",
+                "BSP launch approval is pending and needs Xiaodong review.",
+            ]
+        )
+
+        service = GmailRefService("SeaTalk Chat History Export\n")
+        payload = build_daily_briefing(
+            service,
+            now=datetime(2026, 5, 13, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            gmail_history_text=gmail_history,
+        )
+
+        self.assertEqual(payload["project_updates"][0]["evidence"], "Gmail: CR rollout approval / Alice <alice@example.com>")
+        self.assertEqual(payload["project_updates"][0]["source_type"], "gmail")
+        self.assertIn('"id": "gm-ref-001"', service.last_prompt)
+
+    def test_build_daily_briefing_drops_project_update_with_mismatched_ref(self):
+        class BadProjectRefService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [
+                        {
+                            "domain": "Credit Risk",
+                            "title": "Unrelated CR rollout approval",
+                            "summary": "BSP launch approval is pending.",
+                            "status": "in_progress",
+                            "evidence": "Gmail thread",
+                            "evidence_ref_id": "gm-ref-001",
+                            "source_type": "gmail",
+                        }
+                    ],
+                    "other_updates": [],
+                    "team_member_reminders": [],
+                    "my_todos": [],
+                    "team_todos": [],
+                }
+
+        gmail_history = "\n".join(
+            [
+                "Gmail thread history export",
+                "================================================================================",
+                "Thread 1",
+                "Thread ID: thread-456",
+                "Gmail Thread Link: https://mail.google.com/mail/u/0/#inbox/thread-456",
+                "Subject: Pantry update",
+                "Participants: Office <office@example.com>",
+                "Message 1",
+                "Date: 2026-05-13T12:00:00+08:00",
+                "From: Office <office@example.com>",
+                "Use: in-window evidence",
+                "Body:",
+                "The pantry fridge will be cleaned tomorrow.",
+            ]
+        )
+
+        payload = build_daily_briefing(
+            BadProjectRefService("SeaTalk Chat History Export\n"),
+            now=datetime(2026, 5, 13, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            gmail_history_text=gmail_history,
+        )
+
+        self.assertEqual(payload["project_updates"], [])
+        self.assertEqual(payload["quality_metadata"]["evidence_quality_metrics"]["dropped_invalid_evidence_count"], 1)
+
     def test_build_daily_briefing_repairs_thread_group_mismatch(self):
         class WrongGroupEvidenceService(FakeSeaTalkService):
             def _run_codex_insights_prompt(self, *, prompt, system_prompt):
@@ -819,6 +924,148 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["watch_delegate_todos"], [])
+
+    def test_evidence_ref_helpers_apply_valid_refs_and_drop_invalid_refs(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== PH AAF Small Group (group-2753344) ===",
+                "[2026-05-20 15:10:00] Michael Salam: @Ker Yin please confirm whether PH Money Lock and Kill Switch public live can proceed on May 25.",
+                "[2026-05-20 15:11:00] Alice Tan: @Rene Chong please evaluate AF appeal journey scope.",
+            ]
+        )
+        candidates = [
+            {
+                "group": "PH AAF Small Group (group-2753344)",
+                "thread": "",
+                "timestamp": "2026-05-20 15:10:00",
+                "text": "@Ker Yin please confirm whether PH Money Lock and Kill Switch public live can proceed on May 25.",
+                "person": "Ker Yin",
+            }
+        ]
+
+        refs = seatalk_daily_email._build_daily_brief_evidence_refs(
+            history,
+            team_member_reminder_candidates=candidates,
+        )
+        self.assertEqual(refs[0]["id"], "st-ref-001")
+        self.assertEqual(refs[0]["reply_state"], "unanswered")
+        self.assertEqual(refs[0]["evidence"], "PH AAF Small Group (group-2753344)")
+
+        my_todos = [
+            {
+                "task": "Ensure Ker Yin confirms whether PH Money Lock and Kill Switch public live can proceed.",
+                "person": "Ker Yin",
+                "evidence": "SeaTalk SeaTalk group",
+                "evidence_ref_id": "st-ref-001",
+                "source_type": "seatalk",
+                "action_type": "watch_delegate",
+            },
+            {
+                "task": "Ask Rene Chong to confirm unrelated scope.",
+                "evidence": "SeaTalk group",
+                "evidence_ref_id": "st-ref-001",
+                "source_type": "seatalk",
+                "action_type": "watch_delegate",
+            },
+            {
+                "task": "Finish direct PM task.",
+                "evidence": "SeaTalk group",
+                "source_type": "seatalk",
+                "action_type": "direct_action",
+            },
+        ]
+        reminders = [
+            {
+                "person": "Ker Yin",
+                "reminder": "Confirm PH Money Lock readiness.",
+                "evidence": "SeaTalk group",
+                "evidence_ref_id": "st-ref-001",
+                "source_type": "seatalk",
+            },
+            {
+                "person": "Rene Chong",
+                "reminder": "Confirm unrelated scope.",
+                "evidence": "SeaTalk group",
+                "evidence_ref_id": "missing-ref",
+                "source_type": "seatalk",
+            },
+        ]
+
+        metrics = seatalk_daily_email._apply_daily_brief_evidence_refs(
+            project_updates=[],
+            other_updates=[],
+            my_todos=my_todos,
+            reminders=reminders,
+            evidence_refs=refs,
+        )
+
+        self.assertEqual([item["task"] for item in my_todos], [
+            "Ensure Ker Yin confirms whether PH Money Lock and Kill Switch public live can proceed.",
+            "Finish direct PM task.",
+        ])
+        self.assertEqual(my_todos[0]["evidence"], "PH AAF Small Group (group-2753344)")
+        self.assertEqual([item["person"] for item in reminders], ["Ker Yin"])
+        self.assertGreaterEqual(metrics["dropped_invalid_evidence_count"], 2)
+        self.assertGreaterEqual(metrics["repaired_evidence_count"], 2)
+
+    def test_evidence_repair_helpers_handle_generic_and_thread_evidence(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== PH AAF Small Group (group-2753344) ===",
+                "[2026-05-20 15:10:00] Michael Salam: Please confirm whether PH Money Lock and Kill Switch public live can proceed on May 25.",
+                "=== PH Credit Card-Shopee Instant Checkout PM&Dev&QA群 (group-4206402) ===",
+                "[2026-05-20 11:48:33] Zou Jianfeng (邹剑锋) (UID 209286) [thread reply under: uat2，shopee checkout 信用卡入口问题]: @Feng Ailing (冯爱玲) 我已经改好了，需要测试的时候告诉我一下，我打开开关",
+            ]
+        )
+        items = [
+            {
+                "task": "Ensure Michael confirms PH Money Lock and Kill Switch readiness.",
+                "evidence": "SeaTalk SeaTalk group",
+                "source_type": "unknown",
+            }
+        ]
+        metrics = {"repaired_evidence_count": 0}
+
+        seatalk_daily_email._repair_generic_seatalk_evidence(
+            items,
+            history_text=history,
+            quality_metrics=metrics,
+        )
+
+        self.assertEqual(items[0]["evidence"], "PH AAF Small Group (group-2753344)")
+        self.assertEqual(metrics["repaired_evidence_count"], 1)
+        self.assertEqual(seatalk_daily_email._normalize_generic_seatalk_evidence("SeaTalk SeaTalk contact"), "SeaTalk contact")
+        self.assertTrue(seatalk_daily_email._is_generic_seatalk_evidence("SeaTalk thread / thread: abc"))
+
+        thread_items = [
+            {
+                "task": "Monitor the Shopee checkout credit card entry UAT test.",
+                "evidence": "Wrong Group / thread: uat2，shopee checkout 信用卡入口问题",
+                "source_type": "seatalk",
+            },
+            {
+                "task": "Monitor unrelated item.",
+                "evidence": "Wrong Group / thread: missing thread",
+                "source_type": "seatalk",
+            },
+        ]
+        thread_metrics = {"dropped_invalid_evidence_count": 0, "repaired_evidence_count": 0}
+
+        seatalk_daily_email._validate_and_repair_seatalk_evidence(
+            thread_items,
+            history_text=history,
+            quality_metrics=thread_metrics,
+        )
+
+        self.assertEqual(len(thread_items), 1)
+        self.assertEqual(
+            thread_items[0]["evidence"],
+            "PH Credit Card-Shopee Instant Checkout PM&Dev&QA群 (group-4206402) / thread: uat2，shopee checkout 信用卡入口问题",
+        )
+        self.assertEqual(thread_metrics["dropped_invalid_evidence_count"], 1)
+        self.assertEqual(thread_metrics["repaired_evidence_count"], 1)
 
     def test_build_daily_briefing_enforces_section_caps(self):
         class OverflowService(FakeSeaTalkService):

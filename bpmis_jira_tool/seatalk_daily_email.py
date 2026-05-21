@@ -596,6 +596,7 @@ def build_daily_briefing(
     team_member_reminder_hints = _format_team_member_reminder_hints(team_member_reminder_candidates)
     evidence_refs = _build_daily_brief_evidence_refs(
         history_text,
+        gmail_history_text=gmail_history_text,
         team_member_reminder_candidates=team_member_reminder_candidates,
     )
     daily_matches = match_report_intelligence(
@@ -666,6 +667,8 @@ def build_daily_briefing(
         text_fields=("person", "reminder"),
     )[:MAX_TEAM_MEMBER_REMINDERS]
     evidence_quality_metrics = _apply_daily_brief_evidence_refs(
+        project_updates=project_updates,
+        other_updates=other_updates,
         my_todos=my_todos,
         reminders=reminders,
         evidence_refs=evidence_refs,
@@ -1288,8 +1291,8 @@ def _daily_brief_user_prompt(
     return (
         "## Output Contract\n"
         "Return a JSON object with exactly these top-level keys: project_updates, other_updates, my_todos, team_member_reminders, team_todos.\n"
-        "project_updates: array of objects with keys domain, title, summary, status, evidence, source_type, matched_vips, matched_keywords, matched_key_projects, priority_reason.\n"
-        "other_updates: array of objects with keys domain, title, summary, status, evidence, source_type, signal_type, matched_vips, matched_keywords, matched_key_projects, priority_reason.\n"
+        "project_updates: array of objects with keys domain, title, summary, status, evidence, source_type, evidence_ref_id, matched_vips, matched_keywords, matched_key_projects, priority_reason.\n"
+        "other_updates: array of objects with keys domain, title, summary, status, evidence, source_type, signal_type, evidence_ref_id, matched_vips, matched_keywords, matched_key_projects, priority_reason.\n"
         "my_todos: array of objects with keys task, domain, priority, due, evidence, source_type, action_type, evidence_ref_id, matched_vips, matched_keywords, matched_key_projects, priority_reason.\n"
         "team_member_reminders: array of objects with keys domain, person, reminder, evidence, source_type, evidence_ref_id.\n"
         "team_todos must always be an empty array.\n"
@@ -1309,7 +1312,8 @@ def _daily_brief_user_prompt(
         "project_updates: include updates from SeaTalk or Gmail where Xiaodong is involved, mentioned, directly asked, or clearly participating. Summarize the decision, milestone, blocker, or current state. Max 10 items. Sort blocked and in_progress before done.\n"
         "other_updates: include useful awareness from SeaTalk or Gmail where Xiaodong is not directly involved but the information may matter to a Digital Banking PM. Prioritize incident, launch, policy/process, risk/compliance, cross-team dependency, leadership decision, and cross-product milestone. useful_awareness should be rare and only included when genuinely PM-relevant, especially when matched to a VIP, priority keyword, or key project. Include at most 5 useful_awareness items and at most 8 other_updates total. Do not include generic chatter, greetings, pure thanks, meeting logistics with no decision, or low-value FYI.\n"
         "team_member_reminders: use SeaTalk only. Never create these from Gmail. Only include people from the explicit allowed reminder list below. Max 8 items. Sort by most actionable first.\n\n"
-        "For team_member_reminders and SeaTalk watch_delegate my_todos, evidence_ref_id is required and must be copied exactly from Deterministic Daily Brief Evidence Bundle.evidence_refs. Do not invent evidence_ref_id values.\n\n"
+        "For project_updates, team_member_reminders, and SeaTalk watch_delegate my_todos, evidence_ref_id is required and must be copied exactly from Deterministic Daily Brief Evidence Bundle.evidence_refs. Do not invent evidence_ref_id values.\n"
+        "For mixed SeaTalk+Gmail project_updates, evidence_ref_id may contain two comma-separated ids, one st-ref and one gm-ref, only when both refs support the same topic.\n\n"
         "## Team Member Reminder Scan\n"
         "Before writing team_member_reminders, scan every SeaTalk group conversation for human mentions of these people: Ker Yin, Rene Chong, Sabrina Chan, Liye, Hui Xian, Sophia Wang Zijun, Ming Ming, Zoey Lu, Wang Chang, Jireh.\n"
         "Sophia Wang Zijun belongs to Credit Risk. Do not classify Sophia Wang Zijun as Ops Risk.\n"
@@ -1960,11 +1964,10 @@ def _sanitize_seatalk_evidence(value: Any, *, name_mappings: dict[str, str] | No
 def _build_daily_brief_evidence_refs(
     history_text: str,
     *,
+    gmail_history_text: str = "",
     team_member_reminder_candidates: list[dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     records = _seatalk_history_records_for_evidence(history_text)
-    if not records:
-        return []
     refs: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str, str]] = set()
 
@@ -1998,42 +2001,161 @@ def _build_daily_brief_evidence_refs(
             }
         )
 
-    by_record_key = {
-        (
-            _normalize_thread_match_text(record.get("group")),
-            _normalize_thread_match_text(record.get("thread") or "__main__"),
-            str(record.get("timestamp") or ""),
-            _normalize_thread_match_text(record.get("text")),
-        ): record
-        for record in records
-    }
-    for candidate in team_member_reminder_candidates or []:
-        lookup_key = (
-            _normalize_thread_match_text(candidate.get("group")),
-            _normalize_thread_match_text(candidate.get("thread") or "__main__"),
-            str(candidate.get("timestamp") or ""),
-            _normalize_thread_match_text(candidate.get("text")),
-        )
-        record = by_record_key.get(lookup_key)
-        if record:
-            add_ref(record, person=str(candidate.get("person") or ""), reply_state="unanswered")
+    if records:
+        by_record_key = {
+            (
+                _normalize_thread_match_text(record.get("group")),
+                _normalize_thread_match_text(record.get("thread") or "__main__"),
+                str(record.get("timestamp") or ""),
+                _normalize_thread_match_text(record.get("text")),
+            ): record
+            for record in records
+        }
+        for candidate in team_member_reminder_candidates or []:
+            lookup_key = (
+                _normalize_thread_match_text(candidate.get("group")),
+                _normalize_thread_match_text(candidate.get("thread") or "__main__"),
+                str(candidate.get("timestamp") or ""),
+                _normalize_thread_match_text(candidate.get("text")),
+            )
+            record = by_record_key.get(lookup_key)
+            if record:
+                add_ref(record, person=str(candidate.get("person") or ""), reply_state="unanswered")
 
-    for record in records:
-        text = str(record.get("text") or "")
-        if _looks_like_team_member_request(text) or _is_unanswered_question_candidate(
-            text,
-            group=str(record.get("group") or ""),
-            thread=str(record.get("thread") or ""),
-            sender=str(record.get("sender") or ""),
-        ):
-            add_ref(record)
-        if len(refs) >= 60:
-            break
+        for record in records:
+            text = str(record.get("text") or "")
+            if _looks_like_team_member_request(text) or _is_unanswered_question_candidate(
+                text,
+                group=str(record.get("group") or ""),
+                thread=str(record.get("thread") or ""),
+                sender=str(record.get("sender") or ""),
+            ) or _looks_like_project_update_ref(record):
+                add_ref(record)
+            if len([ref for ref in refs if str(ref.get("source_type")) == "seatalk"]) >= 80:
+                break
+    refs.extend(_build_gmail_evidence_refs(gmail_history_text, start_index=len(refs) + 1))
     return refs
+
+
+def _looks_like_project_update_ref(record: dict[str, str]) -> bool:
+    text = " ".join([record.get("group", ""), record.get("thread", ""), record.get("sender", ""), record.get("text", "")]).casefold()
+    return any(
+        term in text
+        for term in (
+            "blocked",
+            "pending",
+            "confirmed",
+            "approval",
+            "launch",
+            "go-live",
+            "golive",
+            "live",
+            "incident",
+            "risk",
+            "uat",
+            "prd",
+            "release",
+            "dependency",
+            "timeline",
+            "eta",
+            "上线",
+            "发布",
+            "风险",
+            "阻塞",
+            "确认",
+            "审批",
+        )
+    )
+
+
+def _build_gmail_evidence_refs(gmail_history_text: str, *, start_index: int) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    current: dict[str, Any] = {}
+    current_message: dict[str, str] | None = None
+
+    def flush_message() -> None:
+        nonlocal current_message
+        if not current_message or str(current_message.get("use") or "").startswith("context only"):
+            current_message = None
+            return
+        body = str(current_message.get("body") or "").strip()
+        ref_index = start_index + len(refs)
+        refs.append(
+            {
+                "id": f"gm-ref-{ref_index:03d}",
+                "source_type": "gmail",
+                "thread_id": str(current.get("thread_id") or "").strip(),
+                "thread_link": str(current.get("thread_link") or "").strip(),
+                "subject": str(current.get("subject") or "").strip(),
+                "participants": str(current.get("participants") or "").strip(),
+                "sender": str(current_message.get("from") or "").strip(),
+                "timestamp": str(current_message.get("date") or "").strip(),
+                "snippet": _clip_hint_text(body, limit=280),
+                "evidence": _format_gmail_ref_evidence(current, current_message),
+            }
+        )
+        current_message = None
+
+    for raw_line in str(gmail_history_text or "").splitlines():
+        line = raw_line.rstrip()
+        if re.fullmatch(r"=+", line):
+            flush_message()
+            current = {}
+            continue
+        if re.fullmatch(r"Thread\s+\d+", line):
+            flush_message()
+            current["thread"] = line.strip()
+            continue
+        if line.startswith("Thread ID:"):
+            current["thread_id"] = line.split(":", 1)[1].strip()
+            continue
+        if line.startswith("Gmail Thread Link:"):
+            current["thread_link"] = line.split(":", 1)[1].strip()
+            continue
+        if line.startswith("Subject:"):
+            current["subject"] = line.split(":", 1)[1].strip()
+            continue
+        if line.startswith("Participants:"):
+            current["participants"] = line.split(":", 1)[1].strip()
+            continue
+        if re.fullmatch(r"Message\s+\d+(?:\s+\(context only\))?", line):
+            flush_message()
+            current_message = {"message": line.strip(), "body": ""}
+            continue
+        if current_message is None:
+            continue
+        if line.startswith("Date:"):
+            current_message["date"] = line.split(":", 1)[1].strip()
+        elif line.startswith("From:"):
+            current_message["from"] = line.split(":", 1)[1].strip()
+        elif line.startswith("To:"):
+            current_message["to"] = line.split(":", 1)[1].strip()
+        elif line.startswith("Cc:"):
+            current_message["cc"] = line.split(":", 1)[1].strip()
+        elif line.startswith("Use:"):
+            current_message["use"] = line.split(":", 1)[1].strip()
+        elif line == "Body:":
+            current_message["in_body"] = "1"
+        elif current_message.get("in_body"):
+            current_message["body"] = (str(current_message.get("body") or "") + "\n" + line).strip()
+    flush_message()
+    return refs[:40]
+
+
+def _format_gmail_ref_evidence(thread: dict[str, Any], message: dict[str, str]) -> str:
+    subject = str(thread.get("subject") or "").strip()
+    sender = str(message.get("from") or "").strip()
+    if subject and sender:
+        return f"Gmail: {subject} / {sender}"
+    if subject:
+        return f"Gmail: {subject}"
+    return "Gmail thread"
 
 
 def _apply_daily_brief_evidence_refs(
     *,
+    project_updates: list[dict[str, Any]],
+    other_updates: list[dict[str, Any]],
     my_todos: list[dict[str, Any]],
     reminders: list[dict[str, Any]],
     evidence_refs: list[dict[str, Any]],
@@ -2053,7 +2175,7 @@ def _apply_daily_brief_evidence_refs(
         ref_id = str(item.get("evidence_ref_id") or "").strip()
         ref = refs_by_id.get(ref_id)
         if not ref:
-            if require_ref:
+            if ref_id or require_ref:
                 metrics["dropped_invalid_evidence_count"] += 1
                 return False
             return True
@@ -2064,9 +2186,43 @@ def _apply_daily_brief_evidence_refs(
         if evidence and evidence != str(item.get("evidence") or "").strip():
             metrics["repaired_evidence_count"] += 1
             item["evidence"] = evidence
-        item["source_type"] = "seatalk"
+        item["source_type"] = str(ref.get("source_type") or item.get("source_type") or "unknown").strip()
         item["evidence_ref_id"] = ref_id
         return True
+
+    def apply_project_item(item: dict[str, Any]) -> bool:
+        ref_ids = _split_evidence_ref_ids(item.get("evidence_ref_id"))
+        if not ref_ids:
+            return True
+        refs = [refs_by_id.get(ref_id) for ref_id in ref_ids]
+        if any(ref is None for ref in refs):
+            metrics["dropped_invalid_evidence_count"] += 1
+            return False
+        valid_refs = [ref for ref in refs if isinstance(ref, dict)]
+        if not _evidence_refs_match_project_item(item, valid_refs):
+            metrics["dropped_invalid_evidence_count"] += 1
+            return False
+        evidence = "; ".join(str(ref.get("evidence") or "").strip() for ref in valid_refs if str(ref.get("evidence") or "").strip())
+        if evidence and evidence != str(item.get("evidence") or "").strip():
+            metrics["repaired_evidence_count"] += 1
+            item["evidence"] = evidence
+        source_types = {str(ref.get("source_type") or "").strip() for ref in valid_refs if str(ref.get("source_type") or "").strip()}
+        item["source_type"] = "mixed" if len(source_types) > 1 else (next(iter(source_types)) if source_types else item.get("source_type"))
+        item["evidence_ref_id"] = ", ".join(ref_ids)
+        return True
+
+    project_updates[:] = [
+        item
+        for item in project_updates
+        if not isinstance(item, dict)
+        or apply_project_item(item)
+    ]
+    other_updates[:] = [
+        item
+        for item in other_updates
+        if not isinstance(item, dict)
+        or apply_project_item(item)
+    ]
 
     my_todos[:] = [
         item
@@ -2089,11 +2245,26 @@ def _apply_daily_brief_evidence_refs(
     return metrics
 
 
+def _split_evidence_ref_ids(value: Any) -> list[str]:
+    return [part.strip() for part in re.split(r"[,;]\s*", str(value or "")) if part.strip()]
+
+
+def _evidence_refs_match_project_item(item: dict[str, Any], refs: list[dict[str, Any]]) -> bool:
+    item_tokens = _evidence_match_tokens(_item_text(item, fields=("title", "summary", "task", "reminder")))
+    if not item_tokens:
+        return True
+    ref_tokens: set[str] = set()
+    for ref in refs:
+        ref_tokens.update(_evidence_match_tokens(" ".join(str(ref.get(field) or "") for field in ("group", "thread", "subject", "participants", "sender", "snippet"))))
+    overlap = item_tokens & ref_tokens
+    return len(overlap) >= 2 or bool({"launch", "live", "uat", "prd", "risk", "incident"} & overlap)
+
+
 def _requires_seatalk_evidence_ref(item: dict[str, Any], *, section: str) -> bool:
     if section == "team_member_reminders":
-        return True
+        return _item_uses_seatalk_source(item) and _is_generic_seatalk_evidence(item.get("evidence"))
     if section == "my_todos" and str(item.get("action_type") or "").strip() == "watch_delegate":
-        return _item_uses_seatalk_source(item)
+        return _item_uses_seatalk_source(item) and _is_generic_seatalk_evidence(item.get("evidence"))
     return False
 
 
