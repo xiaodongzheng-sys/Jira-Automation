@@ -95,7 +95,7 @@ from bpmis_jira_tool.monthly_report import (
 from bpmis_jira_tool.report_intelligence import (
     normalize_report_intelligence_config,
 )
-from bpmis_jira_tool.codex_model_router import CODEX_ROUTE_CHEAP, resolve_codex_model
+from bpmis_jira_tool.codex_model_router import CODEX_ROUTE_DEEP, resolve_codex_model
 from bpmis_jira_tool.productization_codex import (
     clean_codex_productization_detailed_feature as _clean_codex_productization_detailed_feature,
     format_productization_description_text as _format_productization_description_text,
@@ -2365,7 +2365,7 @@ def _build_seatalk_dashboard_service(settings: Settings) -> SeaTalkDashboardServ
         seatalk_data_dir=settings.seatalk_local_data_dir,
         codex_workspace_root=PROJECT_ROOT,
         codex_model=resolve_codex_model(
-            CODEX_ROUTE_CHEAP,
+            CODEX_ROUTE_DEEP,
             legacy_env_names=("SEATALK_CODEX_MODEL",),
         ),
         codex_timeout_seconds=settings.source_code_qa_codex_timeout_seconds,

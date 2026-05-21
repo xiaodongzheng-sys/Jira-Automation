@@ -30,6 +30,7 @@ class DailyBriefArchiveStore:
         sent_at: datetime,
         window_start: datetime | str | None = None,
         window_end: datetime | str | None = None,
+        quality_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = self._load()
         briefs = payload.setdefault("briefs", {})
@@ -47,6 +48,8 @@ class DailyBriefArchiveStore:
             "sent_at": sent_at.isoformat(),
             "window_start": _datetime_value(window_start),
             "window_end": _datetime_value(window_end),
+            "quality_metadata": dict(quality_metadata or {}),
+            "token_ledger": dict((quality_metadata or {}).get("token_ledger") or {}),
         }
         item["time_period"] = format_daily_brief_period(item)
         briefs[brief_id] = item

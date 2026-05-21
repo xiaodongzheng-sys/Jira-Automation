@@ -123,7 +123,7 @@ class FakeSeaTalkService:
 
 
 class SeaTalkDailyEmailCodexRoutingTests(unittest.TestCase):
-    def test_build_seatalk_service_defaults_to_cheap_codex_route(self):
+    def test_build_seatalk_service_defaults_to_deep_codex_route(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {"TEAM_PORTAL_DATA_DIR": temp_dir, "SOURCE_CODE_QA_CODEX_MODEL": "gpt-5.5"},
@@ -131,7 +131,7 @@ class SeaTalkDailyEmailCodexRoutingTests(unittest.TestCase):
         ), patch("bpmis_jira_tool.config.find_dotenv", return_value=""):
             service = build_seatalk_service(Settings.from_env(), data_root=Path(temp_dir))
 
-        self.assertEqual(service.codex_model, "gpt-5.4-mini")
+        self.assertEqual(service.codex_model, "gpt-5.5")
 
 
 class SeaTalkDailyEmailTests(unittest.TestCase):
@@ -665,6 +665,161 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertNotIn("buddy-266783", evidence)
         self.assertNotIn("group-999999", evidence)
 
+    def test_build_daily_briefing_repairs_generic_seatalk_group_evidence_from_ref(self):
+        class GenericEvidenceService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [],
+                    "other_updates": [],
+                    "team_member_reminders": [],
+                    "my_todos": [
+                        {
+                            "task": "Ensure Michael confirms whether PH Money Lock and Kill Switch public live can proceed on May 25.",
+                            "domain": "Anti-fraud",
+                            "priority": "high",
+                            "due": "2026-05-22",
+                            "evidence": "SeaTalk SeaTalk group",
+                            "evidence_ref_id": "st-ref-001",
+                            "source_type": "seatalk",
+                            "action_type": "watch_delegate",
+                        }
+                    ],
+                    "team_todos": [],
+                }
+
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== PH AAF Small Group (group-2753344) ===",
+                "[2026-05-20 15:10:00] Michael Salam: Please confirm whether PH Money Lock and Kill Switch public live can proceed on May 25 after CS FAQ and Help Centre article readiness are confirmed.",
+            ]
+        )
+
+        payload = build_daily_briefing(
+            GenericEvidenceService(history),
+            now=datetime(2026, 5, 20, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+        )
+
+        self.assertEqual(payload["watch_delegate_todos"][0]["evidence"], "PH AAF Small Group (group-2753344)")
+        self.assertNotIn("SeaTalk SeaTalk group", payload["watch_delegate_todos"][0]["evidence"])
+
+    def test_build_daily_briefing_drops_generic_seatalk_followup_without_ref(self):
+        class GenericEvidenceService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [],
+                    "other_updates": [],
+                    "team_member_reminders": [],
+                    "my_todos": [
+                        {
+                            "task": "Ensure Michael confirms whether PH Money Lock and Kill Switch public live can proceed on May 25.",
+                            "domain": "Anti-fraud",
+                            "priority": "high",
+                            "due": "2026-05-22",
+                            "evidence": "SeaTalk SeaTalk group",
+                            "source_type": "seatalk",
+                            "action_type": "watch_delegate",
+                        }
+                    ],
+                    "team_todos": [],
+                }
+
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== PH AAF Small Group (group-2753344) ===",
+                "[2026-05-20 15:10:00] Michael Salam: Please confirm whether PH Money Lock and Kill Switch public live can proceed on May 25.",
+            ]
+        )
+
+        payload = build_daily_briefing(
+            GenericEvidenceService(history),
+            now=datetime(2026, 5, 20, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+        )
+
+        self.assertEqual(payload["watch_delegate_todos"], [])
+
+    def test_build_daily_briefing_repairs_thread_group_mismatch(self):
+        class WrongGroupEvidenceService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [],
+                    "other_updates": [],
+                    "team_member_reminders": [],
+                    "my_todos": [
+                        {
+                            "task": "Monitor the Shopee checkout credit card entry UAT test for ABC whitelist readiness.",
+                            "domain": "Credit Risk",
+                            "priority": "medium",
+                            "due": "TBD",
+                            "evidence": "PH AF UAT物料沟通 / thread: uat2，shopee checkout 信用卡入口问题",
+                            "source_type": "seatalk",
+                            "action_type": "watch_delegate",
+                        }
+                    ],
+                    "team_todos": [],
+                }
+
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== PH Credit Card-Shopee Instant Checkout PM&Dev&QA群 (group-4206402) ===",
+                "[2026-05-20 11:48:33] Zou Jianfeng (邹剑锋) (UID 209286) [thread reply under: uat2，shopee checkout 信用卡入口问题]: @Feng Ailing (冯爱玲) 我已经改好了，需要测试的时候告诉我一下，我打开开关",
+                "[2026-05-20 12:00:51] QA (UID 1024899) [thread reply under: uat2，shopee checkout 信用卡入口问题]: 可以了，没有问题ABC的都有入口，不在白名单的没有入口",
+            ]
+        )
+
+        payload = build_daily_briefing(
+            WrongGroupEvidenceService(history),
+            now=datetime(2026, 5, 20, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+        )
+
+        self.assertEqual(
+            payload["watch_delegate_todos"][0]["evidence"],
+            "PH Credit Card-Shopee Instant Checkout PM&Dev&QA群 (group-4206402) / thread: uat2，shopee checkout 信用卡入口问题",
+        )
+
+    def test_build_daily_briefing_drops_thread_evidence_with_mismatched_person(self):
+        class MixedPersonEvidenceService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [],
+                    "other_updates": [],
+                    "team_member_reminders": [],
+                    "my_todos": [
+                        {
+                            "task": "Ask Liye to confirm whether the Shopee checkout UAT segment-C phone-prefix issue requires Credit Risk changes.",
+                            "domain": "Credit Risk",
+                            "priority": "medium",
+                            "due": "TBD",
+                            "evidence": "PH AF UAT物料沟通 / thread: uat2，shopee checkout 信用卡入口问题",
+                            "source_type": "seatalk",
+                            "action_type": "watch_delegate",
+                        }
+                    ],
+                    "team_todos": [],
+                }
+
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== PH Credit Card-Shopee Instant Checkout PM&Dev&QA群 (group-4206402) ===",
+                "[2026-05-20 11:48:33] Zou Jianfeng (邹剑锋) (UID 209286) [thread reply under: uat2，shopee checkout 信用卡入口问题]: @Feng Ailing (冯爱玲) 我已经改好了，需要测试的时候告诉我一下，我打开开关",
+                "[2026-05-20 12:00:51] QA (UID 1024899) [thread reply under: uat2，shopee checkout 信用卡入口问题]: 可以了，没有问题ABC的都有入口，不在白名单的没有入口",
+            ]
+        )
+
+        payload = build_daily_briefing(
+            MixedPersonEvidenceService(history),
+            now=datetime(2026, 5, 20, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+        )
+
+        self.assertEqual(payload["watch_delegate_todos"], [])
+
     def test_build_daily_briefing_enforces_section_caps(self):
         class OverflowService(FakeSeaTalkService):
             def _run_codex_insights_prompt(self, *, prompt, system_prompt):
@@ -1088,9 +1243,11 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertLessEqual(ledger["gmail_prompt_chars"], 35_000)
         self.assertLess(ledger["final_estimated_prompt_tokens"], 30_000)
         self.assertIn("Deterministic Daily Brief Evidence Bundle", service.last_prompt)
+        self.assertIn('"evidence_refs"', service.last_prompt)
         self.assertIn("@Ker Yin please confirm", service.last_prompt)
         self.assertIn("BSP launch approval is pending", service.last_prompt)
         self.assertNotIn("low value filler 200", service.last_prompt)
+        self.assertIn("seatalk_prompt_hit_cap", ledger)
 
     def test_unanswered_seatalk_question_hints_include_pm_relevant_thread_questions(self):
         history = "\n".join(
@@ -1139,6 +1296,52 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
 
         self.assertEqual([item["person"] for item in candidates or []], ["Ker Yin"])
         self.assertIn("ETP linkage", candidates[0]["text"])
+
+    def test_team_member_reminder_candidates_do_not_match_ambiguous_short_names(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== [ID] AF & Auth Credit Card (group-4320981) ===",
+                "[2026-05-20 18:44:33] ZhangFan (张帆) (UID 342541) [thread reply under: ph bank non-live gateway https域名申请]: hi @Feng Ailing (冯爱玲) @Huang Haitao (黄海涛) @Chang Xinxin(常鑫鑫) | Banking | iOS",
+                "=== SG SPX group (group-4252112) ===",
+                "[2026-05-20 15:40:36] Rene Chong (UID 341874) [thread reply under: AF PRD Clarifications]: @Zoey Jiaqi Cui credit card will have different cardIdentifier from debit card right?",
+                "[2026-05-20 16:00:00] Alice Tan: @Wang Chang please confirm the AF release owner",
+            ]
+        )
+
+        candidates = _build_team_member_reminder_candidates(history)
+
+        self.assertEqual([item["person"] for item in candidates or []], ["Wang Chang"])
+        self.assertIn("AF release owner", candidates[0]["text"])
+
+    def test_team_member_reminder_candidates_ignore_bare_mentions_without_action(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== PH AF UAT物料沟通 (group-4074790) ===",
+                "[2026-05-20 17:02:13] Grace Zheng (UID 496270): @Zheng Xiaodong @Zoey Lu",
+                "[2026-05-20 17:05:00] Alice Tan: @Zoey Lu please confirm whether AF next steps are still needed",
+            ]
+        )
+
+        candidates = _build_team_member_reminder_candidates(history)
+
+        self.assertEqual([item["person"] for item in candidates or []], ["Zoey Lu"])
+        self.assertIn("AF next steps", candidates[0]["text"])
+
+    def test_team_member_reminder_candidates_treat_thread_reply_as_named_person_reply(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== AF urgent requirement (group-4445222) ===",
+                "[2026-05-20 14:41:08] Harken (UID 94019): 这个需求，我觉得和刚刚开会讨论的那个紧急需求基本上一样，有空 af 老板们也可以评估下 @Jireh @Wang Chang",
+                "[2026-05-20 18:23:02] Jireh (UID 633302) [thread reply under: 这个需求，我觉得和刚刚开会讨论的那个紧急需求基本上一样，有空 af 老板们也可以评估下 @Jireh @Wang Chang]: 哦，明白了，正在问业务之后紧急需求需要改吗",
+            ]
+        )
+
+        candidates = _build_team_member_reminder_candidates(history)
+
+        self.assertEqual([item["person"] for item in candidates or []], ["Wang Chang"])
 
     def test_build_daily_briefing_drops_followup_when_named_person_replied(self):
         class RepliedReminderService(FakeSeaTalkService):
@@ -1986,6 +2189,10 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                 "team_member_reminders": [],
                 "my_todos": [],
                 "project_updates": [],
+                "quality_metadata": {
+                    "token_ledger": {"final_estimated_prompt_tokens": 1234},
+                    "evidence_quality_metrics": {"dropped_invalid_evidence_count": 2},
+                },
             }
 
             with patch("bpmis_jira_tool.seatalk_daily_email.build_seatalk_service", return_value=FakeSeaTalkService()):
@@ -2014,6 +2221,8 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             self.assertEqual(archive[0]["run_slot"], "morning")
             self.assertEqual(archive[0]["time_period"], "2026-05-05 08:00-13:00")
             self.assertIn("Review rollout", archive[0]["text_body"])
+            self.assertEqual(archive[0]["token_ledger"]["final_estimated_prompt_tokens"], 1234)
+            self.assertEqual(archive[0]["quality_metadata"]["evidence_quality_metrics"]["dropped_invalid_evidence_count"], 2)
 
     def test_send_daily_email_dry_run_does_not_archive(self):
         with tempfile.TemporaryDirectory() as temp_dir:

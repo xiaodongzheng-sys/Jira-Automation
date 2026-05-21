@@ -47,7 +47,7 @@ from bpmis_jira_tool.monthly_report import (
     send_monthly_report_email,
 )
 from bpmis_jira_tool.gmail_sender import StoredGoogleCredentials
-from bpmis_jira_tool.codex_model_router import CODEX_ROUTE_CHEAP, resolve_codex_model
+from bpmis_jira_tool.codex_model_router import CODEX_ROUTE_DEEP, resolve_codex_model
 from bpmis_jira_tool.productization_codex import (
     generate_productization_detailed_features_with_local_codex as _generate_productization_detailed_features_with_local_codex,
 )
@@ -2867,7 +2867,7 @@ def _build_seatalk_service(settings: Settings, *, name_overrides_path: str | Pat
         seatalk_data_dir=settings.seatalk_local_data_dir,
         codex_workspace_root=Path(__file__).resolve().parent.parent,
         codex_model=resolve_codex_model(
-            CODEX_ROUTE_CHEAP,
+            CODEX_ROUTE_DEEP,
             legacy_env_names=("SEATALK_CODEX_MODEL",),
         ),
         codex_timeout_seconds=settings.source_code_qa_codex_timeout_seconds,
