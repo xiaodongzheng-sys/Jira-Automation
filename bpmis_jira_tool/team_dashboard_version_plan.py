@@ -411,7 +411,20 @@ def update_version_plan_rows(config: dict[str, Any], payload: dict[str, Any]) ->
 
     rows = _manual_rows_for_scope(plan, payload)
     if action == "add":
-        rows.append(_manual_row({"sort_order": _next_sort_order(rows)}))
+        rows.append(
+            _manual_row(
+                {
+                    "row_id": str(payload.get("row_id") or "").strip(),
+                    "feature": str(payload.get("feature") or "").strip(),
+                    "priority": payload.get("priority"),
+                    "pm": payload.get("pm"),
+                    "remarks": str(payload.get("remarks") or "").strip(),
+                    "productization_efforts": str(payload.get("productization_efforts") or "").strip(),
+                    "sort_order": _next_sort_order(rows),
+                    "updated_at": _now_text(),
+                }
+            )
+        )
     elif action == "delete":
         row_id = str(payload.get("row_id") or "").strip()
         rows[:] = [row for row in rows if row.get("row_id") != row_id]

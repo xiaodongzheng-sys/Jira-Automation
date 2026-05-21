@@ -1481,6 +1481,65 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(update_call[3], {"jiraKey": "AF-101", "statusId": 44})
             self.assertEqual(detail["status"]["label"], "Testing")
 
+    def test_update_biz_project_status_posts_resolved_status(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+
+            client = BPMISDirectApiClient(settings)
+            calls: list[tuple[str, str, dict | None, dict | None]] = []
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                calls.append((path, method, params, body))
+                if path == "/api/v1/issueField/list":
+                    return {
+                        "data": {
+                            "statusId": {
+                                "key": "statusId",
+                                "optionGroup": ["jiraStatus", "bizProjectStatus"],
+                                "optionGroupFilter": {"match": {"value": [[4], [1]]}},
+                            }
+                        }
+                    }
+                if path == "/api/v1/options/getGroupOptions":
+                    return {"data": {"bizProjectStatus": [{"label": "Developing", "value": 10}]}}
+                if path == "/api/v1/issues/updateStatus":
+                    return {"data": {"ok": True}}
+                if path == "/api/v1/issues/detail":
+                    return {
+                        "data": {
+                            "row": {
+                                "id": 221733,
+                                "summary": "BPMIS Project",
+                                "status": {"label": "Developing"},
+                            }
+                        }
+                    }
+                raise AssertionError(path)
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            detail = client.update_biz_project_status("221733", "Developing")
+
+            update_call = next(call for call in calls if call[0] == "/api/v1/issues/updateStatus")
+            self.assertEqual(update_call[1], "POST")
+            self.assertEqual(update_call[3], {"id": "221733", "statusId": 10})
+            self.assertEqual(detail["status"]["label"], "Developing")
+
     def test_delink_jira_ticket_from_project_clears_parent_issue(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = Settings(

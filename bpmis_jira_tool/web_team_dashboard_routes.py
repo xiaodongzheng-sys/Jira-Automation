@@ -193,6 +193,55 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
     def _get_version_plan_store():
         return build_version_plan_store(settings, _get_team_dashboard_config_store())
 
+    def _team_dashboard_status_text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, dict):
+            for key in ("label", "name", "text", "value", "statusName"):
+                text = _team_dashboard_status_text(value.get(key))
+                if text:
+                    return text
+            return ""
+        if isinstance(value, list):
+            for item in value:
+                text = _team_dashboard_status_text(item)
+                if text:
+                    return text
+            return ""
+        return str(value or "").strip()
+
+    def _team_dashboard_project_status_from_detail(detail: dict[str, Any]) -> str:
+        if not isinstance(detail, dict):
+            return ""
+        for key in ("statusId", "status", "statusName", "issueStatus"):
+            text = _team_dashboard_status_text(detail.get(key))
+            if text:
+                return text
+        return ""
+
+    def _update_team_dashboard_cached_project_status(config: dict[str, Any], *, bpmis_id: str, status: str) -> int:
+        task_cache = config.get("task_cache") if isinstance(config.get("task_cache"), dict) else {}
+        teams = task_cache.get("teams") if isinstance(task_cache.get("teams"), dict) else {}
+        updated_count = 0
+        for cached_team in teams.values():
+            if not isinstance(cached_team, dict):
+                continue
+            for section_key in ("under_prd", "pending_live"):
+                projects = cached_team.get(section_key)
+                if not isinstance(projects, list):
+                    continue
+                for project in projects:
+                    if not isinstance(project, dict):
+                        continue
+                    if str(project.get("bpmis_id") or "").strip() != bpmis_id:
+                        continue
+                    project["status"] = status
+                    updated_count += 1
+        if updated_count:
+            task_cache["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            config["task_cache"] = task_cache
+        return updated_count
+
     def _version_plan_conflict_response(error: VersionPlanConflictError):
         return jsonify({"status": "error", "message": str(error), "error_category": "version_plan_conflict"}), HTTPStatus.CONFLICT
 
@@ -1091,6 +1140,64 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         )
 
 
+    def save_team_dashboard_project_status():
+        access_gate = _require_team_dashboard_admin_api()
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        bpmis_id = str(payload.get("bpmis_id") or payload.get("issue_id") or "").strip()
+        requested_status = str(payload.get("status") or "").strip()
+        if not bpmis_id:
+            return jsonify({"status": "error", "message": "BPMIS ID is required."}), HTTPStatus.BAD_REQUEST
+        if not requested_status:
+            return jsonify({"status": "error", "message": "BPMIS status is required."}), HTTPStatus.BAD_REQUEST
+        user_identity = _get_user_identity(settings)
+        try:
+            bpmis_client = _build_bpmis_client_for_current_user(settings)
+            detail = bpmis_client.update_biz_project_status(bpmis_id, requested_status)
+            updated_status = _team_dashboard_project_status_from_detail(detail) or requested_status
+            store = _get_team_dashboard_config_store()
+            config = store.load()
+            cached_updates = _update_team_dashboard_cached_project_status(config, bpmis_id=bpmis_id, status=updated_status)
+            if cached_updates:
+                store.save(config)
+            _log_portal_event(
+                "team_dashboard_project_status_update_success",
+                **_build_request_log_context(
+                    settings,
+                    user_identity=user_identity,
+                    extra={
+                        "bpmis_id": bpmis_id,
+                        "status": updated_status,
+                        "cached_updates": cached_updates,
+                    },
+                ),
+            )
+            return jsonify(
+                {
+                    "status": "ok",
+                    "bpmis_id": bpmis_id,
+                    "project_status": updated_status,
+                    "cached_updates": cached_updates,
+                }
+            )
+        except Exception as error:  # noqa: BLE001 - preserve BPMIS failure details for the UI.
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "team_dashboard_project_status_update_error",
+                level=logging.WARNING,
+                **_build_request_log_context(
+                    settings,
+                    user_identity=user_identity,
+                    extra={**error_details, "bpmis_id": bpmis_id, "status": requested_status},
+                ),
+            )
+            return (
+                jsonify({"status": "error", "message": str(error) or "Could not update BPMIS status.", **error_details}),
+                HTTPStatus.BAD_REQUEST,
+            )
+
+
     def team_dashboard_link_biz_projects():
         access_gate = _require_team_dashboard_admin_api()
         if access_gate is not None:
@@ -1630,6 +1737,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         team_dashboard_report_intelligence_seatalk_name_mappings=team_dashboard_report_intelligence_seatalk_name_mappings,
         team_dashboard_tasks=team_dashboard_tasks,
         save_team_dashboard_key_project=save_team_dashboard_key_project,
+        save_team_dashboard_project_status=save_team_dashboard_project_status,
         team_dashboard_link_biz_projects=team_dashboard_link_biz_projects,
         team_dashboard_link_biz_project_jira=team_dashboard_link_biz_project_jira,
         team_dashboard_link_biz_project_suggestions=team_dashboard_link_biz_project_suggestions,
@@ -1662,6 +1770,7 @@ def register_team_dashboard_routes(app: Any, handlers: Any) -> None:
     _add_route(app, "/api/team-dashboard/report-intelligence/seatalk/name-mappings", handlers.team_dashboard_report_intelligence_seatalk_name_mappings, methods=["GET", "POST"])
     _add_route(app, "/api/team-dashboard/tasks", handlers.team_dashboard_tasks)
     _add_route(app, "/api/team-dashboard/key-projects", handlers.save_team_dashboard_key_project, methods=["POST"])
+    _add_route(app, "/api/team-dashboard/project-status", handlers.save_team_dashboard_project_status, methods=["POST"])
     _add_route(app, "/api/team-dashboard/link-biz-projects", handlers.team_dashboard_link_biz_projects)
     _add_route(app, "/api/team-dashboard/link-biz-projects/jira", handlers.team_dashboard_link_biz_project_jira)
     _add_route(app, "/api/team-dashboard/link-biz-projects/suggestions", handlers.team_dashboard_link_biz_project_suggestions, methods=["POST"])

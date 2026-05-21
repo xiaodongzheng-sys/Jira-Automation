@@ -123,6 +123,10 @@ class BPMISClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def update_biz_project_status(self, project_issue_id: str | int, status: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def update_jira_ticket_fix_version(self, ticket_key: str, version_name: str, version_id: str | None = None) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -167,6 +171,17 @@ class BPMISDirectApiClient(BPMISClient):
         "Done",
         "Closed",
         "IceBox",
+    ]
+    BIZ_PROJECT_STATUS_OPTIONS = [
+        "Draft",
+        "Pending Review",
+        "Confirmed",
+        "KIV",
+        "Developing",
+        "Testing",
+        "UAT",
+        "Done",
+        "Closed",
     ]
 
     def __init__(self, settings: Settings, access_token: str | None = None):
@@ -1759,6 +1774,56 @@ class BPMISDirectApiClient(BPMISClient):
             "The current BPMIS API token does not expose a working Jira workflow transition endpoint."
         )
 
+    def update_biz_project_status(self, project_issue_id: str | int, status: str) -> dict[str, Any]:
+        normalized_issue_id = str(project_issue_id or "").strip()
+        normalized_status = self._normalize_biz_project_status(status)
+        if not normalized_issue_id:
+            raise BPMISError("BPMIS Biz Project ID is required.")
+        if not normalized_status:
+            raise BPMISError("BPMIS Biz Project status is required.")
+
+        status_id = self._resolve_biz_project_status_id(normalized_status)
+        bodies = self._biz_project_status_update_bodies(
+            issue_id=normalized_issue_id,
+            status=normalized_status,
+            status_id=status_id,
+        )
+        attempts = [
+            ("POST", "/api/v1/issues/updateStatus"),
+            ("POST", "/api/v1/issues/status/update"),
+            ("POST", "/api/v1/issues/workflow"),
+            ("POST", "/api/v1/issues/update"),
+            ("PUT", "/api/v1/issues/update"),
+            ("POST", "/api/v1/issue/updateStatus"),
+            ("POST", "/api/v1/issue/status/update"),
+        ]
+        last_error: BPMISError | None = None
+        accepted_statuses: list[str] = []
+        for body in bodies:
+            for method, path in attempts:
+                try:
+                    response = self._api_request(path, method=method, body=body)
+                    updated_detail = self._extract_issue_detail_payload(response)
+                    with self._cache_lock:
+                        self._issue_detail_cache.pop(normalized_issue_id, None)
+                    if not updated_detail:
+                        updated_detail = self.get_issue_detail(normalized_issue_id)
+                    updated_status = self._team_dashboard_biz_project_status_label(updated_detail)
+                    if self._status_labels_match(updated_status, normalized_status):
+                        return updated_detail
+                    if updated_status:
+                        accepted_statuses.append(updated_status)
+                except BPMISError as error:
+                    last_error = error
+        if accepted_statuses:
+            current_status = accepted_statuses[-1]
+            raise BPMISError(
+                f"BPMIS accepted the status update request, but Biz Project {normalized_issue_id} is still '{current_status}'."
+            )
+        if last_error is not None:
+            raise BPMISError(f"Could not update BPMIS Biz Project status. Last error: {last_error}") from last_error
+        raise BPMISError("Could not update BPMIS Biz Project status.")
+
     def update_jira_ticket_fix_version(self, ticket_key: str, version_name: str, version_id: str | None = None) -> dict[str, Any]:
         normalized_ticket_key = self._extract_issue_key(str(ticket_key or "")) or str(ticket_key or "").strip()
         normalized_version_name = str(version_name or "").strip()
@@ -2606,6 +2671,19 @@ class BPMISDirectApiClient(BPMISClient):
         except (BPMISError, TypeError, ValueError):
             return None
 
+    def _resolve_biz_project_status_id(self, status: str) -> int | None:
+        field_defs = self._get_issue_fields()
+        status_field = field_defs.get("statusId") or field_defs.get("status") or field_defs.get("issueStatus") or {}
+        if not isinstance(status_field, dict):
+            return None
+        try:
+            return int(self._resolve_option_value(status_field, status, self.BIZ_PROJECT_TYPE_ID))
+        except (BPMISError, TypeError, ValueError):
+            try:
+                return int(self._resolve_option_value(status_field, status))
+            except (BPMISError, TypeError, ValueError):
+                return None
+
     def _jira_status_update_bodies(
         self,
         *,
@@ -2621,6 +2699,30 @@ class BPMISDirectApiClient(BPMISClient):
         if status_id is not None:
             status_values.extend([{"statusId": status_id}, {"jiraStatusId": status_id}])
         status_values.extend([{"status": status}, {"jiraStatus": status}, {"statusName": status}])
+
+        bodies: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for identifier in identifiers:
+            for status_value in status_values:
+                body = {**identifier, **status_value}
+                key = json.dumps(body, sort_keys=True)
+                if key not in seen:
+                    bodies.append(body)
+                    seen.add(key)
+        return bodies
+
+    def _biz_project_status_update_bodies(
+        self,
+        *,
+        issue_id: str,
+        status: str,
+        status_id: int | None,
+    ) -> list[dict[str, Any]]:
+        identifiers: list[dict[str, Any]] = [{"id": issue_id}, {"issueId": issue_id}]
+        status_values: list[dict[str, Any]] = []
+        if status_id is not None:
+            status_values.append({"statusId": status_id})
+        status_values.extend([{"status": status}, {"statusName": status}, {"issueStatus": status}])
 
         bodies: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -3104,6 +3206,7 @@ class BPMISDirectApiClient(BPMISClient):
             "project_name": self._issue_first_text(row, "summary", "title", "projectName", "name"),
             "market": self._issue_first_text(row, "marketId", "market", "country"),
             "priority": self._issue_first_text(row, "bizPriorityId", "bizPriority", "priority", "priorityId"),
+            "status": self._team_dashboard_biz_project_status_label(row),
             "regional_pm_pic": self._issue_first_person(
                 row,
                 "regionalPmPicId",
@@ -3121,6 +3224,7 @@ class BPMISDirectApiClient(BPMISClient):
             str(project.get("project_name") or "").strip()
             and str(project.get("market") or "").strip()
             and str(project.get("priority") or "").strip()
+            and str(project.get("status") or "").strip()
             and str(project.get("regional_pm_pic") or "").strip()
         )
 
@@ -3160,12 +3264,21 @@ class BPMISDirectApiClient(BPMISClient):
                 "market": str(project.get("market") or ""),
                 "priority": str(project.get("priority") or ""),
                 "regional_pm_pic": str(project.get("regional_pm_pic") or ""),
-                "status": self._team_dashboard_biz_project_status_label(row),
+                "status": str(project.get("status") or self._team_dashboard_biz_project_status_label(row)),
             }
         return list(deduped.values())
 
     def _team_dashboard_biz_project_status_label(self, row: dict[str, Any]) -> str:
         return self._issue_first_text(row, "statusId", "status", "statusName", "issueStatus")
+
+    def _normalize_biz_project_status(self, status: str) -> str:
+        normalized = str(status or "").strip()
+        if not normalized:
+            return ""
+        for option in self.BIZ_PROJECT_STATUS_OPTIONS:
+            if option.casefold() == normalized.casefold():
+                return option
+        raise BPMISError(f"Unsupported BPMIS Biz Project status: {normalized}.")
 
     def _is_team_dashboard_biz_project_status_allowed(self, row: dict[str, Any]) -> bool:
         status = self._team_dashboard_biz_project_status_label(row)

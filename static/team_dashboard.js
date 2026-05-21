@@ -130,6 +130,17 @@
   const versionPlanSyncButton = root.querySelector('[data-version-plan-sync]');
   const canManageKeyProjects = root.dataset.canManageKeyProjects === 'true';
   let canSyncVersionPlan = root.dataset.canSyncVersionPlan === 'true';
+  const bpmisBizProjectStatusOptions = [
+    'Draft',
+    'Pending Review',
+    'Confirmed',
+    'KIV',
+    'Developing',
+    'Testing',
+    'UAT',
+    'Done',
+    'Closed',
+  ];
   const teamLabels = {
     AF: 'Anti-fraud',
     CRMS: 'Credit Risk',
@@ -941,6 +952,81 @@
     setVersionPlanStatus('Saved.', 'success');
   };
 
+  const cloneVersionPlanState = () => {
+    try {
+      return JSON.parse(JSON.stringify(versionPlanState || {}));
+    } catch (error) {
+      return null;
+    }
+  };
+
+  const versionPlanManualRowsForPayload = (payload, scope, versionId = '') => {
+    if (!payload) return null;
+    if (scope === 'pipeline') return Array.isArray(payload.pipeline_rows) ? payload.pipeline_rows : null;
+    if (scope === 'bundle') {
+      const bundle = (Array.isArray(payload.bundles) ? payload.bundles : [])
+        .find((item) => String(item?.version_id || '') === String(versionId || ''));
+      return bundle && Array.isArray(bundle.manual_rows) ? bundle.manual_rows : null;
+    }
+    return null;
+  };
+
+  const nextVersionPlanSortOrder = (rows) => (
+    Array.isArray(rows) && rows.length
+      ? Math.max(...rows.map((row) => Number(row?.sort_order) || 0)) + 1
+      : 0
+  );
+
+  const applyOptimisticVersionPlanRows = (change) => {
+    const previous = cloneVersionPlanState();
+    const next = cloneVersionPlanState();
+    if (!next) return null;
+    const action = String(change?.action || '').trim().toLowerCase();
+    if (action === 'add') {
+      const rows = versionPlanManualRowsForPayload(next, change.scope || '', change.version_id || '');
+      if (!rows) return null;
+      rows.push({
+        row_id: change.row_id || `manual-client-${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`,
+        row_type: 'manual',
+        feature: '',
+        priority: '',
+        pm: [],
+        remarks: '',
+        productization_efforts: '',
+        sort_order: nextVersionPlanSortOrder(rows),
+        updated_at: '',
+      });
+    } else if (action === 'delete') {
+      const rows = versionPlanManualRowsForPayload(next, change.scope || '', change.version_id || '');
+      if (!rows) return null;
+      const index = rows.findIndex((row) => String(row?.row_id || '') === String(change.row_id || ''));
+      if (index < 0) return null;
+      rows.splice(index, 1);
+    } else if (action === 'move') {
+      const sourceRows = versionPlanManualRowsForPayload(next, change.source_scope || '', change.source_version_id || '');
+      const targetRows = versionPlanManualRowsForPayload(next, change.target_scope || '', change.target_version_id || '');
+      if (!sourceRows || !targetRows) return null;
+      const sourceIndex = sourceRows.findIndex((row) => String(row?.row_id || '') === String(change.row_id || ''));
+      if (sourceIndex < 0) return null;
+      const [movingRow] = sourceRows.splice(sourceIndex, 1);
+      const beforeId = String(change.target_before_row_id || '');
+      const targetIndex = beforeId
+        ? targetRows.findIndex((row) => String(row?.row_id || '') === beforeId)
+        : -1;
+      targetRows.splice(targetIndex >= 0 ? targetIndex : targetRows.length, 0, movingRow);
+      targetRows.forEach((row, index) => { row.sort_order = index; });
+    } else {
+      return null;
+    }
+    renderVersionPlan(next);
+    setVersionPlanStatus('Saving...', 'neutral');
+    return previous;
+  };
+
+  const rollbackVersionPlanRows = (previousState) => {
+    if (previousState) renderVersionPlan(previousState);
+  };
+
   const clearVersionPlanDropIndicators = () => {
     versionPlanContent?.querySelectorAll('.is-drop-target, .is-drop-before, .is-drop-after').forEach((node) => {
       node.classList.remove('is-drop-target', 'is-drop-before', 'is-drop-after');
@@ -997,7 +1083,7 @@
     const targetBeforeRowId = dropRow && dropRow.dataset.versionPlanPriority === versionPlanDragRow.dataset.versionPlanPriority
       ? (insertBefore ? dropRow.dataset.versionPlanRowId || '' : dropRow.nextElementSibling?.dataset.versionPlanRowId || '')
       : '';
-    await updateVersionPlanRows({
+    const change = {
       action: 'move',
       row_id: versionPlanDragRow.dataset.versionPlanRowId || '',
       source_scope: sourceScope,
@@ -1005,7 +1091,14 @@
       target_scope: targetScope,
       target_version_id: targetVersionId,
       target_before_row_id: targetBeforeRowId,
-    }, 'Could not move Version Plan row.');
+    };
+    const previousState = applyOptimisticVersionPlanRows(change);
+    try {
+      await updateVersionPlanRows(change, 'Could not move Version Plan row.');
+    } catch (error) {
+      rollbackVersionPlanRows(previousState);
+      throw error;
+    }
   };
 
   const renderMarkdown = (value) => {
@@ -1357,9 +1450,15 @@
             <span>Priority</span>
             <strong>${escapeHtml(project.priority || '-')}</strong>
           </div>
-          <div class="bpmis-project-card-name">
-            <span>Regional PM PIC</span>
-            <strong>${escapeHtml(project.regional_pm_pic || '-')}</strong>
+          <div class="bpmis-project-card-status">
+            <span>Status</span>
+            <select
+              data-team-dashboard-project-status
+              data-bpmis-id="${escapeHtml(bpmisId)}"
+              data-current-status="${escapeHtml(project.status || '')}"
+              aria-label="BPMIS Project Status"
+              ${canManageKeyProjects && bpmisId !== '-' ? '' : 'disabled'}
+            >${renderBizProjectStatusOptions(project.status || '')}</select>
           </div>
           <div class="team-dashboard-project-mandays">
             <span>Actual Mandays</span>
@@ -1820,6 +1919,20 @@
     return url.toString();
   };
 
+  const renderBizProjectStatusOptions = (currentStatus) => {
+    const normalized = String(currentStatus || '').trim();
+    const options = normalized && !bpmisBizProjectStatusOptions.some((option) => option.toLowerCase() === normalized.toLowerCase())
+      ? [normalized, ...bpmisBizProjectStatusOptions]
+      : bpmisBizProjectStatusOptions;
+    return [
+      `<option value="" ${normalized ? '' : 'selected'}>-</option>`,
+      ...options.map((option) => {
+        const selected = option.toLowerCase() === normalized.toLowerCase() ? ' selected' : '';
+        return `<option value="${escapeHtml(option)}"${selected}>${escapeHtml(option)}</option>`;
+      }),
+    ].join('');
+  };
+
   const updateTaskSummary = (teams) => {
     const teamItems = Array.isArray(teams) ? teams : [];
     const loaded = teamItems.filter((team) => team.loaded).length;
@@ -2029,6 +2142,22 @@
     renderTeams(taskTeams);
     updateTaskSummary(taskTeams);
     schedulePendingActualMandaysPolls(taskTeams);
+  };
+
+  const updateProjectStatusInTeams = (bpmisId, projectStatus) => {
+    const normalizedId = String(bpmisId || '').trim();
+    taskTeams = taskTeams.map((team) => {
+      const nextTeam = { ...team };
+      ['under_prd', 'pending_live'].forEach((sectionKey) => {
+        const projects = Array.isArray(nextTeam[sectionKey]) ? nextTeam[sectionKey] : [];
+        nextTeam[sectionKey] = projects.map((project) => (
+          String(project?.bpmis_id || '').trim() === normalizedId
+            ? { ...project, status: projectStatus }
+            : project
+        ));
+      });
+      return nextTeam;
+    });
   };
 
   const emailsFromTextarea = (node) => String(node?.value || '')
@@ -2943,16 +3072,35 @@
     const row = button.closest('[data-version-plan-row-id]');
     try {
       if (action === 'add') {
-        await updateVersionPlanRows({ action: 'add', scope, version_id: versionId }, 'Could not add Version Plan row.');
+        const change = {
+          action: 'add',
+          scope,
+          version_id: versionId,
+          row_id: `manual-client-${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`,
+        };
+        const previousState = applyOptimisticVersionPlanRows(change);
+        try {
+          await updateVersionPlanRows(change, 'Could not add Version Plan row.');
+        } catch (error) {
+          rollbackVersionPlanRows(previousState);
+          throw error;
+        }
         return;
       }
       if (action === 'delete' && row) {
-        await updateVersionPlanRows({
+        const change = {
           action: 'delete',
           scope,
           version_id: versionId,
           row_id: row.dataset.versionPlanRowId || '',
-        }, 'Could not delete Version Plan row.');
+        };
+        const previousState = applyOptimisticVersionPlanRows(change);
+        try {
+          await updateVersionPlanRows(change, 'Could not delete Version Plan row.');
+        } catch (error) {
+          rollbackVersionPlanRows(previousState);
+          throw error;
+        }
         return;
       }
     } catch (error) {
@@ -3266,7 +3414,43 @@
     }
   });
 
-  taskList?.addEventListener('change', (event) => {
+  taskList?.addEventListener('change', async (event) => {
+    const projectStatusSelect = event.target.closest('[data-team-dashboard-project-status]');
+    if (projectStatusSelect) {
+      const bpmisId = projectStatusSelect.dataset.bpmisId || '';
+      const previousStatus = projectStatusSelect.dataset.currentStatus || '';
+      const nextStatus = String(projectStatusSelect.value || '').trim();
+      if (!bpmisId || !nextStatus || nextStatus === previousStatus) {
+        projectStatusSelect.value = previousStatus;
+        return;
+      }
+      projectStatusSelect.disabled = true;
+      setStatus(taskStatus, `Updating BPMIS status for ${bpmisId}...`, 'neutral');
+      try {
+        const response = await fetch(root.dataset.projectStatusUrl || '/api/team-dashboard/project-status', {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          credentials: 'same-origin',
+          body: JSON.stringify({ bpmis_id: bpmisId, status: nextStatus }),
+        });
+        const payload = await readJson(response, 'Could not update BPMIS status.');
+        const savedStatus = payload.project_status || nextStatus;
+        updateProjectStatusInTeams(payload.bpmis_id || bpmisId, savedStatus);
+        projectStatusSelect.dataset.currentStatus = savedStatus;
+        setStatus(taskStatus, `Updated BPMIS status for ${payload.bpmis_id || bpmisId} to ${savedStatus}.`, 'success');
+        await loadTeamTasks(activeTaskTeamKey || '');
+      } catch (error) {
+        projectStatusSelect.value = previousStatus;
+        setStatus(taskStatus, error.message || 'Could not update BPMIS status.', 'error');
+      } finally {
+        if (canManageKeyProjects) projectStatusSelect.disabled = false;
+      }
+      return;
+    }
+
     const keyFilter = event.target.closest('[data-team-dashboard-key-filter]');
     if (keyFilter) {
       keyProjectOnly = Boolean(keyFilter.checked);

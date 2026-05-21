@@ -2074,6 +2074,69 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(write_response.status_code, 403)
         self.assertEqual(tasks_response.status_code, 403)
 
+    def test_team_dashboard_project_status_updates_bpmis_and_cached_payload(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "ENV_FILE": os.devnull,
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(
+                {
+                    "teams": {"AF": {"member_emails": ["af@npt.sg"]}},
+                    "task_cache": {
+                        "version": 3,
+                        "teams": {
+                            "AF": {
+                                "team_key": "AF",
+                                "member_emails": ["af@npt.sg"],
+                                "under_prd": [
+                                    {
+                                        "bpmis_id": "221733",
+                                        "project_name": "BPMIS Project",
+                                        "status": "Confirmed",
+                                    }
+                                ],
+                                "pending_live": [],
+                            }
+                        },
+                    },
+                }
+            )
+
+            class FakeTeamDashboardClient:
+                def __init__(self):
+                    self.calls = []
+
+                def update_biz_project_status(self, bpmis_id, status):
+                    self.calls.append((bpmis_id, status))
+                    return {"id": bpmis_id, "status": {"label": status}}
+
+            fake_client = FakeTeamDashboardClient()
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                        session["google_credentials"] = {"token": "x"}
+                    response = client.post(
+                        "/api/team-dashboard/project-status",
+                        json={"bpmis_id": "221733", "status": "Developing"},
+                    )
+                    saved_config = app.config["TEAM_DASHBOARD_CONFIG_STORE"].load()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["project_status"], "Developing")
+        self.assertEqual(fake_client.calls, [("221733", "Developing")])
+        cached_project = saved_config["task_cache"]["teams"]["AF"]["under_prd"][0]
+        self.assertEqual(cached_project["status"], "Developing")
+
     def test_team_dashboard_config_uses_remote_local_agent_store_when_enabled(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,

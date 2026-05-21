@@ -324,7 +324,7 @@
 }
 
 .team-dashboard-project-card .bpmis-project-card-main {
-  grid-template-columns: auto minmax(90px, 0.58fr) minmax(92px, 0.52fr) minmax(220px, 1.45fr) minmax(58px, 0.34fr) minmax(64px, 0.38fr) minmax(165px, 0.95fr) minmax(82px, 0.48fr) minmax(42px, 0.28fr) 40px;
+  grid-template-columns: auto minmax(90px, 0.58fr) minmax(92px, 0.52fr) minmax(220px, 1.45fr) minmax(58px, 0.34fr) minmax(64px, 0.38fr) minmax(128px, 0.72fr) minmax(82px, 0.48fr) minmax(42px, 0.28fr) 40px;
   gap: 10px;
   align-items: center;
   padding: 10px 12px;
@@ -351,6 +351,24 @@
 .team-dashboard-project-card .bpmis-project-card-main strong {
   font-size: 0.83rem;
   line-height: 1.25;
+}
+
+.team-dashboard-project-card .bpmis-project-card-status select {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid #d7e1ef;
+  border-radius: 8px;
+  background: #fff;
+  color: #14213d;
+  font: inherit;
+  font-size: 0.83rem;
+  font-weight: 700;
+  line-height: 1.2;
+  padding: 6px 28px 6px 8px;
+}
+
+.team-dashboard-project-card .bpmis-project-card-status select:disabled {
+  opacity: 0.68;
 }
 
 .team-dashboard-project-count > span,
