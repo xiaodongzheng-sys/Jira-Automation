@@ -314,6 +314,7 @@ ENV_VARS+=("TEAM_PORTAL_DEPLOY_HASH=$DEPLOY_HASH")
 IFS='|'
 ENV_VARS_JOINED="${ENV_VARS[*]}"
 unset IFS
+DEPLOY_SECRET_ARGS=(--update-secrets "LOCAL_AGENT_HMAC_SECRET=local-agent-hmac-secret:latest")
 
 if [[ "${CLOUD_RUN_SKIP_UNCHANGED:-0}" == "1" && "$DEPLOY_HASH" != "unknown" ]]; then
   EXISTING_DEPLOY_HASH="$("$GCLOUD_BIN" run services describe "$SERVICE" ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} --region "$REGION" --format='value(spec.template.spec.containers[0].env[?name="TEAM_PORTAL_DEPLOY_HASH"].value)' 2>/dev/null || true)"
@@ -356,6 +357,7 @@ DEPLOY_STARTED_AT="$(date +%s)"
   --region "$REGION" \
   "${DEPLOY_SOURCE_ARGS[@]}" \
   ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} \
+  "${DEPLOY_SECRET_ARGS[@]}" \
   --max-instances="${CLOUD_RUN_MAX_INSTANCES:-1}" \
   ${RUNTIME_ARGS[@]+"${RUNTIME_ARGS[@]}"} \
   --set-env-vars "^|^$ENV_VARS_JOINED"
