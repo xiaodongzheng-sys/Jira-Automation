@@ -31,6 +31,11 @@ project_args=()
 if [[ -n "$PROJECT_ID" ]]; then
   project_args=(--project "$PROJECT_ID")
 fi
+account_args=()
+DEPLOY_ACCOUNT="${CLOUD_RUN_DEPLOY_ACCOUNT:-$(read_env_value CLOUD_RUN_DEPLOY_ACCOUNT)}"
+if [[ -n "$DEPLOY_ACCOUNT" ]]; then
+  account_args=(--account "$DEPLOY_ACCOUNT")
+fi
 
 current_sha() {
   git -C "$ROOT_DIR" rev-parse HEAD
@@ -51,6 +56,7 @@ artifact_image_exists() {
   local image_tag="${image_uri##*:}"
   "$GCLOUD_BIN" artifacts docker tags list "$image_package" \
     ${project_args[@]+"${project_args[@]}"} \
+    ${account_args[@]+"${account_args[@]}"} \
     --filter="tag:$image_tag" \
     --format="value(tag)" \
     2>/dev/null | grep -Fx "$image_tag" >/dev/null

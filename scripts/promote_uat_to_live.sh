@@ -24,12 +24,14 @@ if [[ -x "/opt/homebrew/bin/python3.12" && -z "${CLOUDSDK_PYTHON:-}" ]]; then
 fi
 
 PROJECT_ARGS=()
-if [[ -n "${GOOGLE_CLOUD_PROJECT:-}" ]]; then
-  PROJECT_ARGS=(--project "$GOOGLE_CLOUD_PROJECT")
+GOOGLE_CLOUD_PROJECT_RESOLVED="${GOOGLE_CLOUD_PROJECT:-$(read_env_value GOOGLE_CLOUD_PROJECT)}"
+if [[ -n "$GOOGLE_CLOUD_PROJECT_RESOLVED" ]]; then
+  PROJECT_ARGS=(--project "$GOOGLE_CLOUD_PROJECT_RESOLVED")
 fi
 ACCOUNT_ARGS=()
-if [[ -n "${CLOUD_RUN_DEPLOY_ACCOUNT:-}" ]]; then
-  ACCOUNT_ARGS=(--account "$CLOUD_RUN_DEPLOY_ACCOUNT")
+CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED="${CLOUD_RUN_DEPLOY_ACCOUNT:-$(read_env_value CLOUD_RUN_DEPLOY_ACCOUNT)}"
+if [[ -n "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED" ]]; then
+  ACCOUNT_ARGS=(--account "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED")
 fi
 
 enforce_release_window_target live

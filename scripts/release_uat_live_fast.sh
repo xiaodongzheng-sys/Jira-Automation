@@ -29,6 +29,11 @@ project_args=()
 if [[ -n "$PROJECT_ID" ]]; then
   project_args=(--project "$PROJECT_ID")
 fi
+account_args=()
+DEPLOY_ACCOUNT="${CLOUD_RUN_DEPLOY_ACCOUNT:-$(read_env_value CLOUD_RUN_DEPLOY_ACCOUNT)}"
+if [[ -n "$DEPLOY_ACCOUNT" ]]; then
+  account_args=(--account "$DEPLOY_ACCOUNT")
+fi
 
 current_sha() {
   git -C "$ROOT_DIR" rev-parse HEAD
@@ -49,6 +54,7 @@ artifact_image_exists() {
   local image_tag="${image_uri##*:}"
   "$GCLOUD_BIN" artifacts docker tags list "$image_package" \
     ${project_args[@]+"${project_args[@]}"} \
+    ${account_args[@]+"${account_args[@]}"} \
     --filter="tag:$image_tag" \
     --format="value(tag)" \
     2>/dev/null | grep -Fx "$image_tag" >/dev/null
@@ -162,6 +168,7 @@ resolve_uat_url() {
   local service_url
   service_url="$("$GCLOUD_BIN" run services describe "$SERVICE" \
     ${project_args[@]+"${project_args[@]}"} \
+    ${account_args[@]+"${account_args[@]}"} \
     --region "$REGION" \
     --format="value(status.url)")"
   tag_url_from_service_url "$service_url"
@@ -248,7 +255,7 @@ require_gcloud_noninteractive_auth() {
     echo "gcloud is not installed. Install Google Cloud SDK first." >&2
     return 1
   fi
-  if "$GCLOUD_BIN" auth print-access-token ${project_args[@]+"${project_args[@]}"} >/dev/null 2>&1; then
+  if "$GCLOUD_BIN" auth print-access-token ${project_args[@]+"${project_args[@]}"} ${account_args[@]+"${account_args[@]}"} >/dev/null 2>&1; then
     return 0
   fi
   {
@@ -289,7 +296,7 @@ fi
 
 require_gcloud_noninteractive_auth
 GOOGLE_CLOUD_PROJECT="$PROJECT_ID" \
-CLOUD_RUN_DEPLOY_ACCOUNT="${CLOUD_RUN_DEPLOY_ACCOUNT:-$(read_env_value CLOUD_RUN_DEPLOY_ACCOUNT)}" \
+CLOUD_RUN_DEPLOY_ACCOUNT="$DEPLOY_ACCOUNT" \
 "$ROOT_DIR/scripts/promote_uat_to_live.sh"
 TEAM_STACK_HOST_ROOT="${TEAM_STACK_HOST_ROOT:-$(recommended_team_stack_root)}"
 "$TEAM_STACK_HOST_ROOT/scripts/run_team_stack.sh" doctor

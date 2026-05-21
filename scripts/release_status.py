@@ -101,6 +101,11 @@ def _gcloud_binary(*, env: Mapping[str, str]) -> str:
     return str(bundled)
 
 
+def _gcloud_account_args(*, env: Mapping[str, str]) -> list[str]:
+    account = _env_value("CLOUD_RUN_DEPLOY_ACCOUNT", env)
+    return ["--account", account] if account else []
+
+
 def _gcloud_secret_value(secret_name: str, *, env: Mapping[str, str], runner: Any = _run) -> tuple[str, str]:
     project = _env_value("GOOGLE_CLOUD_PROJECT", env)
     gcloud_bin = _gcloud_binary(env=env)
@@ -109,6 +114,7 @@ def _gcloud_secret_value(secret_name: str, *, env: Mapping[str, str], runner: An
     command = [gcloud_bin, "secrets", "versions", "access", "latest", f"--secret={secret_name}"]
     if project:
         command.extend(["--project", project])
+    command.extend(_gcloud_account_args(env=env))
     completed = runner(command, env=env)
     if completed.returncode != 0:
         return "", _sanitize_error_text(completed.stderr or completed.stdout or f"exit {completed.returncode}")
@@ -206,6 +212,7 @@ def _revision_release_value(
     *,
     gcloud_bin: str,
     project_args: list[str],
+    account_args: list[str],
     region: str,
     env: Mapping[str, str],
     runner: Any = _run,
@@ -220,6 +227,7 @@ def _revision_release_value(
             "describe",
             revision_name,
             *project_args,
+            *account_args,
             "--region",
             region,
             "--format=json",
@@ -248,6 +256,7 @@ def build_status_lines(*, env: Mapping[str, str] | None = None, runner: Any = _r
     project = _env_value("GOOGLE_CLOUD_PROJECT", env)
     gcloud_bin = _gcloud_binary(env=env)
     project_args = ["--project", project] if project else []
+    account_args = _gcloud_account_args(env=env)
 
     lines.append(f"Cloud Run service: {service} region={region}")
     if not gcloud_bin or not Path(gcloud_bin).exists():
@@ -261,6 +270,7 @@ def build_status_lines(*, env: Mapping[str, str] | None = None, runner: Any = _r
                 "describe",
                 service,
                 *project_args,
+                *account_args,
                 "--region",
                 region,
                 "--format=json",
@@ -280,6 +290,7 @@ def build_status_lines(*, env: Mapping[str, str] | None = None, runner: Any = _r
                     uat_revision,
                     gcloud_bin=gcloud_bin,
                     project_args=project_args,
+                    account_args=account_args,
                     region=region,
                     env=env,
                     runner=runner,
@@ -300,6 +311,7 @@ def build_status_lines(*, env: Mapping[str, str] | None = None, runner: Any = _r
                         revision,
                         gcloud_bin=gcloud_bin,
                         project_args=project_args,
+                        account_args=account_args,
                         region=region,
                         env=env,
                         runner=runner,

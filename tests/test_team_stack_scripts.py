@@ -592,6 +592,24 @@ exit 0
         self.assertIn("Skipping live local-agent restart", contents)
         self.assertIn("PROMOTE_UAT_LOCAL_AGENT_RESTART_MODE", contents)
 
+    def test_live_promotion_defaults_to_env_file_service_account(self):
+        promote_script = PROJECT_ROOT / "scripts/promote_uat_to_live.sh"
+        contents = promote_script.read_text(encoding="utf-8")
+
+        self.assertIn('GOOGLE_CLOUD_PROJECT_RESOLVED="${GOOGLE_CLOUD_PROJECT:-$(read_env_value GOOGLE_CLOUD_PROJECT)}"', contents)
+        self.assertIn('CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED="${CLOUD_RUN_DEPLOY_ACCOUNT:-$(read_env_value CLOUD_RUN_DEPLOY_ACCOUNT)}"', contents)
+        self.assertIn('ACCOUNT_ARGS=(--account "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED")', contents)
+
+    def test_fast_release_gcloud_checks_use_deploy_service_account(self):
+        uat_script = (PROJECT_ROOT / "scripts/release_uat_fast.sh").read_text(encoding="utf-8")
+        live_script = (PROJECT_ROOT / "scripts/release_uat_live_fast.sh").read_text(encoding="utf-8")
+
+        for contents in (uat_script, live_script):
+            self.assertIn('DEPLOY_ACCOUNT="${CLOUD_RUN_DEPLOY_ACCOUNT:-$(read_env_value CLOUD_RUN_DEPLOY_ACCOUNT)}"', contents)
+            self.assertIn('account_args=(--account "$DEPLOY_ACCOUNT")', contents)
+            self.assertIn('${account_args[@]+"${account_args[@]}"}', contents)
+        self.assertIn('auth print-access-token ${project_args[@]+"${project_args[@]}"} ${account_args[@]+"${account_args[@]}"}', live_script)
+
     def test_release_checklist_documents_full_gate_and_read_only_smoke(self):
         checklist = (PROJECT_ROOT / "docs/release-checklist.md").read_text(encoding="utf-8")
 
@@ -2002,11 +2020,14 @@ fi
         with tempfile.TemporaryDirectory() as temp_dir:
             gcloud_path = Path(temp_dir) / "gcloud"
             gcloud_path.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+            gcloud_commands: list[list[str]] = []
 
             def fake_run(command, *, env):
                 joined = " ".join(command)
                 if command[0] == "git":
                     return subprocess.CompletedProcess(command, 0, stdout="d8fb5fb59c743dadfce1f8a106a7846c8ebe2fbc\n", stderr="")
+                if command[0] == str(gcloud_path):
+                    gcloud_commands.append(command)
                 if command[0] == str(gcloud_path) and "run services describe" in joined:
                     return subprocess.CompletedProcess(
                         command,
@@ -2086,6 +2107,7 @@ fi
                 env={
                     "GCLOUD_BIN": str(gcloud_path),
                     "GOOGLE_CLOUD_PROJECT": "civil-partition-492805-v7",
+                    "CLOUD_RUN_DEPLOY_ACCOUNT": "deploy@example.iam.gserviceaccount.com",
                     "CLOUD_RUN_SERVICE": "team-portal",
                     "CLOUD_RUN_REGION": "asia-southeast1",
                     "CLOUD_RUN_UAT_TAG": "uat",
@@ -2103,6 +2125,10 @@ fi
         self.assertIn("git_revision=d8fb5fb59c743dadfce1f8a106a7846c8ebe2fbc", output)
         self.assertIn("Cloud Run service live traffic: revision=team-portal-00200-n7q percent=100", output)
         self.assertIn("(Cloud Run traffic, not Mac public Live)", output)
+        self.assertTrue(gcloud_commands)
+        for command in gcloud_commands:
+            self.assertIn("--account", command)
+            self.assertIn("deploy@example.iam.gserviceaccount.com", command)
         self.assertIn("Mac portal availability: status=online", output)
         self.assertIn("Shared session configuration: status=ok", output)
         self.assertIn("match=yes", output)
