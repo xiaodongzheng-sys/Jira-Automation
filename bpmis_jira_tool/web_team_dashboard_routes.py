@@ -1350,12 +1350,15 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             job_store: JobStore = current_app.config["JOB_STORE"]
             job = job_store.create("team-dashboard-monthly-report-draft", title="Generate Monthly Report Draft")
             app_obj = current_app._get_current_object()
-            thread = threading.Thread(
-                target=_run_team_dashboard_monthly_report_draft_job,
-                args=(app_obj, job.job_id, settings, request_payload, user_identity),
-                daemon=True,
-            )
-            thread.start()
+            if current_app.testing:
+                _run_team_dashboard_monthly_report_draft_job(app_obj, job.job_id, settings, request_payload, user_identity)
+            else:
+                thread = threading.Thread(
+                    target=_run_team_dashboard_monthly_report_draft_job,
+                    args=(app_obj, job.job_id, settings, request_payload, user_identity),
+                    daemon=True,
+                )
+                thread.start()
             _log_portal_event(
                 "team_dashboard_monthly_report_draft_queued",
                 **_build_request_log_context(

@@ -71,6 +71,7 @@ start() {
 }
 
 stop() {
+  assert_no_active_meeting_recording_before_restart "stop team stack guard" "$DATA_DIR"
   local pid
   pid="$(find_live_pid || true)"
   if [[ -n "${pid:-}" ]]; then
@@ -122,7 +123,8 @@ logs() {
 }
 
 restart() {
-  stop || true
+  assert_no_active_meeting_recording_before_restart "restart team stack guard" "$DATA_DIR"
+  stop
   start
 }
 

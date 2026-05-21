@@ -2308,9 +2308,34 @@ def _queue_meeting_recorder_process_job(
             "record": _meeting_record_summary(record),
         }
     if str(record.get("status") or "").strip().lower() == "processing":
-        record["status"] = "recorded"
-        record["error"] = ""
-        _get_meeting_record_store().save_record(record)
+        recovery = _build_meeting_processing_service(current_app.config["SETTINGS"]).recover_stale_processing_record(
+            record_id=str(record.get("record_id") or record_id),
+            owner_email=normalized_owner,
+        )
+        recovered_record = recovery.get("record") if isinstance(recovery.get("record"), dict) else record
+        if recovery.get("status") == "recovered":
+            return {
+                "status": "completed",
+                "state": "completed",
+                "job_id": "",
+                "record": _meeting_record_summary(recovered_record),
+            }
+        if recovery.get("status") == "failed":
+            return {
+                "status": "failed",
+                "state": "failed",
+                "job_id": "",
+                "record": _meeting_record_summary(recovered_record),
+                "message": str(recovered_record.get("error") or "Meeting processing stalled."),
+                "error_retryable": True,
+                "stalled_retryable": True,
+            }
+        return {
+            "status": "queued",
+            "state": "running",
+            "job_id": "",
+            "record": _meeting_record_summary(recovered_record),
+        }
     job = job_store.create(
         MEETING_RECORDER_PROCESS_ACTION,
         title="Process Meeting Recording",
@@ -2701,6 +2726,8 @@ def _meeting_record_summary(record: dict[str, Any]) -> dict[str, Any]:
         "transcript_status": (record.get("transcript") or {}).get("status"),
         "minutes_status": (record.get("minutes") or {}).get("status"),
         "email_status": (record.get("email") or {}).get("status"),
+        "stalled_retryable": bool(record.get("stalled_retryable")),
+        "processing_recovery": record.get("processing_recovery") or {},
         "error": record.get("error") or "",
     }
 

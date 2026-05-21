@@ -1169,55 +1169,44 @@ class MeetingProcessingService:
             audio_path = self._recorded_audio_path(record)
             transcript = self._transcribe_audio(audio_path, transcript_language=record.get("transcript_language"))
             owner_speech = self._transcribe_owner_speech_candidates(record, transcript_language=record.get("transcript_language"))
-            transcript_text = str(transcript.get("text") or "").strip()
-            transcript_hash = _meeting_transcript_hash(transcript_text)
-            estimated_transcript_tokens = _estimate_meeting_transcript_tokens(transcript_text)
-            minutes_payload = self._cached_minutes_payload(
-                record=record,
-                transcript_hash=transcript_hash,
-                estimated_transcript_tokens=estimated_transcript_tokens,
-            )
-            if minutes_payload is None:
-                minutes_payload = self._generate_minutes_payload(
-                    record=record,
-                    transcript_text=transcript_text,
-                    transcript_quality=transcript.get("quality") or {},
-                    transcript_hash=transcript_hash,
-                    estimated_transcript_tokens=estimated_transcript_tokens,
-                )
-            owner_speech_asset_url = ""
-            if owner_speech.get("status") == "completed" and str(owner_speech.get("text") or "").strip():
-                owner_speech_asset_url = f"/meeting-recorder/assets/{record_id}/owner-microphone-transcript.txt"
-                (self.store.record_dir(record_id) / "owner-microphone-transcript.txt").write_text(
-                    str(owner_speech.get("text") or "").strip(),
-                    encoding="utf-8",
-                )
-            record["transcript"] = {
-                "status": "completed",
-                "text": transcript_text,
-                "chunks": transcript.get("chunks") or [{"start_seconds": 0, "text": transcript_text}],
-                "segments": transcript.get("segments") or [],
-                "quality": transcript.get("quality") or {},
-                "owner_speech_status": owner_speech.get("status") or "skipped",
-                "owner_speech_candidates": owner_speech.get("chunks") or [],
-                "owner_speech_quality": owner_speech.get("quality") or {},
-                "owner_speech_warning": owner_speech.get("warning") or "",
-                "owner_speech_asset_url": owner_speech_asset_url,
-                "asset_url": f"/meeting-recorder/assets/{record_id}/transcript.txt",
-            }
-            (self.store.record_dir(record_id) / "transcript.txt").write_text(transcript_text, encoding="utf-8")
-            record["visual_evidence"] = []
-            minutes_payload["asset_url"] = f"/meeting-recorder/assets/{record_id}/minutes.md"
-            record["minutes"] = minutes_payload
-            (self.store.record_dir(record_id) / "minutes.md").write_text(str(minutes_payload.get("markdown") or ""), encoding="utf-8")
-            record["status"] = "completed"
-            self.store.save_record(record)
-            return record
+            return self._complete_record_from_transcript(record=record, transcript=transcript, owner_speech=owner_speech)
         except Exception as error:  # noqa: BLE001
             record["status"] = "failed"
             record["error"] = str(error)
             self.store.save_record(record)
             raise
+
+    def recover_stale_processing_record(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
+        record = self.store.get_record(record_id)
+        _assert_record_owner(record, owner_email)
+        if str(record.get("status") or "").strip().lower() != "processing":
+            return {"status": "not_applicable", "record": record}
+        if self._record_has_active_whisper_process(record_id):
+            return {"status": "active", "record": record}
+        transcript = self._recover_transcript_from_segments(record)
+        if transcript is None:
+            message = "Meeting processing stalled before transcription completed. Re-run Process to retry."
+            record["status"] = "failed"
+            record["error"] = message
+            record["stalled_retryable"] = True
+            record["processing_recovery"] = {
+                "status": "failed_incomplete_segments",
+                "checked_at": _utc_now(),
+            }
+            self.store.save_record(record)
+            return {"status": "failed", "record": record}
+        record["stalled_retryable"] = False
+        record["processing_recovery"] = {
+            "status": "recovered_from_segments",
+            "recovered_at": _utc_now(),
+            "segment_count": len(transcript.get("segments") or []),
+        }
+        completed = self._complete_record_from_transcript(
+            record=record,
+            transcript=transcript,
+            owner_speech={"status": "skipped"},
+        )
+        return {"status": "recovered", "record": completed}
 
     def send_minutes_email(self, *, record_id: str, owner_email: str, recipient: str | None = None) -> dict[str, Any]:
         if self.credential_store is None:
@@ -1666,6 +1655,143 @@ class MeetingProcessingService:
                 "capture_source": media.get("screencapture_capture_source") or "",
             },
         }
+
+    def _complete_record_from_transcript(
+        self,
+        *,
+        record: dict[str, Any],
+        transcript: dict[str, Any],
+        owner_speech: dict[str, Any],
+    ) -> dict[str, Any]:
+        record_id = str(record.get("record_id") or "")
+        transcript_text = str(transcript.get("text") or "").strip()
+        transcript_hash = _meeting_transcript_hash(transcript_text)
+        estimated_transcript_tokens = _estimate_meeting_transcript_tokens(transcript_text)
+        minutes_payload = self._cached_minutes_payload(
+            record=record,
+            transcript_hash=transcript_hash,
+            estimated_transcript_tokens=estimated_transcript_tokens,
+        )
+        if minutes_payload is None:
+            minutes_payload = self._generate_minutes_payload(
+                record=record,
+                transcript_text=transcript_text,
+                transcript_quality=transcript.get("quality") or {},
+                transcript_hash=transcript_hash,
+                estimated_transcript_tokens=estimated_transcript_tokens,
+            )
+        owner_speech_asset_url = ""
+        if owner_speech.get("status") == "completed" and str(owner_speech.get("text") or "").strip():
+            owner_speech_asset_url = f"/meeting-recorder/assets/{record_id}/owner-microphone-transcript.txt"
+            (self.store.record_dir(record_id) / "owner-microphone-transcript.txt").write_text(
+                str(owner_speech.get("text") or "").strip(),
+                encoding="utf-8",
+            )
+        record["transcript"] = {
+            "status": "completed",
+            "text": transcript_text,
+            "chunks": transcript.get("chunks") or [{"start_seconds": 0, "text": transcript_text}],
+            "segments": transcript.get("segments") or [],
+            "quality": transcript.get("quality") or {},
+            "owner_speech_status": owner_speech.get("status") or "skipped",
+            "owner_speech_candidates": owner_speech.get("chunks") or [],
+            "owner_speech_quality": owner_speech.get("quality") or {},
+            "owner_speech_warning": owner_speech.get("warning") or "",
+            "owner_speech_asset_url": owner_speech_asset_url,
+            "asset_url": f"/meeting-recorder/assets/{record_id}/transcript.txt",
+        }
+        (self.store.record_dir(record_id) / "transcript.txt").write_text(transcript_text, encoding="utf-8")
+        record["visual_evidence"] = []
+        minutes_payload["asset_url"] = f"/meeting-recorder/assets/{record_id}/minutes.md"
+        record["minutes"] = minutes_payload
+        (self.store.record_dir(record_id) / "minutes.md").write_text(str(minutes_payload.get("markdown") or ""), encoding="utf-8")
+        record["status"] = "completed"
+        record["error"] = ""
+        self.store.save_record(record)
+        return record
+
+    def _recover_transcript_from_segments(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        record_id = str(record.get("record_id") or "")
+        try:
+            audio_path = self._recorded_audio_path(record)
+            duration_seconds = _audio_duration_seconds(audio_path)
+        except Exception:
+            return None
+        if duration_seconds is None or duration_seconds <= 0:
+            return None
+        expected_count = max(1, int((float(duration_seconds) + MEETING_TRANSCRIPT_SEGMENT_SECONDS - 0.001) // MEETING_TRANSCRIPT_SEGMENT_SECONDS))
+        record_dir = self.store.record_dir(record_id)
+        text_parts: list[str] = []
+        chunks: list[dict[str, Any]] = []
+        segments: list[dict[str, Any]] = []
+        for index in range(expected_count):
+            txt_path = record_dir / f"whisper-segment-{index:04d}.txt"
+            try:
+                segment_text = txt_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                return None
+            if not segment_text:
+                return None
+            start_seconds = float(index * MEETING_TRANSCRIPT_SEGMENT_SECONDS)
+            end_seconds = min(float(duration_seconds), start_seconds + MEETING_TRANSCRIPT_SEGMENT_SECONDS)
+            srt_chunks = _parse_srt_transcript(record_dir / f"whisper-segment-{index:04d}.srt")
+            offset_chunks = []
+            for chunk in srt_chunks:
+                offset_chunks.append({
+                    **chunk,
+                    "start_seconds": float(chunk.get("start_seconds") or 0) + start_seconds,
+                    "end_seconds": float(chunk.get("end_seconds") or 0) + start_seconds,
+                })
+            if not offset_chunks:
+                offset_chunks = [{"start_seconds": start_seconds, "end_seconds": end_seconds, "text": segment_text}]
+            chunks.extend(offset_chunks)
+            segments.append({
+                "index": index,
+                "start_seconds": start_seconds,
+                "end_seconds": end_seconds,
+                "language": meeting_transcript_whisper_language(record.get("transcript_language"), fallback=self.config.whisper_language),
+                "language_confidence": None,
+                "quality": "recovered",
+                "possible_missed_speech": False,
+                "no_audio": False,
+                "startup_silence": False,
+                "chunk_count": len(offset_chunks),
+            })
+            text_parts.append(segment_text)
+        text = "\n".join(part for part in text_parts if part).strip()
+        if not text:
+            return None
+        return {
+            "text": text,
+            "chunks": chunks,
+            "segments": segments,
+            "quality": {
+                "status": "recovered",
+                "segment_count": expected_count,
+                "segment_seconds": MEETING_TRANSCRIPT_SEGMENT_SECONDS,
+                "source": "whisper_segment_files",
+            },
+            "language_retry_count": 0,
+        }
+
+    def _record_has_active_whisper_process(self, record_id: str) -> bool:
+        record_dir = str(self.store.record_dir(record_id))
+        try:
+            completed = subprocess.run(
+                ["ps", "-axo", "command="],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return True
+        if completed.returncode != 0:
+            return True
+        for line in completed.stdout.splitlines():
+            if "whisper-cli" in line and record_dir in line:
+                return True
+        return False
 
     def _transcript_segment_workers(self) -> int:
         return _effective_transcript_segment_workers(self.config.transcript_segment_workers)

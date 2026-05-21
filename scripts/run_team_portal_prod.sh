@@ -52,6 +52,7 @@ start() {
   local stale_pid
   stale_pid="$(find_live_pid || true)"
   if [[ -n "${stale_pid:-}" ]]; then
+    assert_no_active_meeting_recording_before_restart "replace stale team portal process on port $PORT" "$DATA_DIR"
     echo "Stopping stale portal process on port $PORT (pid $stale_pid) because its revision does not match $EXPECTED_REVISION."
     kill "$stale_pid" >/dev/null 2>&1 || true
     sleep 1
@@ -80,6 +81,7 @@ start() {
 }
 
 stop() {
+  assert_no_active_meeting_recording_before_restart "stop team portal" "$DATA_DIR"
   if [[ -f "$PID_FILE" ]]; then
     kill "$(cat "$PID_FILE")" >/dev/null 2>&1 || true
     rm -f "$PID_FILE"
@@ -110,7 +112,8 @@ logs() {
 }
 
 restart() {
-  stop || true
+  assert_no_active_meeting_recording_before_restart "restart team portal" "$DATA_DIR"
+  stop
   start
 }
 

@@ -3,6 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/team_env.sh"
 VENV_PYTHON="$ROOT_DIR/.venv/bin/python"
 SERVER_WRAPPER="$ROOT_DIR/scripts/serve_forever.sh"
 TMP_DIR="$ROOT_DIR/tmp"
@@ -12,6 +13,7 @@ HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-5000}"
 LABEL="io.codex.bpmis-jira-tool"
 PLIST_FILE="$HOME/Library/LaunchAgents/$LABEL.plist"
+DATA_DIR="$(resolve_team_data_dir "${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}")"
 
 mkdir -p "$TMP_DIR" "$HOME/Library/LaunchAgents"
 
@@ -83,6 +85,7 @@ start() {
 
   : >"$LOG_FILE"
   write_plist
+  assert_no_active_meeting_recording_before_restart "kickstart Flask portal launchd job" "$DATA_DIR"
   bootout_if_loaded
   launchctl bootstrap "gui/$(id -u)" "$PLIST_FILE"
   launchctl kickstart -k "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
@@ -104,6 +107,7 @@ start() {
 }
 
 stop() {
+  assert_no_active_meeting_recording_before_restart "stop Flask portal launchd job" "$DATA_DIR"
   bootout_if_loaded
   rm -f "$PID_FILE"
   echo "Server stopped."
@@ -124,7 +128,8 @@ logs() {
 }
 
 restart() {
-  stop || true
+  assert_no_active_meeting_recording_before_restart "restart Flask portal launchd job" "$DATA_DIR"
+  stop
   start
 }
 

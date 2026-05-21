@@ -3,12 +3,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/team_env.sh"
 TMP_DIR="$ROOT_DIR/tmp"
 PID_FILE="$TMP_DIR/team_portal.pid"
 LOG_FILE="$TMP_DIR/team_portal.log"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-5000}"
-PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+DATA_DIR="$(resolve_team_data_dir "${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}")"
 
 mkdir -p "$TMP_DIR"
 
@@ -52,6 +53,7 @@ start() {
 }
 
 stop() {
+  assert_no_active_meeting_recording_before_restart "stop team portal" "$DATA_DIR"
   if [[ -f "$PID_FILE" ]]; then
     kill "$(cat "$PID_FILE")" >/dev/null 2>&1 || true
     rm -f "$PID_FILE"
@@ -79,7 +81,8 @@ logs() {
 }
 
 restart() {
-  stop || true
+  assert_no_active_meeting_recording_before_restart "restart team portal" "$DATA_DIR"
+  stop
   start
 }
 

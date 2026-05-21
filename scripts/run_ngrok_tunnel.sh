@@ -64,6 +64,12 @@ is_running() {
 }
 
 start() {
+  if [[ "${ALLOW_LEGACY_NGROK_PORTAL:-0}" != "1" ]]; then
+    echo "ngrok tunnel is disabled."
+    echo "Use the Cloudflare-backed tunnel instead."
+    return 1
+  fi
+
   if is_running; then
     echo "ngrok tunnel already running (pid $(cat "$PID_FILE"))."
     echo "Log: $LOG_FILE"

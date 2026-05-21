@@ -496,6 +496,11 @@ def _extract_structure_rows(self, relative_path: str, lines: list[str]) -> dict[
                     add_reference(route, "route", route_line, route_context)
                     add_entity_edge(current_class_id, "route", route, route_line, route_context)
             pending_routes = [item for item in pending_routes if item[3] != "RequestMapping"]
+            for inherited in re.findall(r"\b(?:implements|extends)\s+([A-Z][A-Za-z0-9_]*(?:\s*,\s*[A-Z][A-Za-z0-9_]*)*)", stripped):
+                for inherited_name in re.findall(r"[A-Z][A-Za-z0-9_]*", inherited):
+                    edge_kind = "implements" if "implements" in stripped else "extends"
+                    add_reference(inherited_name, "type_hierarchy", line_no, stripped)
+                    add_entity_edge(current_class_id or file_entity_id, edge_kind, inherited_name, line_no, stripped)
         py_match = PY_DEF_PATTERN.search(line)
         if py_match and suffix != ".py":
             add_definition(py_match.group(2), "python_" + py_match.group(1).lower(), line_no, stripped)

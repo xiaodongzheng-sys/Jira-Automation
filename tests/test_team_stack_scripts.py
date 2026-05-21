@@ -1126,6 +1126,75 @@ exit 0
         self.assertIn("Refusing to restart Mac local-agent", completed.stdout)
         self.assertIn("meeting-active", completed.stdout)
 
+    def test_generic_restart_guard_blocks_portal_restart_when_recording(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_root = Path(temp_dir)
+            record_dir = data_root / "meeting_records" / "records" / "meeting-active"
+            record_dir.mkdir(parents=True)
+            status_path = record_dir / "screencapture-status.json"
+            status_path.write_text(json.dumps({"status": "recording"}), encoding="utf-8")
+            (record_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "record_id": "meeting-active",
+                        "title": "Portal Guard Review",
+                        "status": "recording",
+                        "recording_started_at": "2026-05-21T08:03:51+00:00",
+                        "media": {
+                            "screencapture_status_path": str(status_path),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            completed = self._run_team_env_helper(
+                f'assert_no_active_meeting_recording_before_restart "restart team portal" "{data_root}"',
+            )
+
+        self.assertEqual(completed.returncode, 1, msg=completed.stdout + completed.stderr)
+        self.assertIn("Refusing to restart team portal", completed.stdout)
+        self.assertIn("portal, team stack, launchd, or Mac local-agent", completed.stdout)
+        self.assertIn("meeting-active", completed.stdout)
+
+    def test_portal_restart_scripts_use_active_recording_guard(self):
+        prod_script = (PROJECT_ROOT / "scripts/run_team_portal_prod.sh").read_text(encoding="utf-8")
+        dev_script = (PROJECT_ROOT / "scripts/run_team_portal.sh").read_text(encoding="utf-8")
+        server_script = (PROJECT_ROOT / "scripts/run_server.sh").read_text(encoding="utf-8")
+
+        self.assertIn('assert_no_active_meeting_recording_before_restart "stop team portal" "$DATA_DIR"', prod_script)
+        self.assertIn('assert_no_active_meeting_recording_before_restart "restart team portal" "$DATA_DIR"', prod_script)
+        self.assertIn('assert_no_active_meeting_recording_before_restart "replace stale team portal process on port $PORT" "$DATA_DIR"', prod_script)
+        self.assertIn('assert_no_active_meeting_recording_before_restart "stop team portal" "$DATA_DIR"', dev_script)
+        self.assertIn('assert_no_active_meeting_recording_before_restart "restart team portal" "$DATA_DIR"', dev_script)
+        self.assertIn('assert_no_active_meeting_recording_before_restart "kickstart Flask portal launchd job" "$DATA_DIR"', server_script)
+
+    def test_team_stack_and_launchd_restart_paths_use_active_recording_guard(self):
+        stack_script = (PROJECT_ROOT / "scripts/run_team_stack.sh").read_text(encoding="utf-8")
+        stack_launchd_script = (PROJECT_ROOT / "scripts/install_team_stack_launchd.sh").read_text(encoding="utf-8")
+        portal_launchd_script = (PROJECT_ROOT / "scripts/install_team_portal_launchd.sh").read_text(encoding="utf-8")
+        setup_script = (PROJECT_ROOT / "scripts/setup_team_stack_host_workspace.sh").read_text(encoding="utf-8")
+
+        self.assertIn('assert_no_active_meeting_recording_before_restart "stop team stack"', stack_script)
+        self.assertIn('assert_no_active_meeting_recording_before_restart "restart team stack guard"', stack_script)
+        self.assertIn('assert_no_active_meeting_recording_before_restart "restart team portal"', stack_script)
+        self.assertIn('launchctl kickstart -k "$domain_label"', stack_script)
+        self.assertIn('assert_no_active_meeting_recording_before_restart "reload team stack launchd job" "$DATA_DIR"', stack_launchd_script)
+        self.assertIn('assert_no_active_meeting_recording_before_restart "reload team portal launchd job" "$DATA_DIR"', portal_launchd_script)
+        self.assertIn('assert_no_active_meeting_recording_before_restart "kickstart team stack launchd job"', setup_script)
+
+    def test_team_stack_guard_does_not_restart_or_cleanup_portal_while_recording(self):
+        guard_script = (PROJECT_ROOT / "scripts/run_team_stack_guard.sh").read_text(encoding="utf-8")
+        guard_daemon_script = (PROJECT_ROOT / "scripts/run_team_stack_guard_daemon.sh").read_text(encoding="utf-8")
+
+        self.assertIn("restart_blocked_by_active_recording()", guard_script)
+        self.assertIn('restart_blocked_by_active_recording "team stack guard cleanup stop"', guard_script)
+        self.assertIn('restart_blocked_by_active_recording "portal launch"', guard_script)
+        self.assertIn('restart_blocked_by_active_recording "portal restart after failed health checks"', guard_script)
+        self.assertIn("Leaving portal and tunnel processes running during guard shutdown", guard_script)
+        self.assertIn('assert_no_active_meeting_recording_before_restart "stop team stack guard" "$DATA_DIR"', guard_daemon_script)
+        self.assertIn('assert_no_active_meeting_recording_before_restart "restart team stack guard" "$DATA_DIR"', guard_daemon_script)
+
     def test_mac_stack_supports_portal_only_restart(self):
         stack_script = PROJECT_ROOT / "scripts/run_team_stack.sh"
 

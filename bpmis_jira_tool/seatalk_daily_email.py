@@ -962,16 +962,19 @@ def send_daily_email(
             window_start=window_start.isoformat() if window_start else "",
             window_end=window_end.isoformat() if window_end else "",
         )
-    trello_result = sync_daily_summary_to_trello(
-        briefing=briefing,
-        run_date=run_date,
-        run_slot=run_slot,
-        window_label=window_label,
-        data_root=data_root,
-        now=local_now,
-        trello_client=trello_client,
-        trello_store=trello_store,
-    )
+    if trello_client is None:
+        trello_result = TrelloSyncResult(status="skipped")
+    else:
+        trello_result = sync_daily_summary_to_trello(
+            briefing=briefing,
+            run_date=run_date,
+            run_slot=run_slot,
+            window_label=window_label,
+            data_root=data_root,
+            now=local_now,
+            trello_client=trello_client,
+            trello_store=trello_store,
+        )
     response = send_gmail_message(
         credentials=credentials,
         sender=owner_email,
@@ -3633,6 +3636,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     now = datetime.fromisoformat(args.now).astimezone(SEATALK_INSIGHTS_TIMEZONE) if args.now else None
+    trello_client: TrelloDailySummaryClient | None = None
+    try:
+        trello_client = TrelloDailySummaryClient.from_env()
+    except ConfigError:
+        trello_client = None
     result = send_daily_email(
         settings=Settings.from_env(),
         recipient=args.recipient,
@@ -3641,6 +3649,7 @@ def main(argv: list[str] | None = None) -> int:
         now=now,
         force=args.force,
         dry_run=args.dry_run,
+        trello_client=trello_client,
     )
     print(json.dumps(result.__dict__, ensure_ascii=False, sort_keys=True))
     return 0

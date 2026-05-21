@@ -14,6 +14,13 @@ if [[ ! -f "$TEMPLATE_PATH" ]]; then
   exit 1
 fi
 
+if [[ "${ALLOW_LEGACY_NGROK_PORTAL:-0}" != "1" ]]; then
+  echo "ngrok launchd installation is disabled."
+  echo "Use the Cloudflare-backed tunnel instead."
+  echo "Set ALLOW_LEGACY_NGROK_PORTAL=1 only for an explicit emergency rollback."
+  exit 1
+fi
+
 mkdir -p "$LAUNCH_AGENTS_DIR"
 
 DATA_DIR="$(resolve_team_data_dir "${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}")"

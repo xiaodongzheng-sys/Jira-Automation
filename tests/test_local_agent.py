@@ -768,6 +768,47 @@ class LocalAgentServerTests(unittest.TestCase):
             recipient="owner@npt.sg",
         )
 
+    def test_signed_meeting_recorder_process_async_recovers_stale_processing_record(self):
+        store = self.app.config["MEETING_RECORD_STORE"]
+        record = store.create_record(
+            owner_email="owner@npt.sg",
+            title="Recoverable Async Review",
+            platform="zoom",
+            meeting_link="https://zoom.us/j/recover",
+        )
+        record["status"] = "processing"
+        store.save_record(record)
+        recovered_record = {
+            **record,
+            "status": "completed",
+            "transcript": {"status": "completed"},
+            "minutes": {"status": "completed"},
+            "processing_recovery": {"status": "recovered_from_segments", "segment_count": 2},
+        }
+        fake_processing = Mock()
+        fake_processing.recover_stale_processing_record.return_value = {
+            "status": "recovered",
+            "record": recovered_record,
+        }
+
+        with patch("bpmis_jira_tool.local_agent_server._build_meeting_processing_service", return_value=fake_processing):
+            response = self._post_signed(
+                "/api/local-agent/meeting-recorder/process-async",
+                {"record_id": record["record_id"], "owner_email": "owner@npt.sg"},
+            )
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["state"], "completed")
+        self.assertEqual(payload["job_id"], "")
+        self.assertEqual(payload["record"]["status"], "completed")
+        self.assertEqual(payload["record"]["processing_recovery"]["status"], "recovered_from_segments")
+        fake_processing.recover_stale_processing_record.assert_called_once_with(
+            record_id=record["record_id"],
+            owner_email="owner@npt.sg",
+        )
+        fake_processing.process_recording.assert_not_called()
+
     def test_scheduled_auto_stop_queues_local_processing_and_email(self):
         store = self.app.config["MEETING_RECORD_STORE"]
         record = store.create_record(

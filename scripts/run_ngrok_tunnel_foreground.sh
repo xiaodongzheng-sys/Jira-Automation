@@ -19,6 +19,13 @@ if [[ -z "$NGROK_BIN" ]]; then
   exit 1
 fi
 
+if [[ "${ALLOW_LEGACY_NGROK_PORTAL:-0}" != "1" ]]; then
+  echo "Portal ngrok tunnel is disabled."
+  echo "Use the Cloudflare-backed tunnel instead."
+  echo "Set ALLOW_LEGACY_NGROK_PORTAL=1 only for an explicit emergency rollback."
+  exit 1
+fi
+
 if [[ -z "$PUBLIC_URL" ]]; then
   echo "TEAM_PORTAL_BASE_URL is required to start the public ngrok tunnel."
   exit 1

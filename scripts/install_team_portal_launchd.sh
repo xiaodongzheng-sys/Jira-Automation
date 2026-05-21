@@ -34,6 +34,7 @@ sed \
   -e "s|__STDERR_LOG__|$STDERR_LOG|g" \
   "$TEMPLATE_PATH" >"$PLIST_TARGET"
 
+assert_no_active_meeting_recording_before_restart "reload team portal launchd job" "$DATA_DIR"
 launchctl unload "$PLIST_TARGET" >/dev/null 2>&1 || true
 launchctl load "$PLIST_TARGET"
 

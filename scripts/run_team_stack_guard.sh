@@ -88,6 +88,31 @@ log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" | tee -a "$LOG_FILE"
 }
 
+restart_blocked_by_active_recording() {
+  local action="$1"
+  local active_output
+  local active_status
+  set +e
+  active_output="$(meeting_recorder_active_recordings "$DATA_DIR")"
+  active_status=$?
+  set -e
+  if [[ "$active_status" == "0" ]]; then
+    log "Skipping $action because Meeting Recorder is actively recording."
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && log "$line"
+    done <<<"$active_output"
+    return 0
+  fi
+  if [[ "$active_status" == "2" ]]; then
+    log "Skipping $action because active Meeting Recorder sessions could not be verified."
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && log "$line"
+    done <<<"$active_output"
+    return 0
+  fi
+  return 1
+}
+
 read_pid_file() {
   local pid_file="$1"
   if [[ ! -f "$pid_file" ]]; then
@@ -123,6 +148,11 @@ stop_child() {
 }
 
 cleanup() {
+  if restart_blocked_by_active_recording "team stack guard cleanup stop"; then
+    log "Leaving portal and tunnel processes running during guard shutdown to avoid interrupting recording."
+    rm -f "$PID_FILE"
+    return 0
+  fi
   stop_child "$TUNNEL_CHILD_PID_FILE" "$TUNNEL_LABEL"
   stop_child "$PORTAL_CHILD_PID_FILE" "portal"
   if [[ -f "$CAFFEINATE_PID_FILE" ]]; then
@@ -375,6 +405,10 @@ ensure_portal_running() {
   fi
 
   if [[ ! -f "$PORTAL_CHILD_PID_FILE" ]]; then
+    if restart_blocked_by_active_recording "portal launch"; then
+      portal_unhealthy_count=0
+      return
+    fi
     start_portal
     portal_unhealthy_count=0
     return
@@ -389,6 +423,10 @@ ensure_portal_running() {
   portal_unhealthy_count=$((portal_unhealthy_count + 1))
   if (( portal_unhealthy_count >= 2 )); then
     log "Portal health check failed twice; restarting it."
+    if restart_blocked_by_active_recording "portal restart after failed health checks"; then
+      portal_unhealthy_count=0
+      return
+    fi
     stop_child "$PORTAL_CHILD_PID_FILE" "portal"
     start_portal
     portal_unhealthy_count=0

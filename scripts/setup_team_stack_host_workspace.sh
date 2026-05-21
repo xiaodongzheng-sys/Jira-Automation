@@ -66,6 +66,8 @@ echo "Installing launchd from host workspace..."
 
 echo
 echo "Starting launchd job..."
+assert_no_active_meeting_recording_before_restart "kickstart team stack launchd job" \
+  "${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}"
 launchctl kickstart -k "gui/$(id -u)/${TEAM_STACK_LAUNCHD_LABEL:-io.npt.jira-creation-stack}" >/dev/null 2>&1 || \
 launchctl start "${TEAM_STACK_LAUNCHD_LABEL:-io.npt.jira-creation-stack}" >/dev/null 2>&1 || true
 

@@ -330,12 +330,12 @@ PY
   return 1
 }
 
-assert_no_active_meeting_recording_before_local_agent_restart() {
-  local action="${1:-restart Mac local-agent}"
+assert_no_active_meeting_recording_before_restart() {
+  local action="${1:-restart service}"
   local data_dir="${2:-${LOCAL_AGENT_TEAM_PORTAL_DATA_DIR:-${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}}}"
   data_dir="$(resolve_team_data_dir "$data_dir")"
-  if [[ "${MEETING_RECORDER_ALLOW_LOCAL_AGENT_RESTART_DURING_RECORDING:-0}" == "1" ]]; then
-    echo "Bypassing active Meeting Recorder guard because MEETING_RECORDER_ALLOW_LOCAL_AGENT_RESTART_DURING_RECORDING=1."
+  if [[ "${MEETING_RECORDER_ALLOW_RESTART_DURING_RECORDING:-0}" == "1" || "${MEETING_RECORDER_ALLOW_LOCAL_AGENT_RESTART_DURING_RECORDING:-0}" == "1" ]]; then
+    echo "Bypassing active Meeting Recorder guard because restart during recording was explicitly allowed."
     return 0
   fi
 
@@ -348,7 +348,7 @@ assert_no_active_meeting_recording_before_local_agent_restart() {
 
   if [[ "$active_status" == "0" ]]; then
     echo "Refusing to $action because Meeting Recorder is actively recording."
-    echo "Stop the recording from the portal before restarting the Mac local-agent."
+    echo "Stop the recording from the portal before restarting portal, team stack, launchd, or Mac local-agent services."
     printf '%s\n' "$active_output"
     return 1
   fi
@@ -358,6 +358,10 @@ assert_no_active_meeting_recording_before_local_agent_restart() {
     return 1
   fi
   return 0
+}
+
+assert_no_active_meeting_recording_before_local_agent_restart() {
+  assert_no_active_meeting_recording_before_restart "$@"
 }
 
 hash_text() {

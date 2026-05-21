@@ -1700,6 +1700,86 @@ class MeetingProcessingServiceTests(unittest.TestCase):
         self.assertEqual(processed["minutes"]["chunk_count"], 1)
         self.assertEqual(processed["minutes"]["cache_status"], "miss")
 
+    def test_recover_stale_processing_record_rebuilds_from_whisper_segments(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Recovered Review",
+                platform="zoom",
+                meeting_link="https://zoom.us/j/123",
+            )
+            record_dir = store.record_dir(record["record_id"])
+            audio_path = record_dir / "meeting.wav"
+            audio_path.write_bytes(b"audio")
+            record["status"] = "processing"
+            record["media"] = {"recording_mode": "audio_only", "audio_path": str(audio_path.relative_to(root))}
+            store.save_record(record)
+            (record_dir / "whisper-segment-0000.txt").write_text("Alice opened the meeting.", encoding="utf-8")
+            (record_dir / "whisper-segment-0000.srt").write_text(
+                "1\n00:00:01,000 --> 00:00:03,000\nAlice opened the meeting.\n",
+                encoding="utf-8",
+            )
+            (record_dir / "whisper-segment-0001.txt").write_text("Bob confirmed the launch.", encoding="utf-8")
+            (record_dir / "whisper-segment-0001.srt").write_text(
+                "1\n00:00:02,000 --> 00:00:05,000\nBob confirmed the launch.\n",
+                encoding="utf-8",
+            )
+            text_client = FakeTextClient()
+            service = MeetingProcessingService(store=store, config=MeetingRecorderConfig(), text_client=text_client)
+
+            with patch("bpmis_jira_tool.meeting_recorder._audio_duration_seconds", return_value=120.0), patch.object(
+                service,
+                "_record_has_active_whisper_process",
+                return_value=False,
+            ), patch.object(service, "_transcribe_audio") as transcribe:
+                result = service.recover_stale_processing_record(record_id=record["record_id"], owner_email="owner@npt.sg")
+            self.assertEqual(result["status"], "recovered")
+            recovered = result["record"]
+            self.assertEqual(recovered["status"], "completed")
+            transcribe.assert_not_called()
+            self.assertEqual(recovered["transcript"]["text"], "Alice opened the meeting.\nBob confirmed the launch.")
+            self.assertEqual(recovered["transcript"]["chunks"][1]["start_seconds"], 62.0)
+            self.assertEqual(recovered["processing_recovery"]["status"], "recovered_from_segments")
+            self.assertEqual(recovered["processing_recovery"]["segment_count"], 2)
+            self.assertEqual(recovered["minutes"]["generation_mode"], "direct")
+            self.assertTrue((store.record_dir(recovered["record_id"]) / "transcript.txt").exists())
+            self.assertTrue((store.record_dir(recovered["record_id"]) / "minutes.md").exists())
+            self.assertEqual(len(text_client.calls), 1)
+
+    def test_recover_stale_processing_record_marks_incomplete_segments_retryable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Incomplete Review",
+                platform="zoom",
+                meeting_link="https://zoom.us/j/123",
+            )
+            record_dir = store.record_dir(record["record_id"])
+            audio_path = record_dir / "meeting.wav"
+            audio_path.write_bytes(b"audio")
+            record["status"] = "processing"
+            record["media"] = {"recording_mode": "audio_only", "audio_path": str(audio_path.relative_to(root))}
+            store.save_record(record)
+            (record_dir / "whisper-segment-0000.txt").write_text("Only first segment finished.", encoding="utf-8")
+            service = MeetingProcessingService(store=store, config=MeetingRecorderConfig(), text_client=FakeTextClient())
+
+            with patch("bpmis_jira_tool.meeting_recorder._audio_duration_seconds", return_value=120.0), patch.object(
+                service,
+                "_record_has_active_whisper_process",
+                return_value=False,
+            ):
+                result = service.recover_stale_processing_record(record_id=record["record_id"], owner_email="owner@npt.sg")
+            self.assertEqual(result["status"], "failed")
+            failed = store.get_record(record["record_id"])
+            self.assertEqual(failed["status"], "failed")
+            self.assertTrue(failed["stalled_retryable"])
+            self.assertIn("stalled before transcription completed", failed["error"])
+            self.assertEqual(failed["processing_recovery"]["status"], "failed_incomplete_segments")
+
     def test_long_transcript_generates_chunk_summaries_before_final_minutes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2947,6 +3027,81 @@ class MeetingRecorderRouteTests(unittest.TestCase):
             recipient="xiaodong.zheng@npt.sg",
         )
 
+    def test_process_route_recovers_stale_processing_record_without_queueing_job(self):
+        store = self.app.config["MEETING_RECORD_STORE"]
+        record = store.create_record(
+            owner_email="xiaodong.zheng@npt.sg",
+            title="Recoverable Processing",
+            platform="zoom",
+            meeting_link="https://zoom.us/j/recover",
+        )
+        record["status"] = "processing"
+        store.save_record(record)
+        recovered_record = {
+            **record,
+            "status": "completed",
+            "transcript": {"status": "completed"},
+            "minutes": {"status": "completed"},
+            "processing_recovery": {"status": "recovered_from_segments", "segment_count": 2},
+        }
+        fake_processing = Mock()
+        fake_processing.recover_stale_processing_record.return_value = {
+            "status": "recovered",
+            "record": recovered_record,
+        }
+
+        with patch("bpmis_jira_tool.web._build_meeting_processing_service", return_value=fake_processing):
+            with self.app.test_client() as client:
+                self._login(client, email="xiaodong.zheng@npt.sg")
+                response = client.post(f"/api/meeting-recorder/records/{record['record_id']}/process")
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["state"], "completed")
+        self.assertEqual(payload["job_id"], "")
+        self.assertEqual(payload["record"]["status"], "completed")
+        self.assertEqual(payload["record"]["processing_recovery"]["status"], "recovered_from_segments")
+        fake_processing.recover_stale_processing_record.assert_called_once_with(
+            record_id=record["record_id"],
+            owner_email="xiaodong.zheng@npt.sg",
+        )
+        fake_processing.process_recording.assert_not_called()
+
+    def test_process_route_marks_stale_processing_record_failed_retryable(self):
+        store = self.app.config["MEETING_RECORD_STORE"]
+        record = store.create_record(
+            owner_email="xiaodong.zheng@npt.sg",
+            title="Incomplete Processing",
+            platform="zoom",
+            meeting_link="https://zoom.us/j/retry",
+        )
+        record["status"] = "processing"
+        store.save_record(record)
+        failed_record = {
+            **record,
+            "status": "failed",
+            "error": "Meeting processing stalled before transcription completed. Re-run Process to retry.",
+            "stalled_retryable": True,
+        }
+        fake_processing = Mock()
+        fake_processing.recover_stale_processing_record.return_value = {
+            "status": "failed",
+            "record": failed_record,
+        }
+
+        with patch("bpmis_jira_tool.web._build_meeting_processing_service", return_value=fake_processing):
+            with self.app.test_client() as client:
+                self._login(client, email="xiaodong.zheng@npt.sg")
+                response = client.post(f"/api/meeting-recorder/records/{record['record_id']}/process")
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["state"], "failed")
+        self.assertTrue(payload["stalled_retryable"])
+        self.assertTrue(payload["error_retryable"])
+        self.assertEqual(payload["record"]["status"], "failed")
+        self.assertTrue(payload["record"]["stalled_retryable"])
+
     def test_scheduled_auto_stop_queues_processing_and_email(self):
         store = self.app.config["MEETING_RECORD_STORE"]
         record = store.create_record(
@@ -3316,7 +3471,7 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         self.assertEqual(failed_record["status"], "failed")
         self.assertNotIn("token", failed_record["error"])
 
-    def test_stale_processing_record_can_be_requeued(self):
+    def test_stale_processing_record_with_active_worker_is_not_requeued(self):
         record = self.app.config["MEETING_RECORD_STORE"].create_record(
             owner_email="xiaodong.zheng@npt.sg",
             title="Stale Review",
@@ -3326,11 +3481,9 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         record["status"] = "processing"
         self.app.config["MEETING_RECORD_STORE"].save_record(record)
         fake_processing = Mock()
-        fake_processing.process_recording.return_value = {
-            "record_id": record["record_id"],
-            "title": "Stale Review",
-            "platform": "zoom",
-            "status": "completed",
+        fake_processing.recover_stale_processing_record.return_value = {
+            "status": "active",
+            "record": record,
         }
 
         with patch("bpmis_jira_tool.web._build_meeting_processing_service", return_value=fake_processing):
@@ -3338,14 +3491,15 @@ class MeetingRecorderRouteTests(unittest.TestCase):
                 self._login(client, email="xiaodong.zheng@npt.sg")
                 response = client.post(f"/api/meeting-recorder/records/{record['record_id']}/process")
                 payload = response.get_json()
-                completed = self._wait_for_process_job(client, payload["job_id"])
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(completed["state"], "completed")
-        fake_processing.process_recording.assert_called_once_with(
+        self.assertEqual(payload["state"], "running")
+        self.assertEqual(payload["job_id"], "")
+        fake_processing.recover_stale_processing_record.assert_called_once_with(
             record_id=record["record_id"],
             owner_email="xiaodong.zheng@npt.sg",
         )
+        fake_processing.process_recording.assert_not_called()
 
     def test_meeting_recorder_script_polls_process_jobs_and_uses_clear_errors(self):
         source = Path("static/meeting_recorder.js").read_text(encoding="utf-8")

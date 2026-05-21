@@ -331,6 +331,8 @@ start() {
 }
 
 stop() {
+  assert_no_active_meeting_recording_before_restart "stop team stack" \
+    "${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}"
   "$GUARD_DAEMON_SCRIPT" stop || true
   "$ROOT_DIR/scripts/run_ngrok_tunnel.sh" stop || true
   "$ROOT_DIR/scripts/run_cloudflare_tunnel.sh" stop || true
@@ -367,6 +369,8 @@ restart() {
 
 restart_guard() {
   local guard_env="$1"
+  assert_no_active_meeting_recording_before_restart "restart team stack guard" \
+    "${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}"
   if launchd_stack_installed; then
     local domain_label
     domain_label="$(launchd_domain_label)"
@@ -380,6 +384,8 @@ restart_guard() {
 }
 
 restart_portal() {
+  assert_no_active_meeting_recording_before_restart "restart team portal" \
+    "${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}"
   echo "Restarting team portal only; tunnel, guard, and local-agent are left running."
   "$ROOT_DIR/scripts/run_team_portal_prod.sh" restart
 }
