@@ -1637,12 +1637,19 @@ class MeetingProcessingServiceTests(unittest.TestCase):
         self.assertIn("Codex minutes", minutes)
         self.assertEqual(len(text_client.calls), 1)
         self.assertIn("Alice: approve the launch.", text_client.calls[0]["user_prompt"])
-        self.assertIn("## Key Discussion Topics", text_client.calls[0]["user_prompt"])
-        self.assertIn("- **Topic Name**", text_client.calls[0]["user_prompt"])
-        self.assertIn("  - Factual discussion point grounded in the transcript.", text_client.calls[0]["user_prompt"])
-        self.assertIn("  - [Follow up] Action, question, or check needed before the next discussion.", text_client.calls[0]["user_prompt"])
-        self.assertIn("Do not return separate Summary, Decisions, Action Items", text_client.calls[0]["user_prompt"])
-        self.assertIn("[Follow up]", text_client.calls[0]["system_prompt"])
+        self.assertIn("Hi all,", text_client.calls[0]["user_prompt"])
+        self.assertIn("Below are the key alignments and follow-up items from today's meeting.", text_client.calls[0]["user_prompt"])
+        self.assertIn("1. Topic Name", text_client.calls[0]["user_prompt"])
+        self.assertIn("- Confirmed alignment, decision, or agreed direction.", text_client.calls[0]["user_prompt"])
+        self.assertIn("- Future direction, concern, risk, dependency, or constraint.", text_client.calls[0]["user_prompt"])
+        self.assertIn("- Owner or team to do the next step; use owner TBD if unclear.", text_client.calls[0]["user_prompt"])
+        self.assertIn("Regards", text_client.calls[0]["user_prompt"])
+        self.assertIn("Extract up to 5 most important topics", text_client.calls[0]["user_prompt"])
+        self.assertIn("confirmed alignment or decision; named owner or next step; blocker, dependency, or risk", text_client.calls[0]["user_prompt"])
+        self.assertIn("Omit lower-value background, chronology, side discussions", text_client.calls[0]["user_prompt"])
+        self.assertIn("Under each topic, write 2-3 bullets maximum.", text_client.calls[0]["user_prompt"])
+        self.assertIn("Do not use nested bullets, long explanations, filler", text_client.calls[0]["user_prompt"])
+        self.assertIn("Do not invent owners, decisions, dates, deadlines, slide links", text_client.calls[0]["system_prompt"])
         self.assertNotIn("Screen Evidence", text_client.calls[0]["user_prompt"])
         self.assertNotIn("keyframe", text_client.calls[0]["user_prompt"])
         self.assertNotIn("screen evidence", text_client.calls[0]["system_prompt"].lower())
@@ -1827,8 +1834,16 @@ class MeetingProcessingServiceTests(unittest.TestCase):
         self.assertEqual(processed["minutes"]["transcript_hash"], _meeting_transcript_hash(long_transcript))
         self.assertGreater(processed["minutes"]["estimated_transcript_tokens"], 3000)
         self.assertTrue(all(long_transcript not in call["user_prompt"] for call in text_client.calls))
+        self.assertIn("Preserve only meaningful topics, alignments, explicit decisions, owners, risks, dependencies, and next steps.", text_client.calls[0]["user_prompt"])
         self.assertIn("# Chunk Summaries", text_client.calls[-1]["user_prompt"])
         self.assertNotIn("# Transcript\n", text_client.calls[-1]["user_prompt"])
+        self.assertIn("Hi all,", text_client.calls[-1]["user_prompt"])
+        self.assertIn("1. Topic Name", text_client.calls[-1]["user_prompt"])
+        self.assertIn("Extract up to 5 most important topics", text_client.calls[-1]["user_prompt"])
+        self.assertIn("confirmed alignment or decision; named owner or next step; blocker, dependency, or risk", text_client.calls[-1]["user_prompt"])
+        self.assertIn("Omit lower-value background, chronology, side discussions", text_client.calls[-1]["user_prompt"])
+        self.assertIn("Under each topic, write 2-3 bullets maximum.", text_client.calls[-1]["user_prompt"])
+        self.assertIn("Do not use nested bullets, long explanations, filler", text_client.calls[-1]["user_prompt"])
 
     def test_process_reuses_cached_minutes_for_same_transcript_hash(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1851,9 +1866,9 @@ class MeetingProcessingServiceTests(unittest.TestCase):
             }
             record["minutes"] = {
                 "status": "completed",
-                "markdown": "## Key Discussion Topics\n- **Cached**\n  - Existing minutes.",
-                "prompt_version": "v3_topic_bullets_english_minutes",
-                "generation_version": "v1_token_safe_chunked_minutes",
+                "markdown": "Hi all,\n\n1. Cached\n- Existing alignment.\n\nRegards\nOwner",
+                "prompt_version": "v4_alignment_next_steps_email",
+                "generation_version": "v3_alignment_email_max5",
                 "transcript_hash": transcript_hash,
                 "estimated_transcript_tokens": 9,
                 "generation_mode": "direct",
@@ -1880,7 +1895,7 @@ class MeetingProcessingServiceTests(unittest.TestCase):
                 processed = service.process_recording(record_id=record["record_id"], owner_email="owner@npt.sg")
 
         self.assertEqual(len(text_client.calls), 0)
-        self.assertEqual(processed["minutes"]["markdown"], "## Key Discussion Topics\n- **Cached**\n  - Existing minutes.")
+        self.assertEqual(processed["minutes"]["markdown"], "Hi all,\n\n1. Cached\n- Existing alignment.\n\nRegards\nOwner")
         self.assertEqual(processed["minutes"]["cache_status"], "hit")
         self.assertEqual(processed["minutes"]["transcript_hash"], transcript_hash)
 
@@ -1904,8 +1919,8 @@ class MeetingProcessingServiceTests(unittest.TestCase):
             record["minutes"] = {
                 "status": "completed",
                 "markdown": "Old minutes",
-                "prompt_version": "v3_topic_bullets_english_minutes",
-                "generation_version": "v1_token_safe_chunked_minutes",
+                "prompt_version": "v4_alignment_next_steps_email",
+                "generation_version": "v3_alignment_email_max5",
                 "transcript_hash": _meeting_transcript_hash("old transcript"),
                 "estimated_transcript_tokens": 4,
                 "generation_mode": "direct",
@@ -1956,7 +1971,7 @@ class MeetingProcessingServiceTests(unittest.TestCase):
             record["minutes"] = {
                 "status": "completed",
                 "markdown": "Old minutes",
-                "prompt_version": "v3_topic_bullets_english_minutes",
+                "prompt_version": "v4_alignment_next_steps_email",
                 "generation_version": "old_generation_version",
                 "transcript_hash": _meeting_transcript_hash(transcript_text),
                 "estimated_transcript_tokens": 9,
@@ -1984,7 +1999,7 @@ class MeetingProcessingServiceTests(unittest.TestCase):
 
         self.assertEqual(len(text_client.calls), 1)
         self.assertEqual(processed["minutes"]["cache_status"], "miss")
-        self.assertEqual(processed["minutes"]["generation_version"], "v1_token_safe_chunked_minutes")
+        self.assertEqual(processed["minutes"]["generation_version"], "v3_alignment_email_max5")
 
     def test_process_regenerates_minutes_when_prompt_version_changes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2008,7 +2023,7 @@ class MeetingProcessingServiceTests(unittest.TestCase):
                 "status": "completed",
                 "markdown": "Old minutes",
                 "prompt_version": "old_prompt_version",
-                "generation_version": "v1_token_safe_chunked_minutes",
+                "generation_version": "v3_alignment_email_max5",
                 "transcript_hash": _meeting_transcript_hash(transcript_text),
                 "estimated_transcript_tokens": 10,
                 "generation_mode": "direct",
@@ -2035,7 +2050,7 @@ class MeetingProcessingServiceTests(unittest.TestCase):
 
         self.assertEqual(len(text_client.calls), 1)
         self.assertEqual(processed["minutes"]["cache_status"], "miss")
-        self.assertEqual(processed["minutes"]["prompt_version"], "v3_topic_bullets_english_minutes")
+        self.assertEqual(processed["minutes"]["prompt_version"], "v4_alignment_next_steps_email")
 
     def test_process_screencapture_recording_marks_local_microphone_owner_speech_candidates(self):
         with tempfile.TemporaryDirectory() as temp_dir:

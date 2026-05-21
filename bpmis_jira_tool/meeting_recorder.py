@@ -28,8 +28,8 @@ from bpmis_jira_tool.gmail_sender import credentials_from_payload, send_gmail_me
 
 
 CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
-MEETING_RECORDER_PROMPT_VERSION = "v3_topic_bullets_english_minutes"
-MEETING_RECORDER_MINUTES_GENERATION_VERSION = "v1_token_safe_chunked_minutes"
+MEETING_RECORDER_PROMPT_VERSION = "v4_alignment_next_steps_email"
+MEETING_RECORDER_MINUTES_GENERATION_VERSION = "v3_alignment_email_max5"
 MEETING_RECORDER_TOKEN_CHARS_PER_TOKEN = 4
 MEETING_RECORDER_MINUTES_CHUNK_THRESHOLD_TOKENS = 3_000
 MEETING_RECORDER_MINUTES_CHUNK_TARGET_TOKENS = 2_500
@@ -1998,36 +1998,48 @@ class MeetingProcessingService:
 
     def _minutes_system_prompt(self) -> str:
         return (
-            "You write concise, evidence-grounded English meeting minutes for product managers. "
+            "You write concise, evidence-grounded English meeting minutes that can be sent as an email. "
             "Use only the provided spoken transcript and meeting metadata. "
             "Do not use screen recordings, screenshots, keyframes, or visual context. "
-            "Do not invent owners, decisions, dates, deadlines, or action items. "
-            "If a next step is implied but owner, timing, or decision is unclear, write it as a [Follow up] item instead of pretending it is confirmed. "
-            "If transcript quality warnings are present, include a short warning before Key Discussion Topics and do not infer decisions or follow-ups from repeated low-audio text."
+            "Focus on each meaningful topic's alignment, decision, dependency, and next step. "
+            "Do not invent owners, decisions, dates, deadlines, slide links, or action items. "
+            "Use names only when they are clear from transcript or attendees; otherwise use the team or owner TBD. "
+            "If a next step is implied but owner, timing, or decision is unclear, write it as a follow-up instead of pretending it is confirmed. "
+            "If transcript quality warnings are present, include at most one short warning line after the greeting."
         )
 
     def _generate_minutes(self, *, record: dict[str, Any], transcript_text: str, transcript_quality: dict[str, Any] | None = None) -> str:
         quality = transcript_quality or {}
+        sender_name = _meeting_minutes_sender_name(record)
         user_prompt = (
             f"Meeting title: {record.get('title')}\n"
             f"Platform: {record.get('platform')}\n"
             f"Scheduled start: {record.get('scheduled_start')}\n"
             f"Attendees from calendar: {json.dumps(record.get('attendees') or [], ensure_ascii=False)}\n"
+            f"Sender sign-off name: {sender_name}\n"
             f"Transcript quality: {json.dumps(quality, ensure_ascii=False)}\n\n"
             "# Transcript\n"
             f"{transcript_text or 'No transcript text was produced.'}\n\n"
-            "Return English Markdown in this exact PM-readable format:\n"
-            "## Key Discussion Topics\n"
-            "- **Topic Name**\n"
-            "  - Factual discussion point grounded in the transcript.\n"
-            "  - [Follow up] Action, question, or check needed before the next discussion.\n\n"
+            "Return English Markdown/plain email text in this exact email-ready format:\n"
+            "Hi all,\n\n"
+            "Below are the key alignments and follow-up items from today's meeting.\n\n"
+            "Meeting Slides: Link\n\n"
+            "1. Topic Name\n"
+            "- Confirmed alignment, decision, or agreed direction.\n"
+            "- Future direction, concern, risk, dependency, or constraint.\n"
+            "- Owner or team to do the next step; use owner TBD if unclear.\n\n"
+            "Regards\n"
+            f"{sender_name}\n\n"
             "Rules:\n"
-            "- Group related points under 4-8 concise topic bullets.\n"
-            "- Use top-level bullets only for topic names and make every topic name bold.\n"
-            "- Use indented second-level bullets for details under each topic.\n"
-            "- Prefix uncertain next steps, unresolved questions, or checks with [Follow up].\n"
-            "- Do not return separate Summary, Decisions, Action Items, Risks/Blockers, Open Questions, or Follow-ups sections.\n"
-            "- Do not include transcript excerpts unless needed for clarity."
+            "- Extract up to 5 most important topics, not every transcript turn.\n"
+            "- Rank topics by: confirmed alignment or decision; named owner or next step; blocker, dependency, or risk; boss-level process impact; repeated emphasis in the meeting.\n"
+            "- Omit lower-value background, chronology, side discussions, and topics without alignment or action value.\n"
+            "- Use numbered topic headings exactly like `1. Topic Name`.\n"
+            "- Under each topic, write 2-3 bullets maximum.\n"
+            "- Each bullet must be one sentence and focused on alignment, decision, dependency, or next step.\n"
+            "- Prefer direct wording such as `Agreed that`, `OK for`, `Future:`, or `Name to confirm` over `the group discussed`.\n"
+            "- Include `Meeting Slides: Link` only if a real meeting slides URL is present in metadata or transcript; otherwise omit that line.\n"
+            "- Do not use nested bullets, long explanations, filler, separate Summary/Decisions/Action Items sections, or transcript excerpts."
         )
         return self.text_client.create_answer(system_prompt=self._minutes_system_prompt(), user_prompt=user_prompt).strip()
 
@@ -2040,6 +2052,7 @@ class MeetingProcessingService:
         estimated_transcript_tokens: int,
     ) -> str:
         quality = transcript_quality or {}
+        sender_name = _meeting_minutes_sender_name(record)
         chunk_summaries = []
         for index, chunk in enumerate(transcript_chunks, start=1):
             chunk_prompt = (
@@ -2050,12 +2063,12 @@ class MeetingProcessingService:
                 f"Chunk: {index}/{len(transcript_chunks)}\n\n"
                 "# Transcript Chunk\n"
                 f"{chunk or 'No transcript text was produced.'}\n\n"
-                "Extract concise factual notes for this chunk only. Preserve explicit decisions, owners, dates, risks, and follow-ups. "
-                "Prefix uncertain action-like items with [Follow up]. Do not invent information. Return compact Markdown bullets only."
+                "Extract compact factual notes for this chunk only. Preserve only meaningful topics, alignments, explicit decisions, owners, risks, dependencies, and next steps. "
+                "Do not invent information. Avoid chronology and filler. Return compact Markdown bullets only."
             )
             summary = self.text_client.create_answer(
                 system_prompt=(
-                    "You compress one meeting transcript chunk into factual PM notes. "
+                    "You compress one meeting transcript chunk into high-signal PM notes for later email-ready minutes. "
                     "Use only this chunk and do not infer missing owners, dates, decisions, or action items."
                 ),
                 user_prompt=chunk_prompt,
@@ -2068,22 +2081,31 @@ class MeetingProcessingService:
             f"Scheduled start: {record.get('scheduled_start')}\n"
             f"Attendees from calendar: {json.dumps(record.get('attendees') or [], ensure_ascii=False)}\n"
             f"Transcript quality: {json.dumps(quality, ensure_ascii=False)}\n"
+            f"Sender sign-off name: {sender_name}\n"
             f"Estimated transcript tokens: {estimated_transcript_tokens}\n"
             f"Transcript chunk count: {len(transcript_chunks)}\n\n"
             "# Chunk Summaries\n"
             f"{chr(10).join(chunk_summaries)}\n\n"
-            "Return English Markdown in this exact PM-readable format:\n"
-            "## Key Discussion Topics\n"
-            "- **Topic Name**\n"
-            "  - Factual discussion point grounded in the chunk summaries.\n"
-            "  - [Follow up] Action, question, or check needed before the next discussion.\n\n"
+            "Return English Markdown/plain email text in this exact email-ready format:\n"
+            "Hi all,\n\n"
+            "Below are the key alignments and follow-up items from today's meeting.\n\n"
+            "Meeting Slides: Link\n\n"
+            "1. Topic Name\n"
+            "- Confirmed alignment, decision, or agreed direction.\n"
+            "- Future direction, concern, risk, dependency, or constraint.\n"
+            "- Owner or team to do the next step; use owner TBD if unclear.\n\n"
+            "Regards\n"
+            f"{sender_name}\n\n"
             "Rules:\n"
-            "- Group related points under 4-8 concise topic bullets.\n"
-            "- Use top-level bullets only for topic names and make every topic name bold.\n"
-            "- Use indented second-level bullets for details under each topic.\n"
-            "- Prefix uncertain next steps, unresolved questions, or checks with [Follow up].\n"
-            "- Do not return separate Summary, Decisions, Action Items, Risks/Blockers, Open Questions, or Follow-ups sections.\n"
-            "- Do not include transcript excerpts unless needed for clarity."
+            "- Extract up to 5 most important topics from the chunk summaries, not every transcript turn.\n"
+            "- Rank topics by: confirmed alignment or decision; named owner or next step; blocker, dependency, or risk; boss-level process impact; repeated emphasis in the meeting.\n"
+            "- Omit lower-value background, chronology, side discussions, and topics without alignment or action value.\n"
+            "- Use numbered topic headings exactly like `1. Topic Name`.\n"
+            "- Under each topic, write 2-3 bullets maximum.\n"
+            "- Each bullet must be one sentence and focused on alignment, decision, dependency, or next step.\n"
+            "- Prefer direct wording such as `Agreed that`, `OK for`, `Future:`, or `Name to confirm` over `the group discussed`.\n"
+            "- Include `Meeting Slides: Link` only if a real meeting slides URL is present in metadata or summaries; otherwise omit that line.\n"
+            "- Do not use nested bullets, long explanations, filler, separate Summary/Decisions/Action Items sections, or transcript excerpts."
         )
         return self.text_client.create_answer(system_prompt=self._minutes_system_prompt(), user_prompt=merge_prompt).strip()
 
@@ -2094,6 +2116,21 @@ def _estimate_meeting_transcript_tokens(text: str) -> int:
         (len(str(text or "")) + MEETING_RECORDER_TOKEN_CHARS_PER_TOKEN - 1)
         // MEETING_RECORDER_TOKEN_CHARS_PER_TOKEN,
     )
+
+
+def _meeting_minutes_sender_name(record: dict[str, Any]) -> str:
+    for key in ("owner_name", "owner_display_name", "sender_name"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return value
+    owner_email = str(record.get("owner_email") or "").strip()
+    local_part = owner_email.split("@", 1)[0].strip()
+    if not local_part:
+        return "Xiaodong"
+    parts = [part for part in re.split(r"[._-]+", local_part) if part]
+    if not parts:
+        return local_part
+    return " ".join(part[:1].upper() + part[1:] for part in parts)
 
 
 def _meeting_transcript_hash(text: str) -> str:

@@ -3636,13 +3636,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     now = datetime.fromisoformat(args.now).astimezone(SEATALK_INSIGHTS_TIMEZONE) if args.now else None
+    settings = Settings.from_env()
     trello_client: TrelloDailySummaryClient | None = None
     try:
         trello_client = TrelloDailySummaryClient.from_env()
     except ConfigError:
         trello_client = None
     result = send_daily_email(
-        settings=Settings.from_env(),
+        settings=settings,
         recipient=args.recipient,
         hours=args.hours,
         slot=args.slot,
