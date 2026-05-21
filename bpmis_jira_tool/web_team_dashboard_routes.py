@@ -513,6 +513,10 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         except (ConfigError, ToolError) as error:
             snapshot = store.save_config(mark_version_plan_sync_error(snapshot.config, _version_plan_sync_error_message(error)))
             return _version_plan_json_response(snapshot, sync_queued=False), HTTPStatus.BAD_REQUEST
+        except Exception as error:  # noqa: BLE001
+            current_app.logger.exception("Team Dashboard Version Plan manual sync could not be queued.")
+            snapshot = store.save_config(mark_version_plan_sync_error(snapshot.config, _version_plan_sync_error_message(error)))
+            return _version_plan_json_response(snapshot, sync_queued=False), HTTPStatus.INTERNAL_SERVER_ERROR
         if sync_queued:
             snapshot = store.load_snapshot()
         return _version_plan_json_response(snapshot, sync_queued=sync_queued)

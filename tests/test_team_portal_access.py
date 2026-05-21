@@ -45,6 +45,11 @@ class _UnavailableBPMISClient:
         raise ToolError("Mac local-agent is unavailable: connection refused")
 
 
+class _GenericFailingBPMISClient:
+    def ping(self):
+        raise RuntimeError("BPMIS proxy returned an unexpected error")
+
+
 class _UnavailableLocalAgentClient:
     def bpmis_config_load(self, *, user_key):
         raise ToolError("Mac local-agent is unavailable: connection refused")
@@ -391,6 +396,40 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertNotEqual(auto_payload["sync_state"]["state"], "error")
         self.assertEqual(manual_response.status_code, 400)
         self.assertIn("local-agent", manual_response.get_json()["sync_state"]["error"])
+
+    def test_version_plan_manual_sync_returns_json_when_unexpected_error_occurs(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
+                "BPMIS_CALL_MODE": "local_agent",
+                "LOCAL_AGENT_BPMIS_ENABLED": "true",
+                "LOCAL_AGENT_BASE_URL": "https://agent.example",
+                "LOCAL_AGENT_HMAC_SECRET": "shared-secret",
+                "BPMIS_API_ACCESS_TOKEN": "token",
+            },
+            clear=False,
+        ), patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=_GenericFailingBPMISClient()):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
+                    session["google_credentials"] = {"token": "x", "scopes": []}
+
+                response = client.post("/api/team-dashboard/version-plan/af/sync")
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(payload["status"], "ok")
+        self.assertFalse(payload["sync_queued"])
+        self.assertEqual(payload["sync_state"]["state"], "error")
+        self.assertIn("BPMIS proxy returned an unexpected error", payload["sync_state"]["error"])
 
     def test_cloud_home_google_login_defaults_to_version_plan_for_af_user_without_explicit_next(self):
         def fake_finish_google_oauth(*_args, **_kwargs):
