@@ -846,6 +846,256 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(payload["project_updates"], [])
         self.assertEqual(payload["quality_metadata"]["evidence_quality_metrics"]["dropped_invalid_evidence_count"], 1)
 
+    def test_seatalk_ref_evidence_uses_name_mapping_and_private_fallback(self):
+        mapped_refs = seatalk_daily_email._build_daily_brief_evidence_refs(
+            "\n".join(
+                [
+                    "SeaTalk Chat History Export",
+                    "=== buddy-1022128 ===",
+                    "[2026-05-21 09:00:00] Zheng Xiaodong: Ker Yin please confirm Hold & Release go-live readiness.",
+                ]
+            ),
+            name_mappings={"buddy-1022128": "Ker Yin"},
+        )
+        fallback_refs = seatalk_daily_email._build_daily_brief_evidence_refs(
+            "\n".join(
+                [
+                    "SeaTalk Chat History Export",
+                    "=== buddy-1022128 ===",
+                    "[2026-05-21 09:00:00] Zheng Xiaodong: Ker Yin please confirm Hold & Release go-live readiness.",
+                ]
+            )
+        )
+
+        self.assertEqual(mapped_refs[0]["evidence"], "Ker Yin")
+        self.assertEqual(fallback_refs[0]["evidence"], "Private SeaTalk chat (buddy-1022128)")
+        self.assertEqual(
+            seatalk_daily_email._sanitize_seatalk_evidence("buddy-1022128"),
+            "Private SeaTalk chat (buddy-1022128)",
+        )
+
+    def test_build_daily_briefing_repairs_wrong_source_from_ref_and_normalizes_duplicate_group(self):
+        class WrongSourceRefService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [
+                        {
+                            "domain": "Anti-fraud",
+                            "title": "CRDEv143 greyscale",
+                            "summary": "CRDEv143 10% greyscale is blocked until likely late-afternoon deployment completion.",
+                            "status": "blocked",
+                            "evidence": "[SG] AF需求排期沟通群 ([SG] AF需求排期沟通群)",
+                            "evidence_ref_id": "st-ref-001",
+                            "source_type": "seatalk",
+                        }
+                    ],
+                    "other_updates": [],
+                    "team_member_reminders": [],
+                    "my_todos": [],
+                    "team_todos": [],
+                }
+
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== [SG] AF需求排期沟通群 ([SG] AF需求排期沟通群) ===",
+                "[2026-05-21 12:10:00] Hui Xian: CRDEv143 10% greyscale should wait until late-afternoon deployment completion.",
+            ]
+        )
+
+        payload = build_daily_briefing(
+            WrongSourceRefService(history),
+            now=datetime(2026, 5, 21, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+        )
+
+        self.assertEqual(payload["project_updates"][0]["evidence"], "[SG] AF需求排期沟通群")
+
+    def test_build_daily_briefing_suppresses_project_update_already_covered_by_todo(self):
+        class DuplicateTopicService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [
+                        {
+                            "domain": "Anti-fraud",
+                            "title": "Customer PN false alarm",
+                            "summary": "Grace needs to confirm wording before Xiaodong coordinates the CS reply for the PN false alarm.",
+                            "status": "in_progress",
+                            "evidence": "PH AF UAT物料沟通",
+                            "evidence_ref_id": "st-ref-001",
+                            "source_type": "seatalk",
+                        }
+                    ],
+                    "other_updates": [],
+                    "team_member_reminders": [],
+                    "my_todos": [
+                        {
+                            "domain": "Anti-fraud",
+                            "task": "After Grace confirms wording, send or coordinate the CS reply for the customer PN false-alarm complaint.",
+                            "priority": "medium",
+                            "due": "TBD",
+                            "evidence": "自营贷crms / thread: complaint",
+                            "evidence_ref_id": "st-ref-001",
+                            "source_type": "seatalk",
+                            "action_type": "direct_action",
+                        }
+                    ],
+                    "team_todos": [],
+                }
+
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== PH AF UAT物料沟通 (group-4074790) ===",
+                "[2026-05-21 10:00:00] Grace: Please confirm wording for the customer PN false-alarm complaint before CS reply.",
+            ]
+        )
+
+        payload = build_daily_briefing(
+            DuplicateTopicService(history),
+            now=datetime(2026, 5, 21, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+        )
+
+        self.assertEqual(payload["project_updates"], [])
+        self.assertEqual(payload["direct_action_todos"][0]["evidence"], "PH AF UAT物料沟通 (group-4074790)")
+        self.assertEqual(payload["quality_metadata"]["evidence_quality_metrics"]["suppressed_update_duplicate_count"], 1)
+
+    def test_build_daily_briefing_backfills_valid_team_member_followup_and_records_diagnostics(self):
+        class NoReminderService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [],
+                    "other_updates": [],
+                    "team_member_reminders": [],
+                    "my_todos": [],
+                    "team_todos": [],
+                }
+
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== PH AAF Small Group (group-2753344) ===",
+                "[2026-05-21 09:30:00] Alice Tan: @Ker Yin please confirm whether Hold & Release phase 1 can go live today.",
+            ]
+        )
+
+        payload = build_daily_briefing(
+            NoReminderService(history),
+            now=datetime(2026, 5, 21, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+        )
+
+        self.assertEqual([item["person"] for item in payload["team_member_reminders"]], ["Ker Yin"])
+        metrics = payload["quality_metadata"]["evidence_quality_metrics"]
+        self.assertEqual(metrics["deterministic_followup_backfill_count"], 1)
+        self.assertEqual(metrics["followup_diagnostics"]["candidate_examples"][0]["person"], "Ker Yin")
+
+    def test_build_daily_briefing_drops_backfilled_followup_with_wrong_topic_source(self):
+        class NoReminderService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [],
+                    "other_updates": [],
+                    "team_member_reminders": [],
+                    "my_todos": [],
+                    "team_todos": [],
+                }
+
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== PH AF DB拆库讨论 (group-4403195) ===",
+                "[2026-05-21 11:44:24] Dheonardo: Hi team, this is the description of the issue https://space.sg.maribank.io/utility/swp/detail/20080 -Customer unable to approve transaction.",
+                "[2026-05-21 12:43:55] Dheonardo: hi @Zoey Lu , can we continue for investigation on this ticket bcs the cm has uploaded the log?",
+            ]
+        )
+
+        payload = build_daily_briefing(
+            NoReminderService(history),
+            now=datetime(2026, 5, 21, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+        )
+
+        self.assertEqual(payload["team_member_reminders"], [])
+        metrics = payload["quality_metadata"]["evidence_quality_metrics"]
+        self.assertEqual(metrics["followup_diagnostics"]["reason_buckets"]["invalid_ref"], 1)
+
+    def test_build_daily_briefing_drops_generic_seatalk_group_update(self):
+        class GenericGroupUpdateService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [
+                        {
+                            "domain": "Anti-fraud",
+                            "title": "ITC release checks",
+                            "summary": "ITC release checks required proper MR linkage and approval separation.",
+                            "status": "done",
+                            "evidence": "SeaTalk group",
+                            "source_type": "seatalk",
+                        }
+                    ],
+                    "other_updates": [],
+                    "team_member_reminders": [],
+                    "my_todos": [],
+                    "team_todos": [],
+                }
+
+        payload = build_daily_briefing(
+            GenericGroupUpdateService(
+                "\n".join(
+                    [
+                        "SeaTalk Chat History Export",
+                        "=== group-783880 ===",
+                        "[2026-05-21 10:37:15] Hale Zhou: ITC release checks required proper MR linkage and approval separation.",
+                    ]
+                )
+            ),
+            now=datetime(2026, 5, 21, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+        )
+
+        self.assertEqual(payload["project_updates"], [])
+        self.assertEqual(payload["quality_metadata"]["evidence_quality_metrics"]["dropped_generic_evidence_count"], 1)
+
+    def test_build_daily_briefing_repairs_followup_to_actual_thread_group(self):
+        class WrongReminderSourceService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [],
+                    "other_updates": [],
+                    "team_member_reminders": [
+                        {
+                            "domain": "Anti-fraud",
+                            "person": "Rene Chong",
+                            "reminder": "Confirm whether the ALC v12 face parameter scope includes more than fvVersion and includes fid.",
+                            "evidence": "[PH x Reg] Compliance - AFASA by June 2026 / thread: alcv12 开户人脸参数问题",
+                            "source_type": "seatalk",
+                        }
+                    ],
+                    "my_todos": [],
+                    "team_todos": [],
+                }
+
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== bank 接入ALC v12 沟通 (group-4371534) ===",
+                "[2026-05-21 10:38:12] Ker Yin 珂瑩 [thread reply under: alcv12 开户人脸参数问题]: @Rene Chong 不只是fvVersion 对吧？还有fid？",
+            ]
+        )
+
+        payload = build_daily_briefing(
+            WrongReminderSourceService(history),
+            now=datetime(2026, 5, 21, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+        )
+
+        self.assertEqual(
+            payload["team_member_reminders"][0]["evidence"],
+            "bank 接入ALC v12 沟通 (group-4371534) / thread: alcv12 开户人脸参数问题",
+        )
+
     def test_build_daily_briefing_repairs_thread_group_mismatch(self):
         class WrongGroupEvidenceService(FakeSeaTalkService):
             def _run_codex_insights_prompt(self, *, prompt, system_prompt):
@@ -1175,11 +1425,11 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                             "source_type": "seatalk",
                         },
                         {
-                            "task": "Ensure PH follows up tomorrow on GRC audit-history access and audit-log expectations.",
+                            "task": "Ensure PH follows up tomorrow on vendor onboarding owner alignment.",
                             "domain": "Ops Risk",
                             "priority": "high",
                             "due": "2026-04-30",
-                            "evidence": "GRC evaluation group",
+                            "evidence": "Vendor onboarding group",
                             "source_type": "seatalk",
                         },
                     ],
@@ -1206,8 +1456,8 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(payload["quality_metadata"]["source_coverage"], "SeaTalk + Gmail")
         self.assertEqual(payload["quality_metadata"]["high_confidence_todo_count"], 1)
         self.assertGreaterEqual(payload["quality_metadata"]["deduped_topic_count"], 1)
-        self.assertIn("GRC evaluation group", payload["watch_delegate_todos"][0]["evidence"])
-        self.assertEqual(payload["team_member_reminders"], [])
+        self.assertIn("Vendor onboarding group", payload["watch_delegate_todos"][0]["evidence"])
+        self.assertEqual([item["person"] for item in payload["team_member_reminders"]], ["Sabrina Chan"])
 
     def test_build_daily_briefing_injects_only_matched_report_intelligence(self):
         class MatchedService(FakeSeaTalkService):

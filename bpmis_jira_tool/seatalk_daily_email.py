@@ -594,9 +594,11 @@ def build_daily_briefing(
     unanswered_question_hints = _build_unanswered_seatalk_question_hints(history_text)
     team_member_reminder_candidates = _build_team_member_reminder_candidates(history_text)
     team_member_reminder_hints = _format_team_member_reminder_hints(team_member_reminder_candidates)
+    name_mappings = _load_seatalk_name_mappings(service)
     evidence_refs = _build_daily_brief_evidence_refs(
         history_text,
         gmail_history_text=gmail_history_text,
+        name_mappings=name_mappings,
         team_member_reminder_candidates=team_member_reminder_candidates,
     )
     daily_matches = match_report_intelligence(
@@ -648,7 +650,6 @@ def build_daily_briefing(
         system_prompt=_daily_brief_system_prompt(),
         prompt=prompt,
     )
-    name_mappings = _load_seatalk_name_mappings(service)
     project_updates = _dedupe_brief_items(
         _normalize_update_items(_normalize_brief_items(parsed.get("project_updates", []), name_mappings=name_mappings))
     )[:MAX_PROJECT_UPDATES]
@@ -684,7 +685,39 @@ def build_daily_briefing(
             history_text=history_text,
             quality_metrics=evidence_quality_metrics,
         )
+        _drop_domain_mismatched_evidence_items(
+            section_items,
+            quality_metrics=evidence_quality_metrics,
+        )
+        _drop_generic_seatalk_evidence_items(
+            section_items,
+            quality_metrics=evidence_quality_metrics,
+        )
     my_todos = SeaTalkDashboardService._sort_todos(my_todos)
+    reminders = _backfill_team_member_reminders_from_candidates(
+        reminders,
+        team_member_reminder_candidates=team_member_reminder_candidates,
+        evidence_refs=evidence_refs,
+        quality_metrics=evidence_quality_metrics,
+    )
+    _repair_generic_seatalk_evidence(
+        reminders,
+        history_text=history_text,
+        quality_metrics=evidence_quality_metrics,
+    )
+    _validate_and_repair_seatalk_evidence(
+        reminders,
+        history_text=history_text,
+        quality_metrics=evidence_quality_metrics,
+    )
+    _drop_domain_mismatched_evidence_items(
+        reminders,
+        quality_metrics=evidence_quality_metrics,
+    )
+    _drop_generic_seatalk_evidence_items(
+        reminders,
+        quality_metrics=evidence_quality_metrics,
+    )
     _apply_report_intelligence_matches(
         [*project_updates, *other_updates, *my_todos],
         daily_matches=daily_matches,
@@ -694,11 +727,24 @@ def build_daily_briefing(
     my_todos = _sort_report_intelligence_items(my_todos)
     direct_action_todos, watch_delegate_todos = _split_todos_by_action_type(my_todos)
     reminders = _filter_reminders_already_covered_by_watch_delegate(reminders, watch_delegate_todos)
+    suppressed_update_duplicate_count = _suppress_updates_covered_by_todos(
+        project_updates=project_updates,
+        other_updates=other_updates,
+        direct_action_todos=direct_action_todos,
+        watch_delegate_todos=watch_delegate_todos,
+    )
     evidence_quality_metrics["generic_evidence_count"] = _count_generic_evidence(
         [*project_updates, *other_updates, *direct_action_todos, *watch_delegate_todos, *reminders]
     )
     evidence_quality_metrics["candidate_followup_count"] = len(team_member_reminder_candidates or [])
     evidence_quality_metrics["final_followup_count"] = len(reminders)
+    evidence_quality_metrics["suppressed_update_duplicate_count"] = suppressed_update_duplicate_count
+    evidence_quality_metrics["followup_diagnostics"] = _build_followup_diagnostics(
+        team_member_reminder_candidates=team_member_reminder_candidates,
+        reminders=reminders,
+        watch_delegate_todos=watch_delegate_todos,
+        evidence_refs=evidence_refs,
+    )
     deduped_topic_count = _apply_cross_section_topic_metadata(
         project_updates=project_updates,
         other_updates=other_updates,
@@ -1943,9 +1989,10 @@ def _sanitize_seatalk_evidence(value: Any, *, name_mappings: dict[str, str] | No
             saw_unmapped_group = True
             return "SeaTalk group"
         saw_unmapped_contact = True
-        return "SeaTalk contact"
+        return _format_private_seatalk_chat_label(raw)
 
     cleaned = RAW_SEATALK_ID_PATTERN.sub(replace_raw_id, text)
+    cleaned = _normalize_seatalk_source_label(cleaned)
     cleaned = re.sub(r"\bSeaTalk\s+SeaTalk\s+group\b", "SeaTalk group", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\bSeaTalk\s+SeaTalk\s+contact\b", "SeaTalk contact", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\b(SeaTalk group)(?:\s*[,;/]\s*\1)+\b", r"\1", cleaned)
@@ -1957,14 +2004,55 @@ def _sanitize_seatalk_evidence(value: Any, *, name_mappings: dict[str, str] | No
         if saw_unmapped_group:
             return "SeaTalk group"
         if saw_unmapped_contact:
-            return "SeaTalk contact"
+            return _format_private_seatalk_chat_label(text)
     return cleaned or "SeaTalk conversation"
+
+
+def _format_private_seatalk_chat_label(identifier: Any) -> str:
+    raw = " ".join(str(identifier or "").strip().split())
+    if not raw:
+        return "Private SeaTalk chat"
+    return f"Private SeaTalk chat ({raw})"
+
+
+def _normalize_seatalk_source_label(value: Any) -> str:
+    text = " ".join(str(value or "").strip().split())
+    if not text:
+        return ""
+    nested_private = re.fullmatch(r"Private SeaTalk chat\s*\((Private SeaTalk chat\s*\(.+\))\)", text, flags=re.IGNORECASE)
+    if nested_private:
+        return nested_private.group(1).strip()
+    text = re.sub(r"\bSeaTalk\s+SeaTalk\s+group\b", "SeaTalk group", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bSeaTalk\s+SeaTalk\s+contact\b", "SeaTalk contact", text, flags=re.IGNORECASE)
+    duplicate_match = re.fullmatch(r"(?P<label>.+?)\s*\((?P=label)\)", text)
+    if duplicate_match:
+        return duplicate_match.group("label").strip()
+    thread_match = re.match(r"(?P<label>.+?)\s*\((?P=label)\)\s*/\s*thread:\s*(?P<thread>.+)$", text, flags=re.IGNORECASE)
+    if thread_match:
+        return f"{thread_match.group('label').strip()} / thread: {thread_match.group('thread').strip()}"
+    return text
+
+
+def _mapped_seatalk_identifier_label(identifier: Any, *, name_mappings: dict[str, str] | None = None) -> str:
+    raw = str(identifier or "").strip()
+    if not raw:
+        return ""
+    mappings = {str(key).lower(): str(name).strip() for key, name in (name_mappings or {}).items() if str(name).strip()}
+    mapped = mappings.get(raw.lower())
+    if not mapped:
+        mapped = next((mappings.get(key.lower()) for key in _seatalk_mapping_equivalent_keys(raw) if mappings.get(key.lower())), "")
+    if mapped:
+        return _normalize_seatalk_source_label(mapped)
+    if raw.lower().startswith("buddy-") or re.match(r"^UID\s+\d+$", raw, re.IGNORECASE):
+        return _format_private_seatalk_chat_label(raw)
+    return _normalize_seatalk_source_label(raw)
 
 
 def _build_daily_brief_evidence_refs(
     history_text: str,
     *,
     gmail_history_text: str = "",
+    name_mappings: dict[str, str] | None = None,
     team_member_reminder_candidates: list[dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     records = _seatalk_history_records_for_evidence(history_text)
@@ -1997,7 +2085,7 @@ def _build_daily_brief_evidence_refs(
                 "mentioned_people": mentioned_people,
                 "reply_state": reply_state,
                 "snippet": _clip_hint_text(record.get("text"), limit=240),
-                "evidence": _format_seatalk_record_evidence(record),
+                "evidence": _format_seatalk_record_evidence(record, name_mappings=name_mappings),
             }
         )
 
@@ -2159,7 +2247,7 @@ def _apply_daily_brief_evidence_refs(
     my_todos: list[dict[str, Any]],
     reminders: list[dict[str, Any]],
     evidence_refs: list[dict[str, Any]],
-) -> dict[str, int]:
+) -> dict[str, Any]:
     metrics = {
         "dropped_invalid_evidence_count": 0,
         "repaired_evidence_count": 0,
@@ -2180,6 +2268,9 @@ def _apply_daily_brief_evidence_refs(
                 return False
             return True
         if not _evidence_ref_matches_item_people(item, ref):
+            metrics["dropped_invalid_evidence_count"] += 1
+            return False
+        if not _evidence_refs_match_project_item(item, [ref]):
             metrics["dropped_invalid_evidence_count"] += 1
             return False
         evidence = str(ref.get("evidence") or "").strip()
@@ -2254,10 +2345,62 @@ def _evidence_refs_match_project_item(item: dict[str, Any], refs: list[dict[str,
     if not item_tokens:
         return True
     ref_tokens: set[str] = set()
+    ref_text_parts: list[str] = []
     for ref in refs:
-        ref_tokens.update(_evidence_match_tokens(" ".join(str(ref.get(field) or "") for field in ("group", "thread", "subject", "participants", "sender", "snippet"))))
+        ref_text = " ".join(str(ref.get(field) or "") for field in ("group", "thread", "subject", "participants", "sender", "snippet", "evidence"))
+        ref_text_parts.append(ref_text)
+        ref_tokens.update(_evidence_match_tokens(ref_text))
+    if _evidence_ref_has_domain_mismatch(item, " ".join(ref_text_parts), item_tokens):
+        return False
     overlap = item_tokens & ref_tokens
     return len(overlap) >= 2 or bool({"launch", "live", "uat", "prd", "risk", "incident"} & overlap)
+
+
+def _evidence_ref_has_domain_mismatch(item: dict[str, Any], ref_text: str, item_tokens: set[str]) -> bool:
+    domain = _display_domain(item.get("domain"))
+    normalized_ref = _normalize_thread_match_text(ref_text)
+    if _evidence_ref_has_group_topic_mismatch(normalized_ref, item_tokens):
+        return True
+    credit_source = any(term in normalized_ref for term in ("credit risk", "credit", "crms", "loan", "自营贷", "贷款"))
+    anti_item = bool({"af", "anti", "fraud", "push", "notification", "pn", "false", "alarm", "afasa", "alc"} & item_tokens)
+    credit_item = bool({"credit", "loan", "crms", "npl", "dwh", "cbs"} & item_tokens)
+    if credit_source and anti_item and not credit_item:
+        return True
+    if domain == "Credit Risk":
+        anti_source = any(term in normalized_ref for term in ("anti fraud", "anti-fraud", " af ", "aaf", "afasa"))
+        credit_item = bool({"credit", "loan", "crms", "npl", "dwh", "cbs"} & item_tokens)
+        anti_item = bool({"af", "anti", "fraud", "afasa", "alc"} & item_tokens)
+        if anti_source and credit_item and not anti_item:
+            return True
+    return False
+
+
+def _evidence_ref_has_group_topic_mismatch(normalized_ref: str, item_tokens: set[str]) -> bool:
+    if "db拆库" in normalized_ref or "db 拆库" in normalized_ref:
+        db_split_tokens = {
+            "db",
+            "database",
+            "split",
+            "downtime",
+            "af00",
+            "apollo",
+            "domain",
+            "migration",
+            "migrate",
+            "0526",
+            "拆库",
+            "迁移",
+            "停机",
+            "域名",
+        }
+        customer_ticket_tokens = {"customer", "transaction", "ticket", "log", "uploaded", "unable", "approve"}
+        if item_tokens & customer_ticket_tokens and not item_tokens & db_split_tokens:
+            return True
+    if "compliance afasa" in normalized_ref and "alcv12" in normalized_ref:
+        alc_parameter_tokens = {"fvversion", "fid", "lcrequestid", "parameter", "native", "face", "verification"}
+        if item_tokens & alc_parameter_tokens:
+            return True
+    return False
 
 
 def _requires_seatalk_evidence_ref(item: dict[str, Any], *, section: str) -> bool:
@@ -2346,6 +2489,39 @@ def _validate_and_repair_seatalk_evidence(
     items[:] = [item for item in items if not item.pop("_drop_invalid_evidence", False)]
 
 
+def _drop_domain_mismatched_evidence_items(
+    items: list[dict[str, Any]],
+    *,
+    quality_metrics: dict[str, Any] | None = None,
+) -> None:
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_tokens = _evidence_match_tokens(_item_text(item, fields=("title", "summary", "task", "reminder")))
+        if item_tokens and _evidence_ref_has_domain_mismatch(item, str(item.get("evidence") or ""), item_tokens):
+            item["_drop_domain_mismatch"] = True
+            if quality_metrics is not None:
+                quality_metrics["dropped_invalid_evidence_count"] = quality_metrics.get("dropped_invalid_evidence_count", 0) + 1
+                quality_metrics["dropped_domain_mismatch_count"] = quality_metrics.get("dropped_domain_mismatch_count", 0) + 1
+    items[:] = [item for item in items if not item.pop("_drop_domain_mismatch", False)]
+
+
+def _drop_generic_seatalk_evidence_items(
+    items: list[dict[str, Any]],
+    *,
+    quality_metrics: dict[str, Any] | None = None,
+) -> None:
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if _item_uses_seatalk_source(item) and _is_generic_seatalk_evidence(item.get("evidence")):
+            item["_drop_generic_seatalk_evidence"] = True
+            if quality_metrics is not None:
+                quality_metrics["dropped_invalid_evidence_count"] = quality_metrics.get("dropped_invalid_evidence_count", 0) + 1
+                quality_metrics["dropped_generic_evidence_count"] = quality_metrics.get("dropped_generic_evidence_count", 0) + 1
+    items[:] = [item for item in items if not item.pop("_drop_generic_seatalk_evidence", False)]
+
+
 def _needs_seatalk_evidence_repair(item: dict[str, Any]) -> bool:
     source_type = str(item.get("source_type") or "").strip().lower()
     evidence = str(item.get("evidence") or "").strip()
@@ -2356,6 +2532,8 @@ def _needs_seatalk_evidence_repair(item: dict[str, Any]) -> bool:
 
 def _is_generic_seatalk_evidence(value: Any) -> bool:
     normalized = _normalize_generic_seatalk_evidence(value).casefold()
+    if normalized.startswith("seatalk group"):
+        return True
     generic_values = {
         "seatalk group",
         "seatalk contact",
@@ -2429,18 +2607,21 @@ def _best_seatalk_record_for_item(item: dict[str, Any], records: list[dict[str, 
     return best_record
 
 
-def _format_seatalk_record_evidence(record: dict[str, str]) -> str:
-    group = str(record.get("group") or "").strip()
+def _format_seatalk_record_evidence(record: dict[str, str], *, name_mappings: dict[str, str] | None = None) -> str:
+    group = _mapped_seatalk_identifier_label(record.get("group"), name_mappings=name_mappings)
     thread = str(record.get("thread") or "").strip()
-    if not group or group.startswith("group-"):
+    if not group:
         return f"SeaTalk group / thread: {thread}" if thread else "SeaTalk group"
-    return f"{group} / thread: {thread}" if thread else group
+    if group.startswith("group-"):
+        group = "SeaTalk group"
+    evidence = f"{group} / thread: {thread}" if thread else group
+    return _normalize_seatalk_source_label(evidence)
 
 
 def _item_uses_seatalk_source(item: dict[str, Any]) -> bool:
     source_type = str(item.get("source_type") or "").strip().lower()
     evidence = str(item.get("evidence") or "").strip().lower()
-    return source_type in {"seatalk", "mixed", "unknown"} or "seatalk" in evidence or "/ thread:" in evidence
+    return source_type in {"seatalk", "mixed", "unknown"} or "seatalk" in evidence or "private seatalk" in evidence or "/ thread:" in evidence
 
 
 def _parse_seatalk_evidence_ref(value: Any) -> dict[str, str]:
@@ -2669,6 +2850,48 @@ def _apply_cross_section_topic_metadata(
     return deduped_topic_count
 
 
+def _suppress_updates_covered_by_todos(
+    *,
+    project_updates: list[dict[str, Any]],
+    other_updates: list[dict[str, Any]],
+    direct_action_todos: list[dict[str, Any]],
+    watch_delegate_todos: list[dict[str, Any]],
+) -> int:
+    todos = [*direct_action_todos, *watch_delegate_todos]
+    if not todos:
+        return 0
+    removed = 0
+
+    def keep_update(update: dict[str, Any]) -> bool:
+        nonlocal removed
+        if any(_brief_update_is_covered_by_todo(update, todo) for todo in todos):
+            removed += 1
+            return False
+        return True
+
+    project_updates[:] = [item for item in project_updates if not isinstance(item, dict) or keep_update(item)]
+    other_updates[:] = [item for item in other_updates if not isinstance(item, dict) or keep_update(item)]
+    return removed
+
+
+def _brief_update_is_covered_by_todo(update: dict[str, Any], todo: dict[str, Any]) -> bool:
+    if _display_domain(update.get("domain")) != _display_domain(todo.get("domain")):
+        return False
+    update_ref_ids = set(_split_evidence_ref_ids(update.get("evidence_ref_id")))
+    todo_ref_ids = set(_split_evidence_ref_ids(todo.get("evidence_ref_id")))
+    if update_ref_ids and todo_ref_ids and update_ref_ids & todo_ref_ids:
+        return True
+    update_evidence = _normalize_dedupe_text(str(update.get("evidence") or ""))
+    todo_evidence = _normalize_dedupe_text(str(todo.get("evidence") or ""))
+    update_tokens = _topic_tokens(update, fields=("title", "summary"))
+    todo_tokens = _topic_tokens(todo, fields=("task", "title", "summary"))
+    overlap = update_tokens & todo_tokens
+    if update_evidence and update_evidence == todo_evidence and len(overlap) >= 1:
+        return True
+    min_size = min(len(update_tokens), len(todo_tokens))
+    return len(overlap) >= 3 and (len(overlap) / max(min_size, 1)) >= 0.35
+
+
 def _topic_key(item: dict[str, Any]) -> str:
     evidence_key = _normalize_dedupe_text(str(item.get("evidence") or ""))
     if evidence_key:
@@ -2781,7 +3004,7 @@ def _build_quality_metadata(
     source_texts: list[str],
     deduped_topic_count: int,
     token_ledger: dict[str, Any] | None = None,
-    evidence_quality_metrics: dict[str, int] | None = None,
+    evidence_quality_metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_types = {
         str(item.get("source_type") or "").strip().lower()
@@ -2859,6 +3082,127 @@ def _filter_reminders_already_covered_by_watch_delegate(
         for item in reminders
         if not any(_brief_items_are_same_followup_event(item, todo) for todo in watch_delegate_todos)
     ]
+
+
+def _backfill_team_member_reminders_from_candidates(
+    reminders: list[dict[str, Any]],
+    *,
+    team_member_reminder_candidates: list[dict[str, str]] | None,
+    evidence_refs: list[dict[str, Any]],
+    quality_metrics: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if reminders or not team_member_reminder_candidates:
+        return reminders
+    refs_by_candidate = _seatalk_refs_by_candidate(evidence_refs)
+    backfilled: list[dict[str, Any]] = []
+    for candidate in team_member_reminder_candidates:
+        ref = refs_by_candidate.get(_candidate_ref_key(candidate))
+        if not ref:
+            continue
+        person = _canonical_team_member_name(candidate.get("person"))
+        if not person:
+            continue
+        domain = TEAM_MEMBER_REMINDER_DOMAIN_OVERRIDES.get(_normalize_person_key(person), "General")
+        item = {
+            "domain": domain,
+            "person": person,
+            "reminder": _candidate_followup_reminder_text(candidate),
+            "evidence": str(ref.get("evidence") or "").strip(),
+            "source_type": "seatalk",
+            "evidence_ref_id": str(ref.get("id") or "").strip(),
+            "followup_source": "deterministic_backfill",
+        }
+        if not _evidence_ref_matches_item_people(item, ref) or not _evidence_refs_match_project_item(item, [ref]):
+            continue
+        backfilled.append(item)
+        if len(backfilled) >= MAX_TEAM_MEMBER_REMINDERS:
+            break
+    if quality_metrics is not None:
+        quality_metrics["deterministic_followup_backfill_count"] = len(backfilled)
+    return backfilled or reminders
+
+
+def _seatalk_refs_by_candidate(evidence_refs: list[dict[str, Any]]) -> dict[tuple[str, str, str, str], dict[str, Any]]:
+    refs: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for ref in evidence_refs:
+        if str(ref.get("source_type") or "") != "seatalk":
+            continue
+        key = (
+            _normalize_thread_match_text(ref.get("group")),
+            _normalize_thread_match_text(ref.get("thread") or "__main__"),
+            str(ref.get("timestamp") or ""),
+            _normalize_thread_match_text(ref.get("snippet")),
+        )
+        refs[key] = ref
+    return refs
+
+
+def _candidate_ref_key(candidate: dict[str, str]) -> tuple[str, str, str, str]:
+    return (
+        _normalize_thread_match_text(candidate.get("group")),
+        _normalize_thread_match_text(candidate.get("thread") or "__main__"),
+        str(candidate.get("timestamp") or ""),
+        _normalize_thread_match_text(candidate.get("text")),
+    )
+
+
+def _candidate_followup_reminder_text(candidate: dict[str, str]) -> str:
+    text = _clip_hint_text(candidate.get("text"), limit=180)
+    if text:
+        return f"Follow up on the unresolved ask: {text}"
+    return "Follow up on the unresolved SeaTalk ask."
+
+
+def _build_followup_diagnostics(
+    *,
+    team_member_reminder_candidates: list[dict[str, str]] | None,
+    reminders: list[dict[str, Any]],
+    watch_delegate_todos: list[dict[str, Any]],
+    evidence_refs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    candidates = team_member_reminder_candidates or []
+    refs_by_candidate = _seatalk_refs_by_candidate(evidence_refs)
+    buckets = {
+        "covered_by_watch_delegate": 0,
+        "filtered_not_allowed_person": 0,
+        "missing_ref": 0,
+        "invalid_ref": 0,
+        "model_omitted": 0,
+    }
+    examples: list[dict[str, str]] = []
+    if not candidates:
+        return {"candidate_examples": [], "reason_buckets": buckets}
+    reminder_people = {_normalize_person_key(item.get("person")) for item in reminders}
+    for candidate in candidates:
+        person = _canonical_team_member_name(candidate.get("person"))
+        ref = refs_by_candidate.get(_candidate_ref_key(candidate))
+        candidate_item = {
+            "domain": TEAM_MEMBER_REMINDER_DOMAIN_OVERRIDES.get(_normalize_person_key(person), "General"),
+            "person": person,
+            "reminder": _candidate_followup_reminder_text(candidate),
+            "evidence": str(ref.get("evidence") or "").strip() if ref else "",
+            "source_type": "seatalk",
+            "evidence_ref_id": str(ref.get("id") or "").strip() if ref else "",
+        }
+        if not person:
+            buckets["filtered_not_allowed_person"] += 1
+        elif any(_brief_items_are_same_followup_event(candidate_item, todo) for todo in watch_delegate_todos):
+            buckets["covered_by_watch_delegate"] += 1
+        elif not ref:
+            buckets["missing_ref"] += 1
+        elif not _evidence_ref_matches_item_people(candidate_item, ref) or not _evidence_refs_match_project_item(candidate_item, [ref]):
+            buckets["invalid_ref"] += 1
+        elif _normalize_person_key(person) not in reminder_people:
+            buckets["model_omitted"] += 1
+        if len(examples) < 5:
+            examples.append(
+                {
+                    "person": str(candidate.get("person") or ""),
+                    "source": str(ref.get("evidence") or "") if ref else _format_team_member_reminder_hints([candidate]).removeprefix("- "),
+                    "text": _clip_hint_text(candidate.get("text"), limit=160),
+                }
+            )
+    return {"candidate_examples": examples, "reason_buckets": buckets}
 
 
 def _brief_items_are_same_followup_event(reminder: dict[str, Any], todo: dict[str, Any]) -> bool:
@@ -3021,7 +3365,7 @@ def _normalize_source_type(value: Any, evidence: Any, *, default_source_type: st
     evidence_text = str(evidence or "").strip().lower()
     if "mail.google.com" in evidence_text or "thread id" in evidence_text or "gmail" in evidence_text:
         return "gmail"
-    if evidence_text.startswith("group-") or " group" in evidence_text or "uid " in evidence_text:
+    if evidence_text.startswith("group-") or " group" in evidence_text or "uid " in evidence_text or "private seatalk" in evidence_text:
         return "seatalk"
     return default_source_type if default_source_type in {"seatalk", "gmail", "mixed", "unknown"} else "unknown"
 
