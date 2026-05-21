@@ -1059,6 +1059,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "team_dashboard_version_plan_sync_status",
                 "link_team_dashboard_biz_project",
                 "save_team_dashboard_key_project",
+                "save_team_dashboard_project_status",
                 "uat_local_agent_health_proxy",
                 "uat_local_agent_public_proxy",
             }
