@@ -1446,6 +1446,67 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(rows_response.get_json()["status"], "error")
         self.assertEqual(rows_response.get_json()["error_category"], "version_plan_conflict")
 
+    def test_team_dashboard_version_plan_api_pauses_row_changes_during_sync(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "ENV_FILE": os.devnull,
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            config = app.config["TEAM_DASHBOARD_CONFIG_STORE"].load()
+            config["version_plan"]["af"]["sync_state"]["state"] = "running"
+            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(config)
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                    session["google_credentials"] = {"token": "x"}
+                plan_response = client.get("/api/team-dashboard/version-plan/af?sync=0")
+                row_id = plan_response.get_json()["pipeline_rows"][0]["row_id"]
+                rows_response = client.post(
+                    "/api/team-dashboard/version-plan/af/rows",
+                    json={"scope": "pipeline", "action": "add"},
+                )
+                priority_response = client.post(
+                    "/api/team-dashboard/version-plan/af/cell",
+                    json={
+                        "scope": "pipeline",
+                        "row_id": row_id,
+                        "field": "priority",
+                        "value": "P1",
+                    },
+                )
+                remarks_response = client.post(
+                    "/api/team-dashboard/version-plan/af/cell",
+                    json={
+                        "scope": "pipeline",
+                        "row_id": row_id,
+                        "field": "remarks",
+                        "value": "Can edit during sync",
+                    },
+                )
+                audit_log = app.config["TEAM_DASHBOARD_CONFIG_STORE"].load()["version_plan"]["af"]["audit_log"]
+
+        self.assertEqual(plan_response.status_code, 200)
+        self.assertEqual(rows_response.status_code, 409)
+        self.assertEqual(rows_response.get_json()["error_category"], "version_plan_sync_running")
+        self.assertEqual(priority_response.status_code, 409)
+        self.assertEqual(priority_response.get_json()["error_category"], "version_plan_sync_running")
+        self.assertEqual(remarks_response.status_code, 200)
+        self.assertTrue(
+            any(row["remarks"] == "Can edit during sync" for row in remarks_response.get_json()["pipeline_rows"])
+        )
+        self.assertEqual(audit_log[-1]["action"], "cell_update")
+        self.assertEqual(audit_log[-1]["details"]["field"], "remarks")
+
     def test_team_dashboard_version_plan_route_uses_firestore_store_for_cloud_uat_auto_backend(self):
         from bpmis_jira_tool import team_dashboard_version_plan_store as store_module
 
@@ -3392,6 +3453,10 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn('data-version-plan-row-action="up"', script)
         self.assertNotIn('data-version-plan-row-action="down"', script)
         self.assertIn("row.row_type === 'synced' && field === 'remarks'", script)
+        self.assertIn("Syncing Jira. Row changes are paused until sync finishes.", script)
+        self.assertIn("isVersionPlanSyncRunning", script)
+        self.assertIn("version_plan_sync_running", script)
+        self.assertIn("${rowChangesPaused ? 'disabled' : ''}", script)
         self.assertIn("32px minmax(320px, 1fr) 76px 116px 118px minmax(150px, 0.45fr)", styles)
         self.assertIn("--version-plan-sheet-grid", styles)
         self.assertIn("grid-template-columns: var(--version-plan-sheet-grid)", styles)

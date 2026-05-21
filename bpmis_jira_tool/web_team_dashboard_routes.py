@@ -196,6 +196,18 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
     def _version_plan_conflict_response(error: VersionPlanConflictError):
         return jsonify({"status": "error", "message": str(error), "error_category": "version_plan_conflict"}), HTTPStatus.CONFLICT
 
+    def _version_plan_sync_running(config: dict[str, Any]) -> bool:
+        payload = version_plan_payload(config)
+        sync_state = payload.get("sync_state") if isinstance(payload.get("sync_state"), dict) else {}
+        return str(sync_state.get("state") or "").strip() == "running"
+
+    def _version_plan_sync_running_response():
+        return jsonify({
+            "status": "error",
+            "message": "Syncing Jira. Row changes are paused until sync finishes.",
+            "error_category": "version_plan_sync_running",
+        }), HTTPStatus.CONFLICT
+
     def _version_plan_sync_error_message(error: Exception) -> str:
         normalized = str(error or "").strip().lower()
         if "local-agent" in normalized or "local agent" in normalized:
@@ -574,6 +586,9 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         store = _get_version_plan_store()
         try:
             snapshot = store.load_snapshot()
+            field = str(payload.get("field") or "").strip()
+            if field != "remarks" and _version_plan_sync_running(snapshot.config):
+                return _version_plan_sync_running_response()
             updated = update_version_plan_cell(snapshot.config, payload)
             expected_revision = str(payload.get("document_revision") or payload.get("revision") or "").strip() or None
             saved = store.save_config(_audit_version_plan_config(updated, action="cell_update", payload=payload), expected_revision=expected_revision)
@@ -595,6 +610,8 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         try:
             row_action = str(payload.get("action") or "").strip().lower()
             snapshot = store.load_snapshot()
+            if _version_plan_sync_running(snapshot.config):
+                return _version_plan_sync_running_response()
             updated = update_version_plan_rows(snapshot.config, payload)
             expected_revision = str(payload.get("document_revision") or payload.get("revision") or "").strip() or None
             saved = store.save_config(_audit_version_plan_config(updated, action=f"row_{row_action}", payload=payload), expected_revision=expected_revision)

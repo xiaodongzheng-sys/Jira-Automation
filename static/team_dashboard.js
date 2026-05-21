@@ -500,9 +500,16 @@
     setStatus(versionPlanStatus, message, tone);
   };
 
+  const versionPlanSyncPausedMessage = 'Syncing Jira. Row changes are paused until sync finishes.';
+
+  const isVersionPlanSyncRunning = () => {
+    const syncState = versionPlanState?.sync_state || {};
+    return Boolean(versionPlanState?.sync_queued) || String(syncState.state || '').trim() === 'running';
+  };
+
   const versionPlanSyncText = (syncState = {}) => {
     const state = String(syncState.state || '').trim();
-    if (state === 'running') return syncState.message || 'Syncing Jira information...';
+    if (state === 'running') return versionPlanSyncPausedMessage;
     if (state === 'error') return syncState.error || syncState.message || 'Sync failed.';
     if (syncState.last_synced_date_sgt) return `Last synced: ${syncState.last_synced_date_sgt} SGT`;
     return 'Cached Version Plan loaded. Jira sync starts when this tab opens.';
@@ -613,7 +620,7 @@
         <div class="team-dashboard-version-plan-feature">${renderLink(row.jira_link, `[${jiraId}]`)}<span class="team-dashboard-version-plan-market">[${escapeHtml(market)}]</span><span>${escapeHtml(summary)}</span></div>
       `;
     }
-    if (readOnly) return escapeHtml(row.feature || '-');
+    if (readOnly || isVersionPlanSyncRunning()) return escapeHtml(row.feature || '-');
     return `
       <textarea
         rows="1"
@@ -626,6 +633,10 @@
   const versionPlanManualField = (row, field, readOnly) => {
     if (!readOnly && row.row_type === 'synced' && field === 'remarks') {
       return `<textarea rows="1" spellcheck="true" data-version-plan-cell="remarks">${escapeHtml(row.remarks || '')}</textarea>`;
+    }
+    if (!readOnly && isVersionPlanSyncRunning() && field !== 'remarks') {
+      if (field === 'pm') return escapeHtml(versionPlanPmDisplay(row.pm || []));
+      return escapeHtml(row[field] || '-');
     }
     if (readOnly || row.row_type !== 'manual') {
       if (field === 'pm') return escapeHtml(versionPlanPmDisplay(row.pm || []));
@@ -652,8 +663,10 @@
   const renderVersionPlanRows = (rows, { scope, versionId = '', readOnly = false, title = 'Rows', headerFeature = 'Feature' } = {}) => {
     const rowItems = Array.isArray(rows) ? rows : [];
     const empty = '';
+    const rowChangesPaused = isVersionPlanSyncRunning();
     const body = rowItems.map((row) => {
       const manual = row.row_type === 'manual' && !readOnly;
+      const manualActionsEnabled = manual && !rowChangesPaused;
       return `
         <div
           class="team-dashboard-version-plan-row${manual ? ' is-manual' : ' is-readonly'}"
@@ -664,10 +677,10 @@
           ${manual ? 'data-version-plan-manual-row="true"' : ''}
         >
           <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-cell-drag" data-label="Move">
-            ${manual ? '<button class="button button-secondary team-dashboard-version-plan-drag" type="button" draggable="true" aria-label="Drag row" title="Drag row"><span aria-hidden="true">↕</span></button>' : ''}
+            ${manualActionsEnabled ? '<button class="button button-secondary team-dashboard-version-plan-drag" type="button" draggable="true" aria-label="Drag row" title="Drag row"><span aria-hidden="true">↕</span></button>' : ''}
           </div>
           <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-cell-feature" data-label="Feature">
-            ${manual ? '<div class="team-dashboard-version-plan-row-tools"><button class="button button-secondary team-dashboard-version-plan-delete" type="button" data-version-plan-row-action="delete" aria-label="Delete row" title="Delete row"><span aria-hidden="true">🗑</span></button></div>' : ''}
+            ${manualActionsEnabled ? '<div class="team-dashboard-version-plan-row-tools"><button class="button button-secondary team-dashboard-version-plan-delete" type="button" data-version-plan-row-action="delete" aria-label="Delete row" title="Delete row"><span aria-hidden="true">🗑</span></button></div>' : ''}
             ${versionPlanRowFeature(row, readOnly)}
           </div>
           <div class="team-dashboard-version-plan-cell" data-label="Priority">
@@ -696,6 +709,7 @@
             data-version-id="${escapeHtml(versionId)}"
             aria-label="Add row"
             title="Add row"
+            ${rowChangesPaused ? 'disabled' : ''}
           ><span aria-hidden="true">+</span> Add Row</button>
         </div>
       </div>
@@ -779,7 +793,7 @@
     canSyncVersionPlan = root.dataset.canSyncVersionPlan === 'true' && payload?.can_sync !== false;
     if (!versionPlanSyncButton) return;
     versionPlanSyncButton.hidden = !canSyncVersionPlan;
-    versionPlanSyncButton.disabled = !canSyncVersionPlan;
+    versionPlanSyncButton.disabled = !canSyncVersionPlan || isVersionPlanSyncRunning();
   };
 
   const loadVersionPlan = async ({ force = false } = {}) => {
@@ -850,7 +864,7 @@
     } catch (error) {
       setVersionPlanStatus(error.message || 'Could not start Version Plan sync.', 'error');
     } finally {
-      versionPlanSyncButton.disabled = !canSyncVersionPlan;
+      versionPlanSyncButton.disabled = !canSyncVersionPlan || isVersionPlanSyncRunning();
     }
   };
 
@@ -875,6 +889,10 @@
     const row = input.closest('[data-version-plan-row-id]');
     if (!row) return;
     const field = input.dataset.versionPlanCell || '';
+    if (isVersionPlanSyncRunning() && field !== 'remarks') {
+      setVersionPlanStatus(versionPlanSyncPausedMessage, 'neutral');
+      return;
+    }
     const value = input.multiple ? Array.from(input.selectedOptions).map((option) => option.value) : input.value;
     try {
       const response = await fetch(root.dataset.versionPlanCellUrl || '/api/team-dashboard/version-plan/af/cell', {
@@ -912,6 +930,10 @@
       if (retryOnConflict && error?.payload?.error_category === 'version_plan_conflict') {
         await refreshVersionPlanRevision();
         return updateVersionPlanRows(payload, fallbackMessage, false);
+      }
+      if (error?.payload?.error_category === 'version_plan_sync_running') {
+        setVersionPlanStatus(error.message || versionPlanSyncPausedMessage, 'neutral');
+        await refreshVersionPlanRevision();
       }
       throw error;
     }
@@ -2911,6 +2933,10 @@
     }
     const button = event.target.closest('[data-version-plan-row-action]');
     if (!button) return;
+    if (isVersionPlanSyncRunning()) {
+      setVersionPlanStatus(versionPlanSyncPausedMessage, 'neutral');
+      return;
+    }
     const action = button.dataset.versionPlanRowAction || '';
     const scope = button.dataset.versionPlanScope || button.closest('[data-version-plan-row-id]')?.dataset.versionPlanScope || '';
     const versionId = button.dataset.versionId || button.closest('[data-version-plan-row-id]')?.dataset.versionId || '';
@@ -2935,6 +2961,11 @@
   });
   versionPlanContent?.addEventListener('dragstart', (event) => {
     if (!event.target.closest('.team-dashboard-version-plan-drag')) return;
+    if (isVersionPlanSyncRunning()) {
+      event.preventDefault();
+      setVersionPlanStatus(versionPlanSyncPausedMessage, 'neutral');
+      return;
+    }
     const row = event.target.closest('[data-version-plan-manual-row="true"]');
     if (!row) return;
     versionPlanDragRow = row;
@@ -2948,6 +2979,7 @@
     versionPlanDragRow = null;
   });
   versionPlanContent?.addEventListener('dragover', (event) => {
+    if (isVersionPlanSyncRunning()) return;
     const row = event.target.closest('[data-version-plan-manual-row="true"]');
     const sheet = event.target.closest('[data-version-plan-sheet]');
     if (!versionPlanDragRow || !sheet) return;
@@ -2967,6 +2999,12 @@
     event.dataTransfer.dropEffect = 'move';
   });
   versionPlanContent?.addEventListener('drop', async (event) => {
+    if (isVersionPlanSyncRunning()) {
+      event.preventDefault();
+      clearVersionPlanDropIndicators();
+      setVersionPlanStatus(versionPlanSyncPausedMessage, 'neutral');
+      return;
+    }
     const row = event.target.closest('[data-version-plan-manual-row="true"]');
     const sheet = event.target.closest('[data-version-plan-sheet]');
     if (!sheet) return;
