@@ -48,6 +48,11 @@ class FakeBPMISVersionPlanClient:
                     "timelineEnd": "2026-05-25T00:00:00+08:00",
                 },
                 {
+                    "id": "dbpsg-0526-adhoc",
+                    "fullName": "DBPSG_v2.84.1_0526_adhoc",
+                    "timelineEnd": "2026-05-26T00:00:00+08:00",
+                },
+                {
                     "id": "dbpsg-0526",
                     "fullName": "DBPSG_v2.85_0526",
                     "timelineEnd": "2026-05-26T00:00:00+08:00",

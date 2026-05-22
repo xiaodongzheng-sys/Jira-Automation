@@ -722,7 +722,7 @@ def _mapped_dbp_versions(af_version: dict[str, Any], dbp_versions_by_prefix: dic
     for prefix, versions in dbp_versions_by_prefix.items():
         candidates = []
         for version in versions:
-            if not str(version.get("version_name") or "").startswith(f"{prefix}_"):
+            if not _is_formal_dbp_version_name(prefix, str(version.get("version_name") or "")):
                 continue
             candidate_date = _parse_date(version.get("release_date"))
             if minimum_date and candidate_date and candidate_date >= minimum_date:
@@ -730,6 +730,12 @@ def _mapped_dbp_versions(af_version: dict[str, Any], dbp_versions_by_prefix: dic
         candidates.sort(key=lambda row: (str(row.get("release_date") or "9999-12-31"), str(row.get("version_name") or "")))
         mapped[prefix] = candidates[0] if candidates else {"version_id": "", "version_name": "-", "release_date": "", "market": _market_from_version_prefix(prefix)}
     return mapped
+
+
+def _is_formal_dbp_version_name(prefix: str, version_name: str) -> bool:
+    normalized_prefix = re.escape(str(prefix or "").strip())
+    normalized_name = str(version_name or "").strip()
+    return bool(re.fullmatch(rf"{normalized_prefix}_v\d+(?:\.\d+)*_\d{{4}}", normalized_name))
 
 
 def _safe_search_versions(bpmis_client: Any, query: str) -> list[dict[str, Any]]:
