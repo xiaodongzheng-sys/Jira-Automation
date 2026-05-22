@@ -1004,6 +1004,144 @@ class PortalE2ESmokeTest(unittest.TestCase):
         self.assertEqual(captured_row_actions[-1]["action"], "delete")
         self.assertEqual(captured_row_actions[-1]["row_id"], "pipe-added-1")
 
+    def test_team_dashboard_version_plan_pm_filter_smoke(self) -> None:
+        page = self._new_admin_page()
+        version_plan_request_count = 0
+        version_plan_payload = {
+            "status": "ok",
+            "can_sync": True,
+            "priority_order": ["SP", "P0", "P1", "P2", "P3"],
+            "pm_options": ["Wang Chang", "Zoey", "Jireh", "Ker Yin", "Rene", "Jun Wei"],
+            "sync_state": {"state": "idle", "last_synced_date_sgt": "2026-05-17"},
+            "bundles": [
+                {
+                    "version_id": "af-20260520",
+                    "af_version_name": "AF_v1.0.80_20260529",
+                    "prd_final_date": "2026-04-22",
+                    "mapped_versions": {},
+                    "synced_rows": [
+                        {
+                            "row_id": "sync-zoey",
+                            "row_type": "synced",
+                            "jira_id": "SGDB-1",
+                            "jira_link": "https://jira.example/SGDB-1",
+                            "jira_summary": "Zoey synced row",
+                            "market": "SG",
+                            "priority": "SP",
+                            "pm": ["Zoey"],
+                            "productization_efforts": "N",
+                            "remarks": "",
+                        },
+                    ],
+                    "manual_rows": [
+                        {
+                            "row_id": "manual-rene",
+                            "row_type": "manual",
+                            "feature": "Rene manual row",
+                            "priority": "P1",
+                            "pm": ["Rene"],
+                            "productization_efforts": "Y",
+                            "remarks": "",
+                        }
+                    ],
+                }
+            ],
+            "pipeline_rows": [
+                {
+                    "row_id": "pipe-empty",
+                    "row_type": "manual",
+                    "feature": "No PM pipeline row",
+                    "priority": "SP",
+                    "pm": ["TBC"],
+                    "productization_efforts": "",
+                    "remarks": "",
+                },
+                {
+                    "row_id": "pipe-zoey",
+                    "row_type": "manual",
+                    "feature": "Zoey pipeline row",
+                    "priority": "P0",
+                    "pm": ["Zoey"],
+                    "productization_efforts": "N",
+                    "remarks": "",
+                },
+            ],
+            "archived_bundles": [
+                {
+                    "version_id": "af-archived",
+                    "af_version_name": "AF_v1.0.79_20260515",
+                    "prd_final_date": "2026-04-08",
+                    "mapped_versions": {},
+                    "synced_rows": [
+                        {
+                            "row_id": "arch-junwei",
+                            "row_type": "synced",
+                            "jira_id": "SPDBP-2",
+                            "jira_link": "https://jira.example/SPDBP-2",
+                            "jira_summary": "Jun Wei archived row",
+                            "market": "Regional",
+                            "priority": "P2",
+                            "pm": ["Jun Wei"],
+                            "productization_efforts": "Y",
+                            "remarks": "",
+                        },
+                    ],
+                }
+            ],
+        }
+
+        def json_response(payload: dict[str, object]):
+            return {
+                "status": 200,
+                "content_type": "application/json",
+                "body": json.dumps(payload),
+            }
+
+        def config(route):
+            route.fulfill(**json_response({
+                "status": "ok",
+                "config": {
+                    "teams": {"AF": {"label": "Anti-fraud", "member_emails": [ADMIN_EMAIL]}},
+                    "task_cache": {},
+                },
+            }))
+
+        def version_plan(route):
+            nonlocal version_plan_request_count
+            version_plan_request_count += 1
+            route.fulfill(**json_response(version_plan_payload))
+
+        page.route("**/api/team-dashboard/config", config)
+        page.route("**/api/team-dashboard/version-plan/af", version_plan)
+
+        page.goto("/team-dashboard", wait_until="domcontentloaded")
+        page.locator('[data-team-dashboard-tab="version-plan"]').click()
+        page.locator('[data-version-plan-row-id="sync-zoey"]').get_by_text("Zoey synced row").wait_for(timeout=5000)
+
+        pm_filter = page.locator('[data-version-plan-pm-filter]')
+        self.assertEqual(
+            pm_filter.locator("option").all_text_contents(),
+            ["All PMs", "-", "Wang Chang", "Zoey", "Jireh", "Ker Yin", "Rene", "Jun Wei"],
+        )
+
+        pm_filter.select_option("Zoey")
+        page.locator('[data-version-plan-row-id="sync-zoey"]').get_by_text("Zoey synced row").wait_for(timeout=5000)
+        page.locator('[data-version-plan-row-id="pipe-zoey"]').get_by_text("Zoey pipeline row").wait_for(timeout=5000)
+        self.assertEqual(page.locator('[data-version-plan-row-id="manual-rene"]').count(), 0)
+        self.assertEqual(page.locator('[data-version-plan-row-id="pipe-empty"]').count(), 0)
+        self.assertEqual(page.locator('[data-version-plan-row-id="arch-junwei"]').count(), 0)
+        self.assertGreaterEqual(page.locator('[data-version-plan-row-action="add"]').count(), 2)
+
+        pm_filter.select_option("-")
+        page.locator('[data-version-plan-row-id="pipe-empty"]').get_by_text("No PM pipeline row").wait_for(timeout=5000)
+        self.assertEqual(page.locator('[data-version-plan-row-id="sync-zoey"]').count(), 0)
+        self.assertGreaterEqual(page.locator('[data-version-plan-row-action="add"]').count(), 2)
+
+        pm_filter.select_option("All PMs")
+        page.locator('[data-version-plan-row-id="manual-rene"]').get_by_text("Rene manual row").wait_for(timeout=5000)
+        page.locator('[data-version-plan-row-id="arch-junwei"]').get_by_text("Jun Wei archived row").wait_for(timeout=5000)
+        self.assertEqual(version_plan_request_count, 1)
+
     def test_team_dashboard_prd_summary_and_review_async_smoke(self) -> None:
         page = self._new_admin_page()
         captured_summary_payloads: list[dict[str, object]] = []

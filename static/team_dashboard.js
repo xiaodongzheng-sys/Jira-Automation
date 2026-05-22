@@ -128,6 +128,7 @@
   const versionPlanContent = root.querySelector('[data-version-plan-content]');
   const versionPlanStatus = root.querySelector('[data-version-plan-status]');
   const versionPlanSyncButton = root.querySelector('[data-version-plan-sync]');
+  const versionPlanHeadActions = root.querySelector('.team-dashboard-version-plan-head .button-row');
   const canManageKeyProjects = root.dataset.canManageKeyProjects === 'true';
   let canSyncVersionPlan = root.dataset.canSyncVersionPlan === 'true';
   const bpmisBizProjectStatusOptions = [
@@ -179,6 +180,7 @@
   let versionPlanState = null;
   let versionPlanPollTimer = null;
   let versionPlanDragRow = null;
+  let versionPlanPmFilterValue = 'All PMs';
   const pmFilterState = {};
   const expandedPanels = {};
   const jiraPageState = {};
@@ -507,6 +509,38 @@
     return items.length ? items[0] : '-';
   };
 
+  const versionPlanPmFilterOptions = ['All PMs', '-', 'Wang Chang', 'Zoey', 'Jireh', 'Ker Yin', 'Rene', 'Jun Wei'];
+
+  const ensureVersionPlanPmFilter = () => {
+    if (!versionPlanHeadActions || versionPlanHeadActions.querySelector('[data-version-plan-pm-filter]')) return;
+    const label = document.createElement('label');
+    label.className = 'team-dashboard-pm-filter team-dashboard-version-plan-pm-filter';
+    label.innerHTML = `
+      <span>PM</span>
+      <select data-version-plan-pm-filter aria-label="Filter Version Plan by PM">
+        ${versionPlanPmFilterOptions.map((pm) => (
+          `<option value="${escapeHtml(pm)}"${pm === versionPlanPmFilterValue ? ' selected' : ''}>${escapeHtml(pm)}</option>`
+        )).join('')}
+      </select>
+    `;
+    versionPlanHeadActions.insertBefore(label, versionPlanSyncButton || null);
+  };
+
+  const syncVersionPlanPmFilterControl = () => {
+    const select = versionPlanHeadActions?.querySelector('[data-version-plan-pm-filter]');
+    if (select) select.value = versionPlanPmFilterValue;
+  };
+
+  const versionPlanRowMatchesPmFilter = (row = {}) => {
+    const filter = String(versionPlanPmFilterValue || 'All PMs').trim();
+    if (!filter || filter === 'All PMs') return true;
+    return versionPlanPmDisplay(row.pm || []) === filter;
+  };
+
+  const filterVersionPlanRowsByPm = (rows) => (
+    (Array.isArray(rows) ? rows : []).filter(versionPlanRowMatchesPmFilter)
+  );
+
   const setVersionPlanStatus = (message, tone = 'neutral') => {
     setStatus(versionPlanStatus, message, tone);
   };
@@ -745,13 +779,14 @@
     const mapped = bundle.mapped_versions && typeof bundle.mapped_versions === 'object' ? bundle.mapped_versions : {};
     const manualRows = Array.isArray(bundle.manual_rows) ? bundle.manual_rows : [];
     const syncedRows = Array.isArray(bundle.synced_rows) ? bundle.synced_rows : [];
+    const filteredRows = filterVersionPlanRowsByPm([...syncedRows, ...manualRows]);
     const collapsed = isVersionPlanBundleCollapsed(bundle);
     const headerFeature = versionPlanSheetTitle(versionPlanBundleTitle(bundle), mapped);
     return `
       <section class="team-dashboard-version-plan-bundle${collapsed ? ' is-collapsed' : ''}" data-version-plan-bundle-id="${escapeHtml(versionPlanBundleKey(bundle))}">
         ${renderVersionPlanBundleToggle(bundle)}
         <div data-version-plan-bundle-body ${collapsed ? 'hidden' : ''}>
-          ${renderVersionPlanRows([...syncedRows, ...manualRows], { scope: 'bundle', versionId: bundle.version_id, readOnly: false, title: 'rows', headerFeature })}
+          ${renderVersionPlanRows(filteredRows, { scope: 'bundle', versionId: bundle.version_id, readOnly: false, title: 'rows', headerFeature })}
         </div>
       </section>
     `;
@@ -763,7 +798,7 @@
     return `
       <section class="team-dashboard-version-plan-bundle is-archived">
         ${renderVersionPlanBundleToggle(bundle, { archived: true })}
-        ${renderVersionPlanRows(bundle.synced_rows || [], { scope: 'archived', versionId: bundle.version_id, readOnly: true, title: 'archived Jira rows', headerFeature })}
+        ${renderVersionPlanRows(filterVersionPlanRowsByPm(bundle.synced_rows || []), { scope: 'archived', versionId: bundle.version_id, readOnly: true, title: 'archived Jira rows', headerFeature })}
       </section>
     `;
   };
@@ -771,6 +806,8 @@
   const renderVersionPlan = (payload) => {
     if (!versionPlanContent) return;
     versionPlanState = payload || {};
+    ensureVersionPlanPmFilter();
+    syncVersionPlanPmFilterControl();
     updateVersionPlanSyncControl(payload);
     const bundles = Array.isArray(payload?.bundles) ? payload.bundles : [];
     const pipelineRows = Array.isArray(payload?.pipeline_rows) ? payload.pipeline_rows : [];
@@ -785,7 +822,7 @@
         <section class="team-dashboard-version-plan-bundle team-dashboard-version-plan-pipeline${pipelineCollapsed ? ' is-collapsed' : ''}" data-version-plan-bundle-id="pipeline">
           ${renderVersionPlanPipelineToggle()}
           <div data-version-plan-bundle-body ${pipelineCollapsed ? 'hidden' : ''}>
-            ${renderVersionPlanRows(pipelineRows, { scope: 'pipeline', readOnly: false, title: 'pipeline rows', headerFeature: 'Pipeline Section' })}
+            ${renderVersionPlanRows(filterVersionPlanRowsByPm(pipelineRows), { scope: 'pipeline', readOnly: false, title: 'pipeline rows', headerFeature: 'Pipeline Section' })}
           </div>
         </section>
         <section class="team-dashboard-version-plan-archive">
@@ -3037,6 +3074,12 @@
   monthlyReportSendButton?.addEventListener('click', sendMonthlyReport);
   monthlyReportTemplateForm?.addEventListener('submit', saveMonthlyReportTemplate);
   versionPlanSyncButton?.addEventListener('click', syncVersionPlan);
+  versionPlanHeadActions?.addEventListener('change', (event) => {
+    const select = event.target.closest('[data-version-plan-pm-filter]');
+    if (!select) return;
+    versionPlanPmFilterValue = String(select.value || 'All PMs').trim() || 'All PMs';
+    if (versionPlanState) renderVersionPlan(versionPlanState);
+  });
   versionPlanContent?.addEventListener('change', (event) => {
     const input = event.target.closest('[data-version-plan-cell]');
     if (input) saveVersionPlanCell(input);
