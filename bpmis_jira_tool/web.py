@@ -711,6 +711,7 @@ def create_app() -> Flask:
             }
         user_identity = _get_user_identity(settings)
         can_access_team_dashboard = _can_access_team_dashboard(user_identity)
+        can_access_bpmis_automation = _can_access_bpmis_automation_tool(user_identity)
         can_access_reports = _can_access_team_dashboard_monthly_report(user_identity)
         site_tabs = []
         if _can_access_source_code_qa(settings):
@@ -766,13 +767,14 @@ def create_app() -> Flask:
                     "active": current_endpoint == "team_dashboard_page",
                 }
             )
-        project_tabs.append(
-            {
-                "label": "BPMIS Automation Tool",
-                "href": _bpmis_run_portal_url(settings, url_for("portal_home", workspace="run")),
-                "active": current_endpoint == "portal_home" or (current_endpoint == "index" and not settings.cloud_home_enabled),
-            }
-        )
+        if can_access_bpmis_automation:
+            project_tabs.append(
+                {
+                    "label": "BPMIS Automation Tool",
+                    "href": _bpmis_admin_portal_url(settings, url_for("portal_home", workspace="bpmis")),
+                    "active": _is_bpmis_automation_route_active(settings, current_endpoint),
+                }
+            )
         if can_access_reports:
             project_tabs.append(
                 {
@@ -781,8 +783,8 @@ def create_app() -> Flask:
                     "active": current_endpoint == "reports_page",
                 }
             )
-        project_href = url_for("team_dashboard_page") if can_access_team_dashboard else _bpmis_run_portal_url(settings, url_for("portal_home", workspace="run"))
-        site_tabs.append(_nav_group("Projects", project_href, project_tabs))
+        if project_tabs:
+            site_tabs.append(_nav_group("Projects", project_tabs[0]["href"], project_tabs))
         if _can_access_vpn_connection(settings):
             site_tabs.append(
                 _nav_group(
@@ -992,9 +994,17 @@ def create_app() -> Flask:
         if _site_requires_google_login(settings) and not _google_session_is_connected():
             return render_template("login_gate.html", page_title="Sign In")
 
+        requested_workspace_tab = str(request.args.get("workspace") or "").strip()
+        source_target = _normalize_portal_landing_redirect(settings, requested_workspace_tab)
+        if source_target:
+            return redirect(source_target)
+
         results = _results_for_display(session.pop("last_results", []))
         run_notice = session.pop("run_notice", None)
         user_identity = _get_user_identity(settings)
+        if not _can_access_bpmis_automation_tool(user_identity):
+            flash(f"BPMIS Automation Tool is restricted to {PORTAL_ADMIN_EMAIL}.", "error")
+            return redirect(url_for("access_denied"))
         config_key = user_identity.get("config_key")
         raw_config_data = None
         effective_team_profiles = {team_key: dict(profile) for team_key, profile in TEAM_PROFILE_DEFAULTS.items()}
@@ -1013,11 +1023,12 @@ def create_app() -> Flask:
         config_data = _hydrate_setup_defaults(config_data, user_identity, team_profiles=effective_team_profiles)
         _apply_sync_email_policy(config_data, user_identity)
         has_saved_config = bool(config_key and raw_config_data)
-        requested_workspace_tab = str(request.args.get("workspace") or "").strip()
         default_workspace_tab = session.pop("default_workspace_tab", "run" if has_saved_config else "setup")
         allowed_workspace_tabs = {"setup", "run", "productization-upgrade-summary"}
         if _is_team_profile_admin(user_identity):
             allowed_workspace_tabs.add("team-default-admin")
+        if requested_workspace_tab == "bpmis":
+            requested_workspace_tab = "run"
         if requested_workspace_tab in allowed_workspace_tabs:
             default_workspace_tab = requested_workspace_tab
 
@@ -1230,7 +1241,7 @@ def create_app() -> Flask:
                 **_build_request_log_context(settings, extra=error_details),
             )
             flash(str(error), "error")
-        redirect_target = _pop_post_google_login_redirect()
+        redirect_target = _normalize_post_google_login_redirect_target(settings, _pop_post_google_login_redirect())
         if not redirect_target:
             redirect_target = _cloud_home_default_post_login_redirect(settings, _get_user_identity(settings))
         return redirect(redirect_target or url_for("index"))
@@ -1267,7 +1278,7 @@ def create_app() -> Flask:
                 **_build_request_log_context(settings, extra=error_details),
             )
             flash(str(error), "error")
-        redirect_target = _pop_post_google_login_redirect()
+        redirect_target = _normalize_post_google_login_redirect_target(settings, _pop_post_google_login_redirect())
         if not redirect_target:
             redirect_target = _cloud_home_default_post_login_redirect(settings, _get_user_identity(settings))
         return redirect(redirect_target or url_for("index"))
@@ -2597,6 +2608,48 @@ def _bpmis_run_portal_url(settings: Settings, fallback_url: str) -> str:
     return _url_with_query_value(base_url or fallback_url, "workspace", "run")
 
 
+def _bpmis_admin_portal_url(settings: Settings, fallback_url: str) -> str:
+    base_url = str(settings.mac_full_portal_url or "").strip() if settings.cloud_home_enabled else ""
+    return _url_with_query_value(base_url or fallback_url, "workspace", "bpmis")
+
+
+def _portal_home_source_code_target(settings: Settings) -> str:
+    return url_for("source_code_qa") if _can_access_source_code_qa(settings) else ""
+
+
+def _normalize_portal_landing_redirect(settings: Settings, workspace_tab: str) -> str:
+    if workspace_tab in {"", "run"}:
+        return _portal_home_source_code_target(settings)
+    return ""
+
+
+def _normalize_post_google_login_redirect_target(settings: Settings, redirect_target: str) -> str:
+    target = _safe_relative_redirect_target(redirect_target)
+    if not target:
+        return ""
+    parsed = urlsplit(target)
+    if parsed.path.rstrip("/") == "/portal-home":
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        source_target = _normalize_portal_landing_redirect(settings, str(query.get("workspace") or "").strip())
+        if source_target:
+            return source_target
+    return target
+
+
+def _is_bpmis_automation_workspace(workspace_tab: str) -> bool:
+    return workspace_tab in {"bpmis", "setup", "run", "productization-upgrade-summary", "team-default-admin"}
+
+
+def _is_bpmis_automation_route_active(settings: Settings, current_endpoint: str) -> bool:
+    workspace_tab = str(request.args.get("workspace") or "").strip()
+    if current_endpoint == "portal_home":
+        return workspace_tab == "bpmis" or (
+            not _normalize_portal_landing_redirect(settings, workspace_tab)
+            and _is_bpmis_automation_workspace(workspace_tab)
+        )
+    return current_endpoint == "index" and not settings.cloud_home_enabled and _is_bpmis_automation_workspace(workspace_tab)
+
+
 def _remember_post_google_login_redirect(value: Any) -> None:
     target = _safe_relative_redirect_target(value)
     if target:
@@ -2608,6 +2661,8 @@ def _pop_post_google_login_redirect() -> str:
 
 
 def _cloud_home_default_post_login_redirect(settings: Settings, user_identity: dict[str, str | None]) -> str:
+    if _can_access_source_code_qa(settings):
+        return url_for("source_code_qa")
     if settings.cloud_home_enabled and _can_access_team_dashboard_version_plan(user_identity):
         return url_for("version_plan_page")
     return ""
@@ -3073,7 +3128,7 @@ def _require_team_dashboard_access(settings: Settings, *, api: bool = False):
     if login_gate is not None:
         return login_gate
     user_identity = _get_user_identity(settings)
-    message = "Team Dashboard is available to signed-in npt.sg users and the configured test account."
+    message = "Team Dashboard is restricted to admins and AF Version Plan users."
     if not _can_access_team_dashboard(user_identity):
         if api:
             return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
@@ -3427,9 +3482,9 @@ def _get_prd_latest_result(*, owner_key: str, tool_key: str) -> dict[str, Any] |
 
 
 def _require_team_dashboard_monthly_report_access(settings: Settings, *, api: bool = False):
-    access_gate = _require_team_dashboard_access(settings, api=api)
-    if access_gate is not None:
-        return access_gate
+    login_gate = _require_google_login(settings, api=api)
+    if login_gate is not None:
+        return login_gate
     user_identity = _get_user_identity(settings)
     if _can_access_team_dashboard_monthly_report(user_identity):
         return None
@@ -3466,8 +3521,12 @@ def _is_team_profile_admin(user_identity: dict[str, str | None]) -> bool:
     return _is_portal_admin(str(user_identity.get("email") or ""))
 
 
+def _can_access_bpmis_automation_tool(user_identity: dict[str, str | None]) -> bool:
+    return _is_portal_admin(str(user_identity.get("email") or ""))
+
+
 def _can_access_team_dashboard(user_identity: dict[str, str | None]) -> bool:
-    return _is_portal_user(str(user_identity.get("email") or ""))
+    return _can_manage_team_dashboard(user_identity) or _can_access_team_dashboard_version_plan(user_identity)
 
 
 def _can_manage_team_dashboard(user_identity: dict[str, str | None]) -> bool:

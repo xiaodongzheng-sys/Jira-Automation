@@ -226,8 +226,46 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertNotIn(b'BPMIS Automation Tool</a>', response.data)
             self.assertNotIn(b'site-switcher-subtab is-active" href="/portal-home?workspace=run"', response.data)
             self.assertEqual(dashboard_response.status_code, 200)
-            self.assertIn(b'href="https://app.bankpmtool.uk/portal-home?workspace=run"', dashboard_response.data)
+            self.assertNotIn(b'BPMIS Automation Tool</a>', dashboard_response.data)
             self.assertNotIn(b'href="https://app.bankpmtool.uk/?workspace=run"', dashboard_response.data)
+
+    def test_portal_home_lands_on_source_code_and_bpmis_is_admin_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                self._login_non_admin(client, email="teammate@npt.sg")
+                default_response = client.get("/portal-home", follow_redirects=False)
+                run_response = client.get("/portal-home?workspace=run", follow_redirects=False)
+                bpmis_response = client.get("/portal-home?workspace=bpmis", follow_redirects=False)
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                    session["google_credentials"] = {"token": "x", "scopes": []}
+                admin_default_response = client.get("/portal-home", follow_redirects=False)
+                admin_bpmis_response = client.get("/portal-home?workspace=bpmis", follow_redirects=False)
+
+        self.assertEqual(default_response.status_code, 302)
+        self.assertEqual(default_response.headers["Location"], "/source-code-qa")
+        self.assertEqual(run_response.status_code, 302)
+        self.assertEqual(run_response.headers["Location"], "/source-code-qa")
+        self.assertEqual(bpmis_response.status_code, 302)
+        self.assertEqual(bpmis_response.headers["Location"], "/access-denied")
+        self.assertEqual(admin_default_response.status_code, 302)
+        self.assertEqual(admin_default_response.headers["Location"], "/source-code-qa")
+        self.assertEqual(admin_bpmis_response.status_code, 200)
+        self.assertIn(b"BPMIS Automation Tool", admin_bpmis_response.data)
 
     def test_cloud_and_mac_apps_share_login_session_when_secret_matches(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -257,8 +295,8 @@ class TeamPortalAccessTests(unittest.TestCase):
                 portal_response = mac_client.get("/portal-home", follow_redirects=False)
                 dashboard_response = mac_client.get("/team-dashboard", follow_redirects=False)
 
-            self.assertEqual(portal_response.status_code, 200)
-            self.assertIn(b"Manage My Projects", portal_response.data)
+            self.assertEqual(portal_response.status_code, 302)
+            self.assertEqual(portal_response.headers["Location"], "/source-code-qa")
             self.assertEqual(dashboard_response.status_code, 200)
             self.assertIn(b"Version Plan", dashboard_response.data)
 
@@ -431,7 +469,7 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertEqual(payload["sync_state"]["state"], "error")
         self.assertIn("BPMIS proxy returned an unexpected error", payload["sync_state"]["error"])
 
-    def test_cloud_home_google_login_defaults_to_version_plan_for_af_user_without_explicit_next(self):
+    def test_cloud_home_google_login_defaults_to_source_code_for_af_user_without_explicit_next(self):
         def fake_finish_google_oauth(*_args, **_kwargs):
             session["google_profile"] = {"email": "jireh.tanyx@npt.sg", "name": "Jireh"}
             session["google_credentials"] = {"token": "x", "scopes": []}
@@ -454,9 +492,9 @@ class TeamPortalAccessTests(unittest.TestCase):
                 response = client.get("/cloud-auth/google/callback?code=fake&state=fake", follow_redirects=False)
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.headers["Location"], "/version-plan")
+        self.assertEqual(response.headers["Location"], "/source-code-qa")
 
-    def test_cloud_home_google_login_preserves_explicit_full_portal_next(self):
+    def test_cloud_home_google_login_normalizes_explicit_full_portal_next_to_source_code(self):
         def fake_finish_google_oauth(*_args, **_kwargs):
             session["google_profile"] = {"email": "jireh.tanyx@npt.sg", "name": "Jireh"}
             session["google_credentials"] = {"token": "x", "scopes": []}
@@ -480,7 +518,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 response = client.get("/cloud-auth/google/callback?code=fake&state=fake", follow_redirects=False)
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.headers["Location"], "/portal-home?workspace=run")
+        self.assertEqual(response.headers["Location"], "/source-code-qa")
 
     def test_login_image_gate_css_contract_is_present(self):
         stylesheet = Path("static/style.css").read_text(encoding="utf-8")
@@ -853,7 +891,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self.assertIn(b"Source Code Q&amp;A", source_page.data)
                 self.assertIn(b">Source Code<", source_page.data)
                 self.assertIn(b">PRDs<", source_page.data)
-                self.assertIn(b">Projects<", source_page.data)
+                self.assertNotIn(b">Projects<", source_page.data)
                 for admin_marker in (
                     b"Repo Admin",
                     b"Repository Mapping",
@@ -905,7 +943,8 @@ class TeamPortalAccessTests(unittest.TestCase):
                         self.assertEqual(response.status_code, 302)
                         self.assertEqual(response.headers["Location"], expected_location)
                 response = client.get("/team-dashboard", follow_redirects=False)
-                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(response.headers["Location"], "/access-denied")
                 reports_response = client.get("/reports", follow_redirects=False)
                 self.assertEqual(reports_response.status_code, 302)
                 self.assertEqual(reports_response.headers["Location"], "/access-denied")
@@ -1102,7 +1141,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     ("get", "/api/productization-upgrade-summary/llm-descriptions?version_id=88", {200}),
                     ("post", "/api/jobs/sync-bpmis-projects", {200}),
                     ("get", "/api/jobs/missing", {404}),
-                    ("get", "/team-dashboard?tab=version-plan", {200}),
+                    ("get", "/team-dashboard?tab=version-plan", {302}),
                     ("get", "/reports", {302}),
                     ("get", "/meeting-recorder", {302}),
                     ("get", "/meeting-translation", {302}),
