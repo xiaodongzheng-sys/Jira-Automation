@@ -583,7 +583,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         store = _get_version_plan_store()
         snapshot = _version_plan_load_snapshot(store)
         sync_queued = False
-        should_auto_sync = str(request.args.get("sync") or "1").strip().lower() not in {"0", "false", "no"}
+        should_auto_sync = str(request.args.get("sync") or "").strip().lower() in {"1", "true", "yes"}
         try:
             if should_auto_sync and _can_sync_version_plan():
                 sync_queued = _start_version_plan_sync_if_needed(force=False)

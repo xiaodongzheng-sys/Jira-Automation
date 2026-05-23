@@ -850,7 +850,7 @@
     setVersionPlanStatus('Loading cached Version Plan...', 'neutral');
     try {
       const planUrl = new URL(root.dataset.versionPlanUrl || '/api/team-dashboard/version-plan/af', window.location.origin);
-      if (force) planUrl.searchParams.set('sync', '0');
+      planUrl.searchParams.set('sync', '0');
       const response = await fetch(planUrl.toString(), {
         headers: { Accept: 'application/json' },
         credentials: 'same-origin',

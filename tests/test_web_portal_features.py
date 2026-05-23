@@ -1390,6 +1390,32 @@ class WebPortalFeatureTests(unittest.TestCase):
             any(row["row_id"] == added_row_id for row in delete_response.get_json()["pipeline_rows"])
         )
 
+    def test_team_dashboard_version_plan_get_does_not_auto_sync_by_default(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "ENV_FILE": os.devnull,
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user") as build_client:
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                        session["google_credentials"] = {"token": "x"}
+                    default_response = client.get("/api/team-dashboard/version-plan/af")
+
+        self.assertEqual(default_response.status_code, 200)
+        self.assertFalse(default_response.get_json()["sync_queued"])
+        build_client.assert_not_called()
+
     def test_team_dashboard_version_plan_api_rejects_stale_revision(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
@@ -3524,6 +3550,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("isVersionPlanSyncRunning", script)
         self.assertIn("version_plan_sync_running", script)
         self.assertIn("${rowChangesPaused ? 'disabled' : ''}", script)
+        self.assertGreaterEqual(script.count("planUrl.searchParams.set('sync', '0')"), 2)
         self.assertIn("versionPlanPmFilterOptions = ['All PMs', '-', 'Wang Chang', 'Zoey', 'Jireh', 'Ker Yin', 'Rene', 'Jun Wei']", script)
         self.assertIn("data-version-plan-pm-filter", script)
         self.assertIn("filterVersionPlanRowsByPm([...syncedRows, ...manualRows])", script)
