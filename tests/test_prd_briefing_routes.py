@@ -3,6 +3,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from bpmis_jira_tool.errors import ToolError
@@ -268,6 +269,27 @@ class FakePRDReviewLocalAgentClient:
                         "chunks": [{"id": "chunk-1", "title": "Remote", "content": "Body"}],
                     }
                 }
+            },
+        }
+
+    def prd_briefing_process_prd(self, payload):
+        self.payload = payload
+        return {
+            "status": "ok",
+            "session": {"session_id": "session-remote", "title": "Remote PRD"},
+            "cached": True,
+            "chunks": [{"id": "chunk-remote", "title": "Remote", "content": "Body"}],
+        }
+
+    def prd_briefing_generate_audio(self, payload):
+        self.payload = payload
+        return {
+            "status": "ok",
+            "chunk": {
+                "id": payload["chunk"]["id"],
+                "title": payload["chunk"].get("title") or "",
+                "content": payload["chunk"].get("content") or "",
+                "audioUrl": "/prd-briefing/assets/audio/session-remote/mock.mp3",
             },
         }
 
@@ -672,6 +694,211 @@ class PRDBriefingRouteTests(unittest.TestCase):
             self.assertEqual(response.status_code, 302)
             self.assertEqual(response.headers["Location"], "/")
 
+    def test_prd_briefing_api_access_gate_returns_stable_json(self):
+        with self.app.test_client() as client:
+            anonymous = client.post("/prd-briefing/api/session", json={"page_ref": "https://example.test/prd"})
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                session["google_credentials"] = {"token": "x"}
+            signed_in = client.post("/prd-briefing/api/session", json={"page_ref": "https://example.test/prd"})
+
+        self.assertEqual(anonymous.status_code, 401)
+        self.assertIn("Sign in", anonymous.get_json()["message"])
+        self.assertEqual(signed_in.status_code, 403)
+        self.assertIn("signed-in portal users", signed_in.get_json()["message"])
+
+    @patch("prd_briefing.blueprint._build_service")
+    def test_prd_briefing_session_and_followup_errors_return_json(self, mock_service):
+        class BrokenBriefingService:
+            def create_session(self, **_kwargs):
+                raise RuntimeError("session failed")
+
+            def get_session_payload(self, **_kwargs):
+                raise RuntimeError("load failed")
+
+            def answer_question(self, **_kwargs):
+                raise RuntimeError("answer failed")
+
+            def narrate_section(self, **_kwargs):
+                raise RuntimeError("narrate failed")
+
+        mock_service.return_value = BrokenBriefingService()
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                session["google_credentials"] = {"token": "x"}
+            create_response = client.post("/prd-briefing/api/session", json={"page_ref": "https://example.test/prd"})
+            get_response = client.get("/prd-briefing/api/session/session-1")
+            answer_response = client.post("/prd-briefing/api/session/session-1/answer", json={"question": "What?"})
+            narrate_response = client.post(
+                "/prd-briefing/api/session/session-1/narrate",
+                json={"section_index": "bad-index"},
+            )
+
+        self.assertEqual(create_response.status_code, 400)
+        self.assertIn("session failed", create_response.get_json()["message"])
+        self.assertEqual(get_response.status_code, 400)
+        self.assertIn("load failed", get_response.get_json()["message"])
+        self.assertEqual(answer_response.status_code, 400)
+        self.assertIn("answer failed", answer_response.get_json()["message"])
+        self.assertEqual(narrate_response.status_code, 400)
+        self.assertIn("invalid literal", narrate_response.get_json()["message"])
+
+    @patch("prd_briefing.blueprint._build_prd_review_service")
+    def test_prd_briefing_review_unexpected_error_returns_json(self, mock_service):
+        class BrokenReviewService:
+            def review_url(self, _request):
+                raise RuntimeError("review exploded")
+
+        mock_service.return_value = BrokenReviewService()
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                session["google_credentials"] = {"token": "x"}
+            response = client.post(
+                "/prd-briefing/api/review",
+                json={"prd_url": "https://example.atlassian.net/wiki/pages/123", "language": "en"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("review exploded", response.get_json()["message"])
+
+    def test_process_prd_error_boundaries_are_sanitized(self):
+        class ToolErrorBriefingService:
+            def process_prd_for_presentation(self, **_kwargs):
+                raise ToolError("PRD content is unavailable")
+
+        class RuntimeErrorBriefingService:
+            def process_prd_for_presentation(self, **_kwargs):
+                raise RuntimeError("processing failed")
+
+        class PermissionErrorBriefingService:
+            def process_prd_for_presentation(self, **_kwargs):
+                raise ValueError("403 forbidden token=secret")
+
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                session["google_credentials"] = {"token": "x"}
+            with patch("prd_briefing.blueprint._build_service", return_value=ToolErrorBriefingService()):
+                tool_error = client.post("/prd-briefing/api/process-prd", json={"page_ref": "https://example.test/prd"})
+            with patch("prd_briefing.blueprint._build_service", return_value=RuntimeErrorBriefingService()):
+                runtime_error = client.post("/prd-briefing/api/process-prd", json={"page_ref": "https://example.test/prd"})
+            with patch("prd_briefing.blueprint._build_service", return_value=PermissionErrorBriefingService()):
+                permission_error = client.post("/prd-briefing/api/process-prd", json={"page_ref": "https://example.test/prd"})
+
+        self.assertEqual(tool_error.status_code, 400)
+        self.assertIn("PRD content is unavailable", tool_error.get_json()["message"])
+        self.assertEqual(runtime_error.status_code, 400)
+        self.assertIn("processing failed", runtime_error.get_json()["message"])
+        self.assertEqual(permission_error.status_code, 400)
+        self.assertIn("Confluence access failed", permission_error.get_json()["message"])
+        self.assertNotIn("secret", permission_error.get_json()["message"])
+
+    @patch("prd_briefing.blueprint._local_agent_prd_briefing_enabled", return_value=True)
+    def test_process_prd_and_audio_can_route_to_local_agent(self, _mock_enabled):
+        fake_client = FakePRDReviewLocalAgentClient()
+        with patch("prd_briefing.blueprint._build_local_agent_client", return_value=fake_client):
+            with self.app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                    session["google_credentials"] = {"token": "x"}
+                process_response = client.post(
+                    "/prd-briefing/api/process-prd",
+                    json={"page_ref": "https://example.atlassian.net/wiki/pages/123", "language": "en"},
+                )
+                audio_response = client.post(
+                    "/prd-briefing/api/generate-audio",
+                    json={"session_id": "session-remote", "chunk": {"id": "chunk-remote", "title": "Remote", "content": "Body"}},
+                )
+
+        self.assertEqual(process_response.status_code, 200)
+        self.assertEqual(process_response.get_json()["chunks"][0]["id"], "chunk-remote")
+        self.assertEqual(audio_response.status_code, 200)
+        self.assertIn("audioUrl", audio_response.get_json()["chunk"])
+        self.assertEqual(fake_client.payload["chunk"]["id"], "chunk-remote")
+
+    @patch("prd_briefing.blueprint._local_agent_prd_briefing_enabled", return_value=True)
+    def test_prd_briefing_latest_local_agent_errors_return_json(self, _mock_enabled):
+        class ToolErrorLocalAgentClient:
+            def prd_briefing_latest(self, *, owner_key):
+                raise ToolError(f"local-agent unavailable for {owner_key}")
+
+        class BrokenLocalAgentClient:
+            def prd_briefing_latest(self, *, owner_key):
+                raise RuntimeError("latest exploded")
+
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                session["google_credentials"] = {"token": "x"}
+            with patch("prd_briefing.blueprint._build_local_agent_client", return_value=ToolErrorLocalAgentClient()):
+                tool_error = client.get("/prd-briefing/api/latest")
+            with patch("prd_briefing.blueprint._build_local_agent_client", return_value=BrokenLocalAgentClient()):
+                unexpected = client.get("/prd-briefing/api/latest")
+
+        self.assertEqual(tool_error.status_code, 400)
+        self.assertIn("local-agent unavailable", tool_error.get_json()["message"])
+        self.assertEqual(unexpected.status_code, 400)
+        self.assertIn("latest exploded", unexpected.get_json()["message"])
+
+    @patch("prd_briefing.blueprint._build_service")
+    def test_generate_audio_error_returns_json(self, mock_service):
+        class BrokenAudioService:
+            def generate_presentation_audio(self, **_kwargs):
+                raise RuntimeError("audio failed")
+
+        mock_service.return_value = BrokenAudioService()
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                session["google_credentials"] = {"token": "x"}
+            response = client.post(
+                "/prd-briefing/api/generate-audio",
+                json={"session_id": "session-1", "chunk": {"id": "chunk-1", "content": "Body"}},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("audio failed", response.get_json()["message"])
+
+    def test_prd_briefing_asset_route_blocks_escape_and_missing_assets(self):
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                session["google_credentials"] = {"token": "x"}
+            missing = client.get("/prd-briefing/assets/audio/session-1/missing.mp3")
+            escaped = client.get("/prd-briefing/assets/../secret.txt")
+
+        self.assertEqual(missing.status_code, 404)
+        self.assertIn("Asset not found", missing.get_json()["message"])
+        self.assertEqual(escaped.status_code, 404)
+        self.assertIn("Invalid asset path", escaped.get_json()["message"])
+
+    def test_prd_briefing_latest_without_owner_key_skips_store(self):
+        with self.app.app_context():
+            self.assertIsNone(prd_blueprint_module._get_latest_result(owner_key="", tool_key="prd_briefing"))  # noqa: SLF001
+            prd_blueprint_module._save_latest_result(owner_key="", tool_key="prd_briefing", payload={"payload": {}})  # noqa: SLF001
+
+    def test_prd_briefing_local_agent_helper_predicates(self):
+        settings = SimpleNamespace(
+            local_agent_mode="cloud_run",
+            local_agent_base_url="https://agent.example.test",
+            local_agent_hmac_secret="secret",
+            local_agent_source_code_qa_enabled=True,
+        )
+        self.assertTrue(prd_blueprint_module._local_agent_prd_briefing_enabled(settings))  # noqa: SLF001
+        self.assertTrue(prd_blueprint_module._local_agent_source_code_qa_enabled(settings))  # noqa: SLF001
+        self.assertFalse(prd_blueprint_module._is_loopback_url("https://agent.example.test"))  # noqa: SLF001
+        self.assertTrue(prd_blueprint_module._is_loopback_url("http://127.0.0.1:8787"))  # noqa: SLF001
+
+        settings.local_agent_hmac_secret = ""
+        self.assertFalse(prd_blueprint_module._local_agent_prd_briefing_enabled(settings))  # noqa: SLF001
+        settings.local_agent_hmac_secret = "secret"
+        settings.local_agent_source_code_qa_enabled = False
+        self.assertFalse(prd_blueprint_module._local_agent_source_code_qa_enabled(settings))  # noqa: SLF001
+        settings.local_agent_mode = "disabled"
+        self.assertFalse(prd_blueprint_module._local_agent_prd_briefing_enabled(settings))  # noqa: SLF001
+
     def test_prd_self_assessment_route_allows_npt_google_user(self):
         with self.app.test_client() as client:
             with client.session_transaction() as session:
@@ -1009,6 +1236,57 @@ class PRDBriefingRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("Unsupported image source", response.get_json()["message"])
+
+    @patch("prd_briefing.blueprint._build_service", return_value=FakeImageProxyService())
+    def test_image_proxy_rejects_missing_or_non_http_source(self, _mock_service):
+        with self.app.test_client() as client:
+            missing = client.get("/prd-briefing/image-proxy")
+            non_http = client.get("/prd-briefing/image-proxy", query_string={"src": "file:///tmp/mock.png"})
+
+        self.assertEqual(missing.status_code, 400)
+        self.assertIn("Missing image source", missing.get_json()["message"])
+        self.assertEqual(non_http.status_code, 400)
+        self.assertIn("Unsupported image source", non_http.get_json()["message"])
+
+    def test_image_source_allowlist_rejects_missing_base_and_wrong_paths(self):
+        self.assertFalse(
+            prd_blueprint_module._is_allowed_confluence_image_source(  # noqa: SLF001
+                "https://confluence.shopee.io/download/attachments/123/mock.png",
+                "",
+            )
+        )
+        self.assertFalse(
+            prd_blueprint_module._is_allowed_confluence_image_source(  # noqa: SLF001
+                "https://confluence.shopee.io/pages/viewpage.action?pageId=123",
+                "https://confluence.shopee.io",
+            )
+        )
+        self.assertTrue(
+            prd_blueprint_module._is_allowed_confluence_image_source(  # noqa: SLF001
+                "https://confluence.shopee.io/download/thumbnails/123/mock.png",
+                "https://confluence.shopee.io",
+            )
+        )
+
+    @patch("prd_briefing.blueprint._local_agent_prd_briefing_enabled", return_value=True)
+    @patch("prd_briefing.blueprint._is_loopback_url", return_value=False)
+    @patch("prd_briefing.blueprint._build_service")
+    def test_image_proxy_uses_default_confluence_base_for_remote_local_agent(self, mock_service, _mock_loopback, _mock_enabled):
+        class NoBaseImageProxyService:
+            def __init__(self):
+                self.confluence = type("Connector", (), {"base_url": ""})()
+
+        fake_client = FakePRDReviewLocalAgentClient()
+        mock_service.return_value = NoBaseImageProxyService()
+        with patch("prd_briefing.blueprint._build_local_agent_client", return_value=fake_client):
+            with self.app.test_client() as client:
+                response = client.get(
+                    "/prd-briefing/image-proxy",
+                    query_string={"src": "https://confluence.shopee.io/download/thumbnails/123/mock.png"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(fake_client.image_src, "https://confluence.shopee.io/download/thumbnails/123/mock.png")
 
 
 if __name__ == "__main__":
