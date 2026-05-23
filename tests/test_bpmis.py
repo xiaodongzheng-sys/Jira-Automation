@@ -1517,6 +1517,9 @@ class BPMISClientTests(unittest.TestCase):
                     }
                 if path == "/api/v1/options/getGroupOptions":
                     return {"data": {"bizProjectStatus": [{"label": "Developing", "value": 10}]}}
+                if path == "/api/v1/issues/list":
+                    self.assertEqual(method, "PUT")
+                    return {"data": {"ok": True}}
                 if path == "/api/v1/issues/updateStatus":
                     return {"data": {"ok": True}}
                 if path == "/api/v1/issues/detail":
@@ -1535,9 +1538,8 @@ class BPMISClientTests(unittest.TestCase):
 
             detail = client.update_biz_project_status("221733", "Developing")
 
-            update_call = next(call for call in calls if call[0] == "/api/v1/issues/updateStatus")
-            self.assertEqual(update_call[1], "POST")
-            self.assertEqual(update_call[3], {"id": "221733", "statusId": 10})
+            update_call = next(call for call in calls if call[0] == "/api/v1/issues/list" and call[1] == "PUT")
+            self.assertEqual(update_call[3], {"id": [221733], "statusId": 10})
             self.assertEqual(detail["status"]["label"], "Developing")
 
     def test_delink_jira_ticket_from_project_clears_parent_issue(self):

@@ -1789,6 +1789,7 @@ class BPMISDirectApiClient(BPMISClient):
             status_id=status_id,
         )
         attempts = [
+            ("PUT", "/api/v1/issues/list"),
             ("POST", "/api/v1/issues/updateStatus"),
             ("POST", "/api/v1/issues/status/update"),
             ("POST", "/api/v1/issues/workflow"),
@@ -2718,7 +2719,13 @@ class BPMISDirectApiClient(BPMISClient):
         status: str,
         status_id: int | None,
     ) -> list[dict[str, Any]]:
-        identifiers: list[dict[str, Any]] = [{"id": issue_id}, {"issueId": issue_id}]
+        list_update_identifier: dict[str, Any] | None = None
+        if str(issue_id).strip().isdigit():
+            list_update_identifier = {"id": [int(issue_id)]}
+        identifiers: list[dict[str, Any]] = []
+        if list_update_identifier is not None:
+            identifiers.append(list_update_identifier)
+        identifiers.extend([{"id": issue_id}, {"issueId": issue_id}])
         status_values: list[dict[str, Any]] = []
         if status_id is not None:
             status_values.append({"statusId": status_id})

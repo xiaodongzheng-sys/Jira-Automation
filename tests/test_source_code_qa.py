@@ -70,7 +70,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             session["google_profile"] = {"email": email, "name": "Portal User"}
             session["google_credentials"] = {"token": "x", "scopes": []}
 
-    def test_npt_user_defaults_to_source_code_qa_and_sees_bpmis_last(self):
+    def test_npt_user_defaults_to_source_code_qa_without_project_tab_when_no_project_access(self):
         with self.app.test_client() as client:
             self._login(client)
             default_response = client.get("/", follow_redirects=False)
@@ -82,7 +82,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
         html = response.get_data(as_text=True)
         self.assertIn("Source Code Q&amp;A", html)
         self.assertIn('href="/source-code-qa">Source Code</a>', html)
-        self.assertIn('href="/team-dashboard">Projects</a>', html)
+        self.assertNotIn('href="/team-dashboard">Projects</a>', html)
+        self.assertNotIn("BPMIS Automation Tool", html)
         self.assertIn('data-source-question rows="2"', html)
         self.assertLess(html.index("data-source-attachments"), html.index("data-source-question"))
         self.assertLess(html.index("data-source-question"), html.index("data-source-attachment-upload"))
