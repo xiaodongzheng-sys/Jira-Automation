@@ -108,6 +108,9 @@ BOT_ALERT_REMINDER_HINTS = (
     "system generated",
 )
 TEAM_MEMBER_REMINDER_ALLOWED_PEOPLE = {
+    "xiaodong": "Zheng Xiaodong",
+    "zheng xiaodong": "Zheng Xiaodong",
+    "xiaodong zheng": "Zheng Xiaodong",
     "keryin": "Ker Yin",
     "ker yin": "Ker Yin",
     "rene": "Rene Chong",
@@ -144,6 +147,7 @@ ANTI_FRAUD_TEAM_MEMBERS = {
     "jireh",
 }
 TEAM_MEMBER_REMINDER_DOMAIN_OVERRIDES = {
+    "zheng xiaodong": "General",
     "sophia wang zijun": "Credit Risk",
 }
 DAILY_BRIEF_SIGNAL_TERMS = (
@@ -323,7 +327,7 @@ def resolve_daily_email_window(*, now: datetime, slot: str = "auto") -> DailyEma
         start = _local_datetime(local_now.date(), 13)
         end = _local_datetime(local_now.date(), 19)
     elif normalized_slot == MORNING_SLOT:
-        start = _local_datetime(local_now.date(), 8)
+        start = _previous_daily_brief_midday_end(local_now.date())
         end = _local_datetime(local_now.date(), 13)
     else:
         raise ConfigError(f"Unsupported daily email slot: {slot}. Use auto, morning, or midday.")
@@ -338,6 +342,13 @@ def resolve_daily_email_window(*, now: datetime, slot: str = "auto") -> DailyEma
 def should_skip_fixed_daily_email_window(*, now: datetime) -> bool:
     local_now = now.astimezone(SEATALK_INSIGHTS_TIMEZONE)
     return local_now.weekday() not in DAILY_EMAIL_WEEKDAY_RUNS
+
+
+def _previous_daily_brief_midday_end(value: Any) -> datetime:
+    previous_date = value - timedelta(days=1)
+    while previous_date.weekday() not in DAILY_EMAIL_WEEKDAY_RUNS:
+        previous_date -= timedelta(days=1)
+    return _local_datetime(previous_date, 19)
 
 
 def _local_datetime(value: Any, hour: int) -> datetime:
@@ -738,19 +749,27 @@ def build_daily_briefing(
         direct_action_todos=direct_action_todos,
         watch_delegate_todos=watch_delegate_todos,
     )
+    suppressed_cross_section_duplicate_count = _suppress_cross_section_duplicate_topics(
+        project_updates=project_updates,
+        other_updates=other_updates,
+        direct_action_todos=direct_action_todos,
+        watch_delegate_todos=watch_delegate_todos,
+        reminders=reminders,
+    )
     evidence_quality_metrics["generic_evidence_count"] = _count_generic_evidence(
         [*project_updates, *other_updates, *direct_action_todos, *watch_delegate_todos, *reminders]
     )
     evidence_quality_metrics["candidate_followup_count"] = len(team_member_reminder_candidates or [])
     evidence_quality_metrics["final_followup_count"] = len(reminders)
     evidence_quality_metrics["suppressed_update_duplicate_count"] = suppressed_update_duplicate_count
+    evidence_quality_metrics["suppressed_cross_section_duplicate_count"] = suppressed_cross_section_duplicate_count
     evidence_quality_metrics["followup_diagnostics"] = _build_followup_diagnostics(
         team_member_reminder_candidates=team_member_reminder_candidates,
         reminders=reminders,
         watch_delegate_todos=watch_delegate_todos,
         evidence_refs=evidence_refs,
     )
-    deduped_topic_count = _apply_cross_section_topic_metadata(
+    deduped_topic_count = suppressed_cross_section_duplicate_count + _apply_cross_section_topic_metadata(
         project_updates=project_updates,
         other_updates=other_updates,
         my_todos=my_todos,
@@ -1365,14 +1384,15 @@ def _daily_brief_user_prompt(
         "If a teammate follow-up topic is already represented as a my_todos watch_delegate item, do not repeat it in team_member_reminders.\n"
         "project_updates: include updates from SeaTalk or Gmail where Xiaodong is involved, mentioned, directly asked, or clearly participating. Summarize the decision, milestone, blocker, or current state. Max 10 items. Sort blocked and in_progress before done.\n"
         "other_updates: include useful awareness from SeaTalk or Gmail where Xiaodong is not directly involved but the information may matter to a Digital Banking PM. Prioritize incident, launch, policy/process, risk/compliance, cross-team dependency, leadership decision, and cross-product milestone. useful_awareness should be rare and only included when genuinely PM-relevant, especially when matched to a VIP, priority keyword, or key project. Include at most 5 useful_awareness items and at most 8 other_updates total. Do not include generic chatter, greetings, pure thanks, meeting logistics with no decision, or low-value FYI.\n"
-        "team_member_reminders: use SeaTalk only. Never create these from Gmail. Only include people from the explicit allowed reminder list below. Max 8 items. Sort by most actionable first.\n\n"
+        "team_member_reminders: use SeaTalk only. Never create these from Gmail. Only include people from the explicit allowed reminder list below, including Xiaodong himself when he was @mentioned and did not reply. Max 8 items. Sort by most actionable first.\n\n"
         "For project_updates, team_member_reminders, and SeaTalk watch_delegate my_todos, evidence_ref_id is required and must be copied exactly from Deterministic Daily Brief Evidence Bundle.evidence_refs. Do not invent evidence_ref_id values.\n"
         "For mixed SeaTalk+Gmail project_updates, evidence_ref_id may contain two comma-separated ids, one st-ref and one gm-ref, only when both refs support the same topic.\n\n"
         "## Team Member Reminder Scan\n"
-        "Before writing team_member_reminders, scan every SeaTalk group conversation for human mentions of these people: Ker Yin, Rene Chong, Sabrina Chan, Liye, Hui Xian, Sophia Wang Zijun, Ming Ming, Zoey Lu, Wang Chang, Jireh.\n"
+        "Before writing team_member_reminders, scan every SeaTalk group conversation for human mentions of these people: Zheng Xiaodong, Ker Yin, Rene Chong, Sabrina Chan, Liye, Hui Xian, Sophia Wang Zijun, Ming Ming, Zoey Lu, Wang Chang, Jireh.\n"
         "Sophia Wang Zijun belongs to Credit Risk. Do not classify Sophia Wang Zijun as Ops Risk.\n"
         "For Anti-fraud domain reminders, only these people are Xiaodong's Anti-fraud team: Ker Yin, Rene Chong, Zoey Lu, Wang Chang, Jireh. Do not put anyone else, including Wendy, under Anti-fraud team_member_reminders.\n"
         "Do not create team_member_reminders for people outside the allowed reminder list, even if they appear in SeaTalk.\n"
+        "For Zheng Xiaodong, only include a reminder when the source directly @mentions or clearly asks Xiaodong and no later Xiaodong reply is visible in the same group/thread during the window.\n"
         "A valid reminder exists when a human in a SeaTalk group asks, mentions, assigns, blocks on, or appears to need follow-up from one of those people, and neither the named person nor Xiaodong follows up later in that same group during the available window.\n"
         "Mentions may appear as direct @ mentions, plain names, mapped display names, name variants, or quoted text. Prefer real names in the person field.\n"
         "A cc-only mention is not enough. If a person is only copied after 'cc' and the actual ask is addressed to someone else, do not create a reminder for the cc'd person. If the direct assignee is outside the allowed list and an allowed teammate is only cc'd, produce no team_member_reminders item for that message.\n"
@@ -1721,6 +1741,7 @@ def _looks_like_team_member_request(text: str) -> bool:
             "update",
             "provide",
             "follow up",
+            "ensure",
             "handle",
             "investigate",
             "evaluate",
@@ -2326,10 +2347,20 @@ def _apply_daily_brief_evidence_refs(
     refs_by_id = {str(ref.get("id") or "").strip(): ref for ref in evidence_refs if str(ref.get("id") or "").strip()}
     if not refs_by_id:
         return metrics
+    available_ref_source_types = {
+        str(ref.get("source_type") or "").strip().lower()
+        for ref in evidence_refs
+        if str(ref.get("source_type") or "").strip()
+    }
 
-    def apply_to_item(item: dict[str, Any], *, require_ref: bool) -> bool:
+    def apply_to_item(item: dict[str, Any], *, section: str, require_ref: bool) -> bool:
         ref_id = str(item.get("evidence_ref_id") or "").strip()
         ref = refs_by_id.get(ref_id)
+        if not ref:
+            inferred_ref = _best_evidence_ref_for_item(item, evidence_refs, section=section) if require_ref else None
+            if inferred_ref:
+                ref_id = str(inferred_ref.get("id") or "").strip()
+                ref = refs_by_id.get(ref_id)
         if not ref:
             if ref_id or require_ref:
                 metrics["dropped_invalid_evidence_count"] += 1
@@ -2349,8 +2380,20 @@ def _apply_daily_brief_evidence_refs(
         item["evidence_ref_id"] = ref_id
         return True
 
-    def apply_project_item(item: dict[str, Any]) -> bool:
+    def apply_project_item(item: dict[str, Any], *, section: str) -> bool:
+        require_ref = _requires_daily_brief_evidence_ref(
+            item,
+            section=section,
+            available_ref_source_types=available_ref_source_types,
+        )
         ref_ids = _split_evidence_ref_ids(item.get("evidence_ref_id"))
+        if not ref_ids and require_ref:
+            inferred_ref = _best_evidence_ref_for_item(item, evidence_refs, section=section)
+            if inferred_ref:
+                ref_ids = [str(inferred_ref.get("id") or "").strip()]
+            else:
+                metrics["dropped_invalid_evidence_count"] += 1
+                return False
         if not ref_ids:
             return True
         refs = [refs_by_id.get(ref_id) for ref_id in ref_ids]
@@ -2374,13 +2417,13 @@ def _apply_daily_brief_evidence_refs(
         item
         for item in project_updates
         if not isinstance(item, dict)
-        or apply_project_item(item)
+        or apply_project_item(item, section="project_updates")
     ]
     other_updates[:] = [
         item
         for item in other_updates
         if not isinstance(item, dict)
-        or apply_project_item(item)
+        or apply_project_item(item, section="other_updates")
     ]
 
     my_todos[:] = [
@@ -2389,7 +2432,12 @@ def _apply_daily_brief_evidence_refs(
         if not isinstance(item, dict)
         or apply_to_item(
             item,
-            require_ref=_requires_seatalk_evidence_ref(item, section="my_todos"),
+            section="my_todos",
+            require_ref=_requires_daily_brief_evidence_ref(
+                item,
+                section="my_todos",
+                available_ref_source_types=available_ref_source_types,
+            ),
         )
     ]
     reminders[:] = [
@@ -2398,6 +2446,7 @@ def _apply_daily_brief_evidence_refs(
         if not isinstance(item, dict)
         or apply_to_item(
             item,
+            section="team_member_reminders",
             require_ref=_requires_seatalk_evidence_ref(item, section="team_member_reminders"),
         )
     ]
@@ -2406,6 +2455,51 @@ def _apply_daily_brief_evidence_refs(
 
 def _split_evidence_ref_ids(value: Any) -> list[str]:
     return [part.strip() for part in re.split(r"[,;]\s*", str(value or "")) if part.strip()]
+
+
+def _best_evidence_ref_for_item(
+    item: dict[str, Any],
+    evidence_refs: list[dict[str, Any]],
+    *,
+    section: str,
+) -> dict[str, Any] | None:
+    source_type = str(item.get("source_type") or "").strip().lower()
+    item_evidence = _normalize_thread_match_text(item.get("evidence"))
+    item_text = _item_text(item, fields=("title", "summary", "task", "reminder", "person", "evidence"))
+    item_tokens = _evidence_match_tokens(item_text)
+    best: tuple[int, dict[str, Any]] | None = None
+    for ref in evidence_refs:
+        ref_source_type = str(ref.get("source_type") or "").strip().lower()
+        if source_type == "seatalk" and ref_source_type != "seatalk":
+            continue
+        if source_type == "gmail" and ref_source_type != "gmail":
+            continue
+        ref_text = " ".join(
+            str(ref.get(field) or "")
+            for field in ("group", "thread", "subject", "participants", "sender", "snippet", "evidence")
+        )
+        ref_evidence = _normalize_thread_match_text(ref.get("evidence"))
+        score = 0
+        if item_evidence and ref_evidence:
+            if item_evidence == ref_evidence:
+                score += 30
+            elif item_evidence in ref_evidence or ref_evidence in item_evidence:
+                score += 16
+        parsed_item_evidence = _parse_seatalk_evidence_ref(item.get("evidence"))
+        if parsed_item_evidence.get("thread") and _normalize_thread_match_text(parsed_item_evidence.get("thread")) == _normalize_thread_match_text(ref.get("thread")):
+            score += 10
+        ref_tokens = _evidence_match_tokens(ref_text)
+        overlap = item_tokens & ref_tokens
+        score += min(len(overlap), 12)
+        if _extract_item_people_for_evidence_validation(item) and _evidence_ref_matches_item_people(item, ref):
+            score += 3
+        if not _evidence_refs_match_project_item(item, [ref]):
+            score -= 20
+        if section in {"project_updates", "other_updates"} and ref_source_type == "gmail" and source_type in {"", "unknown"}:
+            score += 1
+        if score >= 6 and (best is None or score > best[0]):
+            best = (score, ref)
+    return best[1] if best else None
 
 
 def _evidence_refs_match_project_item(item: dict[str, Any], refs: list[dict[str, Any]]) -> bool:
@@ -2421,7 +2515,7 @@ def _evidence_refs_match_project_item(item: dict[str, Any], refs: list[dict[str,
     if _evidence_ref_has_domain_mismatch(item, " ".join(ref_text_parts), item_tokens):
         return False
     overlap = item_tokens & ref_tokens
-    return len(overlap) >= 2 or bool({"launch", "live", "uat", "prd", "risk", "incident"} & overlap)
+    return len(overlap) >= 2
 
 
 def _evidence_ref_has_domain_mismatch(item: dict[str, Any], ref_text: str, item_tokens: set[str]) -> bool:
@@ -2473,10 +2567,34 @@ def _evidence_ref_has_group_topic_mismatch(normalized_ref: str, item_tokens: set
 
 def _requires_seatalk_evidence_ref(item: dict[str, Any], *, section: str) -> bool:
     if section == "team_member_reminders":
-        return _item_uses_seatalk_source(item) and _is_generic_seatalk_evidence(item.get("evidence"))
+        return _item_uses_seatalk_source(item)
     if section == "my_todos" and str(item.get("action_type") or "").strip() == "watch_delegate":
-        return _item_uses_seatalk_source(item) and _is_generic_seatalk_evidence(item.get("evidence"))
+        return _item_uses_seatalk_source(item)
     return False
+
+
+def _requires_daily_brief_evidence_ref(
+    item: dict[str, Any],
+    *,
+    section: str,
+    available_ref_source_types: set[str] | None = None,
+) -> bool:
+    if section in {"project_updates", "other_updates"}:
+        source_type = str(item.get("source_type") or "").strip().lower()
+        available = available_ref_source_types or set()
+        if source_type in {"seatalk", "gmail"}:
+            return source_type in available
+        if source_type == "mixed":
+            return bool({"seatalk", "gmail"} & available)
+        return bool(available)
+    if section == "my_todos" and str(item.get("action_type") or "").strip() == "watch_delegate":
+        source_type = str(item.get("source_type") or "").strip().lower()
+        available = available_ref_source_types or set()
+        if source_type in {"seatalk", "gmail"}:
+            return source_type in available
+        if source_type == "mixed":
+            return bool({"seatalk", "gmail"} & available)
+    return _requires_seatalk_evidence_ref(item, section=section)
 
 
 def _evidence_ref_matches_item_people(item: dict[str, Any], ref: dict[str, Any]) -> bool:
@@ -2984,8 +3102,13 @@ def _evidence_match_tokens(value: Any) -> set[str]:
         "meeting",
         "discussion",
         "update",
+        "updates",
         "status",
         "team",
+        "bank",
+        "live",
+        "issue",
+        "issues",
         "需要",
         "确认",
         "是否",
@@ -3126,6 +3249,67 @@ def _apply_cross_section_topic_metadata(
             item["cross_section_duplicate"] = True
             deduped_topic_count += 1
     return deduped_topic_count
+
+
+def _suppress_cross_section_duplicate_topics(
+    *,
+    project_updates: list[dict[str, Any]],
+    other_updates: list[dict[str, Any]],
+    direct_action_todos: list[dict[str, Any]],
+    watch_delegate_todos: list[dict[str, Any]],
+    reminders: list[dict[str, Any]],
+) -> int:
+    canonical_items: list[dict[str, Any]] = []
+    removed = 0
+
+    def remember(items: list[dict[str, Any]]) -> None:
+        for item in items:
+            if isinstance(item, dict):
+                canonical_items.append(item)
+
+    def keep_unique(item: dict[str, Any]) -> bool:
+        nonlocal removed
+        duplicate = next(
+            (canonical for canonical in canonical_items if _brief_items_refer_to_same_topic(item, canonical)),
+            None,
+        )
+        if duplicate is None:
+            canonical_items.append(item)
+            return True
+        duplicate["evidence"] = _merge_evidence(duplicate.get("evidence"), item.get("evidence"))
+        duplicate["source_type"] = _merge_source_type(duplicate.get("source_type"), item.get("source_type"))
+        duplicate["cross_section_duplicate_suppressed"] = True
+        removed += 1
+        return False
+
+    remember(direct_action_todos)
+    remember(watch_delegate_todos)
+    reminders[:] = [item for item in reminders if not isinstance(item, dict) or keep_unique(item)]
+    project_updates[:] = [item for item in project_updates if not isinstance(item, dict) or keep_unique(item)]
+    other_updates[:] = [item for item in other_updates if not isinstance(item, dict) or keep_unique(item)]
+    return removed
+
+
+def _brief_items_refer_to_same_topic(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_ref_ids = set(_split_evidence_ref_ids(left.get("evidence_ref_id")))
+    right_ref_ids = set(_split_evidence_ref_ids(right.get("evidence_ref_id")))
+    if left_ref_ids and right_ref_ids and left_ref_ids & right_ref_ids:
+        return True
+    left_is_reminder = bool(str(left.get("person") or "").strip() and str(left.get("reminder") or "").strip())
+    right_is_reminder = bool(str(right.get("person") or "").strip() and str(right.get("reminder") or "").strip())
+    if left_is_reminder or right_is_reminder:
+        return False
+    left_tokens = _topic_tokens(left, fields=("title", "summary", "task", "reminder", "person"))
+    right_tokens = _topic_tokens(right, fields=("title", "summary", "task", "reminder", "person"))
+    if not left_tokens or not right_tokens:
+        return False
+    overlap = left_tokens & right_tokens
+    min_size = min(len(left_tokens), len(right_tokens))
+    if len(overlap) >= 4 and (len(overlap) / max(min_size, 1)) >= 0.4:
+        return True
+    left_evidence = _normalize_dedupe_text(str(left.get("evidence") or ""))
+    right_evidence = _normalize_dedupe_text(str(right.get("evidence") or ""))
+    return bool(left_evidence and left_evidence == right_evidence and len(overlap) >= 2)
 
 
 def _suppress_updates_covered_by_todos(
