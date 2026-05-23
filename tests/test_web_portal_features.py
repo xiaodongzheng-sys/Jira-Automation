@@ -402,7 +402,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("form.dataset.jobRunning = 'true'", template)
         self.assertIn("submitButton.disabled = true", template)
         self.assertIn("submitButton.setAttribute('aria-busy', 'true')", template)
-        self.assertIn("Syncing BPMIS Projects", template)
+        self.assertIn("submitButton.textContent = 'Working…'", template)
         self.assertIn("delete form.dataset.jobRunning", template)
         self.assertIn("submitButton.disabled = false", template)
 
@@ -782,8 +782,9 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotIn(b"Google Sheets request failed", response.data)
         self.assertNotIn(b'id="spreadsheet_link"', response.data)
-        self.assertIn(b'id="input_tab_name" name="input_tab_name" value="Sheet1"', response.data)
-        self.assertIn(b'name="summary_header" value="Jira Title"', response.data)
+        self.assertIn(b"Productization Upgrade Summary", response.data)
+        self.assertNotIn(b'id="input_tab_name"', response.data)
+        self.assertNotIn(b'name="summary_header"', response.data)
 
     def test_shared_mode_index_ignores_legacy_spreadsheet_link_with_partial_google_credentials(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
