@@ -986,6 +986,7 @@ class LocalAgentServerTests(unittest.TestCase):
 
         list_response = self._get_signed("/api/local-agent/team-dashboard/daily-briefs")
         download_response = self._get_signed(f"/api/local-agent/team-dashboard/daily-briefs/{saved['brief_id']}/download")
+        missing_download_response = self._get_signed("/api/local-agent/team-dashboard/daily-briefs/missing/download")
 
         self.assertEqual(list_response.status_code, 200)
         payload = list_response.get_json()
@@ -999,6 +1000,8 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertIn(b"Archive", download_response.data)
         self.assertIn(b"Formatted", download_response.data)
         self.assertNotIn(b"Plain archive body", download_response.data)
+        self.assertEqual(missing_download_response.status_code, 404)
+        self.assertIn("not found", missing_download_response.get_json()["message"])
 
     def test_signed_monthly_report_draft_latest_and_send_routes(self):
         from bpmis_jira_tool.monthly_report import MonthlyReportSendResult
@@ -2316,6 +2319,130 @@ class LocalAgentServerTests(unittest.TestCase):
                 "https://confluence.shopee.io",
             )
         )
+        self.assertIsNone(
+            local_agent_server._save_prd_latest_result(
+                self.app.config["SETTINGS"],
+                owner_key="",
+                tool_key="prd_self_assessment",
+                payload={"status": "ok"},
+            )
+        )
+        self.assertIsNone(
+            local_agent_server._get_prd_latest_result(
+                self.app.config["SETTINGS"],
+                owner_key="",
+                tool_key="prd_self_assessment",
+            )
+        )
+
+    def test_meeting_record_for_owner_rejects_cross_owner_access(self):
+        class FakeMeetingRecordStore:
+            def get_record(self, record_id):
+                return {"record_id": record_id, "owner_email": "owner@npt.sg"}
+
+        self.app.config["MEETING_RECORD_STORE"] = FakeMeetingRecordStore()
+
+        with self.app.app_context(), self.assertRaisesRegex(ToolError, "not available"):
+            local_agent_server._meeting_record_for_owner(record_id="rec-1", owner_email="other@npt.sg")
+
+    def test_source_code_query_worker_failure_paths_are_json_readable(self):
+        class FakeSourceCodeQAService:
+            def __init__(self, error):
+                self.error = error
+
+            def with_llm_provider(self, llm_provider):
+                return self
+
+            def with_codex_timeout_seconds(self, timeout_seconds):
+                return self
+
+            def query(self, **kwargs):
+                raise self.error
+
+        with self.app.app_context():
+            self.app.config["SOURCE_CODE_QA_SERVICE"] = FakeSourceCodeQAService(ToolError("repo index unavailable"))
+            local_agent_server._run_source_code_qa_query_job(
+                self.app,
+                "tool-error-job",
+                {"pm_team": "AF", "country": "All", "question": "Where is auth?"},
+            )
+            tool_error_snapshot = local_agent_server._snapshot_query_job("tool-error-job")
+
+            self.app.config["SOURCE_CODE_QA_SERVICE"] = FakeSourceCodeQAService(RuntimeError("worker crashed"))
+            local_agent_server._run_source_code_qa_query_job(
+                self.app,
+                "unexpected-job",
+                {"pm_team": "AF", "country": "All", "question": "Where is auth?"},
+            )
+            unexpected_snapshot = local_agent_server._snapshot_query_job("unexpected-job")
+
+        self.assertEqual(tool_error_snapshot["state"], "failed")
+        self.assertEqual(tool_error_snapshot["error"], "repo index unavailable")
+        self.assertEqual(unexpected_snapshot["state"], "failed")
+        self.assertIn("failed unexpectedly", unexpected_snapshot["error"])
+
+    def test_local_agent_service_builders_wire_expected_dependencies(self):
+        settings = self.app.config["SETTINGS"]
+        with self.app.app_context(), patch(
+            "bpmis_jira_tool.local_agent_server.CodexTextGenerationClient",
+            side_effect=lambda **kwargs: {"text_client": kwargs},
+        ) as text_client, patch(
+            "bpmis_jira_tool.local_agent_server.MeetingProcessingService",
+            side_effect=lambda **kwargs: {"meeting_processing": kwargs},
+        ) as meeting_processing, patch(
+            "bpmis_jira_tool.local_agent_server._build_google_credential_store",
+            return_value={"credential_store": True},
+        ):
+            processing_service = local_agent_server._build_meeting_processing_service(settings)
+
+        with patch("bpmis_jira_tool.local_agent_server.BriefingStore", side_effect=lambda root_dir: {"root_dir": root_dir}), patch(
+            "bpmis_jira_tool.local_agent_server.ConfluenceConnector",
+            side_effect=lambda **kwargs: {"confluence": kwargs},
+        ), patch(
+            "bpmis_jira_tool.local_agent_server.PRDReviewService",
+            side_effect=lambda **kwargs: {"prd_review": kwargs},
+        ) as review_service:
+            prd_service = local_agent_server._build_prd_review_service(settings)
+
+        with patch("bpmis_jira_tool.local_agent_server.BriefingStore", side_effect=lambda root_dir: {"root_dir": root_dir}), patch(
+            "bpmis_jira_tool.local_agent_server.CodexTextGenerationClient",
+            side_effect=lambda **kwargs: {"text_client": kwargs},
+        ), patch(
+            "bpmis_jira_tool.local_agent_server.ConfluenceConnector",
+            side_effect=lambda **kwargs: {"confluence": kwargs},
+        ), patch(
+            "bpmis_jira_tool.local_agent_server.VoiceService",
+            side_effect=lambda **kwargs: {"voice": kwargs},
+        ), patch(
+            "bpmis_jira_tool.local_agent_server.PRDBriefingService",
+            side_effect=lambda **kwargs: {"prd_briefing": kwargs},
+        ) as briefing_service:
+            briefing = local_agent_server._build_prd_briefing_service(settings)
+
+        with patch("bpmis_jira_tool.local_agent_server.BriefingStore", side_effect=lambda root_dir: {"root_dir": root_dir}), patch(
+            "bpmis_jira_tool.local_agent_server.ConfluenceConnector",
+            side_effect=lambda **kwargs: {"confluence": kwargs},
+        ), patch(
+            "bpmis_jira_tool.local_agent_server._build_seatalk_service",
+            return_value={"seatalk": True},
+        ), patch(
+            "bpmis_jira_tool.local_agent_server.MonthlyReportService",
+            side_effect=lambda **kwargs: {"monthly": kwargs},
+        ) as monthly_service:
+            monthly = local_agent_server._build_monthly_report_service(settings)
+
+        name_store = local_agent_server._build_seatalk_name_mapping_store(settings)
+
+        self.assertEqual(processing_service["meeting_processing"]["portal_base_url"], settings.team_portal_base_url)
+        self.assertEqual(text_client.call_args.kwargs["prompt_mode"], "meeting_recorder_minutes_codex")
+        self.assertTrue(meeting_processing.called)
+        self.assertIs(prd_service["prd_review"]["settings"], settings)
+        self.assertTrue(review_service.called)
+        self.assertFalse(briefing["prd_briefing"]["walkthrough_prewarm_enabled"])
+        self.assertTrue(briefing_service.called)
+        self.assertIs(monthly["monthly"]["settings"], settings)
+        self.assertTrue(monthly_service.called)
+        self.assertTrue(str(name_store.storage_path).endswith("seatalk/name_overrides.json"))
 
     def test_prd_briefing_audio_inline_helper_handles_empty_external_and_local_assets(self):
         class FakeStore:
@@ -2330,16 +2457,31 @@ class LocalAgentServerTests(unittest.TestCase):
         external_payload = {"chunk": {"audioUrl": "https://cdn.example/audio.mp3"}}
         local_payload = {"chunk": {"audioUrl": "/prd-briefing/assets/sessions/audio.mp3"}}
         missing_payload = {"chunk": {"audioUrl": "/prd-briefing/assets/sessions/missing.mp3"}}
+        unreadable_payload = {"chunk": {"audioUrl": "/prd-briefing/assets/sessions/audio.mp3"}}
 
         local_agent_server._inline_prd_briefing_audio_data_url(store, empty_payload)
         local_agent_server._inline_prd_briefing_audio_data_url(store, external_payload)
         local_agent_server._inline_prd_briefing_audio_data_url(store, missing_payload)
+        with patch.object(Path, "read_bytes", side_effect=OSError("unreadable")):
+            local_agent_server._inline_prd_briefing_audio_data_url(store, unreadable_payload)
         local_agent_server._inline_prd_briefing_audio_data_url(store, local_payload)
 
         self.assertEqual(empty_payload, {})
         self.assertEqual(external_payload["chunk"]["audioUrl"], "https://cdn.example/audio.mp3")
         self.assertEqual(missing_payload["chunk"]["audioUrl"], "/prd-briefing/assets/sessions/missing.mp3")
+        self.assertEqual(unreadable_payload["chunk"]["audioUrl"], "/prd-briefing/assets/sessions/audio.mp3")
         self.assertTrue(local_payload["chunk"]["audioUrl"].startswith("data:audio/mpeg;base64,"))
+
+    def test_seatalk_name_overrides_ignores_cleanup_errors(self):
+        with local_agent_server._seatalk_name_overrides({}) as empty_overrides_path:
+            self.assertIsNone(empty_overrides_path)
+        manager = local_agent_server._seatalk_name_overrides({"group": "Risk PM"})
+        overrides_path = manager.__enter__()
+        self.assertTrue(Path(overrides_path).exists())
+        cleanup_path = Path(overrides_path)
+        with patch.object(Path, "unlink", side_effect=OSError("locked")):
+            manager.__exit__(None, None, None)
+        cleanup_path.unlink(missing_ok=True)
 
     def test_signed_storage_and_memory_contract_routes_return_stable_payloads(self):
         class FakeWorkMemoryStore:
@@ -2596,6 +2738,15 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertEqual(evidence_resolve.get_json()["evidence"][0]["id"], evidence_id)
         self.assertTrue(evidence_delete.get_json()["deleted"])
         self.assertEqual(evidence_list_after_delete.get_json()["evidence"], [])
+
+    def test_signed_source_code_runtime_evidence_scope_errors_are_json(self):
+        list_response = self._post_signed("/api/local-agent/source-code-qa/runtime-evidence/list", {"pm_team": "BAD", "country": "SG"})
+        resolve_response = self._post_signed("/api/local-agent/source-code-qa/runtime-evidence/resolve", {"pm_team": "BAD", "country": "SG"})
+
+        self.assertEqual(list_response.status_code, 400)
+        self.assertIn("PM Team", list_response.get_json()["message"])
+        self.assertEqual(resolve_response.status_code, 400)
+        self.assertIn("PM Team", resolve_response.get_json()["message"])
 
     def test_local_work_memory_backfill_records_duplicates_and_partial_failures(self):
         class FakeMeetingRecordStore:
