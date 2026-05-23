@@ -3476,6 +3476,13 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("loadAllTeamTasks();", script)
         self.assertIn("loadTeamTasks(loadButton.dataset.teamDashboardLoadTeam || '')", script)
 
+    def test_team_dashboard_frontend_status_update_does_not_reload_jira(self):
+        script = Path("static/team_dashboard.js").read_text(encoding="utf-8")
+        self.assertIn("updateProjectStatusInTeams(payload.bpmis_id || bpmisId, savedStatus)", script)
+        self.assertIn("projectStatusSelect.value = savedStatus", script)
+        self.assertIn("Updated BPMIS status for ${payload.bpmis_id || bpmisId} to ${savedStatus}.", script)
+        self.assertNotIn("await loadTeamTasks(activeTaskTeamKey || '')", script)
+
     def test_team_dashboard_frontend_polls_actual_mandays_cache(self):
         script = Path("static/team_dashboard.js").read_text(encoding="utf-8")
         self.assertIn("actualMandaysPollTimers", script)

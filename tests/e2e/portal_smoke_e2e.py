@@ -1271,6 +1271,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
         page = self._new_admin_page()
         captured_status_updates: list[dict[str, object]] = []
         current_status = "Pending Review"
+        task_request_count = 0
 
         def json_response(payload: dict[str, object], *, status: int = 200):
             return {
@@ -1289,6 +1290,8 @@ class PortalE2ESmokeTest(unittest.TestCase):
             }))
 
         def tasks(route):
+            nonlocal task_request_count
+            task_request_count += 1
             route.fulfill(**json_response({
                 "status": "ok",
                 "teams": [
@@ -1352,13 +1355,15 @@ class PortalE2ESmokeTest(unittest.TestCase):
 
         status_select = page.locator('[data-team-dashboard-project-status][data-bpmis-id="BPMIS-STATUS-E2E"]')
         self.assertEqual(status_select.input_value(timeout=5000), "Pending Review")
+        self.assertEqual(task_request_count, 1)
         status_select.select_option("Developing")
         page.locator("[data-team-dashboard-task-status]").get_by_text(
-            "Reloaded Jira for Anti-fraud."
+            "Updated BPMIS status for BPMIS-STATUS-E2E to Developing."
         ).wait_for(timeout=5000)
         status_select = page.locator('[data-team-dashboard-project-status][data-bpmis-id="BPMIS-STATUS-E2E"]')
         self.assertEqual(status_select.input_value(timeout=5000), "Developing")
         self.assertEqual(captured_status_updates[-1], {"bpmis_id": "BPMIS-STATUS-E2E", "status": "Developing"})
+        self.assertEqual(task_request_count, 1)
 
         status_select.select_option("Testing")
         page.locator("[data-team-dashboard-task-status]").get_by_text("BPMIS rejected Testing").wait_for(timeout=5000)

@@ -3483,8 +3483,8 @@
         const savedStatus = payload.project_status || nextStatus;
         updateProjectStatusInTeams(payload.bpmis_id || bpmisId, savedStatus);
         projectStatusSelect.dataset.currentStatus = savedStatus;
+        projectStatusSelect.value = savedStatus;
         setStatus(taskStatus, `Updated BPMIS status for ${payload.bpmis_id || bpmisId} to ${savedStatus}.`, 'success');
-        await loadTeamTasks(activeTaskTeamKey || '');
       } catch (error) {
         projectStatusSelect.value = previousStatus;
         setStatus(taskStatus, error.message || 'Could not update BPMIS status.', 'error');
