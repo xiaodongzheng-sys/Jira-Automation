@@ -226,7 +226,8 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertNotIn(b'BPMIS Automation Tool</a>', response.data)
             self.assertNotIn(b'site-switcher-subtab is-active" href="/portal-home?workspace=run"', response.data)
             self.assertEqual(dashboard_response.status_code, 200)
-            self.assertNotIn(b'BPMIS Automation Tool</a>', dashboard_response.data)
+            self.assertIn(b'BPMIS Automation Tool</a>', dashboard_response.data)
+            self.assertIn(b'/portal-home?workspace=productization-upgrade-summary', dashboard_response.data)
             self.assertNotIn(b'href="https://app.bankpmtool.uk/?workspace=run"', dashboard_response.data)
 
     def test_portal_home_lands_on_source_code_and_bpmis_is_admin_only(self):
@@ -248,6 +249,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 default_response = client.get("/portal-home", follow_redirects=False)
                 run_response = client.get("/portal-home?workspace=run", follow_redirects=False)
                 bpmis_response = client.get("/portal-home?workspace=bpmis", follow_redirects=False)
+                productization_response = client.get("/portal-home?workspace=productization-upgrade-summary", follow_redirects=False)
 
             with app.test_client() as client:
                 with client.session_transaction() as session:
@@ -262,6 +264,12 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertEqual(run_response.headers["Location"], "/source-code-qa")
         self.assertEqual(bpmis_response.status_code, 302)
         self.assertEqual(bpmis_response.headers["Location"], "/access-denied")
+        self.assertEqual(productization_response.status_code, 200)
+        self.assertIn(b"Productization Upgrade Summary", productization_response.data)
+        self.assertNotIn(b">Setup<", productization_response.data)
+        self.assertNotIn(b">My Projects<", productization_response.data)
+        self.assertNotIn(b"Save Setup", productization_response.data)
+        self.assertNotIn(b"BPMIS Projects", productization_response.data)
         self.assertEqual(admin_default_response.status_code, 302)
         self.assertEqual(admin_default_response.headers["Location"], "/source-code-qa")
         self.assertEqual(admin_bpmis_response.status_code, 200)
@@ -891,14 +899,15 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self.assertIn(b"Source Code Q&amp;A", source_page.data)
                 self.assertIn(b">Source Code<", source_page.data)
                 self.assertIn(b">PRDs<", source_page.data)
-                self.assertNotIn(b">Projects<", source_page.data)
+                self.assertIn(b">Projects<", source_page.data)
+                self.assertIn(b'/portal-home?workspace=productization-upgrade-summary', source_page.data)
+                self.assertNotIn(b"Team Dashboard", source_page.data)
                 for admin_marker in (
                     b"Repo Admin",
                     b"Repository Mapping",
                     b"Effort Assessment",
                     b"Sync / Refresh",
                     b"Save Config",
-                    b"Team Dashboard",
                     b"Meeting Recorder",
                     b"Meeting Translation",
                     b"SeaTalk Management",

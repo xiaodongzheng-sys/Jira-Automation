@@ -775,6 +775,14 @@ def create_app() -> Flask:
                     "active": _is_bpmis_automation_route_active(settings, current_endpoint),
                 }
             )
+        elif _can_access_productization_upgrade_summary(_get_user_identity(settings)):
+            project_tabs.append(
+                {
+                    "label": "BPMIS Automation Tool",
+                    "href": url_for("portal_home", workspace="productization-upgrade-summary"),
+                    "active": _is_bpmis_automation_route_active(settings, current_endpoint),
+                }
+            )
         if can_access_reports:
             project_tabs.append(
                 {
@@ -953,12 +961,17 @@ def create_app() -> Flask:
         config_data = _hydrate_setup_defaults(config_data, user_identity, team_profiles=effective_team_profiles)
         _apply_sync_email_policy(config_data, user_identity)
         has_saved_config = bool(config_key and raw_config_data)
+        bpmis_admin_enabled = (not _site_requires_google_login(settings)) or _can_access_bpmis_automation_tool(user_identity)
         default_workspace_tab = session.pop("default_workspace_tab", "run" if has_saved_config else "setup")
-        allowed_workspace_tabs = {"setup", "run", "productization-upgrade-summary"}
-        if _is_team_profile_admin(user_identity):
+        allowed_workspace_tabs = {"productization-upgrade-summary"}
+        if bpmis_admin_enabled:
+            allowed_workspace_tabs.update({"setup", "run"})
+        if bpmis_admin_enabled and _is_team_profile_admin(user_identity):
             allowed_workspace_tabs.add("team-default-admin")
         if requested_workspace_tab in allowed_workspace_tabs:
             default_workspace_tab = requested_workspace_tab
+        if default_workspace_tab not in allowed_workspace_tabs:
+            default_workspace_tab = "productization-upgrade-summary"
 
         return render_template(
             "index.html",
@@ -977,7 +990,8 @@ def create_app() -> Flask:
                 team_profiles=effective_team_profiles,
             ),
             team_profile_admin_configs=effective_team_profiles,
-            team_profile_admin_enabled=_is_team_profile_admin(user_identity),
+            team_profile_admin_enabled=bpmis_admin_enabled and _is_team_profile_admin(user_identity),
+            bpmis_admin_enabled=bpmis_admin_enabled,
             default_workspace_tab=default_workspace_tab,
             input_headers=[],
             google_authorized=True,
@@ -1002,7 +1016,9 @@ def create_app() -> Flask:
         results = _results_for_display(session.pop("last_results", []))
         run_notice = session.pop("run_notice", None)
         user_identity = _get_user_identity(settings)
-        if not _can_access_bpmis_automation_tool(user_identity):
+        bpmis_admin_enabled = _can_access_bpmis_automation_tool(user_identity)
+        productization_requested = requested_workspace_tab == "productization-upgrade-summary"
+        if not bpmis_admin_enabled and not (productization_requested and _can_access_productization_upgrade_summary(user_identity)):
             flash(f"BPMIS Automation Tool is restricted to {PORTAL_ADMIN_EMAIL}.", "error")
             return redirect(url_for("access_denied"))
         config_key = user_identity.get("config_key")
@@ -1024,13 +1040,17 @@ def create_app() -> Flask:
         _apply_sync_email_policy(config_data, user_identity)
         has_saved_config = bool(config_key and raw_config_data)
         default_workspace_tab = session.pop("default_workspace_tab", "run" if has_saved_config else "setup")
-        allowed_workspace_tabs = {"setup", "run", "productization-upgrade-summary"}
-        if _is_team_profile_admin(user_identity):
+        allowed_workspace_tabs = {"productization-upgrade-summary"}
+        if bpmis_admin_enabled:
+            allowed_workspace_tabs.update({"setup", "run"})
+        if bpmis_admin_enabled and _is_team_profile_admin(user_identity):
             allowed_workspace_tabs.add("team-default-admin")
         if requested_workspace_tab == "bpmis":
             requested_workspace_tab = "run"
         if requested_workspace_tab in allowed_workspace_tabs:
             default_workspace_tab = requested_workspace_tab
+        if default_workspace_tab not in allowed_workspace_tabs:
+            default_workspace_tab = "productization-upgrade-summary"
 
         return render_template(
             "index.html",
@@ -1049,7 +1069,8 @@ def create_app() -> Flask:
                 team_profiles=effective_team_profiles,
             ),
             team_profile_admin_configs=effective_team_profiles,
-            team_profile_admin_enabled=_is_team_profile_admin(user_identity),
+            team_profile_admin_enabled=bpmis_admin_enabled and _is_team_profile_admin(user_identity),
+            bpmis_admin_enabled=bpmis_admin_enabled,
             default_workspace_tab=default_workspace_tab,
             input_headers=[],
             google_authorized=True,
@@ -3523,6 +3544,10 @@ def _is_team_profile_admin(user_identity: dict[str, str | None]) -> bool:
 
 def _can_access_bpmis_automation_tool(user_identity: dict[str, str | None]) -> bool:
     return _is_portal_admin(str(user_identity.get("email") or ""))
+
+
+def _can_access_productization_upgrade_summary(user_identity: dict[str, str | None]) -> bool:
+    return bool(str(user_identity.get("email") or "").strip())
 
 
 def _can_access_team_dashboard(user_identity: dict[str, str | None]) -> bool:

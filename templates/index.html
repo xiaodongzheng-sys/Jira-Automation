@@ -26,15 +26,18 @@
 
   <section class="workspace-shell">
     <div class="workspace-tabs" role="tablist" aria-label="Workspace sections" data-default-tab="{{ default_workspace_tab }}">
-      <button class="workspace-tab is-active" type="button" role="tab" aria-selected="true" data-tab-trigger="setup">Setup</button>
-      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="run">My Projects</button>
-      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="productization-upgrade-summary">Productization Upgrade Summary</button>
+      {% if bpmis_admin_enabled %}
+        <button class="workspace-tab{% if default_workspace_tab == 'setup' %} is-active{% endif %}" type="button" role="tab" aria-selected="{{ 'true' if default_workspace_tab == 'setup' else 'false' }}" data-tab-trigger="setup">Setup</button>
+        <button class="workspace-tab{% if default_workspace_tab == 'run' %} is-active{% endif %}" type="button" role="tab" aria-selected="{{ 'true' if default_workspace_tab == 'run' else 'false' }}" data-tab-trigger="run">My Projects</button>
+      {% endif %}
+      <button class="workspace-tab{% if default_workspace_tab == 'productization-upgrade-summary' %} is-active{% endif %}" type="button" role="tab" aria-selected="{{ 'true' if default_workspace_tab == 'productization-upgrade-summary' else 'false' }}" data-tab-trigger="productization-upgrade-summary">Productization Upgrade Summary</button>
       {% if team_profile_admin_enabled %}
-        <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="team-default-admin">Team Default Admin</button>
+        <button class="workspace-tab{% if default_workspace_tab == 'team-default-admin' %} is-active{% endif %}" type="button" role="tab" aria-selected="{{ 'true' if default_workspace_tab == 'team-default-admin' else 'false' }}" data-tab-trigger="team-default-admin">Team Default Admin</button>
       {% endif %}
     </div>
 
-    <section class="workspace-panel is-active" data-tab-panel="setup">
+    {% if bpmis_admin_enabled %}
+    <section class="workspace-panel{% if default_workspace_tab == 'setup' %} is-active{% endif %}" data-tab-panel="setup">
       <section class="panel panel-wide glass-panel">
         <div class="panel-head">
           <div>
@@ -250,7 +253,7 @@
       </section>
     </section>
 
-    <section class="workspace-panel" data-tab-panel="run">
+    <section class="workspace-panel{% if default_workspace_tab == 'run' %} is-active{% endif %}" data-tab-panel="run">
       <section class="panel panel-wide glass-panel bpmis-projects-panel" id="results" data-results-panel data-bpmis-projects
         data-projects-url="{{ url_for('bpmis_projects') }}"
         data-sync-job-url="{{ url_for('create_sync_bpmis_projects_job') }}"
@@ -311,8 +314,9 @@
         </div>
       </div>
     </div>
+    {% endif %}
 
-    <section class="workspace-panel" data-tab-panel="productization-upgrade-summary">
+    <section class="workspace-panel{% if default_workspace_tab == 'productization-upgrade-summary' %} is-active{% endif %}" data-tab-panel="productization-upgrade-summary">
       <section class="panel panel-wide glass-panel productization-panel" data-productization-upgrade-summary>
         <div class="panel-head productization-panel-head">
           <div>
@@ -382,7 +386,7 @@
     </section>
 
     {% if team_profile_admin_enabled %}
-      <section class="workspace-panel" data-tab-panel="team-default-admin">
+      <section class="workspace-panel{% if default_workspace_tab == 'team-default-admin' %} is-active{% endif %}" data-tab-panel="team-default-admin">
         <section class="panel panel-wide glass-panel">
           <div class="panel-head">
             <div>
@@ -424,6 +428,7 @@
     {% endif %}
   </section>
 
+  {% if bpmis_admin_enabled %}
   <div class="confirm-modal-backdrop" data-confirm-modal-backdrop hidden>
     <div class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title" aria-describedby="confirm-modal-message">
       <div class="confirm-modal-accent"></div>
@@ -448,11 +453,15 @@
       </div>
     </div>
   </div>
+  {% endif %}
 {% endblock %}
 
 {% block extra_scripts %}
+  {% if bpmis_admin_enabled %}
   <script src="{{ url_for('static', filename='bpmis_projects.js') }}?v=20260428-bpmis-card-drag"></script>
+  {% endif %}
   <script src="{{ url_for('static', filename='productization_upgrade_summary.js') }}?v=20260427-copy-wrap"></script>
+  {% if bpmis_admin_enabled %}
   <script id="team-profile-data" type="application/json">{{ team_profiles | tojson }}</script>
   <script>
     (() => {
@@ -813,4 +822,5 @@
       refreshMappingPreviews();
     })();
   </script>
+  {% endif %}
 {% endblock %}

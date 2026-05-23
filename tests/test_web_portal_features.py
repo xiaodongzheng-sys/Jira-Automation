@@ -1180,7 +1180,6 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn(b">Projects<", source_response.data)
         self.assertNotIn(b">Team Dashboard<", source_response.data)
         self.assertNotIn(b">Reports<", source_response.data)
-        self.assertNotIn(b">BPMIS Automation Tool<", source_response.data)
         self.assertNotIn(b">AI Memory<", source_response.data)
         self.assertEqual(legacy_response.status_code, 302)
         self.assertEqual(legacy_response.headers["Location"], "/team-dashboard")
