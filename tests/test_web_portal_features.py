@@ -5085,7 +5085,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(save_response.status_code, 302)
         self.assertIn("google:teammate@npt.sg", remote_client.configs)
         self.assertIn("AF | SG | DBP-Anti-fraud", remote_client.configs["google:teammate@npt.sg"]["component_route_rules_text"])
-        self.assertIn(b'data-default-tab="run"', page_response.data)
+        self.assertIn(b'data-default-tab="productization-upgrade-summary"', page_response.data)
+        self.assertIn(b"Productization Upgrade Summary", page_response.data)
 
     def test_index_renders_team_templates_with_actual_email_for_google_user(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
