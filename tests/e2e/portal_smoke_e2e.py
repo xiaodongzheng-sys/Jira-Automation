@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
@@ -18,7 +19,7 @@ from cryptography.fernet import Fernet
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ADMIN_EMAIL = "xiaodong.zheng@npt.sg"
-TEAMMATE_EMAIL = "teammate@npt.sg"
+TEAMMATE_EMAIL = "jireh.tanyx@npt.sg"
 
 
 def _free_port() -> int:
@@ -306,6 +307,34 @@ class PortalE2ESmokeTest(unittest.TestCase):
                 "Cloud homepage version plan row"
             ).wait_for(timeout=5000)
             self.assertEqual(page.locator('[data-team-dashboard-tab="tasks"]').count(), 0)
+
+            non_af_cookie = _session_cookie_value(cloud_env, email="sophia.wangzj@npt.sg", name="Sophia Wang")
+            non_af_context = self._browser.new_context(base_url=cloud_base_url, viewport={"width": 1280, "height": 900})
+            try:
+                non_af_context.add_cookies(
+                    [
+                        {
+                            "name": "session",
+                            "value": non_af_cookie,
+                            "url": cloud_base_url,
+                            "httpOnly": True,
+                            "sameSite": "Lax",
+                        }
+                    ]
+                )
+                non_af_page = non_af_context.new_page()
+                non_af_errors: list[str] = []
+                non_af_page.on("pageerror", lambda error: non_af_errors.append(str(error)))
+                non_af_page.goto("/", wait_until="domcontentloaded")
+                non_af_body = non_af_page.locator("body").inner_text(timeout=5000)
+                self.assertIn("Risk PM Workspace", non_af_body)
+                self.assertNotIn("Open Version Plan", non_af_body)
+                self.assertEqual(non_af_page.locator("[data-version-plan-card]").count(), 0)
+                non_af_page.goto("/version-plan", wait_until="domcontentloaded")
+                self.assertEqual(urlparse(non_af_page.url).path, "/access-denied")
+                self.assertEqual([], non_af_errors)
+            finally:
+                non_af_context.close()
             self.assertEqual([], page_errors)
         finally:
             if context is not None:
@@ -970,7 +999,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
             route.fulfill(**json_response(version_plan_payload))
 
         page.route("**/api/team-dashboard/config", config)
-        page.route("**/api/team-dashboard/version-plan/af", version_plan)
+        page.route(re.compile(r".*/api/team-dashboard/version-plan/af(?:\?.*)?$"), version_plan)
         page.route("**/api/team-dashboard/version-plan/af/rows", save_rows)
         page.route("**/api/team-dashboard/version-plan/af/cell", save_cell)
 
@@ -1003,6 +1032,102 @@ class PortalE2ESmokeTest(unittest.TestCase):
         page.locator('[data-version-plan-row-id="pipe-added-1"]').wait_for(state="detached", timeout=5000)
         self.assertEqual(captured_row_actions[-1]["action"], "delete")
         self.assertEqual(captured_row_actions[-1]["row_id"], "pipe-added-1")
+
+    def test_team_dashboard_version_plan_conflict_refreshes_and_retries_row_action_smoke(self) -> None:
+        page = self._new_admin_page()
+        captured_row_actions: list[dict[str, object]] = []
+        version_plan_gets = 0
+        conflict_seen = False
+        version_plan_payload = {
+            "status": "ok",
+            "can_sync": True,
+            "document_revision": "rev-old",
+            "priority_order": ["SP", "P0", "P1", "P2", "P3"],
+            "pm_options": ["TBC"],
+            "sync_state": {"state": "idle", "last_synced_date_sgt": "2026-05-22"},
+            "bundles": [],
+            "pipeline_rows": [
+                {
+                    "row_id": "pipe-1",
+                    "row_type": "manual",
+                    "feature": "Existing conflict row",
+                    "priority": "SP",
+                    "pm": ["TBC"],
+                    "productization_efforts": "",
+                    "remarks": "",
+                }
+            ],
+            "archived_bundles": [],
+        }
+
+        def json_response(payload: dict[str, object], *, status: int = 200):
+            return {
+                "status": status,
+                "content_type": "application/json",
+                "body": json.dumps(payload),
+            }
+
+        def config(route):
+            route.fulfill(**json_response({
+                "status": "ok",
+                "config": {
+                    "teams": {"AF": {"label": "Anti-fraud", "member_emails": [ADMIN_EMAIL]}},
+                    "task_cache": {},
+                },
+            }))
+
+        def version_plan(route):
+            nonlocal version_plan_gets
+            version_plan_gets += 1
+            if "sync=0" in route.request.url:
+                version_plan_payload["document_revision"] = "rev-new"
+            route.fulfill(**json_response(version_plan_payload))
+
+        def save_rows(route):
+            nonlocal conflict_seen
+            payload = route.request.post_data_json
+            captured_row_actions.append(payload)
+            if not conflict_seen:
+                conflict_seen = True
+                route.fulfill(**json_response({
+                    "status": "error",
+                    "message": "Version Plan was updated by another session. Refresh and try again.",
+                    "error_category": "version_plan_conflict",
+                }, status=409))
+                return
+            self.assertEqual(payload.get("document_revision"), "rev-new")
+            version_plan_payload["pipeline_rows"].append(
+                {
+                    "row_id": "pipe-conflict-added",
+                    "row_type": "manual",
+                    "feature": "Added after conflict refresh",
+                    "priority": "SP",
+                    "pm": ["TBC"],
+                    "productization_efforts": "",
+                    "remarks": "",
+                }
+            )
+            route.fulfill(**json_response(version_plan_payload))
+
+        page.route("**/api/team-dashboard/config", config)
+        page.route(re.compile(r".*/api/team-dashboard/version-plan/af(?:\?.*)?$"), version_plan)
+        page.route("**/api/team-dashboard/version-plan/af/rows", save_rows)
+
+        page.goto("/team-dashboard", wait_until="domcontentloaded")
+        page.locator('[data-team-dashboard-tab="version-plan"]').click()
+        page.locator('[data-version-plan-row-id="pipe-1"]').get_by_text("Existing conflict row").wait_for(timeout=5000)
+
+        page.locator('[data-version-plan-row-action="add"][data-version-plan-scope="pipeline"]').click()
+
+        page.locator('[data-version-plan-row-id="pipe-conflict-added"]').get_by_text(
+            "Added after conflict refresh"
+        ).wait_for(timeout=5000)
+        page.wait_for_function(
+            "() => document.querySelector('[data-version-plan-status]')?.textContent?.includes('Saved.')",
+            timeout=5000,
+        )
+        self.assertEqual([item["document_revision"] for item in captured_row_actions], ["rev-old", "rev-new"])
+        self.assertGreaterEqual(version_plan_gets, 2)
 
     def test_team_dashboard_version_plan_pm_filter_smoke(self) -> None:
         page = self._new_admin_page()
@@ -1141,6 +1266,105 @@ class PortalE2ESmokeTest(unittest.TestCase):
         page.locator('[data-version-plan-row-id="manual-rene"]').get_by_text("Rene manual row").wait_for(timeout=5000)
         page.locator('[data-version-plan-row-id="arch-junwei"]').get_by_text("Jun Wei archived row").wait_for(timeout=5000)
         self.assertEqual(version_plan_request_count, 1)
+
+    def test_team_dashboard_project_status_editing_smoke(self) -> None:
+        page = self._new_admin_page()
+        captured_status_updates: list[dict[str, object]] = []
+        current_status = "Pending Review"
+
+        def json_response(payload: dict[str, object], *, status: int = 200):
+            return {
+                "status": status,
+                "content_type": "application/json",
+                "body": json.dumps(payload),
+            }
+
+        def config(route):
+            route.fulfill(**json_response({
+                "status": "ok",
+                "config": {
+                    "teams": {"AF": {"label": "Anti-fraud", "member_emails": [ADMIN_EMAIL]}},
+                    "task_cache": {},
+                },
+            }))
+
+        def tasks(route):
+            route.fulfill(**json_response({
+                "status": "ok",
+                "teams": [
+                    {
+                        "team_key": "AF",
+                        "label": "Anti-fraud",
+                        "member_emails": [ADMIN_EMAIL],
+                        "loaded": True,
+                        "elapsed_seconds": 1,
+                        "fetch_stats": {"api_call_count": 1},
+                        "under_prd": [
+                            {
+                                "bpmis_id": "BPMIS-STATUS-E2E",
+                                "project_name": "Status Editable Project",
+                                "status": current_status,
+                                "release_date": "2026-05-29",
+                                "release_date_sort": "2026-05-29",
+                                "market": "Regional",
+                                "priority": "P0",
+                                "regional_pm_pic": "Xiaodong Zheng",
+                                "actual_mandays": 3,
+                                "is_key_project": True,
+                                "key_project_source": "priority_default",
+                                "matched_pm_emails": [ADMIN_EMAIL],
+                                "jira_tickets": [],
+                            }
+                        ],
+                        "pending_live": [],
+                    }
+                ],
+            }))
+
+        def save_status(route):
+            nonlocal current_status
+            payload = route.request.post_data_json
+            captured_status_updates.append(payload)
+            if payload.get("status") == "Testing":
+                route.fulfill(**json_response({
+                    "status": "error",
+                    "message": "BPMIS rejected Testing",
+                    "error_category": "bpmis_error",
+                }, status=400))
+                return
+            current_status = str(payload.get("status") or current_status)
+            route.fulfill(**json_response({
+                "status": "ok",
+                "bpmis_id": payload.get("bpmis_id"),
+                "project_status": current_status,
+                "cached_updates": 1,
+            }))
+
+        page.route("**/api/team-dashboard/config", config)
+        page.route("**/api/team-dashboard/tasks**", tasks)
+        page.route("**/api/team-dashboard/project-status", save_status)
+
+        page.goto("/team-dashboard", wait_until="domcontentloaded")
+        page.locator('[data-team-dashboard-track="AF"]').wait_for(timeout=5000)
+        page.locator("[data-team-dashboard-load-team]").click()
+        page.locator("[data-team-dashboard-task-status]").get_by_text("Reloaded Jira for Anti-fraud.").wait_for(timeout=5000)
+        page.get_by_text("Status Editable Project").wait_for(timeout=5000)
+
+        status_select = page.locator('[data-team-dashboard-project-status][data-bpmis-id="BPMIS-STATUS-E2E"]')
+        self.assertEqual(status_select.input_value(timeout=5000), "Pending Review")
+        status_select.select_option("Developing")
+        page.locator("[data-team-dashboard-task-status]").get_by_text(
+            "Reloaded Jira for Anti-fraud."
+        ).wait_for(timeout=5000)
+        status_select = page.locator('[data-team-dashboard-project-status][data-bpmis-id="BPMIS-STATUS-E2E"]')
+        self.assertEqual(status_select.input_value(timeout=5000), "Developing")
+        self.assertEqual(captured_status_updates[-1], {"bpmis_id": "BPMIS-STATUS-E2E", "status": "Developing"})
+
+        status_select.select_option("Testing")
+        page.locator("[data-team-dashboard-task-status]").get_by_text("BPMIS rejected Testing").wait_for(timeout=5000)
+        status_select = page.locator('[data-team-dashboard-project-status][data-bpmis-id="BPMIS-STATUS-E2E"]')
+        self.assertEqual(status_select.input_value(timeout=5000), "Developing")
+        self.assertEqual(captured_status_updates[-1], {"bpmis_id": "BPMIS-STATUS-E2E", "status": "Testing"})
 
     def test_team_dashboard_prd_summary_and_review_async_smoke(self) -> None:
         page = self._new_admin_page()

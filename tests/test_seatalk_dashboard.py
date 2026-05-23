@@ -118,6 +118,33 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             service.build_overview()
 
+    def test_compact_history_preserves_group_headers_for_signal_lines(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "Generated at: 2026-05-22",
+                "=== First Group (group-1) ===",
+                "[2026-05-22 13:00:00] Alice: filler only",
+                "=== Correct Group (group-2) ===",
+                "[2026-05-22 13:01:00] Bob: please confirm PRD release risk",
+                "=== Later Group (group-3) ===",
+                "[2026-05-22 13:02:00] Carol: no signal here",
+            ]
+        )
+
+        compacted = SeaTalkDashboardService._compact_history_for_insights(
+            history,
+            max_chars=260,
+            signal_max_chars=140,
+            recent_max_chars=40,
+        )
+
+        self.assertIn("=== Correct Group (group-2) ===", compacted)
+        self.assertLess(
+            compacted.index("=== Correct Group (group-2) ==="),
+            compacted.index("[2026-05-22 13:01:00] Bob"),
+        )
+
     def test_non_zero_runner_exit_surfaces_tool_error(self):
         def runner(command: list[str]):
             return subprocess.CompletedProcess(args=command, returncode=1, stdout="", stderr="SeaTalk desktop database was not found.")

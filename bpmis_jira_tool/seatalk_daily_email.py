@@ -528,6 +528,7 @@ def build_daily_briefing(
         history_text = service._filter_system_generated_history(export_rolling_history(service, now=local_now, hours=hours))
         period_hours = hours
         window_label = f"previous {hours} hours"
+    seatalk_validation_history_text = history_text
     history_text = filter_text_by_noise(history_text, config=intelligence_config, source="seatalk")
     gmail_history_text = str(gmail_history_text or "").strip()
     seatalk_raw_chars = len(history_text)
@@ -595,6 +596,8 @@ def build_daily_briefing(
     team_member_reminder_candidates = _build_team_member_reminder_candidates(history_text)
     team_member_reminder_hints = _format_team_member_reminder_hints(team_member_reminder_candidates)
     name_mappings = _load_seatalk_name_mappings(service)
+    for key, name in _infer_private_chat_name_mappings_from_history(seatalk_validation_history_text).items():
+        name_mappings.setdefault(key.lower(), name)
     evidence_refs = _build_daily_brief_evidence_refs(
         history_text,
         gmail_history_text=gmail_history_text,
@@ -676,14 +679,15 @@ def build_daily_briefing(
     )
     _repair_generic_seatalk_evidence(
         [*project_updates, *other_updates, *my_todos, *reminders],
-        history_text=history_text,
+        history_text=seatalk_validation_history_text,
         quality_metrics=evidence_quality_metrics,
     )
     for section_items in (project_updates, other_updates, my_todos, reminders):
         _validate_and_repair_seatalk_evidence(
             section_items,
-            history_text=history_text,
+            history_text=seatalk_validation_history_text,
             quality_metrics=evidence_quality_metrics,
+            name_mappings=name_mappings,
         )
         _drop_domain_mismatched_evidence_items(
             section_items,
@@ -702,13 +706,14 @@ def build_daily_briefing(
     )
     _repair_generic_seatalk_evidence(
         reminders,
-        history_text=history_text,
+        history_text=seatalk_validation_history_text,
         quality_metrics=evidence_quality_metrics,
     )
     _validate_and_repair_seatalk_evidence(
         reminders,
-        history_text=history_text,
+        history_text=seatalk_validation_history_text,
         quality_metrics=evidence_quality_metrics,
+        name_mappings=name_mappings,
     )
     _drop_domain_mismatched_evidence_items(
         reminders,
@@ -1846,6 +1851,56 @@ def _load_seatalk_name_mappings(service: Any) -> dict[str, str]:
     return normalized
 
 
+def _infer_private_chat_name_mappings_from_history(history_text: str) -> dict[str, str]:
+    mappings: dict[str, str] = {}
+    current_group = ""
+    for line in str(history_text or "").splitlines():
+        header_match = _SEATALK_HISTORY_HEADER_RE.match(line.strip())
+        if header_match:
+            current_group = header_match.group("group").strip()
+            continue
+        buddy_id = _seatalk_buddy_id(current_group)
+        if not buddy_id:
+            continue
+        message_match = _SEATALK_HISTORY_MESSAGE_RE.match(line)
+        if not message_match:
+            continue
+        sender = message_match.group("sender").strip()
+        if not _sender_is_xiaodong(sender):
+            continue
+        inferred_name = _infer_private_chat_counterparty_name_from_self_text(message_match.group("text"))
+        if not inferred_name:
+            continue
+        suffix = buddy_id.removeprefix("buddy-").strip()
+        mappings.setdefault(buddy_id.lower(), inferred_name)
+        if suffix:
+            mappings.setdefault(f"uid {suffix}", inferred_name)
+    return mappings
+
+
+def _infer_private_chat_counterparty_name_from_self_text(text: Any) -> str:
+    raw = " ".join(str(text or "").split())
+    if not raw:
+        return ""
+    for pattern in (
+        r"\bThanks[, ]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})(?=\b|[,.!?:;])",
+        r"\bThank you[, ]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})(?=\b|[,.!?:;])",
+        r"\bHi[, ]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})(?=\b|[,.!?:;])",
+        r"\bHi[, ]+([A-Z][a-z]+)(?=[,.!?:;])",
+        r"\bHey[, ]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})(?=\b|[,.!?:;])",
+        r"\bHey[, ]+([A-Z][a-z]+)(?=[,.!?:;])",
+    ):
+        match = re.search(pattern, raw)
+        if not match:
+            continue
+        candidate = " ".join(match.group(1).split())
+        normalized = _normalize_thread_match_text(candidate)
+        if normalized in {"zheng xiaodong", "xiaodong zheng"}:
+            continue
+        return candidate[:180]
+    return ""
+
+
 def refresh_seatalk_auto_name_mappings(service: Any, *, now: datetime) -> dict[str, str]:
     path = getattr(service, "name_overrides_path", None)
     if not path or not hasattr(service, "build_name_mappings"):
@@ -1975,6 +2030,14 @@ def _sanitize_seatalk_evidence(value: Any, *, name_mappings: dict[str, str] | No
     if not text:
         return ""
     mappings = {str(key).lower(): str(name) for key, name in (name_mappings or {}).items() if str(name).strip()}
+    private_match = re.fullmatch(r"Private SeaTalk chat\s*\((?P<id>buddy-\d+|UID\s+\d+)\)", text, flags=re.IGNORECASE)
+    if private_match:
+        raw_id = private_match.group("id")
+        mapped = mappings.get(raw_id.lower())
+        if not mapped:
+            mapped = next((mappings.get(key.lower()) for key in _seatalk_mapping_equivalent_keys(raw_id) if mappings.get(key.lower())), "")
+        if mapped:
+            return _normalize_seatalk_source_label(mapped)
     saw_unmapped_group = False
     saw_unmapped_contact = False
 
@@ -2025,6 +2088,8 @@ def _normalize_seatalk_source_label(value: Any) -> str:
     nested_private = re.fullmatch(r"Private SeaTalk chat\s*\((Private SeaTalk chat\s*\(.+\))\)", text, flags=re.IGNORECASE)
     if nested_private:
         return nested_private.group(1).strip()
+    if not text.casefold().startswith("private seatalk chat"):
+        text = re.sub(r"\s+\((?:group-\d+|buddy-\d+|UID\s+\d+)\)(?=\s*/\s*thread:|$)", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\bSeaTalk\s+SeaTalk\s+group\b", "SeaTalk group", text, flags=re.IGNORECASE)
     text = re.sub(r"\bSeaTalk\s+SeaTalk\s+contact\b", "SeaTalk contact", text, flags=re.IGNORECASE)
     duplicate_match = re.fullmatch(r"(?P<label>.+?)\s*\((?P=label)\)", text)
@@ -2425,8 +2490,8 @@ def _evidence_ref_matches_item_people(item: dict[str, Any], ref: dict[str, Any])
             " ".join(str(person or "") for person in ref.get("mentioned_people") or []),
         ]
     )
-    ref_people_key = _normalize_thread_match_text(ref_people)
-    return all(_normalize_thread_match_text(person) in ref_people_key for person in people)
+    ref_people_key = _normalize_thread_match_text(ref_people.replace("@", " "))
+    return all(_person_name_supported_by_text(person, ref_people_key) for person in people)
 
 
 def _count_generic_evidence(items: list[dict[str, Any]]) -> int:
@@ -2459,6 +2524,7 @@ def _validate_and_repair_seatalk_evidence(
     *,
     history_text: str,
     quality_metrics: dict[str, int] | None = None,
+    name_mappings: dict[str, str] | None = None,
 ) -> None:
     records = _seatalk_history_records_for_evidence(history_text)
     if not records:
@@ -2469,6 +2535,19 @@ def _validate_and_repair_seatalk_evidence(
         parsed = _parse_seatalk_evidence_ref(item.get("evidence"))
         thread = parsed.get("thread", "")
         if not thread:
+            group = parsed.get("group", "")
+            if _is_private_seatalk_evidence_ref(group):
+                matching_records = _records_matching_group(records, group, name_mappings=name_mappings)
+                if not matching_records or not _seatalk_private_evidence_matches_item_topic(item, matching_records):
+                    item["_drop_invalid_evidence"] = True
+                    if quality_metrics is not None:
+                        quality_metrics["dropped_invalid_evidence_count"] = quality_metrics.get("dropped_invalid_evidence_count", 0) + 1
+            elif group and not _is_generic_seatalk_evidence(group):
+                matching_records = _records_matching_group(records, group, name_mappings=name_mappings)
+                if not matching_records or not _seatalk_evidence_matches_item_topic(item, matching_records):
+                    item["_drop_invalid_evidence"] = True
+                    if quality_metrics is not None:
+                        quality_metrics["dropped_invalid_evidence_count"] = quality_metrics.get("dropped_invalid_evidence_count", 0) + 1
             continue
         matching_records = _records_matching_thread(records, thread)
         if not matching_records:
@@ -2477,8 +2556,12 @@ def _validate_and_repair_seatalk_evidence(
                 quality_metrics["dropped_invalid_evidence_count"] = quality_metrics.get("dropped_invalid_evidence_count", 0) + 1
             continue
         group = parsed.get("group", "")
-        group_matches = [record for record in matching_records if _seatalk_group_ref_matches(group, record.get("group", ""))]
+        group_matches = _records_matching_group(matching_records, group, name_mappings=name_mappings)
         if group_matches:
+            if not _seatalk_evidence_matches_item_topic(item, group_matches) or not _seatalk_record_mentions_item_people(item, group_matches):
+                item["_drop_invalid_evidence"] = True
+                if quality_metrics is not None:
+                    quality_metrics["dropped_invalid_evidence_count"] = quality_metrics.get("dropped_invalid_evidence_count", 0) + 1
             continue
         repaired = _best_seatalk_record_for_item(item, matching_records)
         if repaired and _seatalk_record_mentions_item_people(item, matching_records):
@@ -2490,6 +2573,152 @@ def _validate_and_repair_seatalk_evidence(
             if quality_metrics is not None:
                 quality_metrics["dropped_invalid_evidence_count"] = quality_metrics.get("dropped_invalid_evidence_count", 0) + 1
     items[:] = [item for item in items if not item.pop("_drop_invalid_evidence", False)]
+
+
+def _is_private_seatalk_evidence_ref(value: Any) -> bool:
+    normalized = _normalize_thread_match_text(value)
+    return bool(re.search(r"\bbuddy\s+\d+\b", normalized)) or normalized.startswith("private seatalk chat")
+
+
+def _records_matching_group(
+    records: list[dict[str, str]],
+    group: str,
+    *,
+    name_mappings: dict[str, str] | None = None,
+) -> list[dict[str, str]]:
+    if not str(group or "").strip():
+        return []
+    target_buddy_id = _seatalk_buddy_id(group)
+    if target_buddy_id:
+        return [record for record in records if _seatalk_buddy_id(record.get("group")) == target_buddy_id]
+    direct_mapping_keys = _seatalk_ids_for_mapped_label(group, name_mappings=name_mappings)
+    if direct_mapping_keys:
+        return [
+            record
+            for record in records
+            if any(_seatalk_group_ref_matches(key, record.get("group", "")) for key in direct_mapping_keys)
+            or _seatalk_group_ref_matches(group, record.get("group", ""))
+        ]
+    return [record for record in records if _seatalk_group_ref_matches(group, record.get("group", ""))]
+
+
+def _seatalk_ids_for_mapped_label(label: Any, *, name_mappings: dict[str, str] | None = None) -> set[str]:
+    normalized_label = _normalize_seatalk_source_label(label).casefold()
+    if not normalized_label:
+        return set()
+    return {
+        str(key)
+        for key, name in (name_mappings or {}).items()
+        if _normalize_seatalk_source_label(name).casefold() == normalized_label
+    }
+
+
+def _seatalk_evidence_matches_item_topic(item: dict[str, Any], records: list[dict[str, str]]) -> bool:
+    return _best_seatalk_record_for_item(item, records) is not None
+
+
+def _seatalk_private_evidence_matches_item_topic(item: dict[str, Any], records: list[dict[str, str]]) -> bool:
+    topic_fields = ("title", "summary", "task", "reminder")
+    item_text = _item_text(item, fields=topic_fields)
+    raw_item_text = " ".join(
+        str(item.get(field) or "").strip() for field in topic_fields if str(item.get(field) or "").strip()
+    )
+    item_tokens = _evidence_match_tokens(item_text)
+    if not item_tokens:
+        return False
+    record_text = " ".join(
+        " ".join([record.get("group", ""), record.get("thread", ""), record.get("sender", ""), record.get("text", "")])
+        for record in records
+    )
+    record_tokens = _evidence_match_tokens(record_text)
+    if not record_tokens:
+        return False
+    required_name_tokens = _private_chat_required_name_tokens(raw_item_text)
+    if required_name_tokens and not (required_name_tokens & record_tokens):
+        return False
+    salient_tokens = {
+        token
+        for token in item_tokens
+        if token not in _PRIVATE_CHAT_WEAK_MATCH_TOKENS and not re.fullmatch(r"\d{3,}", token)
+    }
+    overlap = salient_tokens & record_tokens
+    if len(overlap) >= 2:
+        return True
+    strong_overlap = overlap & _PRIVATE_CHAT_STRONG_TOPIC_TOKENS
+    return bool(strong_overlap and len(overlap) >= 1 and not required_name_tokens)
+
+
+_PRIVATE_CHAT_STRONG_TOPIC_TOKENS = {
+    "afasa",
+    "alc",
+    "amr",
+    "crc",
+    "crms",
+    "dps",
+    "grc",
+    "prd",
+    "sfv",
+    "sop",
+    "uat",
+    "viber",
+    "afasa",
+    "投诉",
+    "审批",
+    "上线",
+    "需求",
+}
+
+
+_PRIVATE_CHAT_WEAK_MATCH_TOKENS = {
+    "action",
+    "align",
+    "arrange",
+    "ask",
+    "check",
+    "clarify",
+    "confirm",
+    "coordinate",
+    "discussion",
+    "feedback",
+    "follow",
+    "help",
+    "issue",
+    "matter",
+    "meeting",
+    "next",
+    "plan",
+    "question",
+    "questions",
+    "reply",
+    "schedule",
+    "status",
+    "steps",
+    "support",
+    "team",
+    "timeline",
+    "week",
+    "安排",
+    "确认",
+    "问题",
+    "处理",
+    "跟进",
+}
+
+
+def _private_chat_required_name_tokens(text: Any) -> set[str]:
+    raw = str(text or "")
+    tokens: set[str] = set()
+    for alias, canonical in TEAM_MEMBER_REMINDER_ALLOWED_PEOPLE.items():
+        if _normalize_thread_match_text(alias) in _normalize_thread_match_text(raw):
+            tokens.update(_evidence_match_tokens(canonical))
+    for match in re.findall(r"\b[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,}){0,2}\b", raw):
+        words = [word.casefold() for word in re.findall(r"[A-Za-z]{3,}", match)]
+        if not words:
+            continue
+        if words[0] in {"arrange", "confirm", "follow", "check", "source", "private", "seatalk"}:
+            words = words[1:]
+        tokens.update(word for word in words if word not in _PRIVATE_CHAT_WEAK_MATCH_TOKENS)
+    return tokens
 
 
 def _drop_domain_mismatched_evidence_items(
@@ -2587,7 +2816,7 @@ def _best_seatalk_evidence_for_item(item: dict[str, Any], records: list[dict[str
 
 
 def _best_seatalk_record_for_item(item: dict[str, Any], records: list[dict[str, str]]) -> dict[str, str] | None:
-    item_tokens = _evidence_match_tokens(_item_text(item))
+    item_tokens = _evidence_match_tokens(_item_text(item, fields=("title", "summary", "task", "reminder", "person")))
     if not item_tokens:
         return None
     best_record: dict[str, str] | None = None
@@ -2652,13 +2881,24 @@ def _records_matching_thread(records: list[dict[str, str]], thread: str) -> list
 
 
 def _seatalk_group_ref_matches(left: Any, right: Any) -> bool:
+    left_buddy = _seatalk_buddy_id(left)
+    right_buddy = _seatalk_buddy_id(right)
+    if left_buddy or right_buddy:
+        return bool(left_buddy and right_buddy and left_buddy == right_buddy)
     left_norm = _normalize_thread_match_text(left)
     right_norm = _normalize_thread_match_text(right)
     if not left_norm or not right_norm:
         return False
+    if left_norm == "private seatalk chat" or right_norm == "private seatalk chat":
+        return left_norm == right_norm
     if left_norm in {"seatalk group", "seatalk conversation", "seatalk thread"}:
         return True
     return left_norm == right_norm or left_norm in right_norm or right_norm in left_norm
+
+
+def _seatalk_buddy_id(value: Any) -> str:
+    match = re.search(r"\bbuddy[-\s]*(\d+)\b", str(value or ""), flags=re.IGNORECASE)
+    return f"buddy-{match.group(1)}" if match else ""
 
 
 def _seatalk_record_mentions_item_people(item: dict[str, Any], records: list[dict[str, str]]) -> bool:
@@ -2666,15 +2906,33 @@ def _seatalk_record_mentions_item_people(item: dict[str, Any], records: list[dic
     if not people:
         return True
     record_text = _normalize_thread_match_text(
-        " ".join(" ".join([record.get("sender", ""), record.get("text", ""), record.get("thread", "")]) for record in records)
+        " ".join(" ".join([record.get("sender", ""), record.get("text", ""), record.get("thread", "")]) for record in records).replace("@", " ")
     )
-    return all(_normalize_thread_match_text(person) in record_text for person in people)
+    return all(_person_name_supported_by_text(person, record_text) for person in people)
+
+
+def _person_name_supported_by_text(person: Any, normalized_text: str) -> bool:
+    canonical = str(person or "").strip()
+    aliases = [canonical]
+    aliases.extend(alias for alias, mapped in TEAM_MEMBER_REMINDER_ALLOWED_PEOPLE.items() if mapped == canonical)
+    compact_text = str(normalized_text or "").replace(" ", "")
+    for alias in aliases:
+        normalized_alias = _normalize_thread_match_text(str(alias).replace("@", " "))
+        if normalized_alias and normalized_alias in normalized_text:
+            return True
+        compact_alias = _normalize_person_key(alias).replace(" ", "")
+        if compact_alias and compact_alias in compact_text:
+            return True
+    return False
 
 
 def _extract_item_people_for_evidence_validation(item: dict[str, Any]) -> list[str]:
     candidates: list[str] = []
     if str(item.get("person") or "").strip():
         candidates.append(str(item.get("person") or "").strip())
+    for person in _mentioned_team_members(_item_text(item, fields=("title", "summary", "task", "reminder", "person"))):
+        if person not in candidates:
+            candidates.append(person)
     task_text = str(item.get("task") or item.get("reminder") or "").strip()
     match = re.match(
         r"^(?:ask|ensure|follow up with|check with|confirm with|monitor|remind)\s+"
@@ -2694,7 +2952,10 @@ def _extract_item_people_for_evidence_validation(item: dict[str, Any]) -> list[s
 
 
 def _evidence_match_tokens(value: Any) -> set[str]:
-    text = _normalize_dedupe_text(str(value or ""))
+    text = str(value or "").casefold()
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"\b(source|status|due|tbd|done|blocked|in progress|unknown)\b", " ", text)
+    text = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", text)
     tokens = set(re.findall(r"[a-z0-9]{3,}|[\u4e00-\u9fff]{2,}", text))
     stopwords = {
         "source",
@@ -2718,6 +2979,20 @@ def _evidence_match_tokens(value: Any) -> set[str]:
         "can",
         "and",
         "the",
+        "next",
+        "week",
+        "meeting",
+        "discussion",
+        "update",
+        "status",
+        "team",
+        "需要",
+        "确认",
+        "是否",
+        "可以",
+        "我们",
+        "你们",
+        "这个",
     }
     return {token for token in tokens if token not in stopwords}
 

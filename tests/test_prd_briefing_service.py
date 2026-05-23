@@ -1165,6 +1165,37 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(payload["sections"][0]["linked_spreadsheet_count"], 0)
         self.assertEqual(payload["sections"][1]["linked_spreadsheet_count"], 1)
 
+    def test_prd_self_assessment_section_char_count_includes_table_media(self):
+        page = self.service.confluence.page
+        page.sections.append(
+            ParsedSection(
+                title="Admin Portal Changes",
+                section_path="3.1.2 Admin Portal Changes",
+                content="[MEDIA_ID_1]",
+                html_content="<table><tr><th>Field</th></tr><tr><td>Status</td></tr></table>",
+                media_refs=["MEDIA_ID_1"],
+            )
+        )
+        service = PRDReviewService(
+            store=self.store,
+            confluence=self.service.confluence,
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        payload = service.list_url_sections(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+            )
+        )
+
+        table_section = payload["sections"][2]
+        self.assertEqual(table_section["title"], "3.1.2 Admin Portal Changes")
+        self.assertGreater(table_section["char_count"], len("[MEDIA_ID_1]"))
+        self.assertGreaterEqual(table_section["char_count"], len("[MEDIA_ID_1 table content]\nField\nStatus"))
+
     def test_confluence_parser_extracts_spreadsheet_links_by_section(self):
         connector = ConfluenceConnector(base_url="", email="", api_token="", bearer_token="", store=self.store)
 

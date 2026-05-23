@@ -635,19 +635,22 @@ class PRDReviewService:
         page = self.confluence.ingest_page(normalized.prd_url, "prd-self-assessment-sections")
         if not page.sections:
             raise ToolError("PRD page did not contain readable sections.")
-        return {
-            "status": "ok",
-            "prd": self._page_metadata(page),
-            "sections": [
+        sections_payload = []
+        for index, section in enumerate(page.sections, start=1):
+            review_char_count = _section_review_char_count(page=page, section=section)
+            sections_payload.append(
                 {
                     "index": index,
                     "title": section.section_path or section.title or f"Section {index}",
-                    "char_count": len(str(section.content or "")),
-                    "long": len(str(section.content or "")) >= PRD_SECTION_LONG_CHAR_THRESHOLD,
+                    "char_count": review_char_count,
+                    "long": review_char_count >= PRD_SECTION_LONG_CHAR_THRESHOLD,
                     "linked_spreadsheet_count": len(getattr(section, "spreadsheet_links", []) or []),
                 }
-                for index, section in enumerate(page.sections, start=1)
-            ],
+            )
+        return {
+            "status": "ok",
+            "prd": self._page_metadata(page),
+            "sections": sections_payload,
         }
 
     @staticmethod
@@ -811,6 +814,10 @@ def _build_review_section_content(*, page: IngestedConfluencePage, section: Any,
         else:
             media_blocks.append(table_text)
     return "\n".join(part for part in [content, *media_blocks] if str(part or "").strip()).strip()
+
+
+def _section_review_char_count(*, page: IngestedConfluencePage, section: Any) -> int:
+    return len(_build_review_section_content(page=page, section=section, table_context=_new_table_pack_context()))
 
 
 def _new_table_pack_context() -> dict[str, Any]:

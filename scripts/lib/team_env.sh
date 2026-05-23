@@ -11,6 +11,10 @@ PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
 if [[ ! -x "$PYTHON_BIN" ]] && command -v python3 >/dev/null 2>&1; then
   PYTHON_BIN="$(command -v python3)"
 fi
+case ":${PYTHONPATH:-}:" in
+  *":$ROOT_DIR:"*) ;;
+  *) export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" ;;
+esac
 
 current_release_revision() {
   if command -v git >/dev/null 2>&1 && [[ -x "$PYTHON_BIN" ]]; then

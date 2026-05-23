@@ -829,10 +829,19 @@ class SeaTalkDashboardService:
         )
         signal_lines: list[str] = []
         signal_chars = 0
+        current_conversation_header = ""
+        last_signal_header = ""
         for line in lines:
+            if line.startswith("===") and line.rstrip().endswith("==="):
+                current_conversation_header = line
+                continue
             lowered = line.lower()
             if not any(term in lowered for term in signal_terms):
                 continue
+            if current_conversation_header and current_conversation_header != last_signal_header:
+                signal_lines.append(current_conversation_header)
+                signal_chars += len(current_conversation_header) + 1
+                last_signal_header = current_conversation_header
             signal_lines.append(line)
             signal_chars += len(line) + 1
             if signal_chars >= signal_max_chars:

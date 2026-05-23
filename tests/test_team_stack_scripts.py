@@ -175,6 +175,7 @@ exit 0
             "scripts/run_team_stack_guard.sh",
             "scripts/run_team_stack_guard_daemon.sh",
             "scripts/run_team_stack.sh",
+            "scripts/project_python.sh",
             "scripts/install_team_portal_launchd.sh",
             "scripts/install_ngrok_launchd.sh",
             "scripts/install_team_stack_launchd.sh",
@@ -201,6 +202,33 @@ exit 0
                 0,
                 msg=f"{relative_path} failed bash -n:\nSTDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}",
             )
+
+    def test_project_python_launcher_uses_repo_root_pythonpath(self):
+        launcher = PROJECT_ROOT / "scripts/project_python.sh"
+        completed = subprocess.run(
+            [
+                "bash",
+                str(launcher),
+                "-c",
+                "import os, sys; assert sys.path[0] == ''; assert os.environ['PYTHONPATH'].split(os.pathsep)[0] == os.getcwd(); import bpmis_jira_tool",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={**os.environ, "PYTHON_BIN": sys.executable},
+            cwd="/tmp",
+        )
+
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+
+    def test_team_env_exports_repo_root_pythonpath(self):
+        completed = self._run_team_env_helper(
+            'printf "%s\\n" "$PYTHONPATH"',
+            PYTHONPATH="/tmp/existing",
+        )
+
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        self.assertEqual(completed.stdout.strip().split(os.pathsep)[:2], [str(PROJECT_ROOT), "/tmp/existing"])
 
     def test_cloud_run_deploy_script_supports_dry_run_without_deploying(self):
         deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run.sh"

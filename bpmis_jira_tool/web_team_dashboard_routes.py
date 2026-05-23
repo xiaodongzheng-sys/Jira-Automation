@@ -46,6 +46,7 @@ from bpmis_jira_tool.team_dashboard_version_plan import (
     version_plan_sync,
 )
 from bpmis_jira_tool.team_dashboard_version_plan_store import (
+    LocalTeamDashboardVersionPlanStore,
     VersionPlanConflictError,
     build_version_plan_store,
 )
@@ -279,10 +280,49 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             details = {}
         return details.get("error_category") == "local_agent_unavailable"
 
+    def _version_plan_store_access_unavailable(error: Exception) -> bool:
+        normalized_error = str(error or "").strip().lower()
+        normalized_type = error.__class__.__name__.strip().lower()
+        if normalized_type in {"calledprocesserror", "permissionerror", "filenotfounderror"}:
+            return True
+        if "gcloud" in normalized_error and (
+            "credentials.db" in normalized_error
+            or "permission denied" in normalized_error
+            or "operation not permitted" in normalized_error
+            or "google-cloud-sdk" in normalized_error
+        ):
+            return True
+        if "firestore" in normalized_error and any(
+            token in normalized_error for token in ("unauthorized", "forbidden", "permission denied", "permission")
+        ):
+            return True
+        return False
+
+    def _version_plan_local_store():
+        return LocalTeamDashboardVersionPlanStore(_get_team_dashboard_config_store())
+
+    def _version_plan_load_snapshot(store):
+        try:
+            return store.load_snapshot()
+        except Exception as error:  # noqa: BLE001
+            if not _version_plan_store_access_unavailable(error):
+                raise
+            current_app.logger.warning("Team Dashboard Version Plan store access unavailable; using local cached config.")
+            return _version_plan_local_store().load_snapshot()
+
+    def _version_plan_save_config(store, config: dict[str, Any], *, expected_revision: str | None = None):
+        try:
+            return store.save_config(config, expected_revision=expected_revision)
+        except Exception as error:  # noqa: BLE001
+            if not _version_plan_store_access_unavailable(error):
+                raise
+            current_app.logger.warning("Team Dashboard Version Plan store access unavailable; saving to local cached config.")
+            return _version_plan_local_store().save_config(config, expected_revision=expected_revision)
+
     def _start_version_plan_sync_if_needed(*, force: bool = False) -> bool:
         global _VERSION_PLAN_SYNC_RUNNING  # noqa: PLW0603
         store = _get_version_plan_store()
-        snapshot = store.load_snapshot()
+        snapshot = _version_plan_load_snapshot(store)
         config = snapshot.config
         with _VERSION_PLAN_SYNC_LOCK:
             if _VERSION_PLAN_SYNC_RUNNING:
@@ -292,12 +332,12 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             bpmis_client = _build_bpmis_client_for_current_user(settings)
             bpmis_client.ping()
             app = current_app._get_current_object()
-            store.save_config(mark_version_plan_sync_running(config), expected_revision=snapshot.revision)
+            _version_plan_save_config(store, mark_version_plan_sync_running(config), expected_revision=snapshot.revision)
         except Exception as error:  # noqa: BLE001
             with _VERSION_PLAN_SYNC_LOCK:
                 _VERSION_PLAN_SYNC_RUNNING = False
             try:
-                store.save_config(mark_version_plan_sync_error(config, _version_plan_sync_error_message(error)))
+                _version_plan_save_config(store, mark_version_plan_sync_error(config, _version_plan_sync_error_message(error)))
             except Exception:
                 current_app.logger.exception("Team Dashboard Version Plan sync error could not be recorded.")
             raise
@@ -307,11 +347,12 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             try:
                 with app.app_context():
                     sync_store = _get_version_plan_store()
-                    latest_snapshot = sync_store.load_snapshot()
+                    latest_snapshot = _version_plan_load_snapshot(sync_store)
                     latest_config = latest_snapshot.config
                     synced_config = version_plan_sync(latest_config, bpmis_client)
-                    current_snapshot = sync_store.load_snapshot()
-                    sync_store.save_config(
+                    current_snapshot = _version_plan_load_snapshot(sync_store)
+                    _version_plan_save_config(
+                        sync_store,
                         merge_version_plan_editable_state(synced_config, current_snapshot.config),
                         expected_revision=current_snapshot.revision,
                     )
@@ -319,8 +360,11 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
                 try:
                     with app.app_context():
                         sync_store = _get_version_plan_store()
-                        current_snapshot = sync_store.load_snapshot()
-                        sync_store.save_config(mark_version_plan_sync_error(current_snapshot.config, _version_plan_sync_error_message(error)))
+                        current_snapshot = _version_plan_load_snapshot(sync_store)
+                        _version_plan_save_config(
+                            sync_store,
+                            mark_version_plan_sync_error(current_snapshot.config, _version_plan_sync_error_message(error)),
+                        )
                         current_app.logger.exception("Team Dashboard Version Plan sync failed.")
                 except Exception:
                     logging.getLogger(__name__).exception("Team Dashboard Version Plan sync failure could not be recorded.")
@@ -537,7 +581,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         if access_gate is not None:
             return access_gate
         store = _get_version_plan_store()
-        snapshot = store.load_snapshot()
+        snapshot = _version_plan_load_snapshot(store)
         sync_queued = False
         should_auto_sync = str(request.args.get("sync") or "1").strip().lower() not in {"0", "false", "no"}
         try:
@@ -547,12 +591,12 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             if _version_plan_error_is_local_agent_unavailable(error):
                 current_app.logger.info("Team Dashboard Version Plan auto-sync skipped because local-agent is unavailable.")
             else:
-                snapshot = store.save_config(mark_version_plan_sync_error(snapshot.config, _version_plan_sync_error_message(error)))
+                snapshot = _version_plan_save_config(store, mark_version_plan_sync_error(snapshot.config, _version_plan_sync_error_message(error)))
         except Exception as error:  # noqa: BLE001
             current_app.logger.exception("Team Dashboard Version Plan auto-sync could not be queued.")
-            snapshot = store.save_config(mark_version_plan_sync_error(snapshot.config, _version_plan_sync_error_message(error)))
+            snapshot = _version_plan_save_config(store, mark_version_plan_sync_error(snapshot.config, _version_plan_sync_error_message(error)))
         if sync_queued:
-            snapshot = store.load_snapshot()
+            snapshot = _version_plan_load_snapshot(store)
         return _version_plan_json_response(snapshot, sync_queued=sync_queued)
 
 
@@ -571,18 +615,18 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             )
             return jsonify({"status": "error", "message": "Version Plan Jira sync is admin-only."}), HTTPStatus.FORBIDDEN
         store = _get_version_plan_store()
-        snapshot = store.load_snapshot()
+        snapshot = _version_plan_load_snapshot(store)
         try:
             sync_queued = _start_version_plan_sync_if_needed(force=True)
         except (ConfigError, ToolError) as error:
-            snapshot = store.save_config(mark_version_plan_sync_error(snapshot.config, _version_plan_sync_error_message(error)))
+            snapshot = _version_plan_save_config(store, mark_version_plan_sync_error(snapshot.config, _version_plan_sync_error_message(error)))
             return _version_plan_json_response(snapshot, sync_queued=False), HTTPStatus.BAD_REQUEST
         except Exception as error:  # noqa: BLE001
             current_app.logger.exception("Team Dashboard Version Plan manual sync could not be queued.")
-            snapshot = store.save_config(mark_version_plan_sync_error(snapshot.config, _version_plan_sync_error_message(error)))
+            snapshot = _version_plan_save_config(store, mark_version_plan_sync_error(snapshot.config, _version_plan_sync_error_message(error)))
             return _version_plan_json_response(snapshot, sync_queued=False), HTTPStatus.INTERNAL_SERVER_ERROR
         if sync_queued:
-            snapshot = store.load_snapshot()
+            snapshot = _version_plan_load_snapshot(store)
         return _version_plan_json_response(snapshot, sync_queued=sync_queued)
 
 
@@ -591,7 +635,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         if access_gate is not None:
             return access_gate
         store = _get_version_plan_store()
-        snapshot = store.load_snapshot()
+        snapshot = _version_plan_load_snapshot(store)
         payload = version_plan_payload(snapshot.config)
         sync_state = payload.get("sync_state") if isinstance(payload.get("sync_state"), dict) else {}
         sync_queued = False
@@ -601,17 +645,17 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             try:
                 sync_queued = _start_version_plan_sync_if_needed(force=False)
             except (ConfigError, ToolError) as error:
-                current_snapshot = store.load_snapshot()
-                snapshot = store.save_config(mark_version_plan_sync_error(current_snapshot.config, _version_plan_sync_error_message(error)))
+                current_snapshot = _version_plan_load_snapshot(store)
+                snapshot = _version_plan_save_config(store, mark_version_plan_sync_error(current_snapshot.config, _version_plan_sync_error_message(error)))
                 payload = version_plan_payload(snapshot.config)
             except Exception as error:  # noqa: BLE001
                 current_app.logger.exception("Team Dashboard Version Plan stale sync could not be restarted.")
-                current_snapshot = store.load_snapshot()
-                snapshot = store.save_config(mark_version_plan_sync_error(current_snapshot.config, _version_plan_sync_error_message(error)))
+                current_snapshot = _version_plan_load_snapshot(store)
+                snapshot = _version_plan_save_config(store, mark_version_plan_sync_error(current_snapshot.config, _version_plan_sync_error_message(error)))
                 payload = version_plan_payload(snapshot.config)
             else:
                 if sync_queued:
-                    snapshot = store.load_snapshot()
+                    snapshot = _version_plan_load_snapshot(store)
                     payload = version_plan_payload(snapshot.config)
         return jsonify({
             "status": "ok",
@@ -634,13 +678,17 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             return jsonify({"status": "error", "message": "JSON payload is required."}), HTTPStatus.BAD_REQUEST
         store = _get_version_plan_store()
         try:
-            snapshot = store.load_snapshot()
+            snapshot = _version_plan_load_snapshot(store)
             field = str(payload.get("field") or "").strip()
             if field != "remarks" and _version_plan_sync_running(snapshot.config):
                 return _version_plan_sync_running_response()
             updated = update_version_plan_cell(snapshot.config, payload)
             expected_revision = str(payload.get("document_revision") or payload.get("revision") or "").strip() or None
-            saved = store.save_config(_audit_version_plan_config(updated, action="cell_update", payload=payload), expected_revision=expected_revision)
+            saved = _version_plan_save_config(
+                store,
+                _audit_version_plan_config(updated, action="cell_update", payload=payload),
+                expected_revision=expected_revision,
+            )
             return _version_plan_json_response(saved)
         except VersionPlanConflictError as error:
             return _version_plan_conflict_response(error)
@@ -658,12 +706,16 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         store = _get_version_plan_store()
         try:
             row_action = str(payload.get("action") or "").strip().lower()
-            snapshot = store.load_snapshot()
+            snapshot = _version_plan_load_snapshot(store)
             if _version_plan_sync_running(snapshot.config):
                 return _version_plan_sync_running_response()
             updated = update_version_plan_rows(snapshot.config, payload)
             expected_revision = str(payload.get("document_revision") or payload.get("revision") or "").strip() or None
-            saved = store.save_config(_audit_version_plan_config(updated, action=f"row_{row_action}", payload=payload), expected_revision=expected_revision)
+            saved = _version_plan_save_config(
+                store,
+                _audit_version_plan_config(updated, action=f"row_{row_action}", payload=payload),
+                expected_revision=expected_revision,
+            )
             return _version_plan_json_response(saved)
         except VersionPlanConflictError as error:
             return _version_plan_conflict_response(error)
