@@ -6,6 +6,7 @@ Mac portal share one document without moving the rest of the portal.
 """
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -89,7 +90,8 @@ class LocalTeamDashboardVersionPlanStore(TeamDashboardVersionPlanStore):
         self.config_store = config_store
 
     def _snapshot(self, config: dict[str, Any]) -> VersionPlanSnapshot:
-        plan = normalize_version_plan_state(config.get("version_plan") if isinstance(config, dict) else {})
+        normalized = copy.deepcopy(config) if isinstance(config, dict) else {}
+        plan = normalize_version_plan_state(normalized.get("version_plan") if isinstance(normalized, dict) else {})
         revision = version_plan_source_hash(plan)
         metadata = {
             "backend": "team_dashboard_config",
@@ -99,7 +101,6 @@ class LocalTeamDashboardVersionPlanStore(TeamDashboardVersionPlanStore):
             "source_hash": revision,
             "updated_at_sgt": "",
         }
-        normalized = dict(config)
         normalized["version_plan"] = plan
         return VersionPlanSnapshot(config=normalized, metadata=metadata)
 

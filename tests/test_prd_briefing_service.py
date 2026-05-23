@@ -25,17 +25,54 @@ from prd_briefing.reviewer import (
 )
 from prd_briefing.service import (
     PRDBriefingService,
+    RetrievalService,
     WALKTHROUGH_SCRIPT_PROMPT_VERSION,
     VoiceService,
     attach_presentation_media,
+    build_briefing_summary,
+    build_block_summary,
+    build_detail_grounded_overview,
+    build_developer_zh_fallback_script,
+    build_presenter_notes,
+    build_presentation_source_text,
     build_presentation_system_prompt,
+    build_presentation_user_prompt,
     build_pm_briefing_blocks,
+    build_scope_items,
+    build_sections_from_text,
+    build_sentence_timestamps,
+    build_walkthrough_block_user_prompt,
+    build_walkthrough_section_system_prompt,
+    build_walkthrough_section_user_prompt,
+    classify_briefing_category,
+    describe_section_topic_zh,
+    duration_from_edge_boundaries,
+    estimate_tts_duration_seconds,
+    extract_detail_points,
+    extract_text,
+    extract_json_array_text,
+    format_source_text,
     build_heuristic_session_overview,
+    infer_engineering_focus_zh,
+    infer_impacted_modules,
+    infer_impacted_modules_from_sections,
+    localize_detail_point_zh,
+    normalize_image_urls,
+    normalize_overview_list,
+    normalize_detail_sentence,
+    normalize_presentation_chunks,
+    normalize_presentation_media,
+    parse_developer_overview_payload,
+    proxy_confluence_image_url,
     overview_is_low_signal,
     optimize_tts_text,
     parse_presentation_chunks,
     parse_session_overview,
+    safe_filename,
     select_sections_for_overview,
+    split_presentation_sentences,
+    summarize_chunk_for_fallback,
+    truncate_for_prompt,
 )
 from prd_briefing.storage import BriefingStore
 
@@ -418,6 +455,63 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertFalse(second["cached"])
         self.assertEqual(self.text_client.answer_calls, 2)
 
+    def test_manual_presentation_path_repairs_invalid_model_json(self):
+        self.text_client.is_configured = lambda: True
+        responses = iter(
+            [
+                "not json",
+                json.dumps(
+                    [
+                        {
+                            "id": "chunk-manual",
+                            "title": "手工输入",
+                            "content": "这一段说明手工输入的 PRD 文本。",
+                            "imageUrls": ["https://example.atlassian.net/download/attachments/123/flow.png"],
+                        }
+                    ]
+                ),
+            ]
+        )
+
+        def create_answer(system_prompt, user_prompt):
+            self.text_client.last_system_prompt = system_prompt
+            self.text_client.last_user_prompt = user_prompt
+            self.text_client.answer_calls += 1
+            return next(responses)
+
+        self.text_client.create_answer = create_answer
+
+        payload = self.service.process_prd_for_presentation(
+            owner_key="anon:manual-presentation",
+            text="Manual PRD text with a submit flow and a fallback image.",
+            language="en",
+        )
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertFalse(payload["cached"])
+        self.assertTrue(payload["session"]["page_id"].startswith("manual:"))
+        self.assertEqual(payload["session"]["language"], "en")
+        self.assertEqual(self.text_client.answer_calls, 2)
+        self.assertEqual(payload["chunks"][0]["id"], "chunk-manual")
+        self.assertEqual(
+            payload["chunks"][0]["imageUrls"],
+            ["/prd-briefing/image-proxy?src=https%3A%2F%2Fexample.atlassian.net%2Fdownload%2Fattachments%2F123%2Fflow.png"],
+        )
+
+    def test_presentation_generation_validates_source_and_provider(self):
+        with self.assertRaisesRegex(ValueError, "PRD text or Confluence page URL is required"):
+            self.service.process_prd_for_presentation(owner_key="anon:missing")
+
+        with self.assertRaisesRegex(RuntimeError, "requires Codex to be configured"):
+            self.service.process_prd_for_presentation(owner_key="anon:not-configured", text="Manual PRD text")
+
+    def test_presentation_generation_reports_repair_failure(self):
+        self.text_client.is_configured = lambda: True
+        self.text_client.create_answer = lambda **_kwargs: "still not json"
+
+        with self.assertRaisesRegex(RuntimeError, "valid presentation JSON"):
+            self.service.process_prd_for_presentation(owner_key="anon:repair-fail", text="Manual PRD text")
+
     def test_media_ref_restores_image_table_or_none(self):
         chunks = attach_presentation_media(
             [
@@ -435,6 +529,59 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(chunks[0]["imageUrls"], ["/prd-briefing/image-proxy?src=x"])
         self.assertEqual(chunks[1]["media"]["type"], "table")
         self.assertEqual(chunks[2]["media"], {"type": "none", "content": ""})
+
+    def test_presentation_chunk_normalizers_filter_unsafe_or_empty_values(self):
+        self.assertEqual(
+            normalize_image_urls(
+                [
+                    "",
+                    "javascript:alert(1)",
+                    "https://example.test/a.png",
+                    "/prd-briefing/assets/audio/a.mp3",
+                    "/prd-briefing/image-proxy?src=x",
+                    "https://example.test/a.png",
+                ]
+            ),
+            [
+                "https://example.test/a.png",
+                "/prd-briefing/assets/audio/a.mp3",
+                "/prd-briefing/image-proxy?src=x",
+            ],
+        )
+        self.assertEqual(normalize_presentation_media({"type": "video", "content": "x"}), {"type": "none", "content": ""})
+        self.assertEqual(normalize_presentation_media({"type": "table", "content": "<table></table>"}), {"type": "table", "content": "<table></table>"})
+        self.assertEqual(proxy_confluence_image_url("https://example.test/image.png"), "/prd-briefing/image-proxy?src=https%3A%2F%2Fexample.test%2Fimage.png")
+        self.assertEqual(proxy_confluence_image_url("/prd-briefing/assets/local.png"), "/prd-briefing/assets/local.png")
+
+        with self.assertRaisesRegex(ValueError, "usable chunks"):
+            normalize_presentation_chunks([{"id": "empty", "content": ""}])
+
+    def test_presentation_prompt_and_source_helpers_cover_edge_cases(self):
+        long_section = ParsedSection(
+            title="Long",
+            section_path="3.1 Long Section",
+            content=("word " * 1200).strip(),
+            html_content="",
+            image_refs=["https://example.test/one.png", "https://example.test/two.png"],
+        )
+        source_text = build_presentation_source_text([long_section])
+        self.assertLessEqual(len(source_text), 12_000)
+        self.assertIn("## Section 1: 3.1 Long Section", source_text)
+        self.assertIn("[IMAGE] https://example.test/one.png", source_text)
+
+        manual_sections = build_sections_from_text(" ".join(f"token{i}" for i in range(80)), chunk_size=120)
+        self.assertGreaterEqual(len(manual_sections), 2)
+        self.assertEqual(manual_sections[0].section_path, "KB Chunk 1")
+
+        english_prompt = build_presentation_user_prompt(
+            source_text="A PRD with an API flow.",
+            image_urls=[f"https://example.test/{index}.png" for index in range(30)],
+            language="en",
+        )
+        self.assertIn("Create 4 to 10 English presentation chunks", english_prompt)
+        self.assertIn("https://example.test/23.png", english_prompt)
+        self.assertNotIn("https://example.test/24.png", english_prompt)
+        self.assertEqual(extract_json_array_text("prefix [{\"id\":\"chunk-1\"}] tail"), "[{\"id\":\"chunk-1\"}]")
 
     def test_generate_audio_preserves_chunk_media_and_uses_version_cache_key(self):
         self.text_client.is_configured = lambda: True
@@ -662,6 +809,78 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertIn("可优先查看", answer["answer_text"])
         self.assertEqual(answer["groundedness"], "grounded")
         self.assertGreaterEqual(len(answer["citations"]), 1)
+
+    def test_session_and_audio_methods_validate_missing_records(self):
+        with self.assertRaisesRegex(ValueError, "session_id is required"):
+            self.service.generate_presentation_audio(owner_key="anon:test", session_id="", chunk={})
+        with self.assertRaisesRegex(ValueError, "Briefing session was not found"):
+            self.service.generate_presentation_audio(owner_key="anon:test", session_id="missing", chunk={})
+        with self.assertRaisesRegex(ValueError, "Briefing session was not found"):
+            self.service.get_session_payload(session_id="missing", owner_key="anon:test")
+        with self.assertRaisesRegex(ValueError, "Briefing session was not found"):
+            self.service.answer_question(session_id="missing", owner_key="anon:test", question="What changed?")
+        with self.assertRaisesRegex(ValueError, "Briefing session was not found"):
+            self.service.narrate_section(session_id="missing", owner_key="anon:test")
+
+    def test_narrate_section_validates_indexes_and_can_generate_block_audio(self):
+        self.text_client.is_configured = lambda: True
+        self.voice_service.synthesize = lambda **kwargs: (self.voice_service.synthesize_calls.append(kwargs) or "audio/block.mp3")
+        payload = self.service.create_session(
+            owner_key="anon:narrate-edges",
+            page_ref="https://example.atlassian.net/wiki/pages/123",
+            mode="walkthrough",
+        )
+        session_id = payload["session"]["session_id"]
+        block_id = payload["briefing_blocks"][0]["block_id"]
+
+        with self.assertRaisesRegex(ValueError, "Section index is out of range"):
+            self.service.narrate_section(
+                session_id=session_id,
+                owner_key="anon:narrate-edges",
+                section_index=99,
+                include_audio=False,
+            )
+        with self.assertRaisesRegex(ValueError, "Briefing block is out of range"):
+            self.service.narrate_section(
+                session_id=session_id,
+                owner_key="anon:narrate-edges",
+                briefing_block_id="missing-block",
+                include_audio=False,
+            )
+
+        result = self.service.narrate_section(
+            session_id=session_id,
+            owner_key="anon:narrate-edges",
+            briefing_block_id=block_id,
+            include_audio=True,
+        )
+
+        self.assertEqual(result["audio_url"], "/prd-briefing/assets/audio/block.mp3")
+        self.assertEqual(result["briefing_block_id"], block_id)
+        self.assertEqual(self.voice_service.synthesize_calls[-1]["language_code"], "zh")
+
+    def test_answer_question_falls_back_for_unsupported_and_model_errors(self):
+        payload = self.service.create_session(
+            owner_key="anon:qa-edges",
+            page_ref="https://example.atlassian.net/wiki/pages/123",
+            mode="walkthrough",
+        )
+        unsupported = self.service.answer_question(
+            session_id=payload["session"]["session_id"],
+            owner_key="anon:qa-edges",
+            question="Completely unrelated blockchain settlement wording",
+        )
+        self.assertEqual(unsupported["groundedness"], "unsupported")
+        self.assertIn("无法在当前选择的 PRD", unsupported["answer_text"])
+
+        self.text_client.is_configured = lambda: True
+        self.text_client.create_answer = lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("model down"))
+        inferred = self.service.answer_question(
+            session_id=payload["session"]["session_id"],
+            owner_key="anon:qa-edges",
+            question="developer handoff",
+        )
+        self.assertIn("根据当前检索到的 PRD 内容", inferred["answer_text"])
 
     def test_prd_review_skill_artifact_contains_section_guidance(self):
         skill_path = Path("/Users/NPTSG0388/.codex/skills/prd-review/SKILL.md")
@@ -2741,6 +2960,168 @@ class PRDBriefingServiceTests(unittest.TestCase):
             [index for block in reporting_blocks for index in block["section_indexes"]],
             list(range(6)),
         )
+
+    def test_pm_briefing_blocks_fall_back_when_sections_have_low_signal(self):
+        sections = [
+            {"section_path": "Appendix A", "content": "tiny"},
+            {"section_path": "Appendix B", "content": "also tiny"},
+        ]
+
+        blocks = build_pm_briefing_blocks(sections, language="en")
+
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["title"], "Core Feature Requirements")
+        self.assertEqual(blocks[0]["section_indexes"], [0, 1])
+        self.assertIn("implementation capability", blocks[0]["merged_summary"])
+
+    def test_briefing_category_summary_and_overview_helpers_cover_edge_cases(self):
+        self.assertEqual(classify_briefing_category("3.1 Audit Report", "download export history"), "reporting")
+        self.assertEqual(classify_briefing_category("3.2 Submit Review", "status changes to approved"), "state_actions")
+        self.assertEqual(classify_briefing_category("3.3 Field Layout", "readonly tab button"), "ui_rules")
+        self.assertEqual(classify_briefing_category("3.4 Permission", "role must not fail validation"), "permission_edge")
+        self.assertEqual(classify_briefing_category("3.5 Journey", "click navigation entry"), "workflow")
+        self.assertEqual(classify_briefing_category("3.6 Feature", "core capability"), "feature")
+
+        self.assertIn(
+            "Review Empty Section",
+            build_block_summary("Block", [{"section_path": "Empty Section", "content": ""}], language="en"),
+        )
+        self.assertIn(
+            "system grouped",
+            build_block_summary("Block", [{"section_path": "", "content": ""}], language="en"),
+        )
+        self.assertIn(
+            "建议开发优先从主流程",
+            build_detail_grounded_overview("Sparse PRD", [{"section_path": "1.1 Version Control", "content": "v1 PIC"}]),
+        )
+        self.assertEqual(build_scope_items([{"section_path": "1.1 Version Control", "content": "PIC"}]), ["主流程", "页面交互", "状态流转", "规则校验"])
+
+    def test_detail_point_helpers_cover_all_fallback_categories(self):
+        sections = [{"section_path": "1.1 Version Control", "content": "PIC someone@example.com"}]
+
+        self.assertIn("页面动作", extract_detail_points(sections, category="developer")[0])
+        self.assertIn("页面展示", extract_detail_points(sections, category="frontend")[0])
+        self.assertIn("状态流转", extract_detail_points(sections, category="backend")[0])
+        self.assertIn("理解偏差", extract_detail_points(sections, category="risks")[0])
+        self.assertIn("强校验", extract_detail_points(sections, category="unclear_rules")[0])
+        self.assertIn("异常路径", extract_detail_points(sections, category="missing_edge_cases")[0])
+        self.assertIn("职责边界", extract_detail_points(sections, category="unclear_ownership")[0])
+        self.assertIn("默认值", extract_detail_points(sections, category="open_questions")[0])
+
+        localized = localize_detail_point_zh('User can click on "Submit" button to submit assessment')
+        self.assertIn("用户可点击", localized)
+        self.assertTrue(localized.endswith("。"))
+
+    def test_prompt_and_retrieval_helpers_cover_empty_and_english_paths(self):
+        self.assertEqual(RetrievalService().rank("anything", []), [])
+        self.assertIn("natural spoken English", build_walkthrough_section_system_prompt("en"))
+        section_prompt = build_walkthrough_section_user_prompt(
+            section={"section_path": "3.1 Flow", "content": "User can submit review.", "briefing_summary": "Submit flow"},
+            notes=["Default status is Draft"],
+            language="en",
+        )
+        self.assertIn("Write a natural spoken script", section_prompt)
+        block_prompt = build_walkthrough_block_user_prompt(
+            block={
+                "title": "Submit Review",
+                "briefing_goal": "Explain submit flow",
+                "merged_summary": "Submit changes status.",
+                "developer_focus": ["Status changes"],
+            },
+            source_lines=["[1] 3.1 Submit\nUser can submit review."],
+            language="en",
+        )
+        self.assertIn("around 7 to 12 sentences in English", block_prompt)
+
+    def test_file_text_and_summary_helpers_cover_fallbacks(self):
+        self.assertEqual(safe_filename(" ../Bad Name?.txt "), "..-Bad-Name-.txt")
+        self.assertEqual(safe_filename("???"), "upload.bin")
+        self.assertEqual(truncate_for_prompt("short text", 20), "short text")
+        self.assertEqual(truncate_for_prompt("one two three", 8), "one two…")
+        self.assertEqual(format_source_text("Short.\nSecond sentence; third sentence."), "Short.\nSecond sentence\nthird sentence.")
+        self.assertEqual(build_briefing_summary("Fallback Title", "Too short."), "Fallback Title")
+        self.assertEqual(build_presenter_notes("Only Title", ""), ["Only Title"])
+        self.assertEqual(summarize_chunk_for_fallback("", limit=10), "")
+        self.assertEqual(summarize_chunk_for_fallback("First sentence is far too long for this limit.", limit=18), "First sentence is...")
+
+        md_path = Path(self.temp_dir.name) / "notes.md"
+        html_path = Path(self.temp_dir.name) / "notes.html"
+        json_path = Path(self.temp_dir.name) / "notes.json"
+        unsupported_path = Path(self.temp_dir.name) / "notes.pdf"
+        md_path.write_text("# Title\nBody", encoding="utf-8")
+        html_path.write_text("<html><body><h1>Title</h1><p>Body</p></body></html>", encoding="utf-8")
+        json_path.write_text('{"title":"Body"}', encoding="utf-8")
+
+        self.assertIn("Body", extract_text(md_path))
+        self.assertIn("Title", extract_text(html_path))
+        self.assertIn("title", extract_text(json_path))
+        with self.assertRaisesRegex(ValueError, "Supported knowledge-base files"):
+            extract_text(unsupported_path)
+
+    def test_overview_and_script_helpers_cover_low_signal_branches(self):
+        self.assertEqual(normalize_overview_list("not-list"), [])
+        self.assertEqual(normalize_overview_list(["PIC: user@example.com", "Submit button"]), ["Submit button"])
+        self.assertEqual(normalize_detail_sentence("v1.0"), "")
+        self.assertEqual(
+            normalize_detail_sentence("  valid product sentence with enough detail  "),
+            "valid product sentence with enough detail",
+        )
+
+        parsed = parse_developer_overview_payload("```json\n{\"background_goal\":\"Goal\",\"implementation_overview\":\"Build flow\"}\n```")
+        self.assertEqual(parsed["overview"], "Goal Build flow")
+        fallback = parse_developer_overview_payload("not json")
+        self.assertEqual(fallback["overview"], "not json")
+
+        self.assertTrue(overview_is_low_signal({"overview": "", "developer_focus": ["Submit button"]}))
+        self.assertTrue(overview_is_low_signal({"overview": "Version v1.0", "developer_focus": ["Submit button"]}))
+        self.assertTrue(overview_is_low_signal({"overview": "Overview", "developer_focus": [], "scope": []}))
+
+        self.assertEqual(describe_section_topic_zh("Navigation Menu", ""), "页面入口、导航方式和页面切换")
+        self.assertEqual(describe_section_topic_zh("Layout Field", ""), "页面布局、字段规则和展示方式")
+        self.assertEqual(describe_section_topic_zh("Requirement Rule", ""), "这部分规则要求和校验逻辑")
+        self.assertEqual(describe_section_topic_zh("Assessment Review", ""), "业务处理过程里的关键动作和状态变化")
+        self.assertIn("页面布局", infer_engineering_focus_zh("Field Layout", "default visible field")[0])
+        self.assertIn(
+            "主流程",
+            build_developer_zh_fallback_script(
+                "Generic",
+                "No concrete product tokens here.",
+                [],
+            ),
+        )
+
+    def test_module_inference_and_tts_timing_helpers_cover_boundaries(self):
+        self.assertEqual(
+            infer_impacted_modules(["Workflow Navigation", "Field Detail", "Submit Review", "Report Download"]),
+            ["流程和页面跳转", "页面布局和字段交互", "状态流转和操作动作", "报表、下载或历史记录"],
+        )
+        self.assertEqual(
+            infer_impacted_modules_from_sections(
+                [
+                    {"section_path": "Version Control", "content": "v1"},
+                    {"section_path": "3.2 Search Detail Tab", "content": "field layout"},
+                    {"section_path": "3.3 Submit Status", "content": "status change"},
+                ]
+            ),
+            ["3.2 Search Detail Tab", "3.3 Submit Status"],
+        )
+
+        self.assertEqual(split_presentation_sentences("第一句。第二句；Third?"), ["第一句。", "第二句；", "Third?"])
+        self.assertEqual(estimate_tts_duration_seconds("", language_code="zh"), 1.0)
+        self.assertGreater(estimate_tts_duration_seconds("a" * 1000, language_code="en"), 1.5)
+        self.assertEqual(
+            duration_from_edge_boundaries(
+                [
+                    {"offset": 10_000_000, "duration": 20_000_000},
+                    {"Offset": "bad", "Duration": 10_000_000},
+                ]
+            ),
+            3.0,
+        )
+        self.assertIsNone(duration_from_edge_boundaries([{"offset": "bad"}]))
+        timestamps = build_sentence_timestamps("短句。更长的第二句。", duration_seconds=10)
+        self.assertEqual(timestamps[0]["start"], 0.0)
+        self.assertEqual(timestamps[-1]["end"], 10.0)
 
     def test_narrate_briefing_block_uses_block_payload_cache(self):
         self.text_client.is_configured = lambda: True

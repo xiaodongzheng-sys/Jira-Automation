@@ -55,6 +55,13 @@ from prd_briefing.reviewer import PRDReviewRequest
 GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 _VERSION_PLAN_SYNC_LOCK = threading.Lock()
 _VERSION_PLAN_SYNC_RUNNING = False
+_TEAM_DASHBOARD_BIZ_PROJECT_STATUS_ID_LABELS = {
+    "4": "Pending Review",
+    "23": "Confirmed",
+    "10": "Developing",
+    "11": "Testing",
+    "12": "UAT",
+}
 
 
 def _fallback_team_dashboard_config() -> dict[str, Any]:
@@ -198,7 +205,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         if value is None:
             return ""
         if isinstance(value, dict):
-            for key in ("label", "name", "text", "value", "statusName"):
+            for key in ("label", "name", "text", "value", "id", "statusName"):
                 text = _team_dashboard_status_text(value.get(key))
                 if text:
                     return text
@@ -214,10 +221,21 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
     def _team_dashboard_project_status_from_detail(detail: dict[str, Any]) -> str:
         if not isinstance(detail, dict):
             return ""
-        for key in ("statusId", "status", "statusName", "issueStatus"):
+        for key in (
+            "statusId",
+            "status",
+            "statusName",
+            "statusLabel",
+            "issueStatus",
+            "issueStatusId",
+            "bizProjectStatus",
+            "projectStatus",
+            "currentStatus",
+            "workflowStatus",
+        ):
             text = _team_dashboard_status_text(detail.get(key))
             if text:
-                return text
+                return _TEAM_DASHBOARD_BIZ_PROJECT_STATUS_ID_LABELS.get(text.strip(), text)
         return ""
 
     def _update_team_dashboard_cached_project_status(config: dict[str, Any], *, bpmis_id: str, status: str) -> int:

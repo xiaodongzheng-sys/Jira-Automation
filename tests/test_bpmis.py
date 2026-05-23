@@ -900,7 +900,7 @@ class BPMISClientTests(unittest.TestCase):
                                         "marketId": "PH",
                                         "bizPriorityId": "P1",
                                         "regionalPmPicId": [{"name": "PM Lead", "email": "pm@npt.sg"}],
-                                        "statusId": "Confirmed",
+                                        "statusId": 23,
                                     }
                                 ]
                             }
@@ -921,7 +921,7 @@ class BPMISClientTests(unittest.TestCase):
                                         "id": 200,
                                         "summary": "Enriched Biz Project",
                                         "marketId": "PH",
-                                        "statusId": "Confirmed",
+                                        "statusId": 23,
                                     },
                                 ]
                             }
@@ -963,6 +963,23 @@ class BPMISClientTests(unittest.TestCase):
                         "status": "Confirmed",
                     }
                 ],
+            )
+
+    def test_team_dashboard_biz_project_status_label_maps_numeric_status_ids(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+
+            self.assertEqual(client._team_dashboard_biz_project_status_label({"statusId": 4}), "Pending Review")
+            self.assertEqual(client._team_dashboard_biz_project_status_label({"statusId": 23}), "Confirmed")
+            self.assertEqual(client._team_dashboard_biz_project_status_label({"statusId": {"id": 23}}), "Confirmed")
+            self.assertEqual(client._team_dashboard_biz_project_status_label({"statusId": 10}), "Developing")
+            self.assertEqual(
+                client._team_dashboard_biz_project_status_label({"bizProjectStatus": {"value": 11}}),
+                "Testing",
+            )
+            self.assertEqual(
+                client._team_dashboard_biz_project_status_label({"currentStatus": {"label": "UAT"}}),
+                "UAT",
             )
 
     def test_search_biz_projects_by_title_keywords_uses_keyword_and_allowed_statuses(self):

@@ -146,6 +146,13 @@ class BPMISDirectApiClient(BPMISClient):
     SUPPORTED_COUNTRIES_ALL_VALUE = 49007
     JIRA_BROWSE_BASE_URL = "https://jira.shopee.io/browse/"
     SYNC_BIZ_PROJECT_STATUS_IDS = [4, 23, 10, 11, 12]
+    TEAM_DASHBOARD_BIZ_PROJECT_STATUS_ID_LABELS = {
+        "4": "Pending Review",
+        "23": "Confirmed",
+        "10": "Developing",
+        "11": "Testing",
+        "12": "UAT",
+    }
     TEAM_DASHBOARD_BIZ_PROJECT_STATUS_NAMES = {
         "pending review",
         "confirmed",
@@ -3276,7 +3283,20 @@ class BPMISDirectApiClient(BPMISClient):
         return list(deduped.values())
 
     def _team_dashboard_biz_project_status_label(self, row: dict[str, Any]) -> str:
-        return self._issue_first_text(row, "statusId", "status", "statusName", "issueStatus")
+        status = self._issue_first_text(
+            row,
+            "statusId",
+            "status",
+            "statusName",
+            "statusLabel",
+            "issueStatus",
+            "issueStatusId",
+            "bizProjectStatus",
+            "projectStatus",
+            "currentStatus",
+            "workflowStatus",
+        )
+        return self.TEAM_DASHBOARD_BIZ_PROJECT_STATUS_ID_LABELS.get(status.strip(), status)
 
     def _normalize_biz_project_status(self, status: str) -> str:
         normalized = str(status or "").strip()
@@ -3347,7 +3367,7 @@ class BPMISDirectApiClient(BPMISClient):
         if isinstance(value, str):
             return value.strip()
         if isinstance(value, dict):
-            for key in ("fullName", "label", "name", "displayName", "emailAddress", "email", "value"):
+            for key in ("fullName", "label", "name", "displayName", "emailAddress", "email", "value", "id"):
                 text = str(value.get(key) or "").strip()
                 if text:
                     return text

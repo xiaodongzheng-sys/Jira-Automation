@@ -180,6 +180,8 @@ exit 0
             "scripts/install_team_portal_launchd.sh",
             "scripts/install_ngrok_launchd.sh",
             "scripts/install_team_stack_launchd.sh",
+            "scripts/run_meeting_recorder_reminder.sh",
+            "scripts/install_meeting_recorder_reminder_launchd.sh",
             "scripts/deploy_cloud_run.sh",
             "scripts/deploy_cloud_run_full.sh",
             "scripts/deploy_cloud_run_uat.sh",
@@ -1241,6 +1243,14 @@ exit 0
         self.assertIn('assert_no_active_meeting_recording_before_restart "reload team stack launchd job" "$DATA_DIR"', stack_launchd_script)
         self.assertIn('assert_no_active_meeting_recording_before_restart "reload team portal launchd job" "$DATA_DIR"', portal_launchd_script)
         self.assertIn('assert_no_active_meeting_recording_before_restart "kickstart team stack launchd job"', setup_script)
+        reminder_launchd_script = (PROJECT_ROOT / "scripts/install_meeting_recorder_reminder_launchd.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            'assert_no_active_meeting_recording_before_restart "reload Meeting Recorder reminder launchd job" "$DATA_DIR"',
+            reminder_launchd_script,
+        )
+        self.assertIn("deploy/launchd/meeting-recorder-reminder.plist.template", reminder_launchd_script)
+        reminder_runner_script = (PROJECT_ROOT / "scripts/run_meeting_recorder_reminder.sh").read_text(encoding="utf-8")
+        self.assertIn("bpmis_jira_tool.meeting_recorder_reminder", reminder_runner_script)
 
     def test_team_stack_guard_does_not_restart_or_cleanup_portal_while_recording(self):
         guard_script = (PROJECT_ROOT / "scripts/run_team_stack_guard.sh").read_text(encoding="utf-8")

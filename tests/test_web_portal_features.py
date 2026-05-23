@@ -2140,7 +2140,7 @@ class WebPortalFeatureTests(unittest.TestCase):
 
                 def update_biz_project_status(self, bpmis_id, status):
                     self.calls.append((bpmis_id, status))
-                    return {"id": bpmis_id, "status": {"label": status}}
+                    return {"id": bpmis_id, "statusId": 10}
 
             fake_client = FakeTeamDashboardClient()
             with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):

@@ -1,10 +1,12 @@
 import os
+import json
 import tempfile
 import threading
 import time
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from bpmis_jira_tool.errors import ConfigError, ToolError
@@ -32,6 +34,14 @@ from bpmis_jira_tool.meeting_recorder import (
     meeting_transcript_whisper_language,
     meeting_platform_from_link,
     normalize_calendar_event,
+)
+from bpmis_jira_tool.meeting_recorder_reminder import (
+    MeetingRecorderReminderRunner,
+    MeetingReminderCandidate,
+    MeetingReminderStateStore,
+    build_meeting_recorder_url,
+    build_meeting_reminder_dialog_script,
+    due_meeting_reminders,
 )
 
 
@@ -153,6 +163,130 @@ class MeetingRecorderParsingTests(unittest.TestCase):
         self.assertEqual(meetings[0]["platform"], "google_meet")
         self.assertEqual(calendar.events_resource.kwargs["maxResults"], 50)
         self.assertIn("+00:00", calendar.events_resource.kwargs["timeMin"])
+
+    def test_meeting_reminder_due_at_start_time_only_within_window(self):
+        now = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+        meetings = [
+            {
+                "calendar_event_id": "due",
+                "title": "Due now",
+                "scheduled_start": "2026-05-21T10:00:00+00:00",
+                "meeting_link": "https://meet.google.com/abc-defg-hij",
+            },
+            {
+                "calendar_event_id": "future",
+                "title": "Future",
+                "scheduled_start": "2026-05-21T10:01:00+00:00",
+            },
+            {
+                "calendar_event_id": "old",
+                "title": "Old",
+                "scheduled_start": "2026-05-21T09:58:00+00:00",
+            },
+        ]
+
+        due = due_meeting_reminders(meetings, now=now, window_seconds=60)
+
+        self.assertEqual([item.calendar_event_id for item in due], ["due"])
+        self.assertEqual(due[0].title, "Due now")
+
+    def test_meeting_reminder_ignores_missing_start_and_dedupes(self):
+        now = datetime(2026, 5, 21, 10, 0, 30, tzinfo=timezone.utc)
+        meetings = [
+            {"calendar_event_id": "missing", "title": "Missing"},
+            {
+                "calendar_event_id": "sent",
+                "title": "Already sent",
+                "scheduled_start": "2026-05-21T10:00:00+00:00",
+            },
+            {
+                "calendar_event_id": "new",
+                "title": "New",
+                "scheduled_start": "2026-05-21T10:00:00+00:00",
+            },
+        ]
+
+        due = due_meeting_reminders(
+            meetings,
+            now=now,
+            window_seconds=60,
+            reminded_keys={"sent:2026-05-21T10:00:00+00:00"},
+        )
+
+        self.assertEqual([item.calendar_event_id for item in due], ["new"])
+
+    def test_meeting_reminder_state_store_persists_sent_keys(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_store = MeetingReminderStateStore(Path(temp_dir) / "meeting_recorder" / "reminders.json")
+            candidate = MeetingReminderCandidate(
+                key="event-1:2026-05-21T10:00:00+00:00",
+                title="Risk review",
+                scheduled_start="2026-05-21T10:00:00+00:00",
+                meeting_link="https://meet.google.com/abc-defg-hij",
+                calendar_event_id="event-1",
+            )
+
+            state_store.mark_sent(candidate, reminded_at=datetime(2026, 5, 21, 10, 0, 1, tzinfo=timezone.utc))
+
+            self.assertEqual(state_store.load_keys(), {"event-1:2026-05-21T10:00:00+00:00"})
+            payload = json.loads(state_store.path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["reminders"][candidate.key]["title"], "Risk review")
+
+    def test_meeting_reminder_commands_are_escaped_and_dry_runnable(self):
+        candidate = MeetingReminderCandidate(
+            key="event-1:start",
+            title='Risk "review"\nwith team',
+            scheduled_start="2026-05-21T10:00:00+08:00",
+            calendar_event_id="event-1",
+        )
+
+        url = build_meeting_recorder_url("https://app.bankpmtool.uk/", candidate)
+        script = build_meeting_reminder_dialog_script(candidate)
+
+        self.assertTrue(url.startswith("https://app.bankpmtool.uk/meeting-recorder?"))
+        self.assertIn("calendar_event_id=event-1", url)
+        self.assertIn("meeting_title=Risk+%22review%22%0Awith+team", url)
+        self.assertIn('buttons {"Dismiss", "Open Meeting Recorder"}', script)
+        self.assertIn('\\"review\\"', script)
+        self.assertNotIn("with team\n", script)
+
+    def test_meeting_reminder_runner_opens_portal_marks_state_and_dedupes(self):
+        class FakeCalendarService:
+            def __init__(self):
+                self.calls = 0
+
+            def upcoming_meetings(self, *, now, days, max_results):
+                self.calls += 1
+                return [
+                    {
+                        "calendar_event_id": "event-1",
+                        "title": "Risk review",
+                        "scheduled_start": "2026-05-21T10:00:00+00:00",
+                    }
+                ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = SimpleNamespace(team_portal_base_url="", team_portal_host="127.0.0.1", team_portal_port=5000)
+            state_store = MeetingReminderStateStore(Path(temp_dir) / "meeting_recorder" / "reminders.json")
+            opened_urls = []
+            dialogs = []
+            runner = MeetingRecorderReminderRunner(
+                settings=settings,
+                calendar_service=FakeCalendarService(),
+                state_store=state_store,
+                opener=opened_urls.append,
+                dialog=dialogs.append,
+            )
+            now = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+
+            first = runner.run_once(now=now, window_seconds=60)
+            second = runner.run_once(now=now, window_seconds=60)
+
+            self.assertEqual([item.calendar_event_id for item in first], ["event-1"])
+            self.assertEqual(second, [])
+            self.assertEqual(len(opened_urls), 1)
+            self.assertIn("http://127.0.0.1:5000/meeting-recorder", opened_urls[0])
+            self.assertEqual(len(dialogs), 1)
 
     def test_transcript_whisper_language_and_calendar_builder_defaults(self):
         self.assertEqual(meeting_transcript_whisper_language("english"), "en")
