@@ -36,6 +36,7 @@ DEPLOY_ACCOUNT="${CLOUD_RUN_DEPLOY_ACCOUNT:-$(read_env_value CLOUD_RUN_DEPLOY_AC
 if [[ -n "$DEPLOY_ACCOUNT" ]]; then
   account_args=(--account "$DEPLOY_ACCOUNT")
 fi
+require_gcloud_noninteractive_deploy_auth "$GCLOUD_BIN" "$PROJECT_ID" "$DEPLOY_ACCOUNT"
 
 current_sha() {
   git -C "$ROOT_DIR" rev-parse HEAD
@@ -102,14 +103,56 @@ wait_for_github_image_workflow() {
       --jq ".[] | select(.headSha == \"$sha\") | .databaseId" \
       --limit 20 2>/dev/null | head -n 1 || true)"
     if [[ -n "$run_id" ]]; then
-      echo "Waiting for GitHub image workflow run $run_id for $sha." >&2
-      "$GH_BIN" run watch "$run_id" --exit-status >&2
-      return 0
+      break
     fi
     sleep 5
   done
 
-  echo "No GitHub image workflow run found for $sha; continuing with UAT image fallback." >&2
+  if [[ -z "$run_id" ]]; then
+    echo "No GitHub image workflow run found for $sha; continuing with UAT image fallback." >&2
+    return 0
+  fi
+
+  local wait_seconds="${RELEASE_UAT_FAST_GITHUB_IMAGE_WAIT_SECONDS:-90}"
+  local poll_seconds="${RELEASE_UAT_FAST_GITHUB_IMAGE_POLL_SECONDS:-5}"
+  local deadline=$(( $(date +%s) + wait_seconds ))
+  local state status conclusion
+  echo "Waiting up to ${wait_seconds}s for GitHub image workflow run $run_id for $sha." >&2
+  while (( $(date +%s) < deadline )); do
+    state="$("$GH_BIN" run view "$run_id" --json status,conclusion --jq '[.status, (.conclusion // "")] | @tsv' 2>/dev/null || true)"
+    status="${state%%$'\t'*}"
+    conclusion="${state#*$'\t'}"
+    if [[ "$status" == "completed" ]]; then
+      if [[ "$conclusion" == "success" ]]; then
+        echo "GitHub image workflow completed successfully for $sha." >&2
+      else
+        echo "GitHub image workflow completed with conclusion '${conclusion:-unknown}' for $sha; continuing with UAT image fallback." >&2
+      fi
+      return 0
+    fi
+    sleep "$poll_seconds"
+  done
+
+  echo "Timed out after ${wait_seconds}s waiting for GitHub image workflow run $run_id; continuing with UAT image fallback." >&2
+}
+
+run_timed_gate() {
+  local started_at finished_at status=0
+  started_at="$(date +%s)"
+  run_gate || status=$?
+  finished_at="$(date +%s)"
+  record_deploy_timing "release_uat_fast.sh" "release_gate" "$started_at" "$finished_at" "$status" "profile=${RELEASE_UAT_FAST_GATE_PROFILE:-auto}" || true
+  return "$status"
+}
+
+run_timed_image_prepare() {
+  local sha="$1"
+  local started_at finished_at status=0
+  started_at="$(date +%s)"
+  ensure_prebuilt_image "$sha" || status=$?
+  finished_at="$(date +%s)"
+  record_deploy_timing "release_uat_fast.sh" "image_prepare" "$started_at" "$finished_at" "$status" "sha=$sha wait_seconds=${RELEASE_UAT_FAST_GITHUB_IMAGE_WAIT_SECONDS:-90}" || true
+  return "$status"
 }
 
 ensure_prebuilt_image() {
@@ -168,12 +211,14 @@ run_gate() {
     if "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/run_system_full_test_gate.py" \
       --check-proof \
       --proof-max-age-seconds "${RELEASE_UAT_FAST_GATE_PROOF_MAX_AGE_SECONDS:-7200}" \
+      --profile "${RELEASE_UAT_FAST_GATE_PROFILE:-auto}" \
       --coverage-fail-under "${RELEASE_UAT_FAST_COVERAGE_FAIL_UNDER:-100}"; then
       return 0
     fi
   fi
   "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/run_system_full_test_gate.py" \
     --skip-smoke \
+    --profile "${RELEASE_UAT_FAST_GATE_PROFILE:-auto}" \
     --parallel-workers "${RELEASE_UAT_FAST_GATE_WORKERS:-4}" \
     --coverage-fail-under "${RELEASE_UAT_FAST_COVERAGE_FAIL_UNDER:-100}"
 }
@@ -186,9 +231,9 @@ run_gate_and_image_in_parallel() {
   image_log="$work_dir/image.log"
   image_file="$work_dir/image.txt"
 
-  run_gate >"$gate_log" 2>&1 &
+  run_timed_gate >"$gate_log" 2>&1 &
   local gate_pid="$!"
-  ensure_prebuilt_image "$sha" >"$image_file" 2>"$image_log" &
+  run_timed_image_prepare "$sha" >"$image_file" 2>"$image_log" &
   local image_pid="$!"
 
   wait "$gate_pid" || gate_status=$?

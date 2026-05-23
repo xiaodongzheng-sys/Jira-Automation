@@ -31,10 +31,13 @@ if [[ -n "$DEPLOY_ACCOUNT" ]]; then
   ACCOUNT="$DEPLOY_ACCOUNT"
   ACCOUNT_ARGS=(--account "$DEPLOY_ACCOUNT")
 else
-  ACCOUNT="$("$GCLOUD_BIN" auth list --filter='status:ACTIVE' --format='value(account)' 2>/dev/null || true)"
+  ACCOUNT=""
+fi
+if [[ "${CLOUD_RUN_DEPLOY_DRY_RUN:-0}" != "1" ]]; then
+  require_gcloud_noninteractive_deploy_auth "$GCLOUD_BIN" "$PROJECT_ID" "$DEPLOY_ACCOUNT"
 fi
 if [[ -z "$ACCOUNT" ]]; then
-  echo "No active Google Cloud account. Run: $GCLOUD_BIN auth login"
+  echo "CLOUD_RUN_DEPLOY_ACCOUNT is required for non-interactive Cloud Run release commands."
   exit 1
 fi
 
@@ -196,7 +199,7 @@ ENV_VARS=(
   "BPMIS_BASE_URL=$BPMIS_BASE_URL"
   "SOURCE_CODE_QA_OWNER_EMAIL=${SOURCE_CODE_QA_OWNER_EMAIL:-xiaodong.zheng@npt.sg}"
   "SOURCE_CODE_QA_ADMIN_EMAILS=${SOURCE_CODE_QA_ADMIN_EMAILS:-xiaodong.zheng@npt.sg}"
-  "SOURCE_CODE_QA_QUERY_SYNC_MODE=${SOURCE_CODE_QA_QUERY_SYNC_MODE:-background}"
+  "SOURCE_CODE_QA_QUERY_SYNC_MODE=${SOURCE_CODE_QA_QUERY_SYNC_MODE:-disabled}"
   "LOCAL_AGENT_MODE=sync"
   "LOCAL_AGENT_BASE_URL=$LOCAL_AGENT_URL"
   "LOCAL_AGENT_SOURCE_CODE_QA_ENABLED=true"

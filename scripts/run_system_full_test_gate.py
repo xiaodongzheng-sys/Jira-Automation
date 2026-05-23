@@ -20,8 +20,10 @@ from urllib.request import Request, urlopen
 ROOT_DIR = Path(__file__).resolve().parents[1]
 STATIC_JS_PATHS = sorted((ROOT_DIR / "static").glob("*.js"))
 GATE_PROOF_VERSION = 1
+GATE_POLICY_VERSION = 2
 COVERAGE_JSON_PATH = ROOT_DIR / ".team-portal" / "run" / "system_full_coverage.json"
 COVERAGE_POLICY_PATH = ROOT_DIR / "config" / "coverage_risk_policy.json"
+VALID_GATE_PROFILES = {"auto", "full", "fast"}
 
 
 @dataclass
@@ -80,6 +82,137 @@ def _source_fingerprint() -> str:
     return digest.hexdigest()
 
 
+def _git_output(args: list[str], *, text: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", str(ROOT_DIR), *args],
+        capture_output=True,
+        text=text,
+        check=False,
+    )
+
+
+def _changed_files_from_status_z(raw_status: bytes) -> list[str]:
+    changed: list[str] = []
+    entries = [entry for entry in raw_status.split(b"\0") if entry]
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        status = entry[:2].decode("utf-8", errors="replace")
+        path = entry[3:].decode("utf-8", errors="surrogateescape")
+        if path:
+            changed.append(path)
+        if status[:1] in {"R", "C"} or status[1:2] in {"R", "C"}:
+            index += 1
+        index += 1
+    return sorted(set(changed))
+
+
+def _changed_files_for_gate() -> tuple[list[str], bool, str]:
+    status = _git_output(["status", "--porcelain=v1", "-z"], text=False)
+    if status.returncode != 0:
+        return [], False, "git_status_failed"
+    worktree_files = _changed_files_from_status_z(status.stdout)
+    if worktree_files:
+        return worktree_files, True, "worktree"
+
+    latest_commit = _git_output(["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"])
+    if latest_commit.returncode != 0:
+        return [], False, "git_diff_tree_failed"
+    files = sorted({line.strip() for line in latest_commit.stdout.splitlines() if line.strip()})
+    return files, True, "latest_commit"
+
+
+def _is_release_tooling_path(path: str) -> bool:
+    if path == "docs/release-checklist.md":
+        return True
+    if path.startswith("scripts/lib/") and path.endswith(".sh"):
+        return True
+    if path.startswith("scripts/") and path.endswith(".sh"):
+        return True
+    return path in {
+        "scripts/run_system_full_test_gate.py",
+        "scripts/check_coverage_policy.py",
+        "scripts/report_deploy_timings.py",
+    }
+
+
+def _classify_gate_profile(profile: str, changed_files: list[str], *, reliable: bool) -> tuple[str, str]:
+    if profile not in VALID_GATE_PROFILES:
+        raise ValueError(f"unsupported gate profile: {profile}")
+    if profile in {"full", "fast"}:
+        return profile, f"requested {profile}"
+    if not reliable or not changed_files:
+        return "full", "changed files are unavailable"
+
+    for path in changed_files:
+        if path.startswith("tests/"):
+            continue
+        if path.startswith(("docs/", "static/", "templates/", ".github/")):
+            continue
+        if path in {"README.md", ".dockerignore", ".gcloudignore", ".env.example"}:
+            continue
+        if _is_release_tooling_path(path):
+            continue
+        return "full", f"{path} requires the full release gate"
+    return "fast", "all changed files are eligible for the fast release gate"
+
+
+def _changed_static_js_paths(changed_files: list[str]) -> list[Path]:
+    paths = []
+    for path in changed_files:
+        if path.startswith("static/") and path.endswith(".js"):
+            file_path = ROOT_DIR / path
+            if file_path.is_file():
+                paths.append(file_path)
+    return sorted(set(paths))
+
+
+def _changed_shell_paths(changed_files: list[str]) -> list[str]:
+    return sorted({path for path in changed_files if path.startswith("scripts/") and path.endswith(".sh") and (ROOT_DIR / path).is_file()})
+
+
+def _changed_test_patterns(changed_files: list[str]) -> list[tuple[str, str]]:
+    patterns: set[tuple[str, str]] = set()
+    for path in changed_files:
+        if not path.startswith("tests/") or not path.endswith(".py"):
+            continue
+        file_path = ROOT_DIR / path
+        if not file_path.is_file():
+            continue
+        parent = str(Path(path).parent)
+        patterns.add((parent, Path(path).name))
+    return sorted(patterns)
+
+
+def _fast_gate_commands(changed_files: list[str], *, include_browser_e2e: bool) -> list[tuple[str, list[str]]]:
+    commands: list[tuple[str, list[str]]] = []
+    for path in _changed_shell_paths(changed_files):
+        commands.append(("bash_syntax", ["bash", "-n", path]))
+    for path in _changed_static_js_paths(changed_files):
+        commands.append(("node_check", ["node", "--check", str(path.relative_to(ROOT_DIR))]))
+    for test_dir, pattern in _changed_test_patterns(changed_files):
+        commands.append(("python_unittest_targeted", [sys.executable, "-m", "unittest", "discover", "-s", test_dir, "-p", pattern]))
+    if any(_is_release_tooling_path(path) for path in changed_files):
+        commands.append(
+            (
+                "python_unittest_release_tooling",
+                [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_team_stack_scripts.py"],
+            )
+        )
+    if "scripts/run_system_full_test_gate.py" in changed_files and not any(
+        command[0] == "python_unittest_targeted" and command[1][-1] == "test_system_full_test_gate.py" for command in commands
+    ):
+        commands.append(
+            (
+                "python_unittest_system_gate",
+                [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_system_full_test_gate.py"],
+            )
+        )
+    if include_browser_e2e:
+        commands.append(("browser_e2e", [sys.executable, "scripts/run_browser_e2e.py"]))
+    return commands
+
+
 def _gate_proof_path() -> Path:
     configured = os.environ.get("SYSTEM_FULL_TEST_GATE_PROOF_PATH")
     if configured:
@@ -98,17 +231,21 @@ def _write_gate_proof(*, result: dict[str, Any], coverage_fail_under: int, skip_
     proof_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": GATE_PROOF_VERSION,
+        "policy_version": GATE_POLICY_VERSION,
         "status": "pass",
         "git_sha": _current_git_sha(),
         "source_fingerprint": _source_fingerprint(),
         "coverage_fail_under": int(coverage_fail_under),
+        "profile": result.get("profile") or "full",
+        "profile_requested": result.get("profile_requested") or result.get("profile") or "full",
+        "changed_files": result.get("changed_files") or [],
         "skip_smoke": True,
         "created_at_epoch": int(time.time()),
     }
     proof_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def load_reusable_gate_proof(*, coverage_fail_under: int, max_age_seconds: int) -> tuple[bool, str]:
+def load_reusable_gate_proof(*, coverage_fail_under: int, max_age_seconds: int, profile: str = "full") -> tuple[bool, str]:
     proof_path = _gate_proof_path()
     if not proof_path.exists():
         return False, f"no gate proof at {proof_path}"
@@ -119,8 +256,13 @@ def load_reusable_gate_proof(*, coverage_fail_under: int, max_age_seconds: int) 
 
     if payload.get("version") != GATE_PROOF_VERSION or payload.get("status") != "pass":
         return False, "gate proof has unsupported version or non-pass status"
+    if payload.get("policy_version") != GATE_POLICY_VERSION:
+        return False, "gate proof policy version does not match"
     if int(payload.get("coverage_fail_under", -1)) != int(coverage_fail_under):
         return False, "gate proof coverage threshold does not match"
+    proof_profile = str(payload.get("profile") or "full")
+    if proof_profile != profile and not (proof_profile == "full" and profile == "fast"):
+        return False, f"gate proof profile {proof_profile} does not satisfy requested {profile}"
     created_at = int(payload.get("created_at_epoch") or 0)
     age_seconds = int(time.time()) - created_at
     if max_age_seconds >= 0 and age_seconds > int(max_age_seconds):
@@ -194,8 +336,11 @@ def run_gate(
     coverage_fail_under: int,
     expect_live_promoted: bool = False,
     parallel_workers: int = 4,
+    profile: str = "full",
 ) -> dict[str, Any]:
     steps: list[GateStep] = []
+    changed_files, changed_files_reliable, changed_files_source = _changed_files_for_gate()
+    effective_profile, profile_reason = _classify_gate_profile(profile, changed_files, reliable=changed_files_reliable)
 
     if smoke_only:
         if not (uat_url and live_url and expected_revision):
@@ -221,65 +366,87 @@ def run_gate(
         return {
             "status": status,
             "failed_steps": failed_steps,
+            "profile": "smoke",
+            "profile_requested": profile,
+            "profile_reason": "--smoke-only",
+            "changed_files": changed_files,
+            "changed_files_source": changed_files_source,
             "steps": [asdict(step) for step in steps],
         }
 
-    coverage_commands = [
-        ("coverage_erase", [sys.executable, "-m", "coverage", "erase", "--rcfile=/dev/null"]),
-        (
-            "python_unittest_coverage",
-            [
-                sys.executable,
-                "-m",
-                "coverage",
-                "run",
-                "--rcfile=/dev/null",
-                "--source=bpmis_jira_tool,prd_briefing",
-                "-m",
-                "unittest",
-                "discover",
-                "-s",
-                "tests",
-            ],
-        ),
-        (
-            "python_coverage_json",
-            [
-                sys.executable,
-                "-m",
-                "coverage",
-                "json",
-                "--rcfile=/dev/null",
-                "-o",
-                str(COVERAGE_JSON_PATH.relative_to(ROOT_DIR)),
-            ],
-        ),
-        (
-            "risk_coverage_gate",
-            [
-                sys.executable,
-                "scripts/check_coverage_policy.py",
-                "--coverage-json",
-                str(COVERAGE_JSON_PATH.relative_to(ROOT_DIR)),
-                "--policy",
-                str(COVERAGE_POLICY_PATH.relative_to(ROOT_DIR)),
-                "--governed-fail-under",
-                str(coverage_fail_under),
-            ],
-        ),
-    ]
-    parallel_commands = [("node_check", ["node", "--check", str(path.relative_to(ROOT_DIR))]) for path in STATIC_JS_PATHS]
-    parallel_commands.append(("source_code_qa_release_gate", [sys.executable, "scripts/run_source_code_qa_release_gate.py"]))
-    if include_browser_e2e:
-        parallel_commands.append(("browser_e2e", [sys.executable, "scripts/run_browser_e2e.py"]))
+    if effective_profile == "fast":
+        steps.append(
+            GateStep(
+                name="fast_profile_classification",
+                details={
+                    "reason": profile_reason,
+                    "changed_files": changed_files,
+                    "changed_files_source": changed_files_source,
+                },
+            )
+        )
+        commands = _fast_gate_commands(changed_files, include_browser_e2e=include_browser_e2e)
+        if commands:
+            steps.extend(_run_parallel_commands(commands, max_workers=parallel_workers))
+        else:
+            steps.append(GateStep(name="fast_profile_noop", details={"reason": "no targeted local checks for changed files"}))
+    else:
+        coverage_commands = [
+            ("coverage_erase", [sys.executable, "-m", "coverage", "erase", "--rcfile=/dev/null"]),
+            (
+                "python_unittest_coverage",
+                [
+                    sys.executable,
+                    "-m",
+                    "coverage",
+                    "run",
+                    "--rcfile=/dev/null",
+                    "--source=bpmis_jira_tool,prd_briefing",
+                    "-m",
+                    "unittest",
+                    "discover",
+                    "-s",
+                    "tests",
+                ],
+            ),
+            (
+                "python_coverage_json",
+                [
+                    sys.executable,
+                    "-m",
+                    "coverage",
+                    "json",
+                    "--rcfile=/dev/null",
+                    "-o",
+                    str(COVERAGE_JSON_PATH.relative_to(ROOT_DIR)),
+                ],
+            ),
+            (
+                "risk_coverage_gate",
+                [
+                    sys.executable,
+                    "scripts/check_coverage_policy.py",
+                    "--coverage-json",
+                    str(COVERAGE_JSON_PATH.relative_to(ROOT_DIR)),
+                    "--policy",
+                    str(COVERAGE_POLICY_PATH.relative_to(ROOT_DIR)),
+                    "--governed-fail-under",
+                    str(coverage_fail_under),
+                ],
+            ),
+        ]
+        parallel_commands = [("node_check", ["node", "--check", str(path.relative_to(ROOT_DIR))]) for path in STATIC_JS_PATHS]
+        parallel_commands.append(("source_code_qa_release_gate", [sys.executable, "scripts/run_source_code_qa_release_gate.py"]))
+        if include_browser_e2e:
+            parallel_commands.append(("browser_e2e", [sys.executable, "scripts/run_browser_e2e.py"]))
 
-    for name, command in coverage_commands:
-        step = _run_command(name, command)
-        steps.append(step)
-        if step.returncode != 0:
-            break
-    if all(step.returncode == 0 for step in steps):
-        steps.extend(_run_parallel_commands(parallel_commands, max_workers=parallel_workers))
+        for name, command in coverage_commands:
+            step = _run_command(name, command)
+            steps.append(step)
+            if step.returncode != 0:
+                break
+        if all(step.returncode == 0 for step in steps):
+            steps.extend(_run_parallel_commands(parallel_commands, max_workers=parallel_workers))
 
     if all(step.returncode == 0 for step in steps):
         if skip_smoke:
@@ -308,6 +475,11 @@ def run_gate(
     return {
         "status": status,
         "failed_steps": failed_steps,
+        "profile": effective_profile,
+        "profile_requested": profile,
+        "profile_reason": profile_reason,
+        "changed_files": changed_files,
+        "changed_files_source": changed_files_source,
         "steps": [asdict(step) for step in steps],
     }
 
@@ -328,6 +500,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--coverage-fail-under", type=int, default=100, help="Coverage percentage required for governed code.")
     parser.add_argument("--parallel-workers", type=int, default=4, help="Workers for independent JS and Source Code QA checks.")
     parser.add_argument(
+        "--profile",
+        choices=sorted(VALID_GATE_PROFILES),
+        default="full",
+        help="Release gate profile. Use auto to choose fast/full from changed files.",
+    )
+    parser.add_argument(
         "--check-proof",
         action="store_true",
         help="Return success when the current source tree already has a recent passing full-gate proof.",
@@ -342,11 +520,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.check_proof:
+        changed_files, reliable, _ = _changed_files_for_gate()
+        effective_profile, _ = _classify_gate_profile(args.profile, changed_files, reliable=reliable)
         reusable, reason = load_reusable_gate_proof(
             coverage_fail_under=int(args.coverage_fail_under),
             max_age_seconds=int(args.proof_max_age_seconds),
+            profile=effective_profile,
         )
-        payload = {"status": "pass" if reusable else "miss", "reason": reason}
+        payload = {"status": "pass" if reusable else "miss", "reason": reason, "profile": effective_profile}
         if args.json:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
@@ -363,13 +544,14 @@ def main(argv: list[str] | None = None) -> int:
         coverage_fail_under=int(args.coverage_fail_under),
         expect_live_promoted=bool(args.expect_live_promoted),
         parallel_workers=int(args.parallel_workers),
+        profile=str(args.profile),
     )
     if not args.smoke_only:
         _write_gate_proof(result=result, coverage_fail_under=int(args.coverage_fail_under), skip_smoke=bool(args.skip_smoke))
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
-        print(f"System full test gate: {result['status']}")
+        print(f"System full test gate: {result['status']} ({result.get('profile', args.profile)})")
         for step in result["steps"]:
             suffix = f" ({step['status']})"
             if step.get("returncode"):

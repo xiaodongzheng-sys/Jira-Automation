@@ -92,6 +92,114 @@ class SystemFullTestGateTests(unittest.TestCase):
         self.assertEqual(result["status"], "pass")
         self.assertIn(("browser_e2e", [sys.executable, "scripts/run_browser_e2e.py"]), commands)
 
+    def test_auto_profile_uses_full_for_backend_runtime_changes(self):
+        commands = []
+
+        def fake_run_command(name, command):
+            commands.append((name, command))
+            return gate.GateStep(name=name, command=command)
+
+        with patch.object(gate, "_changed_files_for_gate", return_value=(["bpmis_jira_tool/web.py"], True, "worktree")), patch.object(
+            gate,
+            "STATIC_JS_PATHS",
+            [],
+        ), patch.object(gate, "_run_command", side_effect=fake_run_command), patch.object(
+            gate,
+            "_run_parallel_commands",
+            side_effect=lambda parallel_commands, max_workers: [fake_run_command(name, command) for name, command in parallel_commands],
+        ):
+            result = gate.run_gate(
+                skip_smoke=True,
+                uat_url=None,
+                live_url=None,
+                expected_revision=None,
+                coverage_fail_under=100,
+                profile="auto",
+            )
+
+        self.assertEqual(result["profile"], "full")
+        self.assertEqual(commands[0][0], "coverage_erase")
+
+    def test_auto_profile_uses_fast_for_docs_and_tests_only_changes(self):
+        parallel_commands = []
+
+        def fake_parallel(commands, *, max_workers):
+            parallel_commands.extend(commands)
+            return [gate.GateStep(name=name, command=command) for name, command in commands]
+
+        with patch.object(
+            gate,
+            "_changed_files_for_gate",
+            return_value=(["docs/release-checklist.md", "tests/test_system_full_test_gate.py"], True, "worktree"),
+        ), patch.object(gate, "_run_command") as run_command, patch.object(gate, "_run_parallel_commands", side_effect=fake_parallel):
+            result = gate.run_gate(
+                skip_smoke=True,
+                uat_url=None,
+                live_url=None,
+                expected_revision=None,
+                coverage_fail_under=100,
+                profile="auto",
+            )
+
+        self.assertEqual(result["profile"], "fast")
+        run_command.assert_not_called()
+        command_names = [name for name, _ in parallel_commands]
+        self.assertIn("python_unittest_targeted", command_names)
+        self.assertIn("python_unittest_release_tooling", command_names)
+        self.assertNotIn("coverage_erase", command_names)
+
+    def test_auto_profile_release_tooling_uses_targeted_script_checks(self):
+        parallel_commands = []
+
+        def fake_parallel(commands, *, max_workers):
+            parallel_commands.extend(commands)
+            return [gate.GateStep(name=name, command=command) for name, command in commands]
+
+        with patch.object(
+            gate,
+            "_changed_files_for_gate",
+            return_value=(["scripts/release_uat_fast.sh"], True, "worktree"),
+        ), patch.object(gate, "_run_parallel_commands", side_effect=fake_parallel):
+            result = gate.run_gate(
+                skip_smoke=True,
+                uat_url=None,
+                live_url=None,
+                expected_revision=None,
+                coverage_fail_under=100,
+                profile="auto",
+            )
+
+        self.assertEqual(result["profile"], "fast")
+        self.assertIn(("bash_syntax", ["bash", "-n", "scripts/release_uat_fast.sh"]), parallel_commands)
+        self.assertIn(
+            (
+                "python_unittest_release_tooling",
+                [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_team_stack_scripts.py"],
+            ),
+            parallel_commands,
+        )
+
+    def test_auto_profile_defaults_to_full_for_unknown_paths(self):
+        with patch.object(gate, "_changed_files_for_gate", return_value=(["tools/unknown_runtime.txt"], True, "worktree")), patch.object(
+            gate,
+            "STATIC_JS_PATHS",
+            [],
+        ), patch.object(gate, "_run_command", return_value=gate.GateStep(name="ok")), patch.object(
+            gate,
+            "_run_parallel_commands",
+            return_value=[],
+        ):
+            result = gate.run_gate(
+                skip_smoke=True,
+                uat_url=None,
+                live_url=None,
+                expected_revision=None,
+                coverage_fail_under=100,
+                profile="auto",
+            )
+
+        self.assertEqual(result["profile"], "full")
+
     def test_gate_stops_after_failed_command(self):
         def fake_run_command(name, command):
             if name == "python_unittest_coverage":
@@ -254,6 +362,8 @@ class SystemFullTestGateTests(unittest.TestCase):
             self.assertEqual(payload["git_sha"], "sha-1")
             self.assertEqual(payload["source_fingerprint"], "fingerprint-1")
             self.assertEqual(payload["coverage_fail_under"], 95)
+            self.assertEqual(payload["policy_version"], gate.GATE_POLICY_VERSION)
+            self.assertEqual(payload["profile"], "full")
 
     def test_check_proof_accepts_matching_recent_source_fingerprint(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -262,10 +372,12 @@ class SystemFullTestGateTests(unittest.TestCase):
                 json.dumps(
                     {
                         "version": gate.GATE_PROOF_VERSION,
+                        "policy_version": gate.GATE_POLICY_VERSION,
                         "status": "pass",
                         "git_sha": "sha-1",
                         "source_fingerprint": "fingerprint-1",
                         "coverage_fail_under": 100,
+                        "profile": "full",
                         "skip_smoke": True,
                         "created_at_epoch": 1000,
                     }
@@ -294,10 +406,12 @@ class SystemFullTestGateTests(unittest.TestCase):
                 json.dumps(
                     {
                         "version": gate.GATE_PROOF_VERSION,
+                        "policy_version": gate.GATE_POLICY_VERSION,
                         "status": "pass",
                         "git_sha": "sha-1",
                         "source_fingerprint": "fingerprint-1",
                         "coverage_fail_under": 100,
+                        "profile": "full",
                         "skip_smoke": True,
                         "created_at_epoch": 1000,
                     }
@@ -318,6 +432,38 @@ class SystemFullTestGateTests(unittest.TestCase):
 
             self.assertEqual(returncode, 1)
             self.assertIn("fingerprint does not match", stdout.getvalue())
+
+    def test_check_proof_allows_full_proof_for_fast_but_not_fast_for_full(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            proof_path = Path(temp_dir) / "proof.json"
+            base_payload = {
+                "version": gate.GATE_PROOF_VERSION,
+                "policy_version": gate.GATE_POLICY_VERSION,
+                "status": "pass",
+                "git_sha": "sha-1",
+                "source_fingerprint": "fingerprint-1",
+                "coverage_fail_under": 100,
+                "skip_smoke": True,
+                "created_at_epoch": 1000,
+            }
+            proof_path.write_text(json.dumps({**base_payload, "profile": "full"}), encoding="utf-8")
+            with patch.dict(os.environ, {"SYSTEM_FULL_TEST_GATE_PROOF_PATH": str(proof_path)}), patch.object(
+                gate,
+                "_source_fingerprint",
+                return_value="fingerprint-1",
+            ), patch.object(gate.time, "time", return_value=1100):
+                reusable, _ = gate.load_reusable_gate_proof(coverage_fail_under=100, max_age_seconds=200, profile="fast")
+            self.assertTrue(reusable)
+
+            proof_path.write_text(json.dumps({**base_payload, "profile": "fast"}), encoding="utf-8")
+            with patch.dict(os.environ, {"SYSTEM_FULL_TEST_GATE_PROOF_PATH": str(proof_path)}), patch.object(
+                gate,
+                "_source_fingerprint",
+                return_value="fingerprint-1",
+            ), patch.object(gate.time, "time", return_value=1100):
+                reusable, reason = gate.load_reusable_gate_proof(coverage_fail_under=100, max_age_seconds=200, profile="full")
+            self.assertFalse(reusable)
+            self.assertIn("does not satisfy", reason)
 
 
 class _JsonResponse:

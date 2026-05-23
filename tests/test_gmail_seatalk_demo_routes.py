@@ -17,6 +17,10 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
             {
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": self.temp_dir.name,
+                "LOCAL_AGENT_MODE": "disabled",
+                "LOCAL_AGENT_BASE_URL": "",
+                "LOCAL_AGENT_HMAC_SECRET": "",
+                "LOCAL_AGENT_SEATALK_ENABLED": "false",
                 "SEATALK_LOCAL_APP_PATH": os.path.join(self.temp_dir.name, "missing", "SeaTalk.app"),
                 "SEATALK_LOCAL_DATA_DIR": os.path.join(self.temp_dir.name, "missing", "SeaTalkData"),
             },
@@ -942,6 +946,211 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("Codex is unavailable", response.get_json()["message"])
+
+    def test_gmail_dashboard_error_boundaries_are_sanitized(self):
+        class ToolErrorDashboardService:
+            def build_overview(self):
+                raise web_module.ToolError("Gmail API quota exhausted")
+
+            def build_network(self):
+                raise web_module.ToolError("Gmail network quota exhausted")
+
+            def build_export_manifest(self):
+                raise web_module.ToolError("Gmail export manifest unavailable")
+
+        class BrokenDashboardService:
+            def build_overview(self):
+                raise RuntimeError("token=secret-overview")
+
+            def build_network(self):
+                raise RuntimeError("token=secret-network")
+
+            def build_export_manifest(self):
+                raise RuntimeError("token=secret-manifest")
+
+        with self.app.test_client() as client:
+            self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+            with patch("bpmis_jira_tool.web._build_gmail_dashboard_service", return_value=ToolErrorDashboardService()):
+                dashboard = client.get("/api/gmail-sea-talk-demo/dashboard")
+                network = client.get("/api/gmail-sea-talk-demo/network")
+                manifest = client.get("/api/gmail-sea-talk-demo/gmail/export-manifest")
+            with patch("bpmis_jira_tool.web._build_gmail_dashboard_service", return_value=BrokenDashboardService()):
+                broken_dashboard = client.get("/api/gmail-sea-talk-demo/dashboard")
+                broken_network = client.get("/api/gmail-sea-talk-demo/network")
+                broken_manifest = client.get("/api/gmail-sea-talk-demo/gmail/export-manifest")
+
+        self.assertEqual(dashboard.status_code, 400)
+        self.assertIn("Gmail API quota exhausted", dashboard.get_json()["message"])
+        self.assertEqual(network.status_code, 400)
+        self.assertIn("Gmail network quota exhausted", network.get_json()["message"])
+        self.assertEqual(manifest.status_code, 400)
+        self.assertIn("Gmail export manifest unavailable", manifest.get_json()["message"])
+        self.assertEqual(broken_dashboard.status_code, 500)
+        self.assertNotIn("secret", broken_dashboard.get_json()["message"])
+        self.assertIn("Gmail data could not be loaded", broken_dashboard.get_json()["message"])
+        self.assertEqual(broken_network.status_code, 500)
+        self.assertNotIn("secret", broken_network.get_json()["message"])
+        self.assertIn("Gmail network rankings could not be loaded", broken_network.get_json()["message"])
+        self.assertEqual(broken_manifest.status_code, 500)
+        self.assertNotIn("secret", broken_manifest.get_json()["message"])
+        self.assertIn("Gmail export batches could not be prepared", broken_manifest.get_json()["message"])
+
+    def test_gmail_export_and_prewarm_failure_boundaries_are_sanitized(self):
+        class ToolErrorExportService:
+            def get_cached_export_history_text(self, batch=1):
+                return None
+
+            def export_history_text(self, batch=1):
+                raise web_module.ToolError("Gmail export quota exhausted")
+
+            def prewarm_export_history_text(self, batch=1):
+                raise web_module.ToolError("Gmail prewarm quota exhausted")
+
+        class BrokenExportService:
+            def get_cached_export_history_text(self, batch=1):
+                return None
+
+            def export_history_text(self, batch=1):
+                raise RuntimeError("token=secret-export")
+
+            def prewarm_export_history_text(self, batch=1):
+                raise RuntimeError("token=secret-prewarm")
+
+        with self.app.test_client() as client:
+            self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+            invalid_export = client.get("/api/gmail-sea-talk-demo/gmail/export?batch=not-a-number")
+            invalid_prewarm = client.post("/api/gmail-sea-talk-demo/gmail/export-prewarm?batch=not-a-number")
+            with patch("bpmis_jira_tool.web._build_gmail_dashboard_service", return_value=ToolErrorExportService()):
+                export_tool_error = client.get("/api/gmail-sea-talk-demo/gmail/export?batch=2")
+                prewarm_tool_error = client.post("/api/gmail-sea-talk-demo/gmail/export-prewarm?batch=2")
+            with patch("bpmis_jira_tool.web._build_gmail_dashboard_service", return_value=BrokenExportService()):
+                export_unexpected = client.get("/api/gmail-sea-talk-demo/gmail/export?batch=3")
+                prewarm_unexpected = client.post("/api/gmail-sea-talk-demo/gmail/export-prewarm?batch=3")
+            with web_module._gmail_export_active_users_lock:
+                web_module._gmail_export_active_users.add("xiaodong.zheng@npt.sg")
+            with patch("bpmis_jira_tool.web._build_gmail_dashboard_service", return_value=ToolErrorExportService()):
+                prewarm_in_progress = client.post("/api/gmail-sea-talk-demo/gmail/export-prewarm?batch=4")
+
+        self.assertEqual(invalid_export.status_code, 400)
+        self.assertIn("Invalid Gmail export batch", invalid_export.get_json()["message"])
+        self.assertEqual(invalid_prewarm.status_code, 400)
+        self.assertIn("Invalid Gmail export batch", invalid_prewarm.get_json()["message"])
+        self.assertEqual(export_tool_error.status_code, 400)
+        self.assertIn("Gmail export quota exhausted", export_tool_error.get_json()["message"])
+        self.assertEqual(prewarm_tool_error.status_code, 400)
+        self.assertIn("Gmail prewarm quota exhausted", prewarm_tool_error.get_json()["message"])
+        self.assertEqual(export_unexpected.status_code, 500)
+        self.assertNotIn("secret", export_unexpected.get_json()["message"])
+        self.assertIn("Gmail mail history could not be exported", export_unexpected.get_json()["message"])
+        self.assertEqual(prewarm_unexpected.status_code, 500)
+        self.assertNotIn("secret", prewarm_unexpected.get_json()["message"])
+        self.assertIn("Gmail export prewarm could not be completed", prewarm_unexpected.get_json()["message"])
+        self.assertEqual(prewarm_in_progress.status_code, 202)
+        self.assertTrue(prewarm_in_progress.get_json()["in_progress"])
+
+    def test_seatalk_split_api_fallback_and_failure_boundaries_are_sanitized(self):
+        class FallbackSeaTalkService:
+            def build_insights(self):
+                return {
+                    "project_updates": [{"title": "Fallback update"}],
+                    "my_todos": [{"task": "Fallback todo"}],
+                    "team_todos": [{"task": "Hidden team todo"}],
+                }
+
+        class ToolErrorSeaTalkService:
+            def build_project_updates(self):
+                raise web_module.ToolError("SeaTalk project update unavailable")
+
+            def build_todos(self, *, todo_since=""):
+                raise web_module.ToolError("SeaTalk todo unavailable")
+
+            def export_history_text(self):
+                raise web_module.ToolError("SeaTalk export unavailable")
+
+        class BrokenSeaTalkService:
+            def build_overview(self):
+                raise RuntimeError("token=secret-overview")
+
+            def build_project_updates(self):
+                raise RuntimeError("token=secret-projects")
+
+            def build_todos(self, *, todo_since=""):
+                raise RuntimeError("token=secret-todos")
+
+            def build_name_mappings(self, *, force_refresh=False):
+                raise RuntimeError("token=secret-mappings")
+
+            def export_history_text(self):
+                raise RuntimeError("token=secret-export")
+
+        with self.app.test_client() as client:
+            self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+            with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=FallbackSeaTalkService()):
+                fallback_updates = client.get("/api/gmail-sea-talk-demo/seatalk/project-updates")
+                fallback_todos = client.get("/api/gmail-sea-talk-demo/seatalk/todos")
+            with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=ToolErrorSeaTalkService()):
+                project_tool_error = client.get("/api/gmail-sea-talk-demo/seatalk/project-updates")
+                todos_tool_error = client.get("/api/gmail-sea-talk-demo/seatalk/todos")
+                export_tool_error = client.get("/api/gmail-sea-talk-demo/seatalk/export")
+            with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=BrokenSeaTalkService()):
+                overview_unexpected = client.get("/api/gmail-sea-talk-demo/seatalk")
+                project_unexpected = client.get("/api/gmail-sea-talk-demo/seatalk/project-updates")
+                todos_unexpected = client.get("/api/gmail-sea-talk-demo/seatalk/todos")
+                mapping_unexpected = client.get("/api/gmail-sea-talk-demo/seatalk/name-mappings")
+                export_unexpected = client.get("/api/gmail-sea-talk-demo/seatalk/export")
+
+        self.assertEqual(fallback_updates.status_code, 200)
+        self.assertEqual(fallback_updates.get_json()["project_updates"][0]["title"], "Fallback update")
+        self.assertEqual(fallback_updates.get_json()["my_todos"], [])
+        self.assertEqual(fallback_todos.status_code, 200)
+        self.assertEqual(fallback_todos.get_json()["my_todos"][0]["task"], "Fallback todo")
+        self.assertEqual(fallback_todos.get_json()["project_updates"], [])
+        self.assertEqual(project_tool_error.status_code, 400)
+        self.assertIn("SeaTalk project update unavailable", project_tool_error.get_json()["message"])
+        self.assertEqual(todos_tool_error.status_code, 400)
+        self.assertIn("SeaTalk todo unavailable", todos_tool_error.get_json()["message"])
+        self.assertEqual(export_tool_error.status_code, 400)
+        self.assertIn("SeaTalk export unavailable", export_tool_error.get_json()["message"])
+        for response, expected_message in [
+            (overview_unexpected, "SeaTalk data could not be loaded"),
+            (project_unexpected, "SeaTalk project updates could not be loaded"),
+            (todos_unexpected, "SeaTalk to-dos could not be loaded"),
+            (mapping_unexpected, "SeaTalk name mappings could not be loaded"),
+            (export_unexpected, "SeaTalk chat history could not be exported"),
+        ]:
+            self.assertEqual(response.status_code, 500)
+            self.assertNotIn("secret", response.get_json()["message"])
+            self.assertIn(expected_message, response.get_json()["message"])
+
+    def test_seatalk_saved_todo_failure_boundaries_are_sanitized(self):
+        with self.app.test_client() as client:
+            self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+            with patch(
+                "bpmis_jira_tool.seatalk_stores.SeaTalkTodoStore.completed_ids",
+                side_effect=web_module.ToolError("Saved to-do store unavailable"),
+            ):
+                open_tool_error = client.get("/api/gmail-sea-talk-demo/seatalk/todos/open")
+            with patch(
+                "bpmis_jira_tool.seatalk_stores.SeaTalkTodoStore.mark_completed",
+                side_effect=web_module.ToolError("Cannot complete saved to-do"),
+            ):
+                complete_tool_error = client.post(
+                    "/api/gmail-sea-talk-demo/seatalk/todos/complete",
+                    json={"todo": {"task": "Follow up rollout"}},
+                )
+            with patch(
+                "bpmis_jira_tool.seatalk_stores.SeaTalkTodoStore.completed_ids",
+                side_effect=RuntimeError("token=secret-open-todos"),
+            ):
+                open_unexpected = client.get("/api/gmail-sea-talk-demo/seatalk/todos/open")
+
+        self.assertEqual(open_tool_error.status_code, 400)
+        self.assertIn("Saved to-do store unavailable", open_tool_error.get_json()["message"])
+        self.assertEqual(complete_tool_error.status_code, 400)
+        self.assertIn("Cannot complete saved to-do", complete_tool_error.get_json()["message"])
+        self.assertEqual(open_unexpected.status_code, 500)
+        self.assertNotIn("secret", open_unexpected.get_json()["message"])
+        self.assertIn("Saved SeaTalk to-dos could not be loaded", open_unexpected.get_json()["message"])
 
 
 if __name__ == "__main__":

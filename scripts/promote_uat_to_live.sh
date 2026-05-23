@@ -33,6 +33,7 @@ CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED="${CLOUD_RUN_DEPLOY_ACCOUNT:-$(read_env_value 
 if [[ -n "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED" ]]; then
   ACCOUNT_ARGS=(--account "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED")
 fi
+require_gcloud_noninteractive_deploy_auth "$GCLOUD_BIN" "$GOOGLE_CLOUD_PROJECT_RESOLVED" "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED"
 
 enforce_release_window_target live
 
@@ -169,6 +170,59 @@ validate_live_candidate_slot() {
   "$HOST_ROOT/scripts/run_team_portal_slot.sh" restart
 }
 
+record_promote_stage_timing() {
+  local phase="$1"
+  local started_at="$2"
+  local finished_at="$3"
+  local status="$4"
+  local details="${5:-}"
+  record_deploy_timing "promote_uat_to_live.sh" "$phase" "$started_at" "$finished_at" "$status" "service=$SERVICE region=$REGION tag=$UAT_TAG host=$HOST_ROOT $details" || true
+}
+
+read_healthz_revision() {
+  local url="$1"
+  local max_time="${2:-10}"
+  curl -fsS --max-time "$max_time" "$url" | "$PYTHON_BIN" -c 'import json, sys; print(json.load(sys.stdin).get("revision", ""))'
+}
+
+wait_for_healthz_revision() {
+  local label="$1"
+  local url="$2"
+  local expected_revision="$3"
+  local timeout_seconds="$4"
+  local poll_seconds="$5"
+  local curl_max_time="$6"
+  local started_at finished_at status=1 deadline revision last_revision=""
+
+  started_at="$(date +%s)"
+  deadline=$(( started_at + timeout_seconds ))
+  echo "Verifying $label revision at $url for up to ${timeout_seconds}s." >&2
+  while true; do
+    revision="$(read_healthz_revision "$url" "$curl_max_time" 2>/dev/null || true)"
+    if [[ "$revision" == "$expected_revision" ]]; then
+      finished_at="$(date +%s)"
+      record_promote_stage_timing "$label" "$started_at" "$finished_at" 0 "url=$url revision=$revision"
+      printf '%s\n' "$revision"
+      return 0
+    fi
+    if [[ -n "$revision" ]]; then
+      last_revision="$revision"
+    fi
+    if (( $(date +%s) >= deadline )); then
+      break
+    fi
+    sleep "$poll_seconds"
+  done
+
+  finished_at="$(date +%s)"
+  record_promote_stage_timing "$label" "$started_at" "$finished_at" "$status" "url=$url last_revision=${last_revision:-<none>}"
+  echo "$label revision did not become healthy before timeout." >&2
+  echo "URL:      $url" >&2
+  echo "Served:   ${last_revision:-<none>}" >&2
+  echo "Expected: $expected_revision" >&2
+  return 1
+}
+
 SERVICE_JSON="$(json_from_gcloud_service)"
 UAT_REVISION="$(printf '%s' "$SERVICE_JSON" | UAT_TAG_VALUE="$UAT_TAG" "$PYTHON_BIN" -c 'import json, os, sys; p=json.load(sys.stdin); tag=os.environ["UAT_TAG_VALUE"]; matches=[t for t in p.get("status", {}).get("traffic", []) if t.get("tag")==tag]; print(matches[0].get("revisionName", "") if matches else "")')"
 UAT_URL="$(printf '%s' "$SERVICE_JSON" | UAT_TAG_VALUE="$UAT_TAG" "$PYTHON_BIN" -c 'import json, os, sys; p=json.load(sys.stdin); tag=os.environ["UAT_TAG_VALUE"]; matches=[t for t in p.get("status", {}).get("traffic", []) if t.get("tag")==tag]; print(matches[0].get("url", "") if matches else "")')"
@@ -240,25 +294,24 @@ else
 fi
 "$HOST_ROOT/scripts/run_team_stack.sh" restart-guard
 TEAM_PORTAL_SLOT=candidate TEAM_PORTAL_SLOT_PORT="${PROMOTE_UAT_BLUE_GREEN_PORT:-5001}" "$HOST_ROOT/scripts/run_team_portal_slot.sh" stop >/dev/null 2>&1 || true
-SERVED_REVISION="$(curl -fsS --max-time 10 "http://127.0.0.1:5000/healthz" | "$PYTHON_BIN" -c 'import json, sys; print(json.load(sys.stdin).get("revision", ""))')"
-if [[ "$SERVED_REVISION" != "$UAT_COMMIT" ]]; then
-  echo "Live portal loopback revision mismatch after restart."
-  echo "Served: $SERVED_REVISION"
-  echo "UAT:    $UAT_COMMIT"
-  exit 1
-fi
+wait_for_healthz_revision \
+  "live_loopback_health" \
+  "http://127.0.0.1:5000/healthz" \
+  "$UAT_COMMIT" \
+  "${PROMOTE_UAT_LOOPBACK_HEALTH_TIMEOUT_SECONDS:-30}" \
+  "${PROMOTE_UAT_HEALTH_POLL_SECONDS:-3}" \
+  10 >/dev/null
 
 HOST_ENV_FILE="$HOST_ROOT/.env"
 PUBLIC_URL="$(ENV_FILE="$HOST_ENV_FILE" read_env_value TEAM_PORTAL_BASE_URL)"
 if [[ -n "$PUBLIC_URL" ]]; then
-  PUBLIC_REVISION="$(curl -fsS --max-time 15 "${PUBLIC_URL%/}/healthz" | "$PYTHON_BIN" -c 'import json, sys; print(json.load(sys.stdin).get("revision", ""))')"
-  if [[ "$PUBLIC_REVISION" != "$UAT_COMMIT" ]]; then
-    echo "Live portal public revision mismatch after restart."
-    echo "Public URL: $PUBLIC_URL"
-    echo "Served:     $PUBLIC_REVISION"
-    echo "UAT:        $UAT_COMMIT"
-    exit 1
-  fi
+  wait_for_healthz_revision \
+    "live_public_health" \
+    "${PUBLIC_URL%/}/healthz" \
+    "$UAT_COMMIT" \
+    "${PROMOTE_UAT_PUBLIC_HEALTH_TIMEOUT_SECONDS:-60}" \
+    "${PROMOTE_UAT_HEALTH_POLL_SECONDS:-3}" \
+    15 >/dev/null
 fi
 
 echo "Mac-hosted Live now serves UAT commit $UAT_COMMIT."

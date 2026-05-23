@@ -1,19 +1,18 @@
 # Release Checklist
 
-Use this checklist for every portal release. Release target is selected by Singapore release-window rules:
+Use this checklist for every portal release. UAT and Live deployment are both allowed at any time:
 
-- Business hours are Monday-Friday, 10:00-19:00 Asia/Singapore.
 - UAT may be deployed anytime.
-- Live may be deployed anytime except Monday-Friday business hours.
-- The one-command release orchestrator defaults to Live during the Live window and UAT at all other times.
-- The release scripts enforce this by default. Set `RELEASE_WINDOW_POLICY_BYPASS=1` only for an explicitly approved exception.
+- Live may be deployed anytime.
+- The one-command release orchestrator deploys UAT first, then promotes the same UAT commit to Mac-hosted Live.
+- The release scripts do not enforce time-of-day or weekday restrictions.
 
 - The Mac-hosted portal exposed through Cloudflare Tunnel is the primary teammate entrypoint.
 - The Mac host owns Mac-only capabilities and durable portal state, including Source Code Q&A repos/indexes, Codex CLI access, Source Code Q&A sessions/attachments/runtime evidence, BPMIS setup/project rows, SeaTalk desktop data, and VPN-only BPMIS calls.
 - Cloud Run tagged revisions provide the UAT environment. UAT uses `--no-traffic --tag uat`, so it does not change Cloud Run live traffic or the Cloudflare Tunnel Live portal.
 - New services running on Cloud Run must default to local-agent-backed cache/DB/state. Use the Mac-local data root through local-agent APIs for durable cache, SQLite DBs, Source Code Q&A repos/indexes, PRD stores, Team Dashboard job state, and similar records; do not use the Cloud Run team portal filesystem or container-local DB as the system of record unless explicitly requested.
-- If the user says only "deploy", "publish", "release", or "发/发布", apply the release-window rule above.
-- If the user says "发 live", "publish live", "deploy live", or "发布 live" without saying Cloud Run, publish only the Cloudflare Tunnel Live portal, and only when the release window allows Live unless an explicit exception is approved.
+- If the user says only "deploy", "publish", "release", or "发/发布", deploy UAT first and then promote the same UAT commit to Mac-hosted Live.
+- If the user says "发 live", "publish live", "deploy live", or "发布 live" without saying Cloud Run, publish only the Cloudflare Tunnel Live portal.
 - Deploy Cloud Run live traffic only when the user explicitly says "live Cloud Run", "Cloud Run live", "publish the cloud version", or equivalent.
 
 ## 1. Pre-Release
@@ -28,24 +27,30 @@ git status --short
 
 Run this gate before every portal release. It is intentionally read-only except for local test temp/cache output: it must not create Jira tickets, send Gmail/SeaTalk messages, write BPMIS data, or mutate production portal state.
 
-- Run the one-command local gate first. This executes the governed-code 100% coverage suite, the blocking risk-based integration coverage policy, frontend JavaScript syntax checks for checked-in browser scripts, and the deterministic Source Code Q&A release gate:
+- Run the one-command local gate first. The default `auto` profile is risk-aware: backend/runtime/config/Source Code Q&A changes run the full governed-code coverage suite, blocking risk-based coverage policy, checked-in JavaScript syntax checks, and deterministic Source Code Q&A release gate; docs/tests/UI/release-tooling-only changes run targeted checks such as changed tests, changed JavaScript syntax, shell syntax, and release-script tests:
 
 ```bash
-./.venv/bin/python scripts/run_system_full_test_gate.py --skip-smoke
+./.venv/bin/python scripts/run_system_full_test_gate.py --profile auto --skip-smoke
 ```
 
 The gate sets `ENV_FILE=/dev/null` for subprocesses unless you explicitly provide `ENV_FILE`, so broad local tests do not silently load real credentials from `.env`.
 
-Independent JavaScript syntax checks and the deterministic Source Code Q&A release gate run in parallel after the coverage gate passes. Tune only if the host is overloaded:
+Force the full gate for higher-risk changes, ambiguous release state, or a pre-release confidence check:
 
 ```bash
-./.venv/bin/python scripts/run_system_full_test_gate.py --skip-smoke --parallel-workers 2
+./.venv/bin/python scripts/run_system_full_test_gate.py --profile full --skip-smoke
+```
+
+Independent JavaScript syntax checks and the deterministic Source Code Q&A release gate run in parallel after the full coverage gate passes. Tune only if the host is overloaded:
+
+```bash
+./.venv/bin/python scripts/run_system_full_test_gate.py --profile full --skip-smoke --parallel-workers 2
 ```
 
 Use an explicit threshold when validating release tooling changes:
 
 ```bash
-./.venv/bin/python scripts/run_system_full_test_gate.py --coverage-fail-under 100 --skip-smoke
+./.venv/bin/python scripts/run_system_full_test_gate.py --profile full --coverage-fail-under 100 --skip-smoke
 ```
 
 - For browser-level UI smoke coverage, install the optional Playwright runtime once, then run the local E2E gate. It starts a temporary Flask portal with an isolated `TEAM_PORTAL_DATA_DIR` and a signed admin session cookie, so it does not use real Google credentials or mutate production data:
@@ -247,11 +252,17 @@ CLOUD_RUN_UAT_PREBUILT_IMAGE_TAG=TAG \
 ./scripts/deploy_cloud_run_uat.sh
 ```
 
-The deploy scripts read `GOOGLE_CLOUD_PROJECT` and `CLOUD_RUN_DEPLOY_ACCOUNT` from `.env`, so routine UAT deploys do not depend on a personal interactive `gcloud auth login` session.
+The deploy scripts read `GOOGLE_CLOUD_PROJECT` and `CLOUD_RUN_DEPLOY_ACCOUNT` from `.env`, require that deploy account for real Cloud Run release commands, and preflight it with `gcloud auth print-access-token --account "$CLOUD_RUN_DEPLOY_ACCOUNT"` before Cloud Run mutations. Routine UAT and Live promotion must not depend on a personal interactive `gcloud auth login` session. If the deploy-account token preflight fails, fix the service-account credential first, for example:
+
+```bash
+gcloud auth activate-service-account "$CLOUD_RUN_DEPLOY_ACCOUNT" --key-file /path/to/service-account.json
+```
 
 - After Cloud Run UAT deploy succeeds, the script syncs the isolated UAT Mac host workspace to the same Git commit, installs host dependencies only when `requirements.txt` changed, initializes the PRD Briefing SQLite schema under the UAT data root, restarts the UAT Mac local-agent on port `7008`, and verifies public UAT local-agent health through the fixed live portal `/uat-local-agent` proxy. This keeps UAT's Cloud Run frontend and UAT local-agent-backed backend/cache code aligned without restarting the live local-agent. The UAT local-agent sync is change-aware: static assets, templates, docs/tests, `app.py`, `bpmis_jira_tool/web.py`, and split Flask web route modules (`bpmis_jira_tool/web_*.py`) skip the UAT local-agent sync/restart because they do not change local-agent-backed runtime code.
 
-For faster UAT releases, use the one-command orchestrator. It reuses a recent full-gate proof when the source fingerprint still matches, otherwise runs the full release gate. In parallel, it prepares the Cloud Run image by preferring the current SHA image, then the nearest reusable image when Cloud Run runtime inputs have not changed, then a GitHub/Cloud Build workflow wait, and finally a local Cloud Build fallback. It deploys UAT with the unchanged-deploy skip enabled, overlaps UAT host sync with Cloud Run deploy, and prints recent timing records:
+UAT public local-agent health is also retried for transient Cloudflare Tunnel readiness: `CLOUD_RUN_UAT_PUBLIC_LOCAL_AGENT_HEALTH_TIMEOUT_SECONDS=45` by default, polling every `CLOUD_RUN_UAT_PUBLIC_LOCAL_AGENT_HEALTH_POLL_SECONDS=3`. A failed public local-agent check after that window remains release-blocking.
+
+For faster UAT releases, use the one-command orchestrator. It reuses a recent matching gate proof when the source fingerprint still matches, otherwise runs `run_system_full_test_gate.py --profile "${RELEASE_UAT_FAST_GATE_PROFILE:-auto}"`. In parallel, it prepares the Cloud Run image by preferring the current SHA image, then the nearest reusable image when Cloud Run runtime inputs have not changed, then a GitHub/Cloud Build workflow wait, and finally a local Cloud Build fallback. It deploys UAT with the unchanged-deploy skip enabled, overlaps UAT host sync with Cloud Run deploy, and prints recent timing records:
 
 ```bash
 ./scripts/release_uat_fast.sh
@@ -266,9 +277,19 @@ RELEASE_UAT_FAST_WAIT_FOR_GITHUB_IMAGE=0 \
 ./scripts/release_uat_fast.sh
 ```
 
+Force the full local release gate for a UAT release with:
+
+```bash
+RELEASE_UAT_FAST_GATE_PROFILE=full ./scripts/release_uat_fast.sh
+```
+
 Set `RELEASE_UAT_FAST_BUILD_IMAGE_FALLBACK=0` to fail instead of building a missing prebuilt image locally. Set `RELEASE_UAT_FAST_BUILD_IMAGE=0` to preserve the older source-deploy fallback behavior.
 
-For one-command release handling, use the window-aware orchestrator. Outside Monday-Friday business hours, including weekends, it publishes Live by promoting the existing UAT tag to the Mac-hosted Live portal, runs the live doctor, and prints the timing report. During Monday-Friday business hours, it publishes UAT:
+The GitHub image workflow wait is intentionally bounded so release commands do not hang behind a stuck CI run. By default the fast UAT path waits up to `RELEASE_UAT_FAST_GITHUB_IMAGE_WAIT_SECONDS=90` before continuing to the next fallback, and records separate `release_gate` and `image_prepare` timing rows in `deploy_timings.jsonl`.
+
+If the release reaches the local Cloud Build fallback, its polling loop is also bounded by `CLOUD_RUN_BUILD_WAIT_TIMEOUT_SECONDS=1200` by default. A timeout fails the release instead of waiting indefinitely; inspect the printed Cloud Build ID before retrying.
+
+For one-command release handling, use the unrestricted UAT+Live orchestrator. It deploys UAT first, promotes that same UAT commit to the Mac-hosted Live portal, runs the live doctor, and prints the timing report:
 
 ```bash
 ./scripts/release_uat_live_fast.sh
@@ -306,10 +327,9 @@ CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceac
 
 - Do not skip the post-deploy UAT local-agent sync for PRD Briefing, BPMIS proxy, Source Code Q&A, SeaTalk, or other local-agent-backed changes. If you must skip it for a Cloud Run-only dry check, set `CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY=0` and treat UAT as not fully validated for local-agent-backed workflows.
 
-- If the active personal `gcloud` account works for the current shell, the account override can be omitted. If not, keep the configured deploy service account:
+- Real UAT deploys require the configured deploy service account. Dry-run can still be used to inspect deploy input shape without mutating Cloud Run:
 
 ```bash
-CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceaccount.com \
 CLOUD_RUN_UAT_DRY_RUN=1 ./scripts/deploy_cloud_run_uat.sh
 ```
 
@@ -355,10 +375,9 @@ Skip this section for routine UAT-gated releases. Use it only when the user expl
 CLOUD_RUN_DEPLOY_DRY_RUN=1 ./scripts/deploy_cloud_run.sh
 ```
 
-- If the active personal `gcloud` account needs browser reauthentication, use the configured deploy service account for non-interactive release checks:
+- Real Cloud Run live/backup deploys require the configured deploy service account. Dry-run can still be used for input validation:
 
 ```bash
-CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceaccount.com \
 CLOUD_RUN_DEPLOY_DRY_RUN=1 ./scripts/deploy_cloud_run.sh
 ```
 
@@ -423,7 +442,7 @@ curl https://app.bankpmtool.uk/api/local-agent/healthz
 
 ## 5. Live Promotion
 
-Run this only after the user explicitly confirms UAT passed and asks to publish Live. This is allowed anytime except Monday-Friday business hours. The promotion script reads the Cloud Run `uat` tag, verifies the tagged revision's `TEAM_PORTAL_RELEASE_REVISION`, refuses to publish if `origin/main` has moved past that UAT commit, fast-forwards the host workspace, validates the new portal revision on an inactive local slot, restarts the live guard, restarts the live local-agent only when local-agent-backed files changed, and verifies `/healthz`.
+Run this only after UAT passed and the user asks to publish Live, or through the one-command UAT+Live orchestrator. Live promotion is allowed anytime. The promotion script reads the Cloud Run `uat` tag, verifies the tagged revision's `TEAM_PORTAL_RELEASE_REVISION`, refuses to publish if `origin/main` has moved past that UAT commit, fast-forwards the host workspace, validates the new portal revision on an inactive local slot, restarts the live guard, restarts the live local-agent only when local-agent-backed files changed, and verifies `/healthz`.
 
 ```bash
 CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceaccount.com \
@@ -451,6 +470,8 @@ After promotion, run doctor for the full stack view:
 cd ~/Workspace/jira-creation-stack-host
 ./scripts/run_team_stack.sh doctor
 ```
+
+Promotion health checks tolerate short Cloudflare Tunnel propagation blips without weakening release validation. Loopback `/healthz` waits up to `PROMOTE_UAT_LOOPBACK_HEALTH_TIMEOUT_SECONDS=30`, and public Cloudflare `/healthz` waits up to `PROMOTE_UAT_PUBLIC_HEALTH_TIMEOUT_SECONDS=60`; a `502`, `530`, `1033`, timeout, or wrong revision after that window remains release-blocking.
 
 When `BPMIS_CALL_MODE=local_agent`, `run_team_stack.sh restart` also restarts the Mac local-agent first so portal BPMIS proxy changes do not run against a stale local-agent process. The doctor check verifies portal health, public URL health, tunnel health, revision alignment, data directory readiness, and launchd friendliness.
 

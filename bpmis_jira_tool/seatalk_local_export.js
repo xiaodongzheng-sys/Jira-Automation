@@ -239,6 +239,75 @@ function loadSessionInfoNames(db) {
   return { uidNames, sidNames };
 }
 
+function readIndexedDbVarint(buffer, offset) {
+  let value = 0;
+  let shift = 0;
+  for (let index = 0; index < 5; index += 1) {
+    if (offset + index >= buffer.length) return null;
+    const byte = buffer[offset + index];
+    value |= (byte & 0x7f) << shift;
+    if (byte < 0x80) return { value, nextOffset: offset + index + 1 };
+    shift += 7;
+  }
+  return null;
+}
+
+function cleanIndexedDbName(value) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text || text.length < 3 || text.length > 180) return '';
+  if (/[\x00-\x1f]/.test(text)) return '';
+  if (/^(unknown|null|undefined)$/i.test(text)) return '';
+  if (/\b(?:group-|buddy-|UID\s+)\d+\b/i.test(text)) return '';
+  return text;
+}
+
+function loadIndexedDbGroupNames(dataDir) {
+  const sidNames = new Map();
+  const indexedDbDir = path.join(dataDir, 'IndexedDB', 'https_web.haiserve.com_0.indexeddb.leveldb');
+  if (!fs.existsSync(indexedDbDir)) return sidNames;
+  let files = [];
+  try {
+    files = fs.readdirSync(indexedDbDir)
+      .filter((name) => /^\d+.*\.(?:ldb|log)$/.test(name))
+      .map((name) => path.join(indexedDbDir, name));
+  } catch {
+    return sidNames;
+  }
+  const keyPrefix = Buffer.from('key"\x13group-');
+  const nameMarker = Buffer.from('"\x04name"');
+  for (const filePath of files) {
+    let buffer;
+    try {
+      buffer = fs.readFileSync(filePath);
+    } catch {
+      continue;
+    }
+    let searchFrom = 0;
+    while (searchFrom < buffer.length) {
+      const keyOffset = buffer.indexOf(keyPrefix, searchFrom);
+      if (keyOffset < 0) break;
+      searchFrom = keyOffset + keyPrefix.length;
+      const keyEnd = buffer.indexOf(Buffer.from('-14420'), keyOffset + keyPrefix.length);
+      if (keyEnd < 0 || keyEnd - keyOffset > 40) continue;
+      const sid = buffer.subarray(keyOffset + 5, keyEnd).toString('utf8');
+      if (!/^group-\d+$/.test(sid)) continue;
+      const windowEnd = Math.min(buffer.length, keyOffset + 900);
+      const nameOffset = buffer.indexOf(nameMarker, keyOffset);
+      if (nameOffset < 0 || nameOffset > windowEnd) continue;
+      const lengthInfo = readIndexedDbVarint(buffer, nameOffset + nameMarker.length);
+      if (!lengthInfo || lengthInfo.value < 1 || lengthInfo.value > 240) continue;
+      const valueStart = lengthInfo.nextOffset;
+      const valueEnd = valueStart + lengthInfo.value;
+      if (valueEnd > windowEnd) continue;
+      const name = cleanIndexedDbName(buffer.subarray(valueStart, valueEnd).toString('utf8'));
+      if (!name) continue;
+      const current = sidNames.get(sid);
+      if (!current || name.length > current.length) sidNames.set(sid, name);
+    }
+  }
+  return sidNames;
+}
+
 function visitNames(obj, rememberUid, rememberSid, sid) {
   if (!obj || typeof obj !== 'object') return;
   if (Array.isArray(obj)) {
@@ -248,8 +317,11 @@ function visitNames(obj, rememberUid, rememberSid, sid) {
   if ((obj.uid || obj.u) && typeof obj.n === 'string') {
     rememberUid(String(obj.uid || obj.u), obj.n);
   }
-  if (obj.ni && typeof obj.ni.n === 'string') rememberSid(sid, obj.ni.n);
-  if (obj.oi && typeof obj.oi.n === 'string') rememberSid(sid, obj.oi.n);
+  if (obj.ni && typeof obj.ni.n === 'string') {
+    rememberSid(sid, obj.ni.n, true);
+  } else if (obj.oi && typeof obj.oi.n === 'string') {
+    rememberSid(sid, obj.oi.n);
+  }
   Object.values(obj).forEach((value) => visitNames(value, rememberUid, rememberSid, sid));
 }
 
@@ -282,7 +354,7 @@ function extractText(row, parsed) {
   return '[empty message]';
 }
 
-function buildNameMaps(rows, db) {
+function buildNameMaps(rows, db, dataDir = '') {
   const uidNames = new Map();
   const sidNames = new Map();
   const rememberUid = (uid, name) => {
@@ -292,12 +364,12 @@ function buildNameMaps(rows, db) {
     const current = uidNames.get(uid);
     if (!current || trimmed.length > current.length) uidNames.set(uid, trimmed);
   };
-  const rememberSid = (sid, name) => {
+  const rememberSid = (sid, name, force = false) => {
     if (!sid || !name) return;
     const trimmed = String(name).trim();
     if (!trimmed) return;
     const current = sidNames.get(sid);
-    if (!current || trimmed.length > current.length) sidNames.set(sid, trimmed);
+    if (force || !current || trimmed.length > current.length) sidNames.set(sid, trimmed);
   };
 
   for (const row of rows) {
@@ -310,6 +382,7 @@ function buildNameMaps(rows, db) {
   const metadataNames = loadSessionInfoNames(db);
   for (const [uid, name] of metadataNames.uidNames.entries()) rememberUid(uid, name);
   for (const [sid, name] of metadataNames.sidNames.entries()) rememberSid(sid, name);
+  for (const [sid, name] of loadIndexedDbGroupNames(dataDir).entries()) rememberSid(sid, name);
 
   for (const row of rows) {
     if (row.sid.startsWith('buddy-')) {
@@ -318,6 +391,19 @@ function buildNameMaps(rows, db) {
     }
   }
   return { uidNames, sidNames };
+}
+
+function buildNameMapsWithConversationEvidence(rows, nameRows, db, dataDir = '') {
+  const base = buildNameMaps(rows, db, dataDir);
+  if (nameRows === rows) return base;
+  const evidence = buildNameMaps(nameRows, db, dataDir);
+  for (const [sid, name] of evidence.sidNames.entries()) {
+    const current = base.sidNames.get(sid);
+    if (!current || String(name || '').length > String(current || '').length) {
+      base.sidNames.set(sid, name);
+    }
+  }
+  return base;
 }
 
 function resolveName(id, autoName, overrides) {
@@ -445,8 +531,19 @@ function formatTimestamp(epochSeconds) {
   return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
 }
 
-function buildHistoryText(rows, selfUid, days, nowIso, db, overrides, sinceIso = '', conversationScope = '') {
-  const { uidNames, sidNames } = buildNameMaps(rows, db);
+function buildHistoryText(
+  rows,
+  selfUid,
+  days,
+  nowIso,
+  db,
+  overrides,
+  sinceIso = '',
+  conversationScope = '',
+  dataDir = '',
+  nameRows = rows,
+) {
+  const { uidNames, sidNames } = buildNameMapsWithConversationEvidence(rows, nameRows, db, dataDir);
   const filteredRows = rows.filter((row) => !isBotConversationRow(row, sidNames));
   const threadRootSummaries = loadThreadRootSummaries(db, filteredRows);
   const lines = [
@@ -477,8 +574,8 @@ function buildHistoryText(rows, selfUid, days, nowIso, db, overrides, sinceIso =
   return `${lines.join('\n')}\n`;
 }
 
-function collectUnknownIds(rows, selfUid, db, overrides, periodEndEpoch) {
-  const { uidNames, sidNames } = buildNameMaps(rows, db);
+function collectUnknownIds(rows, selfUid, db, overrides, periodEndEpoch, dataDir = '', nameRows = rows) {
+  const { uidNames, sidNames } = buildNameMapsWithConversationEvidence(rows, nameRows, db, dataDir);
   const filteredRows = rows.filter((row) => !isBotConversationRow(row, sidNames));
   const unknowns = new Map();
   const recentSourceStart = Number(periodEndEpoch || 0) - DAILY_BRIEF_SOURCE_WINDOW_SECONDS;
@@ -564,8 +661,8 @@ function collectUnknownIds(rows, selfUid, db, overrides, periodEndEpoch) {
   });
 }
 
-function collectAutoMappings(rows, selfUid, db, overrides) {
-  const { uidNames, sidNames } = buildNameMaps(rows, db);
+function collectAutoMappings(rows, selfUid, db, overrides, dataDir = '', nameRows = rows) {
+  const { uidNames, sidNames } = buildNameMapsWithConversationEvidence(rows, nameRows, db, dataDir);
   const filteredRows = rows.filter((row) => !isBotConversationRow(row, sidNames));
   const mappings = new Map();
   const remember = (id, name) => {
@@ -610,26 +707,26 @@ function main() {
   const ranges = createLocalDateRange(args.now, args.days, args.since);
   const overrides = loadNameOverrides(args.nameOverridesPath);
   try {
-    const excludedTypes = Array.from(EXCLUDED_MESSAGE_TYPES);
-    const placeholders = excludedTypes.map(() => '?').join(', ');
-    const rows = db.prepare(`
+    const allRows = db.prepare(`
       SELECT sid, ts, t, u, c, q, mid, rtmid
       FROM chat_message_view
       WHERE ts >= ? AND ts < ?
         AND (sid LIKE 'group-%' OR sid LIKE 'buddy-%')
-        AND t NOT IN (${placeholders})
       ORDER BY sid ASC, ts ASC, mid ASC
-    `).all(ranges.periodStartEpoch, ranges.periodEndEpoch, ...excludedTypes);
+    `).all(ranges.periodStartEpoch, ranges.periodEndEpoch);
+    const rows = allRows.filter((row) => !EXCLUDED_MESSAGE_TYPES.has(String(row.t || '')));
     const scopedRows = args.unknownIdsJson ? rows : filterRowsByConversationScope(rows, uid, args.conversationScope);
     if (args.unknownIdsJson) {
       process.stdout.write(JSON.stringify({
-        unknown_ids: collectUnknownIds(rows, uid, db, overrides, ranges.periodEndEpoch),
-        auto_mappings: collectAutoMappings(rows, uid, db, overrides),
+        unknown_ids: collectUnknownIds(rows, uid, db, overrides, ranges.periodEndEpoch, args.dataDir, allRows),
+        auto_mappings: collectAutoMappings(rows, uid, db, overrides, args.dataDir, allRows),
         generated_at: args.now,
         period_days: args.days,
       }));
     } else {
-      process.stdout.write(buildHistoryText(scopedRows, uid, args.days, args.now, db, overrides, args.since, args.conversationScope));
+      process.stdout.write(
+        buildHistoryText(scopedRows, uid, args.days, args.now, db, overrides, args.since, args.conversationScope, args.dataDir, allRows),
+      );
     }
   } finally {
     db.close();

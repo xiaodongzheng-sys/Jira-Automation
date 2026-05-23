@@ -1,7 +1,7 @@
 import json
 import io
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -41,6 +41,7 @@ from bpmis_jira_tool.web import (
 )
 from scripts.promote_source_code_qa_eval_candidates import promote_candidates
 from scripts.run_source_code_qa_evals import _build_fixture_repositories, _evaluate_case, _guard_fixture_data_root, _summarize_results
+from scripts.source_code_qa_scheduled_sync import run_scheduled_sync
 from scripts.source_code_qa_auto_eval_candidates import build_auto_eval_candidates
 from scripts.source_code_qa_feedback_to_eval import build_eval_candidates
 
@@ -1760,8 +1761,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(captured["llm_budget_mode"], "auto")
-        ensure_synced.assert_called_once()
-        self.assertEqual(response.get_json()["auto_sync"]["status"], "fresh")
+        ensure_synced.assert_not_called()
+        self.assertEqual(response.get_json()["auto_sync"]["status"], "skipped")
 
     def test_af_country_query_uses_country_runtime_evidence_with_shared_repo_scope(self):
         captured = {}
@@ -1800,7 +1801,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
         self.assertEqual(upload.status_code, 200)
         self.assertEqual(response.status_code, 200)
-        ensure_synced.assert_called_once_with(pm_team="AF", country="PH")
+        ensure_synced.assert_not_called()
         self.assertEqual(captured["pm_team"], "AF")
         self.assertEqual(captured["country"], "PH")
         self.assertEqual(captured["runtime_evidence"][0]["country"], "PH")
@@ -1971,7 +1972,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(payload["error_category"], "source_code_qa_internal")
         self.assertTrue(payload["error_retryable"])
 
-    def test_query_api_syncs_before_answer_when_not_refreshed_today(self):
+    def test_query_api_does_not_sync_before_answer_by_default(self):
         with patch(
             "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
             return_value={"attempted": True, "status": "ok", "reason": "synced before query"},
@@ -1987,8 +1988,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
                 )
 
         self.assertEqual(response.status_code, 200)
-        ensure_synced.assert_called_once_with(pm_team="AF", country="All")
-        self.assertTrue(response.get_json()["auto_sync"]["attempted"])
+        ensure_synced.assert_not_called()
+        self.assertEqual(response.get_json()["auto_sync"]["status"], "skipped")
 
     def test_background_query_sync_blocks_when_scope_has_no_queryable_index(self):
         calls = []
@@ -2066,7 +2067,9 @@ class SourceCodeQARouteTests(unittest.TestCase):
             app = create_app()
             app.testing = True
 
-        with patch("bpmis_jira_tool.web._source_code_qa_provider_available", return_value=True), patch(
+        with patch.dict(os.environ, {"SOURCE_CODE_QA_QUERY_SYNC_MODE": "background"}, clear=False), patch(
+            "bpmis_jira_tool.web._source_code_qa_provider_available", return_value=True
+        ), patch(
             "bpmis_jira_tool.web._build_local_agent_client",
             return_value=FakeLocalAgentClient(),
         ):
@@ -2114,6 +2117,59 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual([item["value"] for item in payload["options"]["llm_providers"]], ["codex_cli_bridge"])
         self.assertEqual(set(payload["llm_providers"]), {"codex_cli_bridge"})
         self.assertNotIn("llm_budget_modes", payload["options"])
+
+    def test_scheduled_sync_dry_run_catches_up_latest_due_date(self):
+        class FakeService:
+            def load_config(self):
+                return {"mappings": {"AF:All": [{}], "GRC:All": [{}]}}
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "scripts.source_code_qa_scheduled_sync.Settings.from_env",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "scripts.source_code_qa_scheduled_sync.source_code_qa_data_root",
+            return_value=Path(temp_dir),
+        ), patch(
+            "scripts.source_code_qa_scheduled_sync.build_source_code_qa_service_from_settings",
+            return_value=FakeService(),
+        ):
+            payload = run_scheduled_sync(
+                dry_run=True,
+                now=datetime.fromisoformat("2026-05-23T10:00:00+08:00"),
+            )
+
+        self.assertEqual(payload["status"], "would_run")
+        self.assertEqual(payload["scheduled_date"], "2026-05-22")
+        self.assertEqual(payload["mappings"], ["AF:All", "GRC:All"])
+
+    def test_scheduled_sync_runs_all_configured_mappings_once_per_scheduled_date(self):
+        calls = []
+
+        class FakeService:
+            def load_config(self):
+                return {"mappings": {"AF:All": [{}], "GRC:All": [{}]}}
+
+            def sync(self, *, pm_team, country):
+                calls.append((pm_team, country))
+                return {"status": "ok", "results": [{"display_name": "Repo"}], "job": {"job_id": f"{pm_team}-{country}"}}
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "scripts.source_code_qa_scheduled_sync.Settings.from_env",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "scripts.source_code_qa_scheduled_sync.source_code_qa_data_root",
+            return_value=Path(temp_dir),
+        ), patch(
+            "scripts.source_code_qa_scheduled_sync.build_source_code_qa_service_from_settings",
+            return_value=FakeService(),
+        ):
+            first = run_scheduled_sync(now=datetime.fromisoformat("2026-05-23T10:00:00+08:00"))
+            second = run_scheduled_sync(now=datetime.fromisoformat("2026-05-23T11:00:00+08:00"))
+
+        self.assertEqual(first["status"], "ok")
+        self.assertEqual(calls, [("AF", "All"), ("GRC", "All")])
+        self.assertEqual(second["status"], "skipped")
+        self.assertIn("already completed", second["reason"])
 
     def test_sync_api_runs_as_background_job(self):
         sync_result = {
@@ -2202,7 +2258,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn(b'"state": "completed"', events_response.data)
         self.assertIn("progress_callback", captured)
         self.assertIn("codex_cli_bridge", selected)
-        ensure_synced.assert_called_once_with(pm_team="AF", country="All")
+        ensure_synced.assert_not_called()
 
     def test_query_api_async_returns_before_slow_backend_step_and_exposes_timing(self):
         backend_entered = threading.Event()

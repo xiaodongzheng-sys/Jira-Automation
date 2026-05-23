@@ -116,7 +116,7 @@ def _source_code_qa_query_sync_mode(settings: Settings) -> str:
     mode = str(os.getenv("SOURCE_CODE_QA_QUERY_SYNC_MODE") or "").strip().lower()
     if mode in {"blocking", "background", "disabled"}:
         return mode
-    return "background" if _local_agent_source_code_qa_enabled(settings) else "blocking"
+    return "disabled"
 
 
 def _source_code_qa_scope_has_queryable_index(service: Any, key: str) -> bool:

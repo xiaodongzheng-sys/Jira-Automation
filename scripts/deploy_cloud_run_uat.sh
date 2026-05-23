@@ -49,6 +49,9 @@ CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED="${CLOUD_RUN_DEPLOY_ACCOUNT:-$(read_env_value 
 if [[ -n "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED" ]]; then
   ACCOUNT_ARGS=(--account "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED")
 fi
+if [[ "${CLOUD_RUN_UAT_DRY_RUN:-0}" != "1" ]]; then
+  require_gcloud_noninteractive_deploy_auth "$GCLOUD_BIN" "$GOOGLE_CLOUD_PROJECT_RESOLVED" "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED"
+fi
 UAT_SYNC_PID=""
 UAT_SYNC_LOG=""
 UAT_SYNC_STARTED_AT=""
@@ -372,6 +375,38 @@ classify_uat_local_agent_sync_mode() {
   printf 'skip\n'
 }
 
+verify_uat_public_local_agent_health() {
+  local local_agent_base="${1%/}"
+  local timeout_seconds="${CLOUD_RUN_UAT_PUBLIC_LOCAL_AGENT_HEALTH_TIMEOUT_SECONDS:-45}"
+  local poll_seconds="${CLOUD_RUN_UAT_PUBLIC_LOCAL_AGENT_HEALTH_POLL_SECONDS:-3}"
+  local started_at finished_at deadline
+
+  started_at="$(date +%s)"
+  deadline=$(( started_at + timeout_seconds ))
+  echo "Verifying public Mac local-agent health for up to ${timeout_seconds}s: $local_agent_base"
+  while true; do
+    if curl -fsS --max-time 10 "$local_agent_base/api/local-agent/healthz" >/dev/null 2>&1; then
+      finished_at="$(date +%s)"
+      record_uat_stage_timing "uat_public_local_agent_health" "$started_at" "$finished_at" 0 "url=$local_agent_base/api/local-agent/healthz"
+      return 0
+    fi
+    if curl -fsS --max-time 10 "$local_agent_base/healthz" >/dev/null 2>&1; then
+      finished_at="$(date +%s)"
+      record_uat_stage_timing "uat_public_local_agent_health" "$started_at" "$finished_at" 0 "url=$local_agent_base/healthz"
+      return 0
+    fi
+    if (( $(date +%s) >= deadline )); then
+      break
+    fi
+    sleep "$poll_seconds"
+  done
+
+  finished_at="$(date +%s)"
+  record_uat_stage_timing "uat_public_local_agent_health" "$started_at" "$finished_at" 1 "url=$local_agent_base"
+  echo "Mac local-agent public health check failed for $local_agent_base after ${timeout_seconds}s"
+  return 1
+}
+
 sync_mac_local_agent_for_uat() {
   if [[ "${CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY:-1}" == "0" ]]; then
     echo "Skipping Mac local-agent sync because CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY=0."
@@ -408,15 +443,7 @@ sync_mac_local_agent_for_uat() {
     echo "Skipping UAT Mac local-agent sync/restart; changed files do not affect local-agent-backed workflows."
     if [[ "${CLOUD_RUN_UAT_VERIFY_PUBLIC_LOCAL_AGENT:-1}" != "0" && -n "$LOCAL_AGENT_URL" ]]; then
       local local_agent_base="${LOCAL_AGENT_URL%/}"
-      echo "Verifying existing public Mac local-agent health: $local_agent_base"
-      if curl -fsS --max-time 10 "$local_agent_base/api/local-agent/healthz" >/dev/null; then
-        :
-      elif curl -fsS --max-time 10 "$local_agent_base/healthz" >/dev/null; then
-        :
-      else
-        echo "Mac local-agent public health check failed for $local_agent_base"
-        exit 1
-      fi
+      verify_uat_public_local_agent_health "$local_agent_base"
     fi
     return 0
   fi
@@ -495,15 +522,7 @@ sync_mac_local_agent_for_uat() {
 
   if [[ "${CLOUD_RUN_UAT_VERIFY_PUBLIC_LOCAL_AGENT:-1}" != "0" && -n "$LOCAL_AGENT_URL" ]]; then
     local local_agent_base="${LOCAL_AGENT_URL%/}"
-    echo "Verifying public Mac local-agent health: $local_agent_base"
-    if curl -fsS --max-time 10 "$local_agent_base/api/local-agent/healthz" >/dev/null; then
-      :
-    elif curl -fsS --max-time 10 "$local_agent_base/healthz" >/dev/null; then
-      :
-    else
-      echo "Mac local-agent public health check failed for $local_agent_base"
-      exit 1
-    fi
+    verify_uat_public_local_agent_health "$local_agent_base"
   fi
 
   echo "Mac local-agent revision aligned with UAT commit: $GIT_SHA"
@@ -599,7 +618,7 @@ ENV_VARS=(
   "BPMIS_BASE_URL=${BPMIS_BASE_URL:-$(read_env_value BPMIS_BASE_URL)}"
   "SOURCE_CODE_QA_OWNER_EMAIL=${SOURCE_CODE_QA_OWNER_EMAIL:-xiaodong.zheng@npt.sg}"
   "SOURCE_CODE_QA_ADMIN_EMAILS=${SOURCE_CODE_QA_ADMIN_EMAILS:-xiaodong.zheng@npt.sg}"
-  "SOURCE_CODE_QA_QUERY_SYNC_MODE=${SOURCE_CODE_QA_QUERY_SYNC_MODE:-background}"
+  "SOURCE_CODE_QA_QUERY_SYNC_MODE=${SOURCE_CODE_QA_QUERY_SYNC_MODE:-disabled}"
   "BPMIS_CALL_MODE=${BPMIS_CALL_MODE:-local_agent}"
   "LOCAL_AGENT_MODE=${LOCAL_AGENT_MODE:-sync}"
   "LOCAL_AGENT_SOURCE_CODE_QA_ENABLED=${LOCAL_AGENT_SOURCE_CODE_QA_ENABLED:-true}"

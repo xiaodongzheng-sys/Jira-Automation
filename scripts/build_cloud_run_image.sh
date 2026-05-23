@@ -45,6 +45,7 @@ if [[ "${CLOUD_RUN_BUILD_IMAGE_DRY_RUN:-0}" == "1" ]]; then
   echo "Deploy UAT after build with: CLOUD_RUN_IMAGE=$IMAGE_URI ./scripts/deploy_cloud_run_uat.sh"
   exit 0
 fi
+require_gcloud_noninteractive_deploy_auth "$GCLOUD_BIN" "$PROJECT_ID" "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED"
 
 cd "$ROOT_DIR"
 if ! "$GCLOUD_BIN" artifacts repositories describe "$REPOSITORY" \
@@ -92,6 +93,8 @@ else
     exit 1
   fi
   echo "Cloud Build ID: $BUILD_ID"
+  BUILD_WAIT_TIMEOUT_SECONDS="${CLOUD_RUN_BUILD_WAIT_TIMEOUT_SECONDS:-1200}"
+  BUILD_WAIT_DEADLINE=$(( $(date +%s) + BUILD_WAIT_TIMEOUT_SECONDS ))
   while true; do
     BUILD_STATUS="$("$GCLOUD_BIN" builds describe "$BUILD_ID" \
       --project "$PROJECT_ID" \
@@ -106,6 +109,10 @@ else
         exit 1
         ;;
       *)
+        if (( $(date +%s) >= BUILD_WAIT_DEADLINE )); then
+          echo "Cloud Build did not finish within ${BUILD_WAIT_TIMEOUT_SECONDS}s; check build $BUILD_ID in Cloud Build."
+          exit 1
+        fi
         echo "Cloud Build status: ${BUILD_STATUS:-unknown}"
         sleep "${CLOUD_RUN_BUILD_POLL_SECONDS:-5}"
         ;;

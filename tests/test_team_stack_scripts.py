@@ -36,6 +36,7 @@ class TeamStackScriptTests(unittest.TestCase):
             {
                 "TEAM_DEPLOY_TIMING_FILE": timing_file,
                 "RELEASE_WINDOW_POLICY_BYPASS": "1",
+                "CLOUD_RUN_DEPLOY_ACCOUNT": "deploy@example.iam.gserviceaccount.com",
             },
         )
         self._timing_env_patch.start()
@@ -552,6 +553,7 @@ exit 0
                     PATH=f"{fake_bin}:{os.environ['PATH']}",
                     PYTHON_BIN=sys.executable,
                     FAKE_GCLOUD_CALLS=str(calls_path),
+                    CLOUD_RUN_DEPLOY_ACCOUNT="deploy@example.iam.gserviceaccount.com",
                     CLOUD_RUN_UAT_SKIP_GIT_CHECK="1",
                     CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY="0",
                     CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE="env",
@@ -628,22 +630,32 @@ exit 0
         self.assertIn('GOOGLE_CLOUD_PROJECT_RESOLVED="${GOOGLE_CLOUD_PROJECT:-$(read_env_value GOOGLE_CLOUD_PROJECT)}"', contents)
         self.assertIn('CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED="${CLOUD_RUN_DEPLOY_ACCOUNT:-$(read_env_value CLOUD_RUN_DEPLOY_ACCOUNT)}"', contents)
         self.assertIn('ACCOUNT_ARGS=(--account "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED")', contents)
+        self.assertIn('require_gcloud_noninteractive_deploy_auth "$GCLOUD_BIN" "$GOOGLE_CLOUD_PROJECT_RESOLVED" "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED"', contents)
 
     def test_fast_release_gcloud_checks_use_deploy_service_account(self):
         uat_script = (PROJECT_ROOT / "scripts/release_uat_fast.sh").read_text(encoding="utf-8")
         live_script = (PROJECT_ROOT / "scripts/release_uat_live_fast.sh").read_text(encoding="utf-8")
+        team_env = (PROJECT_ROOT / "scripts/lib/team_env.sh").read_text(encoding="utf-8")
 
         for contents in (uat_script, live_script):
             self.assertIn('DEPLOY_ACCOUNT="${CLOUD_RUN_DEPLOY_ACCOUNT:-$(read_env_value CLOUD_RUN_DEPLOY_ACCOUNT)}"', contents)
             self.assertIn('account_args=(--account "$DEPLOY_ACCOUNT")', contents)
             self.assertIn('${account_args[@]+"${account_args[@]}"}', contents)
-        self.assertIn('auth print-access-token ${project_args[@]+"${project_args[@]}"} ${account_args[@]+"${account_args[@]}"}', live_script)
+            self.assertIn("require_gcloud_noninteractive_deploy_auth", contents)
+        self.assertIn("CLOUD_RUN_DEPLOY_ACCOUNT is required for non-interactive Cloud Run release commands.", team_env)
+        self.assertIn("Do not run personal gcloud auth login for releases.", team_env)
+        self.assertIn("auth print-access-token --account", team_env)
 
     def test_release_checklist_documents_full_gate_and_read_only_smoke(self):
         checklist = (PROJECT_ROOT / "docs/release-checklist.md").read_text(encoding="utf-8")
 
         self.assertIn("System Full Test Gate", checklist)
-        self.assertIn("./.venv/bin/python scripts/run_system_full_test_gate.py --skip-smoke", checklist)
+        self.assertIn("./.venv/bin/python scripts/run_system_full_test_gate.py --profile auto --skip-smoke", checklist)
+        self.assertIn("RELEASE_UAT_FAST_GATE_PROFILE=full", checklist)
+        self.assertIn("RELEASE_UAT_FAST_GITHUB_IMAGE_WAIT_SECONDS=90", checklist)
+        self.assertIn("CLOUD_RUN_BUILD_WAIT_TIMEOUT_SECONDS=1200", checklist)
+        self.assertIn("CLOUD_RUN_UAT_PUBLIC_LOCAL_AGENT_HEALTH_TIMEOUT_SECONDS=45", checklist)
+        self.assertIn("PROMOTE_UAT_PUBLIC_HEALTH_TIMEOUT_SECONDS=60", checklist)
         self.assertIn("./.venv/bin/python scripts/run_system_full_test_gate.py --smoke-only", checklist)
         self.assertIn("ENV_FILE=/dev/null", checklist)
         self.assertIn("--coverage-fail-under 100", checklist)
@@ -1287,6 +1299,9 @@ exit 0
         self.assertIn("Skipping live local-agent restart", contents)
         self.assertIn("restart-guard", contents)
         self.assertIn("Live restart mode:", contents)
+        self.assertIn("wait_for_healthz_revision", contents)
+        self.assertIn("PROMOTE_UAT_PUBLIC_HEALTH_TIMEOUT_SECONDS", contents)
+        self.assertIn("live_public_health", contents)
 
     def test_deploy_scripts_persist_timing_metrics(self):
         helper = (PROJECT_ROOT / "scripts/lib/team_env.sh").read_text(encoding="utf-8")
@@ -1303,7 +1318,11 @@ exit 0
         self.assertIn("prebuilt_image_lookup", uat_script)
         self.assertIn("cloud_run_deploy", uat_script)
         self.assertIn("uat_host_sync", uat_script)
+        self.assertIn("uat_public_local_agent_health", uat_script)
         self.assertIn("record_promote_timing_on_exit", live_script)
+        self.assertIn("record_promote_stage_timing", live_script)
+        self.assertIn("live_loopback_health", live_script)
+        self.assertIn("live_public_health", live_script)
         self.assertIn("Deploy UAT with: CLOUD_RUN_IMAGE=$IMAGE_URI ./scripts/deploy_cloud_run_uat.sh", build_script)
         self.assertIn("Recent deploy timings", report_script)
         self.assertIn("Averages by script/phase", report_script)
@@ -1319,26 +1338,32 @@ exit 0
         self.assertIn("find_reusable_image_without_runtime_changes", script)
         self.assertIn("RELEASE_UAT_FAST_REUSE_IMAGE_WITHOUT_RUNTIME_CHANGES", script)
         self.assertIn("RELEASE_UAT_FAST_REUSE_VERIFIED_GATE", script)
+        self.assertIn('RELEASE_UAT_FAST_GATE_PROFILE:-auto', script)
+        self.assertIn("--profile", script)
         self.assertIn("--check-proof", script)
         self.assertIn("RELEASE_UAT_FAST_GATE_PROOF_MAX_AGE_SECONDS", script)
         self.assertIn("wait_for_github_image_workflow", script)
-        self.assertIn("run watch \"$run_id\"", script)
+        self.assertIn("RELEASE_UAT_FAST_GITHUB_IMAGE_WAIT_SECONDS", script)
+        self.assertIn("run view \"$run_id\"", script)
+        self.assertIn("run_timed_gate", script)
+        self.assertIn("image_prepare", script)
         self.assertIn("RELEASE_UAT_FAST_BUILD_IMAGE_FALLBACK", script)
         self.assertIn("build_cloud_run_image.sh", script)
         self.assertIn("CLOUD_RUN_UAT_SKIP_UNCHANGED", script)
         self.assertIn("CLOUD_RUN_UAT_PARALLEL_HOST_SYNC", script)
         self.assertIn("deploy_cloud_run_uat.sh", script)
 
-    def test_fast_uat_live_release_orchestrator_is_release_window_aware(self):
+    def test_fast_uat_live_release_orchestrator_deploys_uat_then_live_without_time_window(self):
         script = (PROJECT_ROOT / "scripts/release_uat_live_fast.sh").read_text(encoding="utf-8")
 
         self.assertIn("run_gate_and_image_in_parallel", script)
-        self.assertIn("release_window_target", script)
-        self.assertIn("selected UAT default path", script)
-        self.assertIn("selected Live default path", script)
-        self.assertIn("Live already serves $SHA; skipping Cloud Run/UAT gcloud promotion checks.", script)
-        self.assertIn("require_gcloud_noninteractive_auth", script)
-        self.assertIn("gcloud credentials are not usable non-interactively", script)
+        self.assertIn("Release policy allows UAT and Live deployment now", script)
+        self.assertIn("Deploying UAT before Live promotion", script)
+        self.assertIn("Live already serves $SHA after UAT deploy; skipping promotion.", script)
+        self.assertNotIn("selected UAT default path", script)
+        self.assertNotIn("selected Live default path", script)
+        self.assertIn("require_gcloud_noninteractive_deploy_auth", script)
+        self.assertIn("CLOUD_RUN_DEPLOY_ACCOUNT", script)
         self.assertIn("cloud_run_image_policy.sh", script)
         self.assertIn("find_reusable_image_without_runtime_changes", script)
         self.assertIn("RELEASE_UAT_LIVE_REUSE_IMAGE_WITHOUT_RUNTIME_CHANGES", script)
@@ -1346,14 +1371,17 @@ exit 0
         self.assertIn("--check-proof", script)
         self.assertIn("RELEASE_UAT_LIVE_GATE_PROOF_MAX_AGE_SECONDS", script)
         self.assertIn("wait_for_github_image_workflow", script)
-        self.assertIn("run watch \"$run_id\"", script)
+        self.assertIn("RELEASE_UAT_LIVE_GITHUB_IMAGE_WAIT_SECONDS", script)
+        self.assertIn("run view \"$run_id\"", script)
+        self.assertIn("run_timed_gate", script)
+        self.assertIn("image_prepare", script)
         self.assertIn("release_uat_fast.sh", script)
         self.assertIn("run_system_full_test_gate.py", script)
         self.assertIn("promote_uat_to_live.sh", script)
         self.assertIn("run_team_stack.sh\" doctor", script)
         self.assertIn("report_deploy_timings.py", script)
 
-    def test_release_window_policy_routes_targets_by_singapore_business_hours(self):
+    def test_release_window_policy_allows_uat_and_live_anytime(self):
         helper_path = PROJECT_ROOT / "scripts/lib/release_window_policy.sh"
         team_env_path = PROJECT_ROOT / "scripts/lib/team_env.sh"
         command = f'''
@@ -1364,6 +1392,9 @@ RELEASE_WINDOW_POLICY_NOW="2026-05-08T18:59:00+08:00" release_window_target
 RELEASE_WINDOW_POLICY_NOW="2026-05-08T19:00:00+08:00" release_window_target
 RELEASE_WINDOW_POLICY_NOW="2026-05-09T12:00:00+08:00" release_window_target
 RELEASE_WINDOW_POLICY_NOW="2026-05-11T09:59:00+08:00" release_window_target
+RELEASE_WINDOW_POLICY_NOW="2026-05-08T12:00:00+08:00" enforce_release_window_target uat
+RELEASE_WINDOW_POLICY_NOW="2026-05-08T12:00:00+08:00" enforce_release_window_target live
+release_window_summary
 '''
         completed = subprocess.run(
             ["bash", "-lc", command],
@@ -1374,17 +1405,18 @@ RELEASE_WINDOW_POLICY_NOW="2026-05-11T09:59:00+08:00" release_window_target
         )
 
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
-        self.assertEqual(completed.stdout.splitlines(), ["uat", "uat", "live", "live", "live"])
+        lines = completed.stdout.splitlines()
+        self.assertEqual(lines[:5], ["uat_live", "uat_live", "uat_live", "uat_live", "uat_live"])
+        self.assertIn("release policy: unrestricted", lines[-1])
+        self.assertIn("allowed targets: uat,live", lines[-1])
 
-    def test_release_window_policy_allows_uat_anytime(self):
+    def test_release_window_policy_rejects_unknown_target_only(self):
         helper_path = PROJECT_ROOT / "scripts/lib/release_window_policy.sh"
         team_env_path = PROJECT_ROOT / "scripts/lib/team_env.sh"
         command = f'''
 source "{team_env_path}"
 source "{helper_path}"
-RELEASE_WINDOW_POLICY_NOW="2026-05-08T12:00:00+08:00" enforce_release_window_target uat
-RELEASE_WINDOW_POLICY_NOW="2026-05-08T19:00:00+08:00" enforce_release_window_target uat
-RELEASE_WINDOW_POLICY_NOW="2026-05-09T12:00:00+08:00" enforce_release_window_target uat
+RELEASE_WINDOW_POLICY_NOW="2026-05-08T12:00:00+08:00" enforce_release_window_target backup
 '''
         completed = subprocess.run(
             ["bash", "-lc", command],
@@ -1394,53 +1426,9 @@ RELEASE_WINDOW_POLICY_NOW="2026-05-09T12:00:00+08:00" enforce_release_window_tar
             env=self._script_env(PYTHON_BIN=sys.executable, RELEASE_WINDOW_POLICY_BYPASS="0"),
         )
 
-        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
-
-    def test_release_window_policy_allows_live_outside_weekday_business_hours(self):
-        helper_path = PROJECT_ROOT / "scripts/lib/release_window_policy.sh"
-        team_env_path = PROJECT_ROOT / "scripts/lib/team_env.sh"
-        command = f'''
-source "{team_env_path}"
-source "{helper_path}"
-RELEASE_WINDOW_POLICY_NOW="2026-05-08T19:00:00+08:00" enforce_release_window_target live
-RELEASE_WINDOW_POLICY_NOW="2026-05-09T12:00:00+08:00" enforce_release_window_target live
-RELEASE_WINDOW_POLICY_NOW="2026-05-11T09:59:00+08:00" enforce_release_window_target live
-'''
-        completed = subprocess.run(
-            ["bash", "-lc", command],
-            capture_output=True,
-            text=True,
-            check=False,
-            env=self._script_env(PYTHON_BIN=sys.executable, RELEASE_WINDOW_POLICY_BYPASS="0"),
-        )
-
-        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
-
-    def test_release_window_policy_blocks_wrong_target_by_default(self):
-        helper_path = PROJECT_ROOT / "scripts/lib/release_window_policy.sh"
-        team_env_path = PROJECT_ROOT / "scripts/lib/team_env.sh"
-        scenarios = [
-            ("2026-05-08T12:00:00+08:00", "live", "uat"),
-        ]
-
-        for timestamp, requested, allowed in scenarios:
-            command = f'''
-source "{team_env_path}"
-source "{helper_path}"
-RELEASE_WINDOW_POLICY_NOW="{timestamp}" enforce_release_window_target {requested}
-'''
-            completed = subprocess.run(
-                ["bash", "-lc", command],
-                capture_output=True,
-                text=True,
-                check=False,
-                env=self._script_env(PYTHON_BIN=sys.executable, RELEASE_WINDOW_POLICY_BYPASS="0"),
-            )
-
-            self.assertNotEqual(completed.returncode, 0)
-            self.assertIn(f"blocked '{requested}' release", completed.stderr)
-            self.assertIn(f"Default target: {allowed}", completed.stderr)
-            self.assertIn(f"Allowed targets: {allowed}", completed.stderr)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("Unknown release target 'backup'", completed.stderr)
+        self.assertIn("Allowed targets: uat,live", completed.stderr)
 
     def test_deploy_scripts_enforce_release_window_policy(self):
         uat_script = (PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh").read_text(encoding="utf-8")
@@ -1487,6 +1475,7 @@ RELEASE_WINDOW_POLICY_NOW="{timestamp}" enforce_release_window_target {requested
         self.assertIn("E2_HIGHCPU_8", build_script)
         self.assertIn("--disk-size", build_script)
         self.assertIn("CLOUD_RUN_DEPLOY_ACCOUNT", build_script)
+        self.assertIn("CLOUD_RUN_BUILD_WAIT_TIMEOUT_SECONDS", build_script)
         self.assertIn("artifacts repositories create", build_script)
         self.assertIn("git -C \"$ROOT_DIR\" rev-parse HEAD", build_script)
         self.assertIn("--async", build_script)
@@ -2201,6 +2190,34 @@ fi
         self.assertIn("REST fallback: RuntimeError", status)
         self.assertNotIn("secret-token", status)
         self.assertNotIn("FIRESTORE_ACCESS_TOKEN", status)
+
+    def test_release_status_firestore_token_uses_deploy_service_account(self):
+        from scripts.release_status import _gcloud_firestore_access_token
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            gcloud_path = Path(temp_dir) / "gcloud"
+            gcloud_path.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+            captured: list[list[str]] = []
+
+            def fake_run(command, *, env):
+                captured.append(command)
+                return subprocess.CompletedProcess(command, 0, stdout="service-account-token\n", stderr="")
+
+            token = _gcloud_firestore_access_token(
+                env={
+                    "GCLOUD_BIN": str(gcloud_path),
+                    "CLOUD_RUN_DEPLOY_ACCOUNT": "deploy@example.iam.gserviceaccount.com",
+                    "VERSION_PLAN_FIRESTORE_PROJECT": "risk-pm-tool",
+                },
+                runner=fake_run,
+            )
+
+        self.assertEqual(token, "service-account-token")
+        self.assertEqual(captured[0][1:3], ["auth", "print-access-token"])
+        self.assertIn("--account", captured[0])
+        self.assertIn("deploy@example.iam.gserviceaccount.com", captured[0])
+        self.assertIn("--project", captured[0])
+        self.assertIn("risk-pm-tool", captured[0])
 
     def test_stack_doctor_exposes_release_status_command(self):
         stack_script = (PROJECT_ROOT / "scripts/run_team_stack.sh").read_text(encoding="utf-8")

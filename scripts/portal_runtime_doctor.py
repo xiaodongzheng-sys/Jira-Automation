@@ -187,6 +187,22 @@ def _summarize_llm_ledger(data_root: Path, limit: int, *, recent_hours: float) -
     latencies = [_safe_int(row.get("latency_ms")) for row in actionable_rows if _safe_int(row.get("latency_ms")) > 0]
     prompt_tokens = [_safe_int(row.get("estimated_prompt_tokens")) for row in actionable_rows if _safe_int(row.get("estimated_prompt_tokens")) > 0]
     recent_status_counts = Counter(str(row.get("status") or "unknown") for row in recent_actionable_rows)
+    recent_flow_counts = Counter(str(row.get("flow") or "unknown") for row in recent_actionable_rows)
+    error_flow_counts = Counter(
+        str(row.get("flow") or "unknown")
+        for row in recent_actionable_rows
+        if str(row.get("status") or "") not in {"ok", "cached"}
+    )
+    high_token_flow_counts = Counter(
+        str(row.get("flow") or "unknown")
+        for row in recent_actionable_rows
+        if _safe_int(row.get("estimated_prompt_tokens")) >= HIGH_TOKEN_THRESHOLD
+    )
+    slow_flow_counts = Counter(
+        str(row.get("flow") or "unknown")
+        for row in recent_actionable_rows
+        if _safe_int(row.get("latency_ms")) >= SLOW_LLM_THRESHOLD_MS
+    )
     unknown_flow = sum(1 for row in recent_actionable_rows if str(row.get("flow") or "unknown") == "unknown")
     error_total = sum(value for key, value in recent_status_counts.items() if key not in {"ok", "cached"})
     timeout_total = recent_status_counts.get("timeout", 0)
@@ -198,13 +214,13 @@ def _summarize_llm_ledger(data_root: Path, limit: int, *, recent_hours: float) -
     if unknown_flow:
         issues.append(_issue("warn", "llm_unknown_flow", f"{unknown_flow} LLM ledger rows have unknown flow."))
     if error_total:
-        issues.append(_issue("warn", "llm_errors", f"{error_total} LLM ledger rows are non-ok in the sampled window."))
+        issues.append(_issue("warn", "llm_errors", f"{error_total} LLM ledger rows are non-ok in the sampled window by_flow={_counter_text(_counter_dict(error_flow_counts))}."))
     if timeout_total:
         issues.append(_issue("warn", "llm_timeouts", f"{timeout_total} LLM calls timed out in the sampled window."))
     if high_token_rows:
-        issues.append(_issue("warn", "llm_high_prompt_tokens", f"{high_token_rows} LLM calls used at least {HIGH_TOKEN_THRESHOLD} estimated prompt tokens."))
+        issues.append(_issue("warn", "llm_high_prompt_tokens", f"{high_token_rows} LLM calls used at least {HIGH_TOKEN_THRESHOLD} estimated prompt tokens by_flow={_counter_text(_counter_dict(high_token_flow_counts))}."))
     if slow_rows:
-        issues.append(_issue("warn", "llm_slow_calls", f"{slow_rows} LLM calls took at least {SLOW_LLM_THRESHOLD_MS} ms."))
+        issues.append(_issue("warn", "llm_slow_calls", f"{slow_rows} LLM calls took at least {SLOW_LLM_THRESHOLD_MS} ms by_flow={_counter_text(_counter_dict(slow_flow_counts))}."))
 
     return (
         {
@@ -219,6 +235,8 @@ def _summarize_llm_ledger(data_root: Path, limit: int, *, recent_hours: float) -
             "routes": _counter_dict(route_counts),
             "providers": _counter_dict(provider_counts),
             "error_categories": _counter_dict(error_counts),
+            "recent_flows": _counter_dict(recent_flow_counts),
+            "recent_statuses": _counter_dict(recent_status_counts),
             "latency_ms": {
                 "p50": int(statistics.median(latencies)) if latencies else 0,
                 "p95": _p95(latencies),
@@ -440,7 +458,7 @@ def _release_status_lines() -> tuple[list[str], list[dict[str, str]]]:
 
 
 def _version_plan_firestore_summary() -> tuple[dict[str, str], list[dict[str, str]]]:
-    from scripts.release_status import _env_value
+    from scripts.release_status import _env_value, _gcloud_firestore_access_token
 
     env = os.environ
     stage = str(_env_value("VERSION_PLAN_FIRESTORE_ENVIRONMENT", env) or _env_value("TEAM_PORTAL_STAGE", env) or "live").strip().lower()
@@ -454,6 +472,7 @@ def _version_plan_firestore_summary() -> tuple[dict[str, str], list[dict[str, st
         "status": "not_configured",
         "updated_at_sgt": "",
         "source_hash": "",
+        "error": "",
     }
     if backend not in {"firestore", "cloud_firestore"} and not project:
         return summary, []
@@ -469,7 +488,11 @@ def _version_plan_firestore_summary() -> tuple[dict[str, str], list[dict[str, st
             try:
                 from bpmis_jira_tool.team_dashboard_version_plan_store import _FirestoreRestDocument
 
-                snapshot = _FirestoreRestDocument(project=project, document_id=document).get()
+                snapshot = _FirestoreRestDocument(
+                    project=project,
+                    document_id=document,
+                    token_provider=lambda: _gcloud_firestore_access_token(env=env),
+                ).get()
                 if not getattr(snapshot, "exists", False):
                     return None, ""
                 return snapshot.to_dict() or {}, ""
@@ -480,13 +503,27 @@ def _version_plan_firestore_summary() -> tuple[dict[str, str], list[dict[str, st
         payload, error = _load_payload()
         if error:
             summary["status"] = "unavailable"
-            return summary, [_issue("warn", "version_plan_firestore_unavailable", "Version Plan Firestore document check failed.")]
+            summary["error"] = error[:500]
+            return summary, [
+                _issue(
+                    "warn",
+                    "version_plan_firestore_unavailable",
+                    "Version Plan Firestore document check failed in this local doctor process; refresh local gcloud/ADC credentials or run the check from a service-account context.",
+                )
+            ]
         if payload is None:
             summary["status"] = "missing"
             return summary, [_issue("warn", "version_plan_firestore_missing", f"Version Plan Firestore document is missing: portal/{document}")]
     except Exception as error:
         summary["status"] = f"unavailable:{type(error).__name__}"
-        return summary, [_issue("warn", "version_plan_firestore_unavailable", "Version Plan Firestore document check failed.")]
+        summary["error"] = f"{type(error).__name__}: {error}"[:500]
+        return summary, [
+            _issue(
+                "warn",
+                "version_plan_firestore_unavailable",
+                "Version Plan Firestore document check failed in this local doctor process; refresh local gcloud/ADC credentials or run the check from a service-account context.",
+            )
+        ]
     summary["status"] = "ok"
     summary["environment"] = str(payload.get("environment") or summary["environment"])
     summary["updated_at_sgt"] = str(payload.get("updated_at_sgt") or "")
@@ -611,6 +648,8 @@ def format_report(report: dict[str, Any]) -> list[str]:
     lines.append(f"llm_routes={_counter_text(llm['routes'])}")
     lines.append(f"llm_providers={_counter_text(llm['providers'])}")
     lines.append(f"llm_error_categories={_counter_text(llm['error_categories'])}")
+    lines.append(f"llm_recent_flows={_counter_text(llm['recent_flows'])}")
+    lines.append(f"llm_recent_statuses={_counter_text(llm['recent_statuses'])}")
     lines.append(
         "llm_latency_ms="
         f"p50={llm['latency_ms']['p50']} p95={llm['latency_ms']['p95']} max={llm['latency_ms']['max']}"
@@ -690,6 +729,8 @@ def format_report(report: dict[str, Any]) -> list[str]:
         f"environment={version_plan['environment']} updated_at_sgt={version_plan['updated_at_sgt'] or '<missing>'} "
         f"source_hash={version_plan['source_hash'] or '<missing>'}"
     )
+    if version_plan.get("error"):
+        lines.append(f"version_plan_firestore_error={version_plan['error']}")
 
     mac_portal = report["mac_portal"]
     lines.append("")

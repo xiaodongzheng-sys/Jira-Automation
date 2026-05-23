@@ -41,6 +41,23 @@ class BPMISClientTests(unittest.TestCase):
             bpmis_api_access_token="token",
         )
 
+    def setUp(self):
+        self._jira_env_guard = patch.dict(
+            os.environ,
+            {
+                "JIRA_API_TOKEN": "",
+                "JIRA_PAT": "",
+                "JIRA_PERSONAL_ACCESS_TOKEN": "",
+                "JIRA_BASE_URL": "",
+                "JIRA_USERNAME": "",
+                "JIRA_EMAIL": "",
+                "JIRA_AUTH_SCHEME": "",
+            },
+            clear=False,
+        )
+        self._jira_env_guard.start()
+        self.addCleanup(self._jira_env_guard.stop)
+
     def test_team_dashboard_task_lookup_batches_users_and_caches_parent_detail(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             client = BPMISDirectApiClient(self._settings(temp_dir))

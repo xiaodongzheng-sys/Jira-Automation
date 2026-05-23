@@ -116,6 +116,39 @@ print(value if value is not None else "")
 PY
 }
 
+require_gcloud_noninteractive_deploy_auth() {
+  local gcloud_bin="$1"
+  local project_id="${2:-}"
+  local deploy_account="${3:-}"
+  if [[ -z "$gcloud_bin" ]]; then
+    echo "gcloud is not installed. Install Google Cloud SDK first." >&2
+    return 1
+  fi
+  if [[ -z "$deploy_account" ]]; then
+    {
+      echo "CLOUD_RUN_DEPLOY_ACCOUNT is required for non-interactive Cloud Run release commands."
+      echo "Set CLOUD_RUN_DEPLOY_ACCOUNT in $ENV_FILE or the current environment."
+      echo "This prevents deploys from falling back to a stale personal gcloud login."
+    } >&2
+    return 1
+  fi
+
+  local auth_args=(auth print-access-token --account "$deploy_account")
+  if [[ -n "$project_id" ]]; then
+    auth_args+=(--project "$project_id")
+  fi
+  if "$gcloud_bin" "${auth_args[@]}" >/dev/null 2>&1; then
+    return 0
+  fi
+  {
+    echo "Configured Cloud Run deploy service account cannot get a token non-interactively: $deploy_account"
+    echo "Do not run personal gcloud auth login for releases."
+    echo "Fix the service-account credential, for example:"
+    echo "  gcloud auth activate-service-account $deploy_account --key-file /path/to/service-account.json"
+  } >&2
+  return 1
+}
+
 is_loopback_http_url() {
   local value="${1:-}"
   [[ "$value" =~ ^https?://(127\.0\.0\.1|localhost)(:|/) ]]

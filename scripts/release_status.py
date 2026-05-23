@@ -121,6 +121,26 @@ def _gcloud_secret_value(secret_name: str, *, env: Mapping[str, str], runner: An
     return str(completed.stdout or "").strip(), ""
 
 
+def _gcloud_firestore_access_token(*, env: Mapping[str, str], runner: Any = _run) -> str:
+    explicit = _env_value("FIRESTORE_ACCESS_TOKEN", env)
+    if explicit:
+        return explicit
+    project = _env_value("VERSION_PLAN_FIRESTORE_PROJECT", env) or _env_value("GOOGLE_CLOUD_PROJECT", env)
+    gcloud_bin = _gcloud_binary(env=env)
+    if not gcloud_bin or not Path(gcloud_bin).exists():
+        raise RuntimeError("gcloud unavailable")
+    command = [gcloud_bin, "auth", "print-access-token"]
+    command.extend(_gcloud_account_args(env=env))
+    if project:
+        command.extend(["--project", project])
+    token, error = _text_command(command, env=env, runner=runner)
+    if error:
+        raise RuntimeError(_sanitize_error_text(error))
+    if not token:
+        raise RuntimeError("gcloud auth print-access-token returned an empty token")
+    return token
+
+
 def _is_default_flask_secret(value: str) -> bool:
     return str(value or "").strip() in DEFAULT_SESSION_SECRET_VALUES
 
@@ -184,7 +204,11 @@ def _version_plan_firestore_status(*, env: Mapping[str, str]) -> str:
             try:
                 from bpmis_jira_tool.team_dashboard_version_plan_store import _FirestoreRestDocument
 
-                snapshot = _FirestoreRestDocument(project=project, document_id=document).get()
+                snapshot = _FirestoreRestDocument(
+                    project=project,
+                    document_id=document,
+                    token_provider=lambda: _gcloud_firestore_access_token(env=env),
+                ).get()
                 if not getattr(snapshot, "exists", False):
                     return None, ""
                 return snapshot.to_dict() or {}, ""

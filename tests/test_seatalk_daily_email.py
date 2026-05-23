@@ -868,7 +868,25 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         )
 
         self.assertEqual(mapped_refs[0]["evidence"], "Ker Yin")
+        uid_alias_refs = seatalk_daily_email._build_daily_brief_evidence_refs(
+            "\n".join(
+                [
+                    "SeaTalk Chat History Export",
+                    "=== buddy-1022128 ===",
+                    "[2026-05-21 09:00:00] Zheng Xiaodong: Evan please confirm Hold & Release go-live readiness.",
+                ]
+            ),
+            name_mappings={"UID 1022128": "Evan Ong Jun Wei"},
+        )
+        self.assertEqual(uid_alias_refs[0]["evidence"], "Evan Ong Jun Wei")
         self.assertEqual(fallback_refs[0]["evidence"], "Private SeaTalk chat (buddy-1022128)")
+        self.assertEqual(
+            seatalk_daily_email._sanitize_seatalk_evidence(
+                "Private SeaTalk chat (buddy-1022128)",
+                name_mappings={"UID 1022128": "Evan Ong Jun Wei"},
+            ),
+            "Evan Ong Jun Wei",
+        )
         self.assertEqual(
             seatalk_daily_email._sanitize_seatalk_evidence("buddy-1022128"),
             "Private SeaTalk chat (buddy-1022128)",

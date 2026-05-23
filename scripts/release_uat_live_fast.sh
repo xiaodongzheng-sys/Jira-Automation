@@ -100,14 +100,37 @@ wait_for_github_image_workflow() {
       --jq ".[] | select(.headSha == \"$sha\") | .databaseId" \
       --limit 20 2>/dev/null | head -n 1 || true)"
     if [[ -n "$run_id" ]]; then
-      echo "Waiting for GitHub image workflow run $run_id for $sha." >&2
-      "$GH_BIN" run watch "$run_id" --exit-status >&2
-      return 0
+      break
     fi
     sleep 5
   done
 
-  echo "No GitHub image workflow run found for $sha; continuing with image fallback." >&2
+  if [[ -z "$run_id" ]]; then
+    echo "No GitHub image workflow run found for $sha; continuing with image fallback." >&2
+    return 0
+  fi
+
+  local wait_seconds="${RELEASE_UAT_LIVE_GITHUB_IMAGE_WAIT_SECONDS:-90}"
+  local poll_seconds="${RELEASE_UAT_LIVE_GITHUB_IMAGE_POLL_SECONDS:-5}"
+  local deadline=$(( $(date +%s) + wait_seconds ))
+  local state status conclusion
+  echo "Waiting up to ${wait_seconds}s for GitHub image workflow run $run_id for $sha." >&2
+  while (( $(date +%s) < deadline )); do
+    state="$("$GH_BIN" run view "$run_id" --json status,conclusion --jq '[.status, (.conclusion // "")] | @tsv' 2>/dev/null || true)"
+    status="${state%%$'\t'*}"
+    conclusion="${state#*$'\t'}"
+    if [[ "$status" == "completed" ]]; then
+      if [[ "$conclusion" == "success" ]]; then
+        echo "GitHub image workflow completed successfully for $sha." >&2
+      else
+        echo "GitHub image workflow completed with conclusion '${conclusion:-unknown}' for $sha; continuing with image fallback." >&2
+      fi
+      return 0
+    fi
+    sleep "$poll_seconds"
+  done
+
+  echo "Timed out after ${wait_seconds}s waiting for GitHub image workflow run $run_id; continuing with image fallback." >&2
 }
 
 ensure_prebuilt_image() {
@@ -192,11 +215,35 @@ run_gate() {
     if "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/run_system_full_test_gate.py" \
       --check-proof \
       --proof-max-age-seconds "${RELEASE_UAT_LIVE_GATE_PROOF_MAX_AGE_SECONDS:-7200}" \
+      --profile "${RELEASE_UAT_LIVE_GATE_PROFILE:-auto}" \
       --coverage-fail-under "${RELEASE_UAT_LIVE_COVERAGE_FAIL_UNDER:-100}"; then
       return 0
     fi
   fi
-  "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/run_system_full_test_gate.py" --skip-smoke --parallel-workers "${RELEASE_UAT_LIVE_GATE_WORKERS:-4}"
+  "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/run_system_full_test_gate.py" \
+    --skip-smoke \
+    --profile "${RELEASE_UAT_LIVE_GATE_PROFILE:-auto}" \
+    --parallel-workers "${RELEASE_UAT_LIVE_GATE_WORKERS:-4}" \
+    --coverage-fail-under "${RELEASE_UAT_LIVE_COVERAGE_FAIL_UNDER:-100}"
+}
+
+run_timed_gate() {
+  local started_at finished_at status=0
+  started_at="$(date +%s)"
+  run_gate || status=$?
+  finished_at="$(date +%s)"
+  record_deploy_timing "release_uat_live_fast.sh" "release_gate" "$started_at" "$finished_at" "$status" "profile=${RELEASE_UAT_LIVE_GATE_PROFILE:-auto}" || true
+  return "$status"
+}
+
+run_timed_image_prepare() {
+  local sha="$1"
+  local started_at finished_at status=0
+  started_at="$(date +%s)"
+  ensure_prebuilt_image "$sha" || status=$?
+  finished_at="$(date +%s)"
+  record_deploy_timing "release_uat_live_fast.sh" "image_prepare" "$started_at" "$finished_at" "$status" "sha=$sha wait_seconds=${RELEASE_UAT_LIVE_GITHUB_IMAGE_WAIT_SECONDS:-90}" || true
+  return "$status"
 }
 
 run_gate_and_image_in_parallel() {
@@ -207,9 +254,9 @@ run_gate_and_image_in_parallel() {
   image_log="$work_dir/image.log"
   image_file="$work_dir/image.txt"
 
-  run_gate >"$gate_log" 2>&1 &
+  run_timed_gate >"$gate_log" 2>&1 &
   local gate_pid="$!"
-  ensure_prebuilt_image "$sha" >"$image_file" 2>"$image_log" &
+  run_timed_image_prepare "$sha" >"$image_file" 2>"$image_log" &
   local image_pid="$!"
 
   wait "$gate_pid" || gate_status=$?
@@ -250,51 +297,28 @@ live_revision() {
   curl -fsS --max-time 10 "${LIVE_URL%/}/healthz" | "$PYTHON_BIN" -c 'import json, sys; print(json.load(sys.stdin).get("revision", ""))'
 }
 
-require_gcloud_noninteractive_auth() {
-  if [[ -z "$GCLOUD_BIN" ]]; then
-    echo "gcloud is not installed. Install Google Cloud SDK first." >&2
-    return 1
-  fi
-  if "$GCLOUD_BIN" auth print-access-token ${project_args[@]+"${project_args[@]}"} ${account_args[@]+"${account_args[@]}"} >/dev/null 2>&1; then
-    return 0
-  fi
-  {
-    echo "gcloud credentials are not usable non-interactively."
-    echo "Run: gcloud auth login"
-    echo "Or configure a non-interactive deploy identity before promotion."
-  } >&2
-  return 1
-}
-
 print_timing_report() {
   "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/report_deploy_timings.py" --limit "${RELEASE_UAT_LIVE_TIMING_LIMIT:-20}" || true
 }
 
 cd "$ROOT_DIR"
-RELEASE_TARGET="$(release_window_target)"
-if [[ "$RELEASE_TARGET" == "uat" ]]; then
-  echo "Release window policy selected UAT default path: $(release_window_summary)"
-  "$ROOT_DIR/scripts/release_uat_fast.sh"
-  print_timing_report
-  FINISHED_AT="$(date +%s)"
-  echo "Fast release completed UAT only in $((FINISHED_AT - STARTED_AT))s"
-  exit 0
-fi
-
-echo "Release window policy selected Live default path: $(release_window_summary)"
 SHA="$(current_sha)"
+echo "Release policy allows UAT and Live deployment now: $(release_window_summary)"
+echo "Deploying UAT before Live promotion for $SHA."
+"$ROOT_DIR/scripts/release_uat_fast.sh"
+
 LIVE_URL="$(resolve_live_url)"
 if [[ "$(live_revision || true)" == "$SHA" ]]; then
-  echo "Live already serves $SHA; skipping Cloud Run/UAT gcloud promotion checks."
+  echo "Live already serves $SHA after UAT deploy; skipping promotion."
   TEAM_STACK_HOST_ROOT="${TEAM_STACK_HOST_ROOT:-$(recommended_team_stack_root)}"
   "$TEAM_STACK_HOST_ROOT/scripts/run_team_stack.sh" doctor
   print_timing_report
   FINISHED_AT="$(date +%s)"
-  echo "Fast release confirmed Live already current in $((FINISHED_AT - STARTED_AT))s"
+  echo "Fast release completed UAT and confirmed Live already current in $((FINISHED_AT - STARTED_AT))s"
   exit 0
 fi
 
-require_gcloud_noninteractive_auth
+require_gcloud_noninteractive_deploy_auth "$GCLOUD_BIN" "$PROJECT_ID" "$DEPLOY_ACCOUNT"
 GOOGLE_CLOUD_PROJECT="$PROJECT_ID" \
 CLOUD_RUN_DEPLOY_ACCOUNT="$DEPLOY_ACCOUNT" \
 "$ROOT_DIR/scripts/promote_uat_to_live.sh"
@@ -302,5 +326,5 @@ TEAM_STACK_HOST_ROOT="${TEAM_STACK_HOST_ROOT:-$(recommended_team_stack_root)}"
 "$TEAM_STACK_HOST_ROOT/scripts/run_team_stack.sh" doctor
 print_timing_report
 FINISHED_AT="$(date +%s)"
-echo "Fast release completed Live only in $((FINISHED_AT - STARTED_AT))s"
+echo "Fast release completed UAT and Live in $((FINISHED_AT - STARTED_AT))s"
 exit 0
