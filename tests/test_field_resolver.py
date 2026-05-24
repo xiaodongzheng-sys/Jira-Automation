@@ -178,6 +178,41 @@ class FieldResolverTests(unittest.TestCase):
         self.assertEqual(resolved["Summary"], "Fraud Appeal")
         self.assertNotIn("Description", resolved)
 
+    def test_special_mappings_and_default_sources_cover_config_variants(self):
+        row = InputRow(
+            row_number=7,
+            values={"Summary": "Fallback summary", "Default Field": "Default value"},
+            ordered_values=("A", "Column B", "Column C", "Column D"),
+        )
+        mappings = [
+            FieldMapping("Exact Input", "follow input tab column c"),
+            FieldMapping("Quoted Input", 'please follow "input" sheet column d'),
+            FieldMapping("Legacy B", 'follow "input" sheet column b'),
+            FieldMapping("Legacy D", 'follow "input" tab column d'),
+            FieldMapping("Feature Summary", 'follow input tab column b, start with "[feature]" in front'),
+            FieldMapping("Component", 'select "DBP-Anti-fraud" if this option is not available use "Fraud"'),
+            FieldMapping("Plain Header", "Summary"),
+            FieldMapping("Default Field", ""),
+        ]
+
+        resolved = resolve_fields(mappings, row)
+
+        self.assertEqual(resolved["Exact Input"], "Column C")
+        self.assertEqual(resolved["Quoted Input"], "Column D")
+        self.assertEqual(resolved["Legacy B"], "Column B")
+        self.assertEqual(resolved["Legacy D"], "Column D")
+        self.assertEqual(resolved["Feature Summary"], "[Feature] Column B")
+        self.assertEqual(resolved["Component"], "DBP-Anti-fraud|Fraud")
+        self.assertEqual(resolved["Plain Header"], "Fallback summary")
+        self.assertEqual(resolved["Default Field"], "Default value")
+
+    def test_invalid_json_routing_configs_raise_field_resolution_errors(self):
+        row = InputRow(row_number=2, values={}, ordered_values=())
+        for source in ("market_choices:{bad", "component_routes:{bad", "component_defaults:{bad"):
+            with self.subTest(source=source):
+                with self.assertRaises(FieldResolutionError):
+                    resolve_fields([FieldMapping("Component", source)], row)
+
 
 if __name__ == "__main__":
     unittest.main()

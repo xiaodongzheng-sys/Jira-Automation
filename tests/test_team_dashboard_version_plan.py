@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 import unittest
 
+import bpmis_jira_tool.team_dashboard_version_plan as vplan
 from bpmis_jira_tool.team_dashboard_version_plan import (
     PIPELINE_SEED_ROWS,
     append_version_plan_audit,
     merge_version_plan_editable_state,
+    mark_version_plan_sync_error,
+    mark_version_plan_sync_running,
     normalize_version_plan_state,
     update_version_plan_cell,
     update_version_plan_rows,
@@ -731,6 +734,234 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         merged = merge_version_plan_editable_state(synced, current)
 
         self.assertEqual(merged["version_plan"]["af"]["audit_log"][0]["action"], "cell_update")
+
+    def test_sync_state_and_normalization_edge_branches(self) -> None:
+        self.assertEqual(vplan.singapore_today(datetime(2026, 5, 16, 23, 30)), date(2026, 5, 16))
+
+        normalized = normalize_version_plan_state(
+            {
+                "af": {
+                    "bundles": {
+                        "": {"manual_rows": []},
+                        "bad": "not-a-bundle",
+                        "good": {"manual_rows": [{"row_id": "m1", "feature": "Good"}]},
+                    },
+                    "pipeline_rows": [],
+                }
+            }
+        )
+        self.assertEqual(list(normalized["af"]["bundles"]), ["good"])
+
+        running = mark_version_plan_sync_running({"version_plan": normalized}, message="Manual sync.")
+        self.assertEqual(running["version_plan"]["af"]["sync_state"]["state"], "running")
+        self.assertEqual(running["version_plan"]["af"]["sync_state"]["message"], "Manual sync.")
+
+        failed = mark_version_plan_sync_error(running, "")
+        self.assertEqual(failed["version_plan"]["af"]["sync_state"]["state"], "error")
+        self.assertEqual(failed["version_plan"]["af"]["sync_state"]["error"], "Sync failed.")
+
+        self.assertTrue(
+            version_plan_auto_sync_attempted_today(
+                {"version_plan": {"af": {"sync_state": {"last_synced_date_sgt": "2026-05-16"}}}},
+                now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
+            )
+        )
+        self.assertFalse(
+            version_plan_auto_sync_attempted_today(
+                {"version_plan": {"af": {"sync_state": {"state": "running"}}}},
+                now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
+            )
+        )
+
+    def test_version_plan_sync_and_merge_preserve_manual_or_safe_fallback_edges(self) -> None:
+        class RaisingSearchClient:
+            def search_versions(self, query: str) -> list[dict]:
+                raise RuntimeError(query)
+
+        synced = version_plan_sync({}, RaisingSearchClient(), now=datetime(2026, 5, 16, 9, 0))
+        payload = version_plan_payload(synced, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
+
+        self.assertEqual(payload["sync_state"]["state"], "error")
+        self.assertIn("No AF versions", payload["sync_state"]["error"])
+
+        merged = merge_version_plan_editable_state(
+            {"version_plan": normalize_version_plan_state({"af": {"bundles": {}}})},
+            {
+                "version_plan": normalize_version_plan_state(
+                    {
+                        "af": {
+                            "bundles": {
+                                "af-manual": {
+                                    "version_id": "af-manual",
+                                    "version_name": "AF_manual",
+                                    "release_date": "2026-07-01",
+                                    "manual_rows": [{"row_id": "manual-only", "feature": "Manual only"}],
+                                    "synced_rows": [{"row_id": "sync-1", "jira_id": "SGDB-1"}],
+                                }
+                            }
+                        }
+                    }
+                )
+            },
+        )
+
+        self.assertIn("af-manual", merged["version_plan"]["af"]["bundles"])
+        self.assertEqual(merged["version_plan"]["af"]["bundles"]["af-manual"]["manual_rows"][0]["row_id"], "manual-only")
+
+    def test_update_cell_and_row_error_edges(self) -> None:
+        config = {
+            "version_plan": normalize_version_plan_state(
+                {
+                    "af": {
+                        "bundles": {
+                            "af-1": {
+                                "version_id": "af-1",
+                                "version_name": "AF_1",
+                                "release_date": "2026-06-01",
+                                "manual_rows": [{"row_id": "bundle-row", "feature": "Bundle"}],
+                                "synced_rows": [{"row_id": "sync-row", "jira_id": "SPDBP-1"}],
+                            }
+                        },
+                        "pipeline_rows": [{"row_id": "pipe-1", "feature": "Pipeline", "pm": ["Zoey"]}],
+                    }
+                }
+            )
+        }
+
+        updated = update_version_plan_cell(
+            config,
+            {"scope": "pipeline", "row_id": "pipe-1", "field": "pm", "value": "chang.wang@npt.sg"},
+        )
+        self.assertEqual(updated["version_plan"]["af"]["pipeline_rows"][0]["pm"], ["Wang Chang"])
+
+        with self.assertRaisesRegex(ValueError, "Unsupported Version Plan field"):
+            update_version_plan_cell(config, {"scope": "pipeline", "row_id": "pipe-1", "field": "owner"})
+        with self.assertRaisesRegex(ValueError, "manual row was not found"):
+            update_version_plan_cell(config, {"scope": "pipeline", "row_id": "missing", "field": "priority"})
+        with self.assertRaisesRegex(ValueError, "row was not found"):
+            update_version_plan_cell(config, {"scope": "pipeline", "row_id": "missing", "field": "remarks"})
+        with self.assertRaisesRegex(ValueError, "row was not found"):
+            update_version_plan_cell(config, {"scope": "bundle", "row_id": "sync-row", "field": "remarks"})
+        with self.assertRaisesRegex(ValueError, "row was not found"):
+            update_version_plan_cell(config, {"scope": "bundle", "version_id": "missing", "row_id": "sync-row", "field": "remarks"})
+        with self.assertRaisesRegex(ValueError, "row was not found"):
+            update_version_plan_cell(config, {"scope": "bundle", "version_id": "af-1", "row_id": "missing", "field": "remarks"})
+
+        with self.assertRaisesRegex(ValueError, "Unsupported Version Plan row action"):
+            update_version_plan_rows(config, {"scope": "pipeline", "action": "duplicate"})
+        with self.assertRaisesRegex(ValueError, "row_id is required"):
+            update_version_plan_rows(config, {"action": "move", "source_scope": "pipeline", "target_scope": "bundle", "target_version_id": "af-1"})
+        with self.assertRaisesRegex(ValueError, "manual row was not found"):
+            update_version_plan_rows(
+                config,
+                {"action": "move", "row_id": "missing", "source_scope": "pipeline", "target_scope": "bundle", "target_version_id": "af-1"},
+            )
+        with self.assertRaisesRegex(ValueError, "version_id is required"):
+            update_version_plan_rows(config, {"scope": "bundle", "action": "add"})
+        with self.assertRaisesRegex(ValueError, "Unsupported Version Plan row scope"):
+            update_version_plan_rows(config, {"scope": "unknown", "action": "add"})
+
+        same_scope = update_version_plan_rows(
+            config,
+            {"action": "move", "row_id": "pipe-1", "source_scope": "pipeline", "target_scope": "pipeline"},
+        )
+        self.assertEqual(same_scope["version_plan"]["af"]["pipeline_rows"][0]["row_id"], "pipe-1")
+
+    def test_sync_helpers_handle_missing_clients_duplicates_and_parent_failures(self) -> None:
+        class ReleaseWindowClient:
+            def __init__(self, rows: list[dict] | Exception) -> None:
+                self.rows = rows
+
+            def list_jira_tasks_created_by_emails(self, emails: list[str], **kwargs) -> list[dict]:
+                if isinstance(self.rows, Exception):
+                    raise self.rows
+                return self.rows
+
+            def get_issue_detail(self, issue_id: str) -> dict:
+                if issue_id == "bad":
+                    raise RuntimeError("boom")
+                if issue_id == "nondict":
+                    return []  # type: ignore[return-value]
+                return {"priority": "P2"}
+
+        self.assertEqual(vplan._safe_list_jira_tasks_for_release_window(object(), (), release_after="", release_before=""), [])
+        self.assertEqual(
+            vplan._safe_list_jira_tasks_for_release_window(ReleaseWindowClient(RuntimeError("bad")), (), release_after="", release_before=""),
+            [],
+        )
+        self.assertEqual(vplan._parent_project_detail(object(), {}), {})
+        self.assertEqual(vplan._parent_project_detail(object(), {"parentIds": ["parent"]}), {})
+        self.assertEqual(vplan._parent_project_detail(ReleaseWindowClient([]), {"parentIds": [""]}), {})
+        self.assertEqual(vplan._parent_project_detail(ReleaseWindowClient([]), {"parentIds": ["bad"]}), {})
+        self.assertEqual(vplan._parent_project_detail(ReleaseWindowClient([]), {"parentIds": ["nondict"]}), {})
+
+        rows = vplan._sync_rows_for_bundle(
+            ReleaseWindowClient(
+                [
+                    {"jiraLink": "https://jira/browse/SPDBP-100", "summary": "Linked", "parentIds": ["ok"]},
+                    {"jira_id": "SPDBP-100", "summary": "Duplicate"},
+                    {"jiraLink": "https://example.invalid/no-ticket", "summary": "No id"},
+                ]
+            ),
+            {"version_id": "af-1", "release_date": "2026-05-20"},
+            {},
+            [{"jira_id": "SPDBP-100", "remarks": "Existing note"}],
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["jira_id"], "SPDBP-100")
+        self.assertEqual(rows[0]["remarks"], "Existing note")
+        self.assertEqual(rows[0]["jira_link"], "https://jira/browse/SPDBP-100")
+
+        self.assertEqual(vplan._safe_search_versions(ReleaseWindowClient([]), "AF_"), [])
+        self.assertEqual(vplan._safe_list_issues_for_version(object(), "v1"), [])
+
+        class RaisingIssuesClient:
+            def list_issues_for_version(self, version_id: str) -> list[dict]:
+                raise RuntimeError(version_id)
+
+        self.assertEqual(vplan._safe_list_issues_for_version(RaisingIssuesClient(), "v1"), [])
+
+    def test_parser_market_and_date_helper_edges(self) -> None:
+        self.assertEqual(vplan._bundle_payload({"prd_deadline_date": "2026-05-10"}, today=date(2026, 5, 16))["synced_rows"], [])
+        self.assertEqual(vplan._latest_mapped_release_date({"bad": {}, "good": {"release_date": "2026-05-26"}}), "2026-05-26")
+        self.assertEqual(
+            vplan._mapped_dbp_versions(
+                {"release_date": ""},
+                {"DBPSG": [{"version_id": "dbp", "version_name": "DBPSG_v1.0_0526", "release_date": "2026-05-26"}]},
+            )["DBPSG"]["version_name"],
+            "-",
+        )
+        self.assertEqual(vplan._normalize_pm_values(["", "unknown", "tbc", "xiaodong.zheng@npt.sg", "jun wei"]), ["Jun Wei"])
+        self.assertTrue(vplan._is_af_reporter({"reporter": {"name": "Jireh.Tanyx@npt.sg"}}))
+        self.assertTrue(vplan._is_af_reporter({"pm_email": "keryin.lim@npt.sg"}))
+        self.assertEqual(vplan._extract_jira_id({"jiraUrl": "https://jira/browse/SGDB-88"}), "SGDB-88")
+        self.assertEqual(vplan._extract_jira_id({"jiraUrl": "https://jira/no-ticket"}), "")
+        self.assertEqual(vplan._extract_jira_link({}, "SGDB-88"), "https://jira.shopee.io/browse/SGDB-88")
+        self.assertEqual(vplan._flatten_people({"displayName": "Zoey", "email": "zoey.luxy@npt.sg"}), ["Zoey"])
+        self.assertEqual(vplan._flatten_people([{"email": "chongzj@npt.sg"}, "Ker Yin"]), ["chongzj@npt.sg", "Ker Yin"])
+        self.assertEqual(vplan._flatten_people(None), [])
+        self.assertEqual(vplan._extract_market({"country": "ph"}), "PH")
+        self.assertEqual(vplan._extract_jira_board({"board": "SGDB"}), "SGDB")
+        self.assertEqual(vplan._extract_jira_board({"raw_response": {"projectKey": "SPPHDB"}}), "SPPHDB")
+        self.assertEqual(vplan._market_from_jira_board(""), "")
+        self.assertEqual(vplan._market_from_jira_board("SPPHDB-123"), "PH")
+        self.assertEqual(vplan._market_from_jira_board("REG-1"), "Regional")
+        self.assertEqual(vplan._market_from_jira_board("UNKNOWN"), "")
+        self.assertEqual(vplan._market_from_version_name("legacy"), "")
+        self.assertEqual(vplan._extract_first_text({"field": {"value": "Chosen"}}, "field"), "Chosen")
+        self.assertEqual(vplan._extract_first_text({"field": [{"email": "zoey.luxy@npt.sg"}]}, "field"), "zoey.luxy@npt.sg")
+        self.assertEqual(vplan._dedupe_versions([{"version_id": ""}, {"version_id": "v1"}, {"version_id": "v1"}]), [{"version_id": "v1"}])
+        self.assertEqual(vplan._next_quarter_end(date(2026, 8, 10)), date(2026, 12, 31))
+        self.assertEqual(vplan._next_quarter_end(date(2026, 11, 10)), date(2027, 3, 31))
+        self.assertEqual(vplan._parse_datetime("2026-05-16T01:00:00Z").isoformat(), "2026-05-16T09:00:00+08:00")
+        self.assertIsNone(vplan._parse_datetime("not-a-date"))
+        self.assertEqual(vplan._parse_date(date(2026, 5, 16)), date(2026, 5, 16))
+        self.assertIsNone(vplan._parse_date("not-a-date"))
+        self.assertEqual(vplan._sanitize_audit_value([1, "x"]), [1, "x"])
+        self.assertEqual(vplan._sanitize_audit_value(True), True)
+        self.assertIn("+08:00", vplan._now_text(datetime(2026, 5, 16, 9, 0)))
+        self.assertEqual(vplan._next_sort_order([]), 0)
 
 
 if __name__ == "__main__":

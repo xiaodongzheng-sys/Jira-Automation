@@ -659,22 +659,16 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         sync_queued = False
         with _VERSION_PLAN_SYNC_LOCK:
             sync_running = _VERSION_PLAN_SYNC_RUNNING
-        if str(sync_state.get("state") or "").strip() == "running" and not sync_running and _can_sync_version_plan():
-            try:
-                sync_queued = _start_version_plan_sync_if_needed(force=False)
-            except (ConfigError, ToolError) as error:
-                current_snapshot = _version_plan_load_snapshot(store)
-                snapshot = _version_plan_save_config(store, mark_version_plan_sync_error(current_snapshot.config, _version_plan_sync_error_message(error)))
-                payload = version_plan_payload(snapshot.config)
-            except Exception as error:  # noqa: BLE001
-                current_app.logger.exception("Team Dashboard Version Plan stale sync could not be restarted.")
-                current_snapshot = _version_plan_load_snapshot(store)
-                snapshot = _version_plan_save_config(store, mark_version_plan_sync_error(current_snapshot.config, _version_plan_sync_error_message(error)))
-                payload = version_plan_payload(snapshot.config)
-            else:
-                if sync_queued:
-                    snapshot = _version_plan_load_snapshot(store)
-                    payload = version_plan_payload(snapshot.config)
+        if str(sync_state.get("state") or "").strip() == "running" and not sync_running:
+            snapshot = _version_plan_save_config(
+                store,
+                mark_version_plan_sync_error(
+                    snapshot.config,
+                    "Previous Version Plan sync was interrupted. Click Sync Jira to retry.",
+                ),
+                expected_revision=snapshot.revision,
+            )
+            payload = version_plan_payload(snapshot.config)
         return jsonify({
             "status": "ok",
             "sync_state": payload.get("sync_state") or {},

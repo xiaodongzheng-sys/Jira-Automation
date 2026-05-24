@@ -1362,11 +1362,32 @@ class BPMISDirectApiClient(BPMISClient):
     def list_actual_mandays_for_projects(self, project_issue_ids: list[str]) -> dict[str, float]:
         results: dict[str, float] = {}
         seen_project_ids: set[str] = set()
+        project_ids: list[str] = []
         for raw_project_id in project_issue_ids:
             project_id = str(raw_project_id or "").strip()
             if not project_id or project_id in seen_project_ids:
                 continue
             seen_project_ids.add(project_id)
+            project_ids.append(project_id)
+        if not project_ids:
+            return results
+
+        task_rows_by_project = self._list_open_project_task_rows_via_list_bulk(project_ids)
+        if task_rows_by_project is not None:
+            task_ids_by_project: dict[str, list[str]] = {}
+            for project_id in project_ids:
+                task_ids_by_project[project_id] = [
+                    task_id
+                    for task_id in (
+                        self._extract_issue_identifier(task)
+                        for task in task_rows_by_project.get(project_id, [])
+                    )
+                    if task_id
+                ]
+            return self._sum_open_subtask_story_points_by_project(task_ids_by_project)
+
+        self._increment_stat("actual_mandays_project_tree_fallback_count", len(project_ids))
+        for project_id in project_ids:
             results[project_id] = self._calculate_actual_mandays_for_project(project_id)
         return results
 
@@ -1380,6 +1401,71 @@ class BPMISDirectApiClient(BPMISClient):
             if task_id
         ]
         return self._sum_open_subtask_story_points_for_tasks(task_ids)
+
+    def _list_open_project_task_rows_via_list_bulk(
+        self,
+        project_issue_ids: list[str],
+    ) -> dict[str, list[dict[str, Any]]] | None:
+        project_ids = list(dict.fromkeys(str(project_id or "").strip() for project_id in project_issue_ids if str(project_id or "").strip()))
+        if not project_ids:
+            return {}
+        grouped: dict[str, list[dict[str, Any]]] = {project_id: [] for project_id in project_ids}
+        project_id_set = set(project_ids)
+        seen_by_project: set[tuple[str, str]] = set()
+        page_size = 200
+        for project_id_chunk in self._chunks(project_ids, 100):
+            project_id_values: list[int | str] = []
+            for project_id in project_id_chunk:
+                try:
+                    project_id_values.append(int(project_id))
+                except ValueError:
+                    project_id_values.append(project_id)
+            page = 1
+            while True:
+                try:
+                    response = self._api_request(
+                        "/api/v1/issues/list",
+                        params={
+                            "search": json.dumps(
+                                {
+                                    "joinType": "and",
+                                    "subQueries": [
+                                        {"typeId": [self.TASK_TYPE_ID]},
+                                        {"parentIds": project_id_values},
+                                    ],
+                                    "page": page,
+                                    "pageSize": page_size,
+                                    "mapping": True,
+                                }
+                            )
+                        },
+                    )
+                except (BPMISError, ValueError, TypeError):
+                    return None
+                self._increment_stat("actual_mandays_project_task_list_page_count")
+                rows = self._extract_issue_rows_from_response(response)
+                self._increment_stat("actual_mandays_project_task_list_rows_scanned", len(rows))
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    issue_id = self._extract_issue_identifier(row)
+                    if not issue_id or self._is_closed_issue(row):
+                        continue
+                    parent_ids = [parent_id for parent_id in self._extract_parent_issue_ids(row) if parent_id in project_id_set]
+                    if not parent_ids:
+                        continue
+                    for project_id in parent_ids:
+                        if issue_id == project_id or not self._is_project_task_row(row, project_id):
+                            continue
+                        seen_key = (project_id, issue_id)
+                        if seen_key in seen_by_project:
+                            continue
+                        seen_by_project.add(seen_key)
+                        grouped.setdefault(project_id, []).append(row)
+                if len(rows) < page_size:
+                    break
+                page += 1
+        return grouped
 
     def _list_open_project_task_rows_via_tree(self, project_issue_id: str) -> list[dict[str, Any]]:
         project_id = str(project_issue_id or "").strip()
@@ -1489,6 +1575,76 @@ class BPMISDirectApiClient(BPMISClient):
                     break
                 page += 1
         return total
+
+    def _sum_open_subtask_story_points_by_project(self, task_ids_by_project: dict[str, list[str]]) -> dict[str, float]:
+        results = {str(project_id): 0.0 for project_id in task_ids_by_project}
+        task_to_project_ids: dict[str, set[str]] = {}
+        for project_id, task_ids in task_ids_by_project.items():
+            normalized_project_id = str(project_id or "").strip()
+            if not normalized_project_id:
+                continue
+            for task_id in task_ids:
+                normalized_task_id = str(task_id or "").strip()
+                if not normalized_task_id:
+                    continue
+                task_to_project_ids.setdefault(normalized_task_id, set()).add(normalized_project_id)
+        if not task_to_project_ids:
+            return results
+
+        task_ids = list(task_to_project_ids)
+        task_id_set = set(task_ids)
+        for task_id_chunk in self._chunks(task_ids, 100):
+            project_ids_in_chunk: set[str] = set()
+            for task_id in task_id_chunk:
+                project_ids_in_chunk.update(task_to_project_ids.get(task_id) or set())
+            task_id_values: list[int | str] = []
+            for task_id in task_id_chunk:
+                try:
+                    task_id_values.append(int(task_id))
+                except ValueError:
+                    task_id_values.append(task_id)
+            page = 1
+            page_size = 200
+            while True:
+                try:
+                    response = self._api_request(
+                        "/api/v1/issues/list",
+                        params={
+                            "search": json.dumps(
+                                {
+                                    "joinType": "and",
+                                    "subQueries": [{"parentIds": task_id_values}],
+                                    "page": page,
+                                    "pageSize": page_size,
+                                    "mapping": True,
+                                }
+                            )
+                        },
+                    )
+                except (BPMISError, ValueError, TypeError):
+                    return results
+                self._increment_stat("actual_mandays_subtask_list_page_count")
+                rows = ((response.get("data") or {}).get("rows") or []) if isinstance(response, dict) else []
+                self._increment_stat("actual_mandays_subtask_rows_scanned", len(rows))
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    if self._is_closed_issue(row):
+                        continue
+                    if not self._is_subtask_row_for_any_task(row, task_id_set):
+                        continue
+                    matched_projects: set[str] = set()
+                    for parent_id in self._extract_parent_issue_ids(row):
+                        matched_projects.update(task_to_project_ids.get(parent_id) or set())
+                    if not matched_projects and self._issue_type_text(row).replace("-", " ").replace("_", " ").strip().casefold() in {"sub task", "subtask"}:
+                        matched_projects.update(project_ids_in_chunk)
+                    story_points = self._extract_story_points(row)
+                    for project_id in matched_projects:
+                        results[project_id] = results.get(project_id, 0.0) + story_points
+                if len(rows) < page_size:
+                    break
+                page += 1
+        return results
 
     def get_issue_detail(self, issue_id: str | int) -> dict[str, Any]:
         normalized_issue_id = str(issue_id).strip()

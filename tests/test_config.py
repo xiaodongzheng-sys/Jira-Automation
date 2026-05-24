@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from bpmis_jira_tool.codex_model_router import resolve_codex_model, resolve_codex_reasoning_effort
+from bpmis_jira_tool.codex_model_router import codex_route_policy_payload, resolve_codex_model, resolve_codex_reasoning_effort
 from bpmis_jira_tool.config import Settings
 
 
@@ -120,10 +120,18 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(resolve_codex_model("deep"), "gpt-5.5")
             self.assertEqual(resolve_codex_model("compact_deep"), "gpt-5.4")
             self.assertEqual(resolve_codex_model("repair"), "gpt-5.5")
+            self.assertEqual(resolve_codex_model("cheap", explicit_model="explicit-model"), "explicit-model")
             self.assertEqual(resolve_codex_reasoning_effort("cheap"), "low")
             self.assertEqual(resolve_codex_reasoning_effort("balanced"), "medium")
             self.assertEqual(resolve_codex_reasoning_effort("deep"), "high")
             self.assertEqual(resolve_codex_reasoning_effort("repair"), "high")
+            self.assertEqual(resolve_codex_reasoning_effort("cheap", explicit_effort="XHIGH"), "xhigh")
+            self.assertEqual(
+                codex_route_policy_payload(prefix="SOURCE_CODE_QA", legacy_env_names=("SOURCE_CODE_QA_CODEX_MODEL",))["routes"]["cheap"][
+                    "scoped_env"
+                ],
+                "SOURCE_CODE_QA_CODEX_MODEL_CHEAP",
+            )
 
         with patch.dict(
             os.environ,

@@ -7,7 +7,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from bpmis_jira_tool.config import Settings
-from bpmis_jira_tool.productization_codex import generate_productization_detailed_features_with_local_codex
+from bpmis_jira_tool.errors import ToolError
+from bpmis_jira_tool.productization_codex import (
+    clean_codex_productization_detailed_feature,
+    format_productization_description_text,
+    generate_productization_detailed_features_with_local_codex,
+    parse_codex_json_object,
+)
 from prd_briefing.text_generation import CodexTextGenerationClient
 
 
@@ -87,6 +93,51 @@ class TextGenerationClientTests(unittest.TestCase):
         self.assertEqual(fallback_model, "gpt-5.4-mini")
         self.assertEqual(payload["codex_prompt_mode"], "productization_detailed_feature_v1")
         self.assertEqual(items, [])
+
+    def test_productization_codex_parses_and_cleans_llm_payloads(self):
+        self.assertEqual(parse_codex_json_object('```json\n{"items": []}\n```'), {"items": []})
+        self.assertEqual(parse_codex_json_object('prefix {"items": [{"jira_ticket_number": "AF-1"}]} suffix')["items"][0]["jira_ticket_number"], "AF-1")
+        with self.assertRaisesRegex(ToolError, "unreadable"):
+            parse_codex_json_object("no-json-here")
+        with self.assertRaisesRegex(ToolError, "unreadable"):
+            parse_codex_json_object("{bad json}")
+        with self.assertRaisesRegex(ToolError, "invalid"):
+            parse_codex_json_object('["not", "object"]')
+
+        self.assertEqual(format_productization_description_text("<p>Hello&nbsp;team</p><br>Next"), "Hello team\nNext")
+        self.assertEqual(format_productization_description_text(""), "-")
+        self.assertEqual(clean_codex_productization_detailed_feature("```json\nDone\n```"), "Done")
+        self.assertEqual(clean_codex_productization_detailed_feature("   "), "-")
+
+    def test_productization_codex_rejects_invalid_items_shape_and_filters_non_objects(self):
+        class InvalidItemsProvider(_FakeCodexProvider):
+            def generate(self, *, payload, primary_model, fallback_model):
+                self.calls.append((payload, primary_model, fallback_model))
+                return type("Result", (), {"payload": {"text": '{"items": {}}'}, "model": primary_model})()
+
+        class MixedItemsProvider(_FakeCodexProvider):
+            def generate(self, *, payload, primary_model, fallback_model):
+                self.calls.append((payload, primary_model, fallback_model))
+                return type(
+                    "Result",
+                    (),
+                    {"payload": {"text": '{"items": ["bad", {"jira_ticket_number": " AF-1 ", "detailed_feature": "<b>Feature</b>"}]}'}, "model": primary_model},
+                )()
+
+        with patch.dict(os.environ, {}, clear=True), patch("bpmis_jira_tool.config.find_dotenv", return_value=""), patch(
+            "bpmis_jira_tool.productization_codex.CodexCliBridgeSourceCodeQALLMProvider",
+            InvalidItemsProvider,
+        ):
+            with self.assertRaisesRegex(ToolError, "invalid"):
+                generate_productization_detailed_features_with_local_codex([], settings=Settings.from_env())
+
+        with patch.dict(os.environ, {}, clear=True), patch("bpmis_jira_tool.config.find_dotenv", return_value=""), patch(
+            "bpmis_jira_tool.productization_codex.CodexCliBridgeSourceCodeQALLMProvider",
+            MixedItemsProvider,
+        ):
+            items = generate_productization_detailed_features_with_local_codex([], settings=Settings.from_env())
+
+        self.assertEqual(items, [{"jira_ticket_number": "AF-1", "detailed_feature": "Feature"}])
 
     def test_codex_client_defaults_prd_generation_to_balanced_route(self):
         _FakeCodexProvider.instances.clear()

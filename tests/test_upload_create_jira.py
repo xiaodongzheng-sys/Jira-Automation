@@ -12,6 +12,7 @@ from bpmis_jira_tool.upload_create_jira import (
     DEBUG_PAYLOAD_PATH,
     build_fields_from_request,
     create_jira_from_request,
+    load_request_from_stdin,
     main,
 )
 
@@ -64,6 +65,7 @@ class UploadCreateJiraTests(unittest.TestCase):
                 "description": "Detailed description",
                 "dev_pic": "dev@example.com",
                 "need_uat": "Yes",
+                "priority": 1,
             }
         )
 
@@ -74,6 +76,13 @@ class UploadCreateJiraTests(unittest.TestCase):
         self.assertEqual("Detailed description", fields["Description"])
         self.assertEqual("dev@example.com", fields["Dev PIC"])
         self.assertEqual("Yes", fields["Need UAT"])
+        self.assertEqual("1", fields["Priority"])
+
+    def test_load_request_from_stdin_rejects_invalid_json_and_non_object_payloads(self):
+        with self.assertRaisesRegex(ValueError, "valid JSON"):
+            load_request_from_stdin("{bad-json")
+        with self.assertRaisesRegex(ValueError, "must be an object"):
+            load_request_from_stdin("[]")
 
     def test_build_fields_requires_access_token_issue_id_market_and_summary(self):
         with self.assertRaisesRegex(ValueError, "access_token, issue_id, market, summary"):
@@ -101,6 +110,15 @@ class UploadCreateJiraTests(unittest.TestCase):
         self.assertEqual(["10001"], fake_client.find_project_calls)
         self.assertEqual("Feature", fake_client.create_calls[0][1]["Task Type"])
         self.assertEqual("Fix login issue", fake_client.create_calls[0][1]["Summary"])
+
+    def test_create_jira_from_request_uses_default_bpmis_client_factory(self):
+        fake_client = _FakeBPMISClient(ticket_key="DEF-1")
+        with patch("bpmis_jira_tool.bpmis_client.build_bpmis_client", return_value=fake_client) as factory:
+            response = create_jira_from_request(self.minimal_request, settings=self.settings)
+
+        self.assertTrue(response["success"])
+        self.assertEqual("DEF-1", response["ticket_key"])
+        factory.assert_called_once_with(self.settings, "token-123")
 
     def test_create_jira_from_request_returns_error_payload_when_client_fails(self):
         def client_factory(settings, access_token):

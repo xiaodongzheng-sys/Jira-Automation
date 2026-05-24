@@ -1,0 +1,464 @@
+{
+  "version": 1,
+  "description": "Automation coverage matrix for scenarios with observed usage in the 2026-05-10 through 2026-05-24 SGT audit window.",
+  "audit_window": {
+    "timezone": "Asia/Singapore",
+    "start": "2026-05-10T00:00:00+08:00",
+    "end": "2026-05-24T23:59:59+08:00"
+  },
+  "evidence_sources": [
+    {
+      "id": "local_llm_ledger",
+      "path": ".team-portal/llm_call_ledger.jsonl",
+      "summary": "Local LLM ledger showed recent seatalk, source_code_qa, meeting_recorder, and synthetic/unknown flow entries."
+    },
+    {
+      "id": "host_llm_ledger",
+      "path": "/Users/NPTSG0388/Workspace/jira-creation-stack-host/.team-portal/llm_call_ledger.jsonl",
+      "summary": "Live host LLM ledger showed recent seatalk, source_code_qa, meeting_recorder, monthly_report, and prd_reviewer flows."
+    },
+    {
+      "id": "host_access_log",
+      "path": "/Users/NPTSG0388/Workspace/jira-creation-stack-host/.team-portal/logs/team_portal.log",
+      "summary": "Live host access log showed recent page/API access for dashboard, reports, source code QA, PRD self-assessment, meeting recorder, productization, auth, VPN, and local-agent proxy routes."
+    },
+    {
+      "id": "cloud_run_logging",
+      "path": ".team-portal/run/cloud_run_recent_usage_logs.json",
+      "summary": "Cloud Run Logging showed recent external access for the Cloud homepage, version-plan page and APIs, Cloud Google auth, Source Code QA, PRD self-assessment, reports, VPN, and dashboard routes."
+    },
+    {
+      "id": "host_team_portal_db",
+      "path": "/Users/NPTSG0388/Workspace/jira-creation-stack-host/.team-portal/team_portal.db",
+      "summary": "Live host portal DB showed recent team dashboard config and VPN profile connection state."
+    },
+    {
+      "id": "host_work_memory_db",
+      "path": "/Users/NPTSG0388/Workspace/jira-creation-stack-host/.team-portal/work_memory/memory.db",
+      "summary": "Live host Work Memory DB showed recent team_dashboard ingestion runs and refreshed items."
+    },
+    {
+      "id": "host_meeting_records",
+      "path": "/Users/NPTSG0388/Workspace/jira-creation-stack-host/.team-portal/meeting_records/records/*/metadata.json",
+      "summary": "Live host meeting record metadata showed 36 recent meeting records with text outputs."
+    },
+    {
+      "id": "seatalk_name_mapping_cache",
+      "path": ".team-portal/seatalk/cache/name_mappings_v3_auto_mappings_last_7_days_2026-05-21.json",
+      "summary": "Recent SeaTalk name mapping cache artifacts existed for 2026-05-21 through 2026-05-23."
+    },
+    {
+      "id": "source_code_qa_release_gate",
+      "path": ".team-portal/source_code_qa/eval_runs/latest.json",
+      "summary": "Recent Source Code QA release-gate eval and mock LLM smoke ran on 2026-05-14."
+    },
+    {
+      "id": "deploy_timings",
+      "path": ".team-portal/run/deploy_timings.jsonl",
+      "summary": "Recent UAT and live deployment timing records showed local-agent health checks and live promotion checks."
+    }
+  ],
+  "excluded_evidence": [
+    {
+      "id": "healthz_only",
+      "reason": "Health checks are operational probes, not user-facing scenarios. They are covered by release and stack tests but do not define scenario coverage for this goal."
+    },
+    {
+      "id": "unknown_llm_flow",
+      "reason": "Unknown-flow LLM ledger rows are synthetic bridge/error-path coverage entries without a product scenario name."
+    }
+  ],
+  "areas": [
+    {
+      "id": "auth_access_control",
+      "label": "Auth and Access Control",
+      "observed_usage": [
+        {"source": "host_access_log", "signal": "GET /auth/google/login", "count": 2, "last_seen": "2026-05-23"},
+        {"source": "host_access_log", "signal": "GET /auth/google/callback", "count": 1, "last_seen": "2026-05-23"},
+        {"source": "host_access_log", "signal": "POST /auth/google/logout", "count": 4, "last_seen": "2026-05-23"},
+        {"source": "host_access_log", "signal": "GET /access-denied", "count": 1, "last_seen": "2026-05-23"},
+        {"source": "cloud_run_logging", "signal": "GET /cloud-auth/google/login", "count": 32, "last_seen": "2026-05-23"},
+        {"source": "cloud_run_logging", "signal": "GET /cloud-auth/google/callback", "count": 25, "last_seen": "2026-05-23"},
+        {"source": "cloud_run_logging", "signal": "POST /cloud-auth/google/logout", "count": 13, "last_seen": "2026-05-19"}
+      ],
+      "scenarios": [
+        {
+          "id": "google_login_callback_logout_and_denied_page",
+          "description": "Observed host and Cloud Google login, callback, logout, and denied access paths keep browser and route-level coverage.",
+          "tests": [
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_auth_and_access_control_browser_smoke",
+            "tests.test_google_auth.GoogleAuthTests.test_resolve_google_redirect_uri_uses_cloud_base_path_for_cloud_callback",
+            "tests.test_team_portal_access.TeamPortalAccessTests.test_anonymous_login_gate_response_is_not_marked_no_store"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "portal_home",
+      "label": "Portal Home",
+      "observed_usage": [
+        {"source": "host_access_log", "signal": "GET /portal-home", "count": 12, "last_seen": "2026-05-23"},
+        {"source": "host_access_log", "signal": "GET /team-dashboard", "count": 12, "last_seen": "2026-05-23"},
+        {"source": "cloud_run_logging", "signal": "GET /", "count": 266, "last_seen": "2026-05-24"},
+        {"source": "cloud_run_logging", "signal": "GET /version-plan", "count": 68, "last_seen": "2026-05-24"},
+        {"source": "cloud_run_logging", "signal": "GET /team-dashboard", "count": 19, "last_seen": "2026-05-18"}
+      ],
+      "scenarios": [
+        {
+          "id": "home_navigation_to_dashboard_and_version_plan",
+          "description": "Observed portal home/dashboard navigation is covered, including Cloud homepage entry into the standalone version plan.",
+          "tests": [
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_admin_homepage_loads_without_browser_errors",
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_cloud_home_opens_standalone_version_plan_smoke",
+            "tests.test_web_core_coverage.WebCoreCoverageTests.test_create_app_route_edges_for_callbacks_jobs_and_vpn"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "team_dashboard",
+      "label": "Team Dashboard",
+      "observed_usage": [
+        {"source": "host_access_log", "signal": "GET /api/team-dashboard/config", "count": 19, "last_seen": "2026-05-24"},
+        {"source": "host_access_log", "signal": "GET /api/team-dashboard/tasks", "count": 12, "last_seen": "2026-05-23"},
+        {"source": "host_access_log", "signal": "POST /api/team-dashboard/project-status", "count": 16, "last_seen": "2026-05-23"},
+        {"source": "host_team_portal_db", "signal": "team_dashboard_configs updated_at", "count": 1, "last_seen": "2026-05-23"},
+        {"source": "cloud_run_logging", "signal": "GET /api/team-dashboard/version-plan/af/sync-status", "count": 288, "last_seen": "2026-05-24"},
+        {"source": "cloud_run_logging", "signal": "GET /api/team-dashboard/version-plan/af", "count": 157, "last_seen": "2026-05-24"},
+        {"source": "cloud_run_logging", "signal": "POST /api/team-dashboard/version-plan/af/rows including 17 stale revision 409s", "count": 141, "last_seen": "2026-05-23"},
+        {"source": "cloud_run_logging", "signal": "POST /api/team-dashboard/version-plan/af/cell", "count": 75, "last_seen": "2026-05-23"},
+        {"source": "cloud_run_logging", "signal": "POST /api/team-dashboard/version-plan/af/sync", "count": 19, "last_seen": "2026-05-22"},
+        {"source": "cloud_run_logging", "signal": "GET /api/team-dashboard/config", "count": 11, "last_seen": "2026-05-17"}
+      ],
+      "scenarios": [
+        {
+          "id": "config_tasks_and_project_status",
+          "description": "Observed dashboard config, task reload, and project status calls are covered.",
+          "tests": [
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_config_uses_remote_local_agent_store_when_enabled",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_tasks_api_groups_under_prd_and_pending_live_by_team",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_tasks_can_load_one_team_at_a_time",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_project_status_updates_bpmis_and_cached_payload",
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_team_dashboard_project_status_editing_smoke"
+          ]
+        },
+        {
+          "id": "version_plan_cloud_and_store_conflicts",
+          "description": "Observed Cloud homepage/version-plan reads, row/cell writes, stale revision 409s, sync-status polling, and sync attempts are covered by browser smoke, stale revision, and Firestore store selection tests.",
+          "tests": [
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_cloud_home_opens_standalone_version_plan_smoke",
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_team_dashboard_version_plan_manual_row_controls_smoke",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_version_plan_api_rejects_stale_revision",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_version_plan_route_uses_firestore_store_for_cloud_uat_auto_backend"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "local_agent_proxy",
+      "label": "Local Agent Proxy",
+      "observed_usage": [
+        {"source": "host_access_log", "signal": "POST /api/local-agent/team-dashboard/config/load", "count": 208, "last_seen": "2026-05-24"},
+        {"source": "host_access_log", "signal": "POST /api/local-agent/bpmis/config/load", "count": 6, "last_seen": "2026-05-24"},
+        {"source": "host_access_log", "signal": "POST /api/local-agent/bpmis/call", "count": 42, "last_seen": "2026-05-24"},
+        {"source": "host_access_log", "signal": "GET /uat-local-agent/api/local-agent/healthz", "count": 7, "last_seen": "2026-05-23"}
+      ],
+      "scenarios": [
+        {
+          "id": "public_and_uat_proxy_health_and_signed_forwarding",
+          "description": "Observed public/UAT local-agent proxy traffic is covered for health, bypass, signing, and forwarding.",
+          "tests": [
+            "tests.test_team_portal_access.TeamPortalAccessTests.test_public_local_agent_proxy_forwards_signed_request_to_loopback_agent",
+            "tests.test_team_portal_access.TeamPortalAccessTests.test_public_local_agent_proxy_forwards_healthz_to_loopback_agent_health",
+            "tests.test_team_portal_access.TeamPortalAccessTests.test_uat_local_agent_proxy_forwards_to_isolated_loopback_agent",
+            "tests.test_team_portal_access.TeamPortalAccessTests.test_uat_local_agent_health_proxy_forwards_to_isolated_loopback_healthz",
+            "tests.test_team_portal_access.TeamPortalAccessTests.test_uat_local_agent_proxy_bypasses_google_login_gate"
+          ]
+        },
+        {
+          "id": "bpmis_and_team_dashboard_proxy_contract",
+          "description": "Observed BPMIS and team-dashboard proxy calls are covered for serialization, config load, and restart behavior.",
+            "tests": [
+              "tests.test_local_agent.LocalAgentProtocolTests.test_signature_round_trip_and_tamper_rejection",
+              "tests.test_local_agent.LocalAgentProtocolTests.test_stale_signature_is_rejected",
+            "tests.test_local_agent.LocalAgentServerTests.test_signed_bpmis_config_save_and_load_use_agent_data_dir",
+            "tests.test_local_agent.LocalAgentServerTests.test_signed_bpmis_call_delegates_to_direct_client",
+            "tests.test_local_agent.LocalAgentServerTests.test_unexpected_bpmis_error_returns_json",
+            "tests.test_local_agent.LocalAgentServerTests.test_bpmis_proxy_summary_and_serialization_helpers_cover_risk_shapes",
+            "tests.test_team_stack_scripts.TeamStackScriptTests.test_mac_stack_restart_refreshes_local_agent_when_bpmis_proxy_is_enabled"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "source_code_qa",
+      "label": "Source Code QA",
+      "observed_usage": [
+        {"source": "host_access_log", "signal": "GET /source-code-qa", "count": 8, "last_seen": "2026-05-23"},
+        {"source": "host_access_log", "signal": "GET /api/source-code-qa/sessions", "count": 8, "last_seen": "2026-05-23"},
+        {"source": "host_access_log", "signal": "GET /api/source-code-qa/runtime-evidence", "count": 4, "last_seen": "2026-05-23"},
+        {"source": "host_llm_ledger", "signal": "flow=source_code_qa", "count": 174, "last_seen": "2026-05-24"},
+        {"source": "local_llm_ledger", "signal": "flow=source_code_qa", "count": 345, "last_seen": "2026-05-17"},
+        {"source": "cloud_run_logging", "signal": "GET /source-code-qa", "count": 6, "last_seen": "2026-05-17"},
+        {"source": "cloud_run_logging", "signal": "GET /api/source-code-qa/sessions", "count": 4, "last_seen": "2026-05-17"},
+        {"source": "cloud_run_logging", "signal": "GET /api/source-code-qa/config", "count": 4, "last_seen": "2026-05-17"}
+      ],
+      "scenarios": [
+        {
+          "id": "browser_chat_sessions_and_runtime_evidence",
+          "description": "Observed page, session restore, config, and runtime evidence calls are covered.",
+          "tests": [
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_source_code_qa_chat_answer_and_followup_context_smoke",
+            "tests.test_source_code_qa.SourceCodeQARouteTests.test_source_code_qa_session_api_creates_lists_and_loads_session",
+            "tests.test_source_code_qa.SourceCodeQARouteTests.test_source_code_qa_route_access_gate_and_json_error_boundaries"
+          ]
+        },
+        {
+          "id": "llm_answer_repair_sql_and_release_gate",
+          "description": "Observed deep, repair, SQL generation, and release-gate Source Code QA flows are covered.",
+          "tests": [
+            "tests.test_source_code_qa.SourceCodeQARouteTests.test_source_code_qa_sql_answer_creates_downloadable_package",
+            "tests.test_source_code_qa.SourceCodeQARouteTests.test_source_code_qa_route_async_queue_and_event_stream_boundaries",
+            "tests.test_source_code_qa.SourceCodeQAServiceTests.test_release_gate_evaluator_requires_team_balanced_coverage",
+            "tests.test_source_code_qa.SourceCodeQAServiceTests.test_release_gate_evaluator_requires_country_segment_coverage"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "meeting_recorder",
+      "label": "Meeting Recorder",
+      "observed_usage": [
+        {"source": "host_access_log", "signal": "GET /meeting-recorder", "count": 3, "last_seen": "2026-05-23"},
+        {"source": "host_access_log", "signal": "GET /api/meeting-recorder/records", "count": 3, "last_seen": "2026-05-23"},
+        {"source": "host_access_log", "signal": "GET /api/meeting-recorder/diagnostics", "count": 2, "last_seen": "2026-05-23"},
+        {"source": "host_access_log", "signal": "GET /api/meeting-recorder/calendar/upcoming", "count": 2, "last_seen": "2026-05-23"},
+        {"source": "host_meeting_records", "signal": "recent records with text outputs", "count": 36, "last_seen": "2026-05-22"},
+        {"source": "host_llm_ledger", "signal": "flow=meeting_recorder", "count": 58, "last_seen": "2026-05-22"}
+      ],
+      "scenarios": [
+        {
+          "id": "ui_calendar_records_diagnostics",
+          "description": "Observed meeting recorder UI, records, diagnostics, and calendar list calls are covered.",
+          "tests": [
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_meeting_recorder_calendar_start_stop_archive_smoke",
+            "tests.test_meeting_recorder.MeetingRecorderRouteTests.test_meeting_recorder_route_access_gates_cover_api_and_page_handlers",
+            "tests.test_meeting_recorder.MeetingRecorderRouteTests.test_local_meeting_recorder_route_error_boundaries"
+          ]
+        },
+        {
+          "id": "record_lifecycle_processing_minutes_and_assets",
+          "description": "Observed completed recording metadata and minutes generation are covered across local-agent routes, processing, assets, and lifecycle health.",
+          "tests": [
+            "tests.test_local_agent.LocalAgentServerTests.test_signed_meeting_recorder_direct_routes_delegate_to_runtime_and_processing_service",
+            "tests.test_local_agent.LocalAgentServerTests.test_signed_meeting_recorder_asset_supports_range_streaming",
+            "tests.test_local_agent.LocalAgentServerTests.test_signed_meeting_recorder_process_async_returns_job_and_completes",
+            "tests.test_meeting_recorder.MeetingRecorderRuntimeTests.test_calendar_meeting_schedules_auto_stop_twenty_minutes_after_planned_end",
+            "tests.test_web_core_coverage.WebCoreCoverageTests.test_meeting_recorder_and_monthly_report_job_helper_edges"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "prd_self_assessment",
+      "label": "PRD Self-Assessment and Reviewer",
+      "observed_usage": [
+        {"source": "host_access_log", "signal": "GET /prd-self-assessment", "count": 11, "last_seen": "2026-05-23"},
+        {"source": "host_access_log", "signal": "GET /api/prd-self-assessment/latest", "count": 11, "last_seen": "2026-05-23"},
+        {"source": "host_access_log", "signal": "POST /api/prd-self-assessment/sections", "count": 2, "last_seen": "2026-05-23"},
+        {"source": "host_llm_ledger", "signal": "flow=prd_reviewer", "count": 21, "last_seen": "2026-05-23"},
+        {"source": "cloud_run_logging", "signal": "GET /prd-self-assessment", "count": 2, "last_seen": "2026-05-17"},
+        {"source": "cloud_run_logging", "signal": "GET /api/prd-self-assessment/latest", "count": 2, "last_seen": "2026-05-17"}
+      ],
+      "scenarios": [
+        {
+          "id": "page_latest_sections_and_browser_async",
+          "description": "Observed PRD self-assessment page/latest/section extraction paths and browser async review are covered.",
+          "tests": [
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_prd_self_assessment_non_admin_review_async_smoke",
+            "tests.test_prd_briefing_routes.PRDBriefingRouteTests.test_prd_self_assessment_sections_endpoint_returns_metadata",
+            "tests.test_prd_briefing_routes.PRDBriefingRouteTests.test_prd_self_assessment_review_endpoint_passes_selected_sections",
+            "tests.test_prd_briefing_routes.PRDBriefingRouteTests.test_prd_self_assessment_latest_endpoint_can_route_to_local_agent",
+            "tests.test_web_core_coverage.WebCoreCoverageTests.test_prd_self_assessment_and_generation_job_edges"
+          ]
+        },
+        {
+          "id": "reviewer_generation_scoring_and_failures",
+          "description": "Observed PRD reviewer LLM generation is covered for scoring, issue extraction, malformed input, missing evidence, and partial output handling.",
+          "tests": [
+            "tests.test_prd_briefing_service.PRDBriefingServiceTests.test_prd_reviewer_normalization_and_empty_section_boundaries",
+            "tests.test_prd_briefing_service.PRDBriefingServiceTests.test_prd_reviewer_misc_parsing_and_linked_evidence_boundaries",
+            "tests.test_prd_briefing_service.PRDBriefingServiceTests.test_prd_review_persists_generation_failure_and_validates_inputs",
+            "tests.test_prd_briefing_service.PRDBriefingServiceTests.test_prd_review_rejects_pages_without_readable_sections",
+            "tests.test_text_generation.TextGenerationClientTests.test_prd_reviewer_defaults_to_deep_route_without_source_code_qa_fallback"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "monthly_report",
+      "label": "Team Dashboard Monthly Report",
+      "observed_usage": [
+        {"source": "host_access_log", "signal": "GET /reports", "count": 6, "last_seen": "2026-05-23"},
+        {"source": "host_access_log", "signal": "GET /api/team-dashboard/monthly-report/latest-draft", "count": 6, "last_seen": "2026-05-23"},
+        {"source": "host_access_log", "signal": "GET /api/team-dashboard/monthly-report/template", "count": 6, "last_seen": "2026-05-23"},
+        {"source": "host_llm_ledger", "signal": "flow=monthly_report", "count": 31, "last_seen": "2026-05-17"},
+        {"source": "cloud_run_logging", "signal": "GET /reports", "count": 1, "last_seen": "2026-05-17"}
+      ],
+      "scenarios": [
+        {
+          "id": "reports_page_template_latest_and_async_generation",
+          "description": "Observed reports page, template/latest draft APIs, and async monthly report LLM generation are covered.",
+          "tests": [
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_team_dashboard_monthly_report_async_generation_smoke",
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_team_dashboard_monthly_report_empty_highlights_browser_smoke",
+            "tests.test_web_team_dashboard_routes_edges.WebTeamDashboardRouteEdgeTests.test_monthly_report_style_latest_daily_and_send_edges",
+            "tests.test_web_team_dashboard_routes_edges.WebTeamDashboardRouteEdgeTests.test_monthly_report_draft_remote_thread_and_error_edges",
+            "tests.test_llm_call_ledger.LLMCallLedgerTests.test_infers_known_portal_flows_from_prompt_mode",
+            "tests.test_monthly_report.MonthlyReportTests.test_monthly_report_service_generation_edges_cover_caches_and_limits"
+          ]
+        },
+        {
+          "id": "monthly_report_send_and_report_intelligence",
+          "description": "Observed monthly report generation is covered with report intelligence, send, and local-agent job boundaries.",
+          "tests": [
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_monthly_report_draft_returns_portal_result",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_monthly_report_send_sends_edited_draft",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_monthly_report_uses_shared_local_agent_jobs_when_remote_config_enabled",
+            "tests.test_report_intelligence.ReportIntelligenceTests.test_monthly_evidence_sidecar_sources_limits_and_risk_levels"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "report_intelligence_seatalk",
+      "label": "Report Intelligence SeaTalk Name Mapping",
+      "observed_usage": [
+        {"source": "host_access_log", "signal": "GET /api/team-dashboard/report-intelligence/seatalk/name-mappings", "count": 23, "last_seen": "2026-05-23"},
+        {"source": "host_access_log", "signal": "POST /api/team-dashboard/report-intelligence/seatalk/name-mappings", "count": 17, "last_seen": "2026-05-23"},
+        {"source": "seatalk_name_mapping_cache", "signal": "cache artifacts 2026-05-21 to 2026-05-23", "count": 4, "last_seen": "2026-05-23"},
+        {"source": "host_llm_ledger", "signal": "flow=seatalk", "count": 468, "last_seen": "2026-05-23"},
+        {"source": "local_llm_ledger", "signal": "flow=seatalk", "count": 2004, "last_seen": "2026-05-24"}
+      ],
+      "scenarios": [
+        {
+          "id": "name_mapping_load_save_refresh_and_cache",
+          "description": "Observed Team Dashboard SeaTalk name mapping load/save/cache use is covered.",
+          "tests": [
+            "tests.test_gmail_seatalk_demo_routes.GmailSeaTalkDemoRouteTests.test_team_dashboard_name_mapping_uses_existing_seatalk_store_and_payload_shape",
+            "tests.test_gmail_seatalk_demo_routes.GmailSeaTalkDemoRouteTests.test_team_dashboard_name_mapping_auto_merges_confident_candidates",
+            "tests.test_gmail_seatalk_demo_routes.GmailSeaTalkDemoRouteTests.test_owner_can_load_and_save_seatalk_name_mappings",
+            "tests.test_gmail_seatalk_demo_routes.GmailSeaTalkDemoRouteTests.test_owner_seatalk_name_mappings_refresh_bypasses_cache",
+            "tests.test_seatalk_dashboard.SeaTalkDashboardServiceTests.test_name_mapping_daily_cache_key_has_candidate_version"
+          ]
+        },
+        {
+          "id": "seatalk_insights_split_and_failure_boundaries",
+          "description": "Observed SeaTalk insight generation is covered by split API behavior, todo persistence, and sanitized failure boundaries.",
+          "tests": [
+            "tests.test_gmail_seatalk_demo_routes.GmailSeaTalkDemoRouteTests.test_owner_seatalk_insights_api_returns_codex_payload",
+            "tests.test_gmail_seatalk_demo_routes.GmailSeaTalkDemoRouteTests.test_owner_seatalk_project_updates_api_returns_updates_only",
+            "tests.test_gmail_seatalk_demo_routes.GmailSeaTalkDemoRouteTests.test_owner_seatalk_todos_api_returns_todos_only_and_advances_cursor",
+            "tests.test_gmail_seatalk_demo_routes.GmailSeaTalkDemoRouteTests.test_seatalk_split_api_fallback_and_failure_boundaries_are_sanitized"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "productization_summary",
+      "label": "Productization Summary",
+      "observed_usage": [
+        {"source": "host_access_log", "signal": "GET /api/productization-upgrade-summary/versions", "count": 4, "last_seen": "2026-05-23"},
+        {"source": "host_access_log", "signal": "GET /api/productization-upgrade-summary/issues", "count": 1, "last_seen": "2026-05-23"}
+      ],
+      "scenarios": [
+        {
+          "id": "version_and_issue_lookup",
+          "description": "Observed productization version and issue lookup paths are covered.",
+          "tests": [
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_productization_versions_api_returns_normalized_candidates",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_productization_issues_api_returns_normalized_rows",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_productization_issues_api_filters_to_anti_fraud_components_for_af_team",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_productization_external_failure_matrix_returns_stable_json"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bpmis_projects",
+      "label": "BPMIS Projects",
+      "observed_usage": [
+        {"source": "host_access_log", "signal": "GET /api/bpmis-projects", "count": 5, "last_seen": "2026-05-23"},
+        {"source": "cloud_run_logging", "signal": "GET /api/bpmis-projects", "count": 2, "last_seen": "2026-05-17"}
+      ],
+      "scenarios": [
+        {
+          "id": "project_list_user_scope_and_jira_linking",
+          "description": "Observed BPMIS project list calls are covered with user scoping, ordering, comment/delete behavior, and Jira link lifecycle boundaries.",
+          "tests": [
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_bpmis_projects_api_delete_is_user_scoped",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_bpmis_projects_api_reorder_is_user_scoped",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_create_jira_api_returns_partial_results_and_saves_links",
+            "tests.test_small_module_coverage.SmallModuleCoverageTests.test_bpmis_split_handlers_cover_config_admin_and_jira_boundaries"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "vpn_connection",
+      "label": "VPN Connection",
+      "observed_usage": [
+        {"source": "host_access_log", "signal": "GET /vpn-connection", "count": 1, "last_seen": "2026-05-23"},
+        {"source": "host_access_log", "signal": "GET /api/vpn-connection/profiles", "count": 1, "last_seen": "2026-05-23"},
+        {"source": "host_team_portal_db", "signal": "vpn_profiles last_connected_at", "count": 2, "last_seen": "2026-05-22"},
+        {"source": "cloud_run_logging", "signal": "GET /vpn-connection", "count": 1, "last_seen": "2026-05-17"},
+        {"source": "cloud_run_logging", "signal": "GET /api/vpn-connection/profiles", "count": 1, "last_seen": "2026-05-17"}
+      ],
+      "scenarios": [
+        {
+          "id": "profiles_page_save_connect_and_secret_redaction",
+          "description": "Observed VPN page/profile and recent connection state are covered without leaking credentials.",
+          "tests": [
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_admin_vpn_entrypoint_renders_navigation_and_assets",
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_vpn_save_connect_second_password_does_not_leak_secrets",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_vpn_connection_page_is_admin_only_and_in_admin_navigation",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_vpn_connection_admin_can_save_and_connect_profile",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_vpn_connection_failed_connect_does_not_record_success",
+            "tests.test_user_config.UserConfigStoreTests.test_vpn_profile_password_is_encrypted_and_update_can_keep_existing_password"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "work_memory",
+      "label": "Work Memory",
+      "observed_usage": [
+        {"source": "host_work_memory_db", "signal": "work_memory_ingestion_runs source_type=team_dashboard", "count": 159, "last_seen": "2026-05-23"},
+        {"source": "host_work_memory_db", "signal": "work_memory_items updated_at", "count": 3956, "last_seen": "2026-05-23"},
+        {"source": "host_work_memory_db", "signal": "work_memory_entities updated_at", "count": 3034, "last_seen": "2026-05-23"}
+      ],
+      "scenarios": [
+        {
+          "id": "team_dashboard_ingestion_and_entity_refresh",
+          "description": "Observed Work Memory team-dashboard ingestion and item/entity refresh paths are covered.",
+          "tests": [
+            "tests.test_work_memory.WorkMemoryStoreTests.test_ingestion_ledger_is_exposed_in_health",
+            "tests.test_work_memory.WorkMemoryStoreTests.test_team_dashboard_project_items_include_entities",
+            "tests.test_web_core_coverage.WebCoreCoverageTests.test_work_memory_recording_and_ingestion_edges"
+          ]
+        },
+        {
+          "id": "scope_search_superagent_and_meeting_facts",
+          "description": "Observed Work Memory store state is covered for owner/team scoping, search, superagent quality, meeting facts, and monthly report ingestion.",
+          "tests": [
+            "tests.test_work_memory.WorkMemoryStoreTests.test_private_items_are_owner_scoped_and_corrections_win",
+            "tests.test_work_memory.WorkMemoryStoreTests.test_query_filters_before_applying_result_limit",
+            "tests.test_work_memory.WorkMemoryStoreTests.test_superagent_quality_gate_v1_contract_and_pm_brief",
+            "tests.test_work_memory.WorkMemoryStoreTests.test_meeting_minutes_extract_decisions_and_todos",
+            "tests.test_work_memory.WorkMemoryStoreTests.test_sent_monthly_report_record_becomes_curated_report"
+          ]
+        }
+      ]
+    }
+  ]
+}

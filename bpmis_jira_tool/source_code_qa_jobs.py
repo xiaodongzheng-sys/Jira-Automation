@@ -102,7 +102,7 @@ class SourceCodeQAQueryScheduler:
         selected_user = min(ordered, key=lambda user_key: (self._running_users.get(user_key, 0), ordered.index(user_key)))
         self._user_order.remove(selected_user)
         queue = self._user_queues.get(selected_user)
-        if not queue:
+        if not queue:  # pragma: no cover - filtered above while holding the same lock.
             self._user_queues.pop(selected_user, None)
             return None
         job_id, app, payload, runner = queue.popleft()
@@ -138,7 +138,7 @@ class SourceCodeQAQueryScheduler:
         while order:
             user_key = order.popleft()
             queue = queues.get(user_key)
-            if not queue:
+            if not queue:  # pragma: no cover - local queue map only stores non-empty queues.
                 continue
             result.append(queue.popleft())
             if queue:

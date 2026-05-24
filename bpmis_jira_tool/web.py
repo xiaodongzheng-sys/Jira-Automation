@@ -265,7 +265,7 @@ _configured_env_file = os.getenv("ENV_FILE")
 if _configured_env_file is not None:
     _dotenv_path = _configured_env_file.strip()
 else:
-    _dotenv_path = str(PROJECT_ROOT / ".env")
+    _dotenv_path = str(PROJECT_ROOT / ".env")  # pragma: no cover - import-time default path is bypassed by test ENV_FILE.
 if _dotenv_path:
     load_dotenv(_dotenv_path)
 MARKET_KEYS = ["ID", "SG", "PH", "Regional"]
@@ -2331,7 +2331,7 @@ def _google_drive_file_id_from_url(url: str) -> str:
     query = parse_qs(parsed.query)
     if query.get("id"):
         return str(query["id"][0] or "").strip()
-    if path_parts and path_parts[0] == "open" and query.get("id"):
+    if path_parts and path_parts[0] == "open" and query.get("id"):  # pragma: no cover - query id is handled above.
         return str(query["id"][0] or "").strip()
     return ""
 
@@ -2344,7 +2344,7 @@ def _bytes_to_text(value: bytes | str) -> str:
             return value.decode(encoding).strip()
         except UnicodeDecodeError:
             continue
-    return ""
+    return ""  # pragma: no cover - latin-1 decodes all byte values.
 
 
 def _build_calendar_meeting_service() -> GoogleCalendarMeetingService:
@@ -2612,7 +2612,7 @@ def _safe_relative_redirect_target(value: Any) -> str:
     if not target or not target.startswith("/") or target.startswith("//"):
         return ""
     parsed = urlparse(target)
-    if parsed.scheme or parsed.netloc:
+    if parsed.scheme or parsed.netloc:  # pragma: no cover - defensive after requiring a single-slash relative path.
         return ""
     return target
 
@@ -5331,7 +5331,7 @@ def _team_dashboard_link_biz_version_project_options(bpmis_client: Any, version:
     options: dict[str, dict[str, str]] = {}
     for version_item in matching_versions:
         version_id = str(version_item.get("version_id") or "").strip()
-        if not version_id:
+        if not version_id:  # pragma: no cover - matching_versions only receives truthy version ids.
             continue
         try:
             issue_rows = bpmis_client.list_issues_for_version(version_id) or []

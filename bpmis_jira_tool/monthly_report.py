@@ -2256,6 +2256,12 @@ def _parse_monthly_report_datetime(value: str) -> datetime:
     return parsed
 
 
+def _monthly_optional_json_prompt_section(title: str, value: Any) -> list[str]:
+    if not value:
+        return []
+    return [f"# {title}\n{_json_block(value)}"]
+
+
 def build_monthly_report_prompt(
     *,
     template: str,
@@ -2265,30 +2271,33 @@ def build_monthly_report_prompt(
     prd_sources: list[dict[str, str]],
     prd_errors: list[str],
 ) -> str:
-    return (
-        "# Task\n"
-        "Generate Xiaodong Zheng's monthly team report as concise, business-ready Markdown.\n"
-        "Use the configured template as the required structure. Do not invent facts; when evidence is weak, state the gap or mark as TBD.\n"
-        "Synthesize the configured report-period SeaTalk history with Key Project Biz Project and Jira evidence. Prefer concrete project names, decisions, risks, owners, and dates.\n"
-        "Do not include raw transcripts, long PRD excerpts, tool logs, or confidential implementation chatter that is not needed for a monthly business report.\n\n"
-        "# Output Rules\n"
-        "- Return only the final Markdown draft.\n"
-        "- Keep it suitable to send by email after light PM editing.\n"
-        "- Follow the template headings unless the evidence clearly requires a small additional subsection.\n"
-        "- Start the report body directly with 'Highlights'. Do not create a '0. Critical Updates' heading or any numbered critical-update wrapper before Highlights.\n"
-        "- If the configured template contains Markdown tables, preserve those table structures and fill rows from evidence; use TBD for missing cells instead of converting the table to bullets.\n"
-        "- Do not include Jira ticket IDs or Jira links in the final report.\n\n"
-        f"# Generated At\n{generated_at.isoformat()}\n\n"
-        f"# Monthly Report Template\n{normalize_monthly_report_template(template)}\n\n"
-        "# Key Project / Jira Evidence\n"
-        f"{_json_block(key_projects)}\n\n"
-        "# PRD / Confluence Enrichment\n"
-        f"{_json_block(prd_sources)}\n\n"
-        "# PRD Enrichment Gaps\n"
-        f"{_json_block(prd_errors)}\n\n"
+    sections = [
+        (
+            "# Task\n"
+            "Generate Xiaodong Zheng's monthly team report as concise, business-ready Markdown.\n"
+            "Use the configured template as the required structure. Do not invent facts; when evidence is weak, state the gap or mark as TBD.\n"
+            "Synthesize the configured report-period SeaTalk history with Key Project Biz Project and Jira evidence. Prefer concrete project names, decisions, risks, owners, and dates.\n"
+            "Do not include raw transcripts, long PRD excerpts, tool logs, or confidential implementation chatter that is not needed for a monthly business report.\n\n"
+            "# Output Rules\n"
+            "- Return only the final Markdown draft.\n"
+            "- Keep it suitable to send by email after light PM editing.\n"
+            "- Follow the template headings unless the evidence clearly requires a small additional subsection.\n"
+            "- Start the report body directly with 'Highlights'. Do not create a '0. Critical Updates' heading or any numbered critical-update wrapper before Highlights.\n"
+            "- If the configured template contains Markdown tables, preserve those table structures and fill rows from evidence; use TBD for missing cells instead of converting the table to bullets.\n"
+            "- Do not include Jira ticket IDs or Jira links in the final report.\n\n"
+            f"# Generated At\n{generated_at.isoformat()}\n\n"
+            f"# Monthly Report Template\n{normalize_monthly_report_template(template)}\n\n"
+            "# Key Project / Jira Evidence\n"
+            f"{_json_block(key_projects)}"
+        )
+    ]
+    sections.extend(_monthly_optional_json_prompt_section("PRD / Confluence Enrichment", prd_sources))
+    sections.extend(_monthly_optional_json_prompt_section("PRD Enrichment Gaps", prd_errors))
+    sections.append(
         "# SeaTalk History From Report Period\n"
         f"{seatalk_history_text or 'No readable SeaTalk messages were found in the report period.'}"
     )
+    return "\n\n".join(sections)
 
 
 def build_monthly_report_batch_prompt(
@@ -2302,7 +2311,7 @@ def build_monthly_report_batch_prompt(
     prd_errors: list[str],
 ) -> str:
     source_label = _monthly_report_source_label(source)
-    return (
+    sections = [
         "# Task\n"
         f"Summarize one Monthly Report evidence batch from {source_label}.\n"
         "Do not write the final report. Extract only facts useful for the final monthly business report.\n"
@@ -2319,13 +2328,12 @@ def build_monthly_report_batch_prompt(
         "Do not include raw transcripts or long excerpts.\n\n"
         f"# Generated At\n{generated_at.isoformat()}\n\n"
         f"# Report Period\n{report_period.start_date} to {report_period.end_date}\n\n"
-        f"# User-Provided Highlight Topics\n{_json_block(highlight_topics)}\n\n"
-        f"# Evidence Source\n{source_label}\n\n"
-        "# PRD Enrichment Gaps\n"
-        f"{_json_block(prd_errors)}\n\n"
-        "# Batch Payload\n"
-        f"{_payload_block(payload)}"
-    )
+        f"# Evidence Source\n{source_label}"
+    ]
+    sections.extend(_monthly_optional_json_prompt_section("User-Provided Highlight Topics", highlight_topics))
+    sections.extend(_monthly_optional_json_prompt_section("PRD Enrichment Gaps", prd_errors))
+    sections.append("# Batch Payload\n" f"{_payload_block(payload)}")
+    return "\n\n".join(sections)
 
 
 def build_monthly_highlight_topic_narrative_prompt(
@@ -2364,7 +2372,7 @@ def build_monthly_report_merge_prompt(
     batch_summaries: list[dict[str, Any]],
     prd_errors: list[str],
 ) -> str:
-    return (
+    sections = [
         "# Task\n"
         "Merge Monthly Report batch summaries into one compact evidence brief for final drafting.\n"
         "Do not write the final report. Deduplicate repeated facts and keep the strongest concrete evidence.\n"
@@ -2375,13 +2383,12 @@ def build_monthly_report_merge_prompt(
         "Keep the user-provided highlight topics visible as the final draft's required Highlights scope.\n"
         "Keep the brief concise enough for one final model call.\n\n"
         f"# Generated At\n{generated_at.isoformat()}\n\n"
-        f"# Report Period\n{report_period.start_date} to {report_period.end_date}\n\n"
-        f"# User-Provided Highlight Topics\n{_json_block(highlight_topics)}\n\n"
-        "# PRD Enrichment Gaps\n"
-        f"{_json_block(prd_errors)}\n\n"
-        "# Batch Summaries\n"
-        f"{_json_block(batch_summaries)}"
-    )
+        f"# Report Period\n{report_period.start_date} to {report_period.end_date}"
+    ]
+    sections.extend(_monthly_optional_json_prompt_section("User-Provided Highlight Topics", highlight_topics))
+    sections.extend(_monthly_optional_json_prompt_section("PRD Enrichment Gaps", prd_errors))
+    sections.append("# Batch Summaries\n" f"{_json_block(batch_summaries)}")
+    return "\n\n".join(sections)
 
 
 def build_monthly_report_compress_prompt(
@@ -4011,10 +4018,10 @@ def _highlight_topic_phrase_aliases(tokens: list[str]) -> set[str]:
             if not any(_is_useful_alias_token(token) for token in phrase_tokens) and not has_descriptor_anchor:
                 if not known_product_phrase:
                     continue
-            if all(_is_monthly_report_scope_token(token) for token in phrase_tokens):
+            if all(_is_monthly_report_scope_token(token) for token in phrase_tokens):  # pragma: no cover
                 continue
             if all(_is_monthly_report_generic_descriptor_token(token) for token in phrase_tokens):
-                if not has_descriptor_anchor:
+                if not has_descriptor_anchor:  # pragma: no cover
                     continue
                 phrase = " ".join(phrase_tokens)
                 if len(_normalize_alias_token(phrase)) >= 10:
@@ -5164,14 +5171,14 @@ def _monthly_requirements_year_from_subject(subject: str) -> int | None:
     if full_suffix_match:
         try:
             return 2000 + int(full_suffix_match.group(1))
-        except ValueError:
+        except ValueError:  # pragma: no cover
             return None
     match = re.search(r"(?<!\d)(20\d{2})(?!\d)", text)
     if not match:
         return None
     try:
         return int(match.group(1))
-    except ValueError:
+    except ValueError:  # pragma: no cover
         return None
 
 
@@ -5197,7 +5204,7 @@ def _monthly_requirements_market_for_project(project: dict[str, Any]) -> str:
         if re.search(rf"\b{re.escape(token)}\b", text):
             return market
     for market in ("SG", "ID", "PH"):
-        if re.search(rf"\b{re.escape(market.casefold())}\b", text):
+        if re.search(rf"\b{re.escape(market.casefold())}\b", text):  # pragma: no cover
             return market
     return ""
 

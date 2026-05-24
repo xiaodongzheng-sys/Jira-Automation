@@ -408,6 +408,48 @@ class PRDBriefingRouteTests(unittest.TestCase):
             self.app.config["SETTINGS"].prd_briefing_codex_model,
         )
 
+    def test_build_prd_review_service_wires_store_confluence_and_workspace(self):
+        created = {}
+
+        class FakeConfluenceConnector:
+            def __init__(self, **kwargs):
+                created["confluence_kwargs"] = kwargs
+
+        class FakeReviewService:
+            def __init__(self, **kwargs):
+                created["review_kwargs"] = kwargs
+
+        with self.app.app_context(), patch.object(
+            prd_blueprint_module,
+            "ConfluenceConnector",
+            FakeConfluenceConnector,
+        ), patch.object(
+            prd_blueprint_module,
+            "PRDReviewService",
+            FakeReviewService,
+        ):
+            service = prd_blueprint_module._build_prd_review_service()  # noqa: SLF001
+
+        self.assertIsInstance(service, FakeReviewService)
+        self.assertIs(created["confluence_kwargs"]["store"], self.app.config["PRD_BRIEFING_STORE"])
+        self.assertIs(created["review_kwargs"]["store"], self.app.config["PRD_BRIEFING_STORE"])
+        self.assertIsInstance(created["review_kwargs"]["workspace_root"], Path)
+
+    def test_build_local_agent_client_uses_prd_settings(self):
+        settings = SimpleNamespace(
+            local_agent_base_url="https://agent.example.test",
+            local_agent_hmac_secret="secret",
+            local_agent_timeout_seconds=9.5,
+            local_agent_connect_timeout_seconds=1.5,
+        )
+
+        client = prd_blueprint_module._build_local_agent_client(settings)  # noqa: SLF001
+
+        self.assertEqual(client.base_url, "https://agent.example.test/")
+        self.assertEqual(client.hmac_secret, "secret")
+        self.assertEqual(client.timeout_seconds, 9)
+        self.assertEqual(client.connect_timeout_seconds, 1)
+
     def test_prd_pages_use_distinct_local_storage_keys(self):
         root = Path(__file__).resolve().parent.parent
         briefing_js = (root / "static" / "prd_briefing.js").read_text()
@@ -515,6 +557,17 @@ class PRDBriefingRouteTests(unittest.TestCase):
             self.assertEqual(payload["session"]["audience"], "developer_zh")
             self.assertEqual(payload["briefing_blocks"][0]["block_id"], "block-1-feature")
             self.assertEqual(mock_service.return_value.create_session_kwargs[-1]["language"], "zh")
+
+    @patch("prd_briefing.blueprint._build_service", return_value=FakeBriefingService())
+    def test_get_session_endpoint_returns_payload(self, _mock_service):
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                session["google_credentials"] = {"token": "x"}
+            response = client.get("/prd-briefing/api/session/session-1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["session"]["session_id"], "session-1")
 
     @patch("prd_briefing.blueprint._build_service", return_value=FakeBriefingService())
     def test_create_session_endpoint_accepts_english_briefing_language(self, mock_service):
@@ -873,6 +926,21 @@ class PRDBriefingRouteTests(unittest.TestCase):
         self.assertIn("Asset not found", missing.get_json()["message"])
         self.assertEqual(escaped.status_code, 404)
         self.assertIn("Invalid asset path", escaped.get_json()["message"])
+
+    def test_prd_briefing_asset_route_serves_existing_store_file(self):
+        store_root = self.app.config["PRD_BRIEFING_STORE"].root_dir
+        audio_file = store_root / "audio" / "session-1" / "mock.mp3"
+        audio_file.parent.mkdir(parents=True, exist_ok=True)
+        audio_file.write_bytes(b"mp3-bytes")
+
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                session["google_credentials"] = {"token": "x"}
+            response = client.get("/prd-briefing/assets/audio/session-1/mock.mp3")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, b"mp3-bytes")
 
     def test_prd_briefing_latest_without_owner_key_skips_store(self):
         with self.app.app_context():
@@ -1249,6 +1317,12 @@ class PRDBriefingRouteTests(unittest.TestCase):
         self.assertIn("Unsupported image source", non_http.get_json()["message"])
 
     def test_image_source_allowlist_rejects_missing_base_and_wrong_paths(self):
+        self.assertFalse(
+            prd_blueprint_module._is_allowed_confluence_image_source(  # noqa: SLF001
+                "file:///tmp/mock.png",
+                "https://confluence.shopee.io",
+            )
+        )
         self.assertFalse(
             prd_blueprint_module._is_allowed_confluence_image_source(  # noqa: SLF001
                 "https://confluence.shopee.io/download/attachments/123/mock.png",

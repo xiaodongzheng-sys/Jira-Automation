@@ -458,7 +458,7 @@ def _release_status_lines() -> tuple[list[str], list[dict[str, str]]]:
 
 
 def _version_plan_firestore_summary() -> tuple[dict[str, str], list[dict[str, str]]]:
-    from scripts.release_status import _env_value, _gcloud_firestore_access_token
+    from scripts.release_status import _env_value, _load_version_plan_firestore_payload
 
     env = os.environ
     stage = str(_env_value("VERSION_PLAN_FIRESTORE_ENVIRONMENT", env) or _env_value("TEAM_PORTAL_STAGE", env) or "live").strip().lower()
@@ -476,31 +476,8 @@ def _version_plan_firestore_summary() -> tuple[dict[str, str], list[dict[str, st
     }
     if backend not in {"firestore", "cloud_firestore"} and not project:
         return summary, []
-    def _load_payload() -> tuple[dict[str, Any] | None, str]:
-        try:
-            from google.cloud import firestore  # type: ignore
-
-            snapshot = firestore.Client(project=project or None).collection("portal").document(document).get()
-            if not getattr(snapshot, "exists", False):
-                return None, ""
-            return snapshot.to_dict() or {}, ""
-        except Exception as sdk_error:
-            try:
-                from bpmis_jira_tool.team_dashboard_version_plan_store import _FirestoreRestDocument
-
-                snapshot = _FirestoreRestDocument(
-                    project=project,
-                    document_id=document,
-                    token_provider=lambda: _gcloud_firestore_access_token(env=env),
-                ).get()
-                if not getattr(snapshot, "exists", False):
-                    return None, ""
-                return snapshot.to_dict() or {}, ""
-            except Exception as rest_error:
-                return None, f"{type(sdk_error).__name__}: {sdk_error}; REST fallback: {type(rest_error).__name__}: {rest_error}"
-
     try:
-        payload, error = _load_payload()
+        payload, error = _load_version_plan_firestore_payload(project=project, document=document, env=env)
         if error:
             summary["status"] = "unavailable"
             summary["error"] = error[:500]
@@ -508,7 +485,7 @@ def _version_plan_firestore_summary() -> tuple[dict[str, str], list[dict[str, st
                 _issue(
                     "warn",
                     "version_plan_firestore_unavailable",
-                    "Version Plan Firestore document check failed in this local doctor process; refresh local gcloud/ADC credentials or run the check from a service-account context.",
+                    "Version Plan Firestore document check failed; verify the configured service account has Firestore read permission.",
                 )
             ]
         if payload is None:
@@ -521,7 +498,7 @@ def _version_plan_firestore_summary() -> tuple[dict[str, str], list[dict[str, st
             _issue(
                 "warn",
                 "version_plan_firestore_unavailable",
-                "Version Plan Firestore document check failed in this local doctor process; refresh local gcloud/ADC credentials or run the check from a service-account context.",
+                "Version Plan Firestore document check failed; verify the configured service account has Firestore read permission.",
             )
         ]
     summary["status"] = "ok"

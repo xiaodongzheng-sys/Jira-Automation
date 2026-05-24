@@ -1,13 +1,17 @@
 import json
 import os
 import tempfile
+import threading
 import unittest
+from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from bpmis_jira_tool.bpmis import BPMISDirectApiClient
+import requests
+
+from bpmis_jira_tool.bpmis import BPMISClient, BPMISDirectApiClient
 from bpmis_jira_tool.config import Settings
-from bpmis_jira_tool.errors import BPMISError
+from bpmis_jira_tool.errors import BPMISError, BPMISNotConfiguredError
 from bpmis_jira_tool.models import ProjectMatch
 
 
@@ -143,43 +147,50 @@ class BPMISClientTests(unittest.TestCase):
             def fake_api_request(path, method="GET", params=None, body=None):
                 calls.append((path, params))
                 search = json.loads((params or {}).get("search") or "{}")
-                if path == "/api/v1/issues/tree":
-                    self.assertEqual(search["parentIds"], [225159])
-                    self.assertEqual(search["typeId"], BPMISDirectApiClient.TASK_TYPE_ID)
-                    self.assertEqual(search["taskType"], 1)
-                    return {
-                        "data": {
-                            "rows": [
-                                {
-                                    "id": 991,
-                                    "typeId": "Task",
-                                    "statusId": "Developing",
-                                    "parentIds": [{"id": 225159}],
-                                },
-                                {
-                                    "id": 993,
-                                    "typeId": "Task",
-                                    "statusId": "Testing",
-                                    "parentIds": [{"id": 225159}],
-                                },
-                                {
-                                    "id": 992,
-                                    "typeId": "Task",
-                                    "statusId": "Closed",
-                                    "parentIds": [{"id": 225159}],
-                                },
-                            ]
-                        }
-                    }
                 if path == "/api/v1/issues/list":
-                    self.assertEqual(search["subQueries"], [{"parentIds": [991, 993]}])
+                    if search["subQueries"] == [
+                        {"typeId": [BPMISDirectApiClient.TASK_TYPE_ID]},
+                        {"parentIds": [225159, 225160]},
+                    ]:
+                        return {
+                            "data": {
+                                "rows": [
+                                    {
+                                        "id": 991,
+                                        "typeId": "Task",
+                                        "statusId": "Developing",
+                                        "parentIds": [{"id": 225159}],
+                                    },
+                                    {
+                                        "id": 993,
+                                        "typeId": "Task",
+                                        "statusId": "Testing",
+                                        "parentIds": [{"id": 225159}],
+                                    },
+                                    {
+                                        "id": 994,
+                                        "typeId": "Task",
+                                        "statusId": "Developing",
+                                        "parentIds": [{"id": 225160}],
+                                    },
+                                    {
+                                        "id": 992,
+                                        "typeId": "Task",
+                                        "statusId": "Closed",
+                                        "parentIds": [{"id": 225159}],
+                                    },
+                                ]
+                            }
+                        }
+                    self.assertEqual(search["subQueries"], [{"parentIds": [991, 993, 994]}])
                     return {
                         "data": {
                             "rows": [
-                                {"id": 1001, "typeId": "Sub Task", "statusId": "Open", "storyPoints": 2},
-                                {"id": 1002, "typeId": "Sub Task", "statusId": "Testing", "storyPoints": "3.5"},
+                                {"id": 1001, "typeId": "Sub Task", "parentIds": [991], "statusId": "Open", "storyPoints": 2},
+                                {"id": 1002, "typeId": "Sub Task", "parentIds": [993], "statusId": "Testing", "storyPoints": "3.5"},
                                 {"id": 1004, "typeId": 5, "parentIds": [991], "statusId": "Open", "storyPoints": 1},
                                 {"id": 1005, "typeId": "Sub Task", "parentIds": [993], "statusId": "Open", "storyPoints": 4},
+                                {"id": 1007, "typeId": "Sub Task", "parentIds": [994], "statusId": "Open", "storyPoints": 6},
                                 {"id": 1006, "typeId": "Sub Task", "parentIds": [999], "statusId": "Open", "storyPoints": 10},
                                 {"id": 1003, "typeId": "Sub Task", "statusId": "Closed", "storyPoints": 8},
                             ]
@@ -189,12 +200,58 @@ class BPMISClientTests(unittest.TestCase):
 
             client._api_request = fake_api_request  # type: ignore[method-assign]
 
+            actual_mandays = client.list_actual_mandays_for_projects(["225159", "225160"])
+
+        self.assertEqual(actual_mandays, {"225159": 10.5, "225160": 6.0})
+        self.assertEqual([path for path, _params in calls], ["/api/v1/issues/list", "/api/v1/issues/list"])
+        self.assertEqual(client.request_stats["actual_mandays_project_task_list_page_count"], 1)
+        self.assertEqual(client.request_stats["actual_mandays_subtask_list_page_count"], 1)
+
+    def test_actual_mandays_falls_back_to_tree_when_bulk_task_lookup_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+            calls: list[tuple[str, dict[str, object] | None]] = []
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                calls.append((path, params))
+                search = json.loads((params or {}).get("search") or "{}")
+                if path == "/api/v1/issues/list" and search.get("subQueries") == [
+                    {"typeId": [BPMISDirectApiClient.TASK_TYPE_ID]},
+                    {"parentIds": [225159]},
+                ]:
+                    raise BPMISError("bulk task lookup failed")
+                if path == "/api/v1/issues/tree":
+                    self.assertEqual(search["parentIds"], [225159])
+                    return {
+                        "data": {
+                            "rows": [
+                                {
+                                    "id": 991,
+                                    "typeId": "Task",
+                                    "statusId": "Developing",
+                                    "parentIds": [{"id": 225159}],
+                                },
+                            ]
+                        }
+                    }
+                if path == "/api/v1/issues/list":
+                    self.assertEqual(search["subQueries"], [{"parentIds": [991]}])
+                    return {
+                        "data": {
+                            "rows": [
+                                {"id": 1001, "typeId": "Sub Task", "parentIds": [991], "statusId": "Open", "storyPoints": 2},
+                            ]
+                        }
+                    }
+                self.fail(f"unexpected API call: {path}")
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
             actual_mandays = client.list_actual_mandays_for_projects(["225159"])
 
-        self.assertEqual(actual_mandays, {"225159": 10.5})
-        self.assertEqual([path for path, _params in calls], ["/api/v1/issues/tree", "/api/v1/issues/list"])
-        self.assertEqual(client.request_stats["actual_mandays_project_tree_lookup_count"], 1)
-        self.assertEqual(client.request_stats["actual_mandays_subtask_list_page_count"], 1)
+        self.assertEqual(actual_mandays, {"225159": 2.0})
+        self.assertEqual([path for path, _params in calls], ["/api/v1/issues/list", "/api/v1/issues/tree", "/api/v1/issues/list"])
+        self.assertEqual(client.request_stats["actual_mandays_project_tree_fallback_count"], 1)
 
     def test_team_dashboard_parent_details_are_loaded_in_bulk_chunks(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3189,6 +3246,990 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(parent["market"], "Regional")
             self.assertEqual(parent["priority"], "P1")
             self.assertEqual(parent["regional_pm_pic"], "rpm@npt.sg")
+
+    def test_bpmis_abstract_contract_methods_raise_not_implemented(self):
+        abstract_calls = [
+            (BPMISClient.ping, (object(),)),
+            (BPMISClient.find_project, (object(), "123")),
+            (BPMISClient.create_jira_ticket, (object(), ProjectMatch(project_id="1", raw={}), {})),
+            (BPMISClient.list_biz_projects_for_pm_email, (object(), "pm@npt.sg")),
+            (BPMISClient.list_biz_projects_for_pm_emails, (object(), ["pm@npt.sg"])),
+            (BPMISClient.search_biz_projects_by_title_keywords, (object(), "risk")),
+            (BPMISClient.list_jira_tasks_for_project_created_by_email, (object(), "1", "pm@npt.sg")),
+            (BPMISClient.list_jira_tasks_for_projects_created_by_emails, (object(), ["1"], ["pm@npt.sg"])),
+            (BPMISClient.list_jira_tasks_created_by_emails, (object(), ["pm@npt.sg"])),
+            (BPMISClient.get_single_brd_doc_link_for_project, (object(), "1")),
+            (BPMISClient.get_single_brd_doc_links_for_projects, (object(), ["1"])),
+            (BPMISClient.get_brd_doc_links_for_projects, (object(), ["1"])),
+            (BPMISClient.search_versions, (object(), "v1")),
+            (BPMISClient.list_issues_for_version, (object(), "1")),
+            (BPMISClient.list_actual_mandays_for_projects, (object(), ["1"])),
+            (BPMISClient.get_issue_detail, (object(), "1")),
+            (BPMISClient.get_jira_ticket_detail, (object(), "ABC-1")),
+            (BPMISClient.get_jira_ticket_details, (object(), ["ABC-1"])),
+            (BPMISClient.update_jira_ticket_status, (object(), "ABC-1", "Done")),
+            (BPMISClient.update_biz_project_status, (object(), "1", "Done")),
+            (BPMISClient.update_jira_ticket_fix_version, (object(), "ABC-1", "v1")),
+            (BPMISClient.link_jira_ticket_to_project, (object(), "ABC-1", "1")),
+            (BPMISClient.delink_jira_ticket_from_project, (object(), "ABC-1", "1")),
+        ]
+
+        for method, args in abstract_calls:
+            with self.subTest(method=method.__name__):
+                with self.assertRaises(NotImplementedError):
+                    method(*args)
+
+    def test_low_level_helpers_cover_dates_threads_and_nested_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+
+            with patch.dict(os.environ, {"TEAM_DASHBOARD_TREE_PAGE_SIZE": "bad", "WORKERS": "bad"}, clear=False):
+                self.assertEqual(client._tree_page_size(), 500)
+                self.assertEqual(client._worker_count("WORKERS", 2, 4), 2)
+            with patch.dict(os.environ, {"TEAM_DASHBOARD_TREE_PAGE_SIZE": "1", "WORKERS": "99"}, clear=False):
+                self.assertEqual(client._tree_page_size(), 50)
+                self.assertEqual(client._worker_count("WORKERS", 2, 4), 4)
+
+            sessions = []
+
+            def capture_worker_session():
+                sessions.append(client._bpmis_session_for_current_thread())
+
+            worker = threading.Thread(target=capture_worker_session)
+            worker.start()
+            worker.join()
+            self.assertEqual(sessions[0].headers["Authorization"], client.session.headers["Authorization"])
+            self.assertIs(client._bpmis_session_for_current_thread(), client.session)
+
+            client._store_issue_detail("", {"id": "ignored"})
+            nested_rows = client._flatten_issue_tree_rows(
+                {
+                    "children": [
+                        {"id": "1", "summary": "One"},
+                        {"list": [{"jiraKey": "ABC-2"}, "ignored"]},
+                    ]
+                }
+            )
+            self.assertEqual([row.get("id") or row.get("jiraKey") for row in nested_rows], ["1", "ABC-2"])
+            self.assertEqual(client._extract_issue_rows_from_response({"data": nested_rows})[0]["id"], "1")
+            self.assertEqual(client._extract_issue_rows_from_response("bad"), [])
+            self.assertFalse(client._bpmis_release_query_filter_enabled([1], None))
+            self.assertFalse(client._bpmis_release_query_filter_enabled([1], datetime(2026, 1, 1)))
+
+            self.assertIsNone(client._extract_team_dashboard_version_id({"id": "abc"}))
+            self.assertEqual(client._extract_team_dashboard_version_id({"versionId": "42"}), 42)
+            client._team_dashboard_release_versions_by_id[42] = {"fullName": "May", "timeline": {"release": "2026-05-01"}}
+            self.assertEqual(client._enrich_team_dashboard_fix_version_value({"id": 42, "name": "Old"})["fullName"], "May")
+            self.assertEqual(client._enrich_team_dashboard_fix_version_value("missing"), "missing")
+
+            self.assertEqual(client._parse_issue_datetime(date(2026, 5, 1)), datetime(2026, 5, 1))
+            self.assertEqual(client._parse_issue_datetime(datetime(2026, 5, 1, tzinfo=timezone.utc)), datetime(2026, 5, 1))
+            self.assertEqual(client._parse_issue_datetime("2026/05/01 12:13:14"), datetime(2026, 5, 1, 12, 13, 14))
+            self.assertIsNone(client._parse_issue_datetime("not-a-date"))
+            self.assertIsNone(client._parse_issue_datetime(10**30))
+
+            row = {
+                "fields": {
+                    "jiraKey": "ABC-9",
+                    "fixVersions": [{"timeline": [{"label": "Go Live", "value": "2026-06-01"}]}],
+                    "componentId": [{"label": "Core"}],
+                }
+            }
+            task = client._normalize_team_dashboard_jira_task(row, pm_email="pm@npt.sg")
+            self.assertEqual(task["jira_id"], "ABC-9")
+            self.assertEqual(task["jira_board"], "ABC")
+            self.assertEqual(task["release_date"], "2026-06-01")
+            self.assertEqual(task["component"], "Core")
+            self.assertTrue(client._issue_created_on_or_after({"createdAt": "2026-05-02"}, datetime(2026, 5, 1)))
+            self.assertTrue(client._issue_release_on_or_after({"releaseDate": "2026-05-02"}, datetime(2026, 5, 1)))
+            self.assertTrue(client._all_rows_before_created_cutoff([{"createdAt": "2026-04-01"}], datetime(2026, 5, 1)))
+
+    def test_create_payload_and_create_ticket_error_and_success_boundaries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+            client._get_issue_fields = lambda: {  # type: ignore[method-assign]
+                "marketId": {"key": "marketId", "optionGroup": "market"},
+                "taskType": {"key": "taskType", "optionGroup": "taskType"},
+                "componentId": {
+                    "key": "componentId",
+                    "optionGroup": ["sgComponents", "phComponents"],
+                    "optionGroupFilter": {"match": {"value": [[1], [2]]}},
+                },
+                "bizPriorityId": {"key": "bizPriorityId", "optionGroup": "priority"},
+                "uatRequired": {"key": "uatRequired", "optionGroup": "uat"},
+                "involvedProductTrackId": {"key": "involvedProductTrackId", "optionGroup": "track"},
+            }
+            client._group_options_cache = {
+                "market": [{"label": "SG", "value": 1}],
+                "taskType": [{"label": "Feature", "value": 4}],
+                "sgComponents": [{"label": "Core", "value": 9}],
+                "priority": [{"label": "P1", "value": 11}],
+                "uat": [{"label": "Yes", "value": 1}],
+                "track": [{"label": "Risk", "value": 77}],
+            }
+            client._resolve_jira_user_id = lambda query: {"dev": 101, "qa": 102, "pm": 103, "reporter": 104, "biz": 105}[query]  # type: ignore[method-assign]
+            project = ProjectMatch(project_id="225159", raw={})
+
+            payload = client._build_create_payload(
+                project,
+                {
+                    "Market": "SG",
+                    "Task Type": "Feature",
+                    "Summary": "[Feature][Core] Existing title",
+                    "System": "Core",
+                    "Component": "Core",
+                    "Priority": "P1",
+                    "Need UAT": "Yes",
+                    "Involved Tracks": "Risk",
+                    "PRD Link/s": "https://prd",
+                    "TD Link/s": "https://td",
+                    "Description": "desc",
+                    "Dev PIC": "dev",
+                    "QA PIC": "qa",
+                    "Product Manager": "pm",
+                    "Reporter": "reporter",
+                    "Biz PIC": "biz",
+                },
+            )
+            self.assertEqual(payload["summary"], "[Feature][Core] Existing title")
+            self.assertEqual(payload["componentId"], [9])
+            self.assertEqual(payload["jiraRegionalPmPicId"], [103])
+            self.assertEqual(payload["reporter"], 104)
+
+            with self.assertRaises(BPMISError):
+                client._required_field({}, "Summary")
+            with self.assertRaises(BPMISError):
+                client._select_option_groups({"key": "bad"}, 1)
+            with self.assertRaises(BPMISError):
+                client._resolve_option_value({"key": "x", "optionGroup": "market"}, "Missing")
+            original_api_request = client._api_request
+            client._api_request = lambda *args, **kwargs: {"data": {"rows": []}}  # type: ignore[method-assign]
+            with self.assertRaises(BPMISError):
+                client._resolve_fix_versions(1, "Missing")
+            client._api_request = original_api_request  # type: ignore[method-assign]
+
+            responses = [
+                {"data": {"created": [{"errors": {"summary": "required"}}]}},
+                {"data": {"created": [{}], "add": [{}], "update": [{}]}},
+                {"data": {"created": [{"key": "ABC-1", "self": "https://jira/browse/ABC-1"}]}},
+            ]
+            client._api_request = lambda *args, **kwargs: responses.pop(0)  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "validation failed"):
+                client.create_jira_ticket(project, {"Market": "SG", "Summary": "x"})
+            with self.assertRaisesRegex(BPMISError, "did not return"):
+                client.create_jira_ticket(project, {"Market": "SG", "Summary": "x"})
+            created = client.create_jira_ticket(project, {"Market": "SG", "Summary": "x"})
+            self.assertEqual(created.ticket_key, "ABC-1")
+
+    def test_bpmis_list_and_detail_edges_cover_fallbacks_and_dedupe(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+            self.assertEqual(client.list_jira_tasks_for_project_created_by_email("", "pm@npt.sg"), [])
+            self.assertEqual(client.list_jira_tasks_for_project_created_by_email("abc", "pm@npt.sg"), [])
+
+            rows = [
+                {"id": 1, "jiraKey": "ABC-1", "summary": "Needs detail", "parentIds": [{"id": 225159}]},
+                {"id": 1, "jiraKey": "ABC-1", "summary": "Duplicate", "parentIds": [{"id": 225159}]},
+                {"id": 2, "jiraKey": "ABC-2", "summary": "Wrong reporter", "reporter": {"email": "other@npt.sg"}, "parentIds": [{"id": 225159}]},
+            ]
+            client._api_request = lambda *args, **kwargs: {"data": {"rows": rows}}  # type: ignore[method-assign]
+            client._issue_requires_user_enrichment = lambda row, email: row.get("id") == 1  # type: ignore[method-assign]
+            client.get_issue_detail = lambda issue_id: {"id": issue_id, "reporter": {"email": "pm@npt.sg"}, "parentIds": [{"id": 225159}]}  # type: ignore[method-assign]
+            client._get_jira_ticket_details_via_jira_bulk = lambda keys: None  # type: ignore[method-assign]
+            tasks = client.list_jira_tasks_for_project_created_by_email("225159", "pm@npt.sg")
+            self.assertEqual([task["ticket_key"] for task in tasks], ["ABC-1"])
+
+            client._worker_count = lambda *args: 2  # type: ignore[method-assign]
+
+            def fake_parent_chunk(parent_chunk, _page_size):
+                return [
+                    {"id": parent_chunk[0] + 1000, "jiraKey": f"ABC-{parent_chunk[0]}", "reporter": {"email": "pm@npt.sg"}, "parentIds": [{"id": parent_chunk[0]}]},
+                    {"id": parent_chunk[0] + 2000, "jiraKey": "", "reporter": {"email": "pm@npt.sg"}, "parentIds": [{"id": parent_chunk[0]}]},
+                    {"id": parent_chunk[0] + 3000, "jiraKey": f"DUP-{parent_chunk[0]}", "reporter": {"email": "pm@npt.sg"}, "parentIds": [{"id": parent_chunk[0]}]},
+                    {"id": parent_chunk[0] + 3000, "jiraKey": f"DUP-{parent_chunk[0]}", "reporter": {"email": "pm@npt.sg"}, "parentIds": [{"id": parent_chunk[0]}]},
+                ]
+
+            client._list_jira_task_rows_for_parent_chunk = fake_parent_chunk  # type: ignore[method-assign]
+            grouped = client.list_jira_tasks_for_projects_created_by_emails([str(i) for i in range(1, 55)] + ["bad", "1"], ["pm@npt.sg"])
+            self.assertIn("ABC-1", [task["jira_id"] for task in grouped["1"]])
+            self.assertEqual(sum(1 for task in grouped["1"] if task["jira_id"] == "DUP-1"), 1)
+            self.assertEqual(client.list_jira_tasks_for_projects_created_by_emails(["bad"], ["pm@npt.sg"]), {})
+
+            client._get_jira_ticket_detail_via_jira = lambda key: None  # type: ignore[method-assign]
+            detail_call_count = {"count": 0}
+
+            def fake_safe_api_request(*args, **kwargs):
+                detail_call_count["count"] += 1
+                if detail_call_count["count"] <= 6:
+                    return None
+                return {"data": {"rows": [{"jiraKey": "ABC-3", "id": 333, "summary": "Match"}]}}
+
+            client._safe_api_request = fake_safe_api_request  # type: ignore[method-assign]
+            client.get_issue_detail = lambda issue_id: {"id": issue_id, "desc": "detail"}  # type: ignore[method-assign]
+            detail = client.get_jira_ticket_detail("ABC-3")
+            self.assertEqual(detail["desc"], "detail")
+
+            client._get_jira_ticket_details_via_jira_bulk = lambda keys: None  # type: ignore[method-assign]
+            client.get_jira_ticket_detail = lambda key: {"jiraKey": key, "summary": key}  # type: ignore[method-assign]
+            self.assertEqual(set(client.get_jira_ticket_details(["ABC-3", "ABC-3", "bad"]).keys()), {"ABC-3", "BAD"})
+
+    def test_bpmis_status_link_jira_and_api_error_edges(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+
+            self.assertEqual(client._normalize_jira_status("done"), "Done")
+            self.assertEqual(client._normalize_jira_status("unknown"), "")
+            self.assertEqual(client._normalize_biz_project_status("uat"), "UAT")
+            with self.assertRaises(BPMISError):
+                client._normalize_biz_project_status("unknown")
+            self.assertTrue(client._looks_like_basic_auth_blob("dXNlcjp0b2tlbg"))
+            self.assertFalse(client._looks_like_basic_auth_blob("not base64"))
+            with patch.dict(os.environ, {"JIRA_API_TOKEN": "token", "JIRA_USERNAME": "user"}, clear=False):
+                self.assertEqual(client._jira_auth_candidates("token")[0][1], ("user", "token"))
+            with patch.dict(os.environ, {"JIRA_API_TOKEN": "token", "JIRA_AUTH_SCHEME": "bearer"}, clear=False):
+                self.assertIn("Bearer", client._jira_auth_candidates("token")[0][0]["Authorization"])
+            with patch.dict(os.environ, {"JIRA_API_TOKEN": "token", "JIRA_AUTH_SCHEME": "basic"}, clear=False):
+                self.assertIn("Basic", client._jira_auth_candidates("token")[0][0]["Authorization"])
+
+            client._get_issue_fields = lambda: {"statusId": {"key": "statusId", "optionGroup": "status"}}  # type: ignore[method-assign]
+            client._group_options_cache = {"status": [{"label": "Done", "value": 12}, {"label": "UAT", "value": 13}]}
+            self.assertEqual(client._resolve_jira_status_id("Done"), 12)
+            self.assertEqual(client._resolve_biz_project_status_id("UAT"), 13)
+
+            client._update_jira_ticket_status_via_jira = lambda key, status: None  # type: ignore[method-assign]
+            client.get_jira_ticket_detail = lambda key: {"id": 222, "status": {"label": "Waiting"}}  # type: ignore[method-assign]
+            client._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(BPMISError("boom"))  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "Last error"):
+                client.update_jira_ticket_status("ABC-1", "Done")
+
+            detail_states = iter([
+                {"id": 225159, "status": {"label": "Testing"}},
+                {"id": 225159, "status": {"label": "UAT"}},
+            ])
+            client.get_issue_detail = lambda issue_id: next(detail_states)  # type: ignore[method-assign]
+            client._api_request = lambda *args, **kwargs: {"data": {}}  # type: ignore[method-assign]
+            updated = client.update_biz_project_status("225159", "UAT")
+            self.assertEqual(client._team_dashboard_biz_project_status_label(updated), "UAT")
+
+            client._issue_is_linked_to_parent = lambda key, project_id: False  # type: ignore[method-assign]
+            client._find_bpmis_task_row_for_jira_key = lambda key: {"id": 99, "parentIds": [{"id": 1}]}  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "still not linked"):
+                client.link_jira_ticket_to_project("ABC-1", 225159)
+            client._issue_is_linked_to_parent = lambda key, project_id: False  # type: ignore[method-assign]
+            client._find_linked_bpmis_task_id = lambda key, project_id: ""  # type: ignore[method-assign]
+            client.get_jira_ticket_detail = lambda key: {"jiraKey": key}  # type: ignore[method-assign]
+            self.assertEqual(client.delink_jira_ticket_from_project("ABC-1", 225159)["jiraKey"], "ABC-1")
+
+            with patch.dict(os.environ, {"JIRA_API_TOKEN": "token"}, clear=False):
+                responses = [
+                    self._FakeResponse(401, {"error": "bad"}),
+                    self._FakeResponse(200, None, "not-json"),
+                    self._FakeResponse(204, None, ""),
+                ]
+                with patch("bpmis_jira_tool.bpmis.requests.request", side_effect=responses):
+                    with self.assertRaises(BPMISError):
+                        client._jira_api_request("GET", "/x")
+                    self.assertEqual(client._jira_api_request("GET", "/x", expected_statuses={204}, allow_empty=True), {})
+
+            client._api_request = BPMISDirectApiClient._api_request.__get__(client, BPMISDirectApiClient)  # type: ignore[method-assign]
+            client.session.request = lambda *args, **kwargs: self._FakeResponse(500, {"code": 0})  # type: ignore[method-assign]
+            with self.assertRaises(BPMISError):
+                client._api_request("/bad")
+            client.session.request = lambda *args, **kwargs: self._FakeResponse(200, None, "not-json")  # type: ignore[method-assign]
+            with self.assertRaises(BPMISError):
+                client._api_request("/bad-json")
+            client.session.request = lambda *args, **kwargs: self._FakeResponse(200, {"code": 1, "message": "bad code"})  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "bad code"):
+                client._api_request("/bad-code")
+
+    def test_bpmis_normalization_search_and_actual_mandays_edges(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+            self.assertEqual(client.search_versions(""), [])
+            version_pages = [
+                {"data": {"rows": [{"id": 1, "fullName": "May Release"}, {"id": "", "fullName": "bad"}]}},
+            ]
+            client._api_request = lambda *args, **kwargs: version_pages.pop(0)  # type: ignore[method-assign]
+            self.assertEqual(client.search_versions("May")[0]["id"], 1)
+
+            client._api_request = lambda *args, **kwargs: {"data": {"rows": [{"id": 1, "parentIds": [{"id": "225159"}]}, {"id": 1, "parentIds": [{"id": "225159"}]}, {"id": "closed", "status": "Closed", "parentIds": [{"id": "225159"}]}, {"id": 2, "parentIds": [{"id": "other"}]}]}}  # type: ignore[method-assign]
+            grouped = client._list_open_project_task_rows_via_list_bulk(["225159", "225159", "abc"])
+            self.assertEqual([row["id"] for row in grouped["225159"]], [1])
+            client._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(BPMISError("boom"))  # type: ignore[method-assign]
+            self.assertIsNone(client._list_open_project_task_rows_via_list_bulk(["225159"]))
+            self.assertEqual(client._list_open_project_task_rows_via_tree(""), [])
+
+            pages = [
+                {"data": {"rows": [{"id": "10", "parentIds": [{"id": "225159"}]}, {"id": "225159", "parentIds": [{"id": "225159"}]}, {"id": "11", "status": "Closed", "parentIds": [{"id": "225159"}]}]}},
+            ]
+            client._api_request = lambda *args, **kwargs: pages.pop(0)  # type: ignore[method-assign]
+            self.assertEqual([row["id"] for row in client._list_open_project_task_rows_via_tree("225159")], ["10"])
+
+            client._api_request = lambda *args, **kwargs: {"data": {"rows": [{"id": "s1", "parentIds": [{"id": "10"}], "storyPoints": "3"}, "bad", {"id": "s2", "status": "Closed", "parentIds": [{"id": "10"}]}, {"id": "s3", "parentIds": [{"id": "other"}], "storyPoints": "5"}]}}  # type: ignore[method-assign]
+            self.assertEqual(client._sum_open_subtask_story_points_for_tasks(["10", "10", "abc"]), 3.0)
+
+            rows = client._normalize_team_dashboard_biz_project_rows(
+                [
+                    {"id": 1, "summary": "Done Project", "status": "Done"},
+                    {"id": 2, "summary": "", "status": "4", "marketId": "SG", "bizPriorityId": "P1"},
+                    {"id": 2, "summary": "Duplicate", "status": "4"},
+                ]
+            )
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["issue_id"], "2")
+            self.assertTrue(client._is_team_dashboard_biz_project_status_allowed({}))
+            self.assertFalse(client._is_team_dashboard_biz_project_status_allowed({"status": "Closed"}))
+            self.assertEqual(client._issue_first_text({"fields": {"x": {"label": "Value"}}}, "x"), "Value")
+            self.assertEqual(client._issue_first_person({"people": [{"email": "a@npt.sg"}, {"name": "B"}]}, "people"), "a@npt.sg, B")
+            self.assertEqual(client._extract_links({"url": "https://a.example/x", "href": "n/a"}), ["https://a.example/x"])
+            self.assertEqual(client._extract_market_label({"label": "SG"}), "SG")
+            self.assertEqual(client._emails_for_bpmis_user({"displayName": "PM <pm@npt.sg>"}, ["pm@npt.sg"]), ["pm@npt.sg"])
+
+    def test_bpmis_project_brd_and_search_pagination_edges(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+
+            with self.assertRaises(BPMISError):
+                client.list_biz_projects_for_pm_email("")
+            client._resolve_bpmis_user_ids_by_email = lambda email: []  # type: ignore[method-assign]
+            self.assertEqual(client.list_biz_projects_for_pm_email("pm@npt.sg"), [])
+            client._resolve_bpmis_user_ids_by_emails = lambda emails: {email: [] for email in emails}  # type: ignore[method-assign]
+            self.assertEqual(client.list_biz_projects_for_pm_emails(["pm@npt.sg"]), [])
+            self.assertEqual(client.list_biz_projects_for_pm_emails(["", " "]), [])
+            self.assertEqual(client.search_biz_projects_by_title_keywords("  "), [])
+            self.assertEqual(client.get_brd_doc_links_for_projects(["", " "]), {})
+
+            def normalize_rows(rows):
+                return [{"issue_id": str(row.get("id")), "project_name": row.get("summary", "")} for row in rows]
+
+            client._normalize_team_dashboard_biz_project_rows = normalize_rows  # type: ignore[method-assign]
+            client._resolve_bpmis_user_ids_by_email = lambda email: [101]  # type: ignore[method-assign]
+            client._resolve_bpmis_user_ids_by_emails = lambda emails: {email: [101] for email in emails}  # type: ignore[method-assign]
+            first_page = [{"id": index, "summary": f"Project {index}", "regionalPmPicId": [{"id": 101}]} for index in range(200)]
+            calls = {"count": 0}
+
+            def fake_project_api(*args, **kwargs):
+                calls["count"] += 1
+                return {"data": {"rows": first_page if calls["count"] == 1 else [{"id": 999, "summary": "Last", "regionalPmPicId": [{"id": 101}]}]}}
+
+            client._api_request = fake_project_api  # type: ignore[method-assign]
+            projects = client.list_biz_projects_for_pm_email("pm@npt.sg")
+            self.assertEqual(projects[-1]["issue_id"], "999")
+
+            calls["count"] = 0
+            projects_for_many = client.list_biz_projects_for_pm_emails(["pm@npt.sg"])
+            self.assertEqual(projects_for_many[-1]["matched_pm_emails"], ["pm@npt.sg"])
+
+            calls["count"] = 0
+            self.assertEqual(client.search_biz_projects_by_title_keywords("risk", max_pages=2)[-1]["issue_id"], "999")
+
+            brd_pages = [
+                {"data": {"rows": [{"id": str(index), "parentIds": [{"id": 1}], "link": f"https://prd/{index}"} for index in range(500)]}},
+                {"data": {"rows": [{"id": "1", "parentIds": [{"id": 1}], "link": "https://prd/duplicate"}, {"id": "last", "parentIds": [2], "link": "https://prd/last"}]}},
+            ]
+            client._api_request = lambda *args, **kwargs: brd_pages.pop(0)  # type: ignore[method-assign]
+            links = client.get_brd_doc_links_for_projects(["1", "2", "1"])
+            self.assertEqual(links["2"], ["https://prd/last"])
+            self.assertNotIn("https://prd/duplicate", links["1"])
+
+    def test_bpmis_task_listing_and_actual_mandays_control_edges(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+            self.assertEqual(client.list_jira_tasks_created_by_emails([]), [])
+            client._resolve_team_dashboard_user_ids_timed = lambda emails: {email: [] for email in emails}  # type: ignore[method-assign]
+            client._team_dashboard_release_version_ids = lambda *args: []  # type: ignore[method-assign]
+            self.assertEqual(client.list_jira_tasks_created_by_emails(["pm@npt.sg"]), [])
+
+            client._resolve_team_dashboard_user_ids_timed = lambda emails: {"pm@npt.sg": [101]}  # type: ignore[method-assign]
+            client._team_dashboard_release_version_ids = lambda *args: []  # type: ignore[method-assign]
+            client._list_team_dashboard_jira_task_rows_via_tree = lambda *args, **kwargs: None  # type: ignore[method-assign]
+            task_rows = [
+                {"id": "1", "jiraKey": "ABC-1", "createdAt": "2026-01-01", "reporter": {"id": 101}, "parentIds": [{"id": 225159}]},
+                {"id": "2", "jiraKey": "ABC-2", "createdAt": "2026-06-01", "reporter": {"id": 101}},
+                {"id": "2", "jiraKey": "ABC-2", "createdAt": "2026-06-01", "reporter": {"id": 101}},
+                {"id": "3", "jiraKey": "ABC-3", "createdAt": "2026-06-01"},
+            ]
+            client._list_team_dashboard_jira_task_rows_via_list = lambda *args, **kwargs: list(task_rows)  # type: ignore[method-assign]
+            client.get_issue_detail = lambda issue_id: {"id": issue_id, "reporter": {"id": 101}, "parentIds": [{"id": 225159}]}  # type: ignore[method-assign]
+            client._prime_biz_project_parent_details = lambda rows: None  # type: ignore[method-assign]
+            client._parent_project_for_task = lambda row, cache: {}  # type: ignore[method-assign]
+            client._get_jira_ticket_details_via_jira_bulk = lambda keys: {"ABC-2": {"jiraKey": "ABC-2", "summary": "Live", "status": {"label": "Done"}}}  # type: ignore[method-assign]
+            tasks = client.list_jira_tasks_created_by_emails(["pm@npt.sg"], created_after="2026-05-01")
+            self.assertEqual([task["jira_id"] for task in tasks], ["ABC-2", "ABC-3"])
+            self.assertEqual(client.request_stats["issue_tree_fallback_count"], 1)
+            self.assertEqual(client.request_stats["issue_created_before_cutoff_count"], 1)
+
+            client._list_open_project_task_rows_via_list_bulk = lambda project_ids: None  # type: ignore[method-assign]
+            client._calculate_actual_mandays_for_project = lambda project_id: 2.5  # type: ignore[method-assign]
+            self.assertEqual(client.list_actual_mandays_for_projects(["", "225159", "225159"]), {"225159": 2.5})
+            self.assertEqual(client.list_actual_mandays_for_projects(["", " "]), {})
+            self.assertEqual(client._sum_open_subtask_story_points(""), 0.0)
+            self.assertEqual(client._sum_open_subtask_story_points_for_tasks([]), 0.0)
+            client._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(BPMISError("subtask fail"))  # type: ignore[method-assign]
+            self.assertEqual(client._sum_open_subtask_story_points_for_tasks(["10"]), 0.0)
+
+    def test_bpmis_issue_detail_link_and_update_failure_edges(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+
+            self.assertEqual(client.get_issue_detail(""), {})
+            client._safe_api_request = lambda *args, **kwargs: None  # type: ignore[method-assign]
+            client._get_issue_detail_via_list = lambda issue_id: {"id": issue_id, "summary": "From list"}  # type: ignore[method-assign]
+            self.assertEqual(client.get_issue_detail("101")["summary"], "From list")
+            client._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(BPMISError("list fail"))  # type: ignore[method-assign]
+            self.assertEqual(BPMISDirectApiClient._get_issue_detail_via_list(client, "bad"), {})
+            self.assertEqual(client._get_parent_issue_detail(""), {})
+            client._issue_detail_cache.clear()
+            client._get_issue_detail_via_list = lambda issue_id: {}  # type: ignore[method-assign]
+            client.get_issue_detail = lambda issue_id: {"id": issue_id, "summary": "fallback"}  # type: ignore[method-assign]
+            self.assertEqual(client._get_parent_issue_detail("102")["summary"], "fallback")
+            self.assertEqual(client._get_issue_details_via_list_bulk(["", "abc"]), {})
+
+            client._get_jira_ticket_detail_via_jira = lambda key: None  # type: ignore[method-assign]
+            client._safe_api_request = lambda *args, **kwargs: None  # type: ignore[method-assign]
+            self.assertEqual(client.get_jira_ticket_detail(""), {})
+            self.assertEqual(client.get_jira_ticket_detail("ABC-404"), {})
+            client._get_jira_ticket_details_via_jira_bulk = lambda keys: {}  # type: ignore[method-assign]
+            with patch.dict(os.environ, {"JIRA_API_TOKEN": "token"}, clear=False):
+                self.assertEqual(client.get_jira_ticket_details(["ABC-1"]), {})
+            self.assertEqual(client.get_jira_ticket_details([]), {})
+
+            with self.assertRaises(BPMISError):
+                client.update_jira_ticket_status("", "Done")
+            with self.assertRaises(BPMISError):
+                client.update_jira_ticket_status("ABC-1", "bad")
+            client._update_jira_ticket_status_via_jira = lambda key, status: None  # type: ignore[method-assign]
+            client.get_jira_ticket_detail = lambda key: {}  # type: ignore[method-assign]
+            client._api_request = lambda *args, **kwargs: {"data": {}}  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "does not expose"):
+                client.update_jira_ticket_status("ABC-1", "Done")
+
+            with self.assertRaises(BPMISError):
+                client.update_biz_project_status("", "UAT")
+            with self.assertRaises(BPMISError):
+                client.update_biz_project_status("225159", "")
+            client._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(BPMISError("status fail"))  # type: ignore[method-assign]
+            client.get_issue_detail = lambda issue_id: {}  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "Last error"):
+                client.update_biz_project_status("225159", "UAT")
+
+            with self.assertRaises(BPMISError):
+                client.update_jira_ticket_fix_version("", "v1")
+            with self.assertRaises(BPMISError):
+                client.update_jira_ticket_fix_version("ABC-1", "")
+            client._update_jira_ticket_fix_version_via_jira = lambda *args: None  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "direct Jira API token"):
+                client.update_jira_ticket_fix_version("ABC-1", "v1")
+
+            with self.assertRaises(BPMISError):
+                client.link_jira_ticket_to_project("", 1)
+            with self.assertRaises(BPMISError):
+                client.link_jira_ticket_to_project("ABC-1", "")
+            with self.assertRaises(BPMISError):
+                client.delink_jira_ticket_from_project("", 1)
+            with self.assertRaises(BPMISError):
+                client.delink_jira_ticket_from_project("ABC-1", "")
+            client._issue_is_linked_to_parent = lambda key, project_id: True  # type: ignore[method-assign]
+            client._find_linked_bpmis_task_id = lambda key, project_id: "99"  # type: ignore[method-assign]
+            client._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(BPMISError("delete fail"))  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "Last error"):
+                client.delink_jira_ticket_from_project("ABC-1", 225159)
+
+            with self.assertRaises(BPMISError):
+                client._add_existing_jira_ticket_to_project("", 1)
+            with self.assertRaises(BPMISError):
+                client._add_existing_jira_ticket_to_project("ABC-1", "bad")
+            client._api_request = lambda *args, **kwargs: {"data": {"created": {"errors": {"x": "bad"}}, "add": [{"error": "nope"}]}}  # type: ignore[method-assign]
+            client._wait_until_jira_ticket_is_linked = lambda *args: False  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "Could not add"):
+                client._add_existing_jira_ticket_to_project("ABC-1", 225159)
+            self.assertIn("x: bad", client._extract_batch_jira_issue_error({"data": {"created": {"errors": {"x": "bad"}}}}))
+            self.assertIn("nope", client._extract_batch_jira_issue_error({"data": {"failed": [{"error": "nope"}, "bad"]}}))
+
+    def test_bpmis_jira_live_and_private_extraction_edges(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+
+            self.assertIsNone(client._get_jira_ticket_detail_via_jira("ABC-1"))
+            client._jira_api_request = lambda *args, **kwargs: (_ for _ in ()).throw(BPMISError("status 404"))  # type: ignore[method-assign]
+            self.assertIsNone(client._get_jira_ticket_detail_via_jira("ABC-1"))
+            client._jira_api_request = lambda *args, **kwargs: {"issues": ["bad"]}  # type: ignore[method-assign]
+            self.assertEqual(client._get_jira_ticket_details_via_jira_bulk_chunk(["ABC-1"]), {})
+            client._jira_api_request = lambda *args, **kwargs: (_ for _ in ()).throw(BPMISError("status 400"))  # type: ignore[method-assign]
+            self.assertIsNone(client._get_jira_ticket_details_via_jira_bulk_chunk(["ABC-1"]))
+
+            client._jira_api_request = lambda *args, **kwargs: (_ for _ in ()).throw(BPMISError("status 404"))  # type: ignore[method-assign]
+            self.assertIsNone(client._update_jira_ticket_status_via_jira("ABC-1", "Done"))
+            client._jira_api_request = lambda *args, **kwargs: {"transitions": [{"id": "1", "to": {"name": "Testing"}}]}  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "Available transitions"):
+                client._update_jira_ticket_status_via_jira("ABC-1", "Done")
+            calls = {"count": 0}
+
+            def fake_jira_request(*args, **kwargs):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    return {"transitions": [{"id": "2", "to": {"name": "Done"}}]}
+                return {}
+
+            client._jira_api_request = fake_jira_request  # type: ignore[method-assign]
+            client._get_jira_ticket_detail_via_jira = lambda key: None  # type: ignore[method-assign]
+            self.assertEqual(client._update_jira_ticket_status_via_jira("ABC-1", "Done")["status"]["label"], "Done")
+            client._get_jira_ticket_detail_via_jira = lambda key: {"jiraKey": key, "status": {"label": "Testing"}}  # type: ignore[method-assign]
+            calls["count"] = 0
+            with self.assertRaisesRegex(BPMISError, "still"):
+                client._update_jira_ticket_status_via_jira("ABC-1", "Done")
+
+            client._jira_api_request = lambda *args, **kwargs: (_ for _ in ()).throw(BPMISError("status 401"))  # type: ignore[method-assign]
+            self.assertIsNone(client._update_jira_ticket_fix_version_via_jira("ABC-1", {"name": "v1"}))
+            with patch.dict(os.environ, {"JIRA_API_TOKEN": ""}, clear=False):
+                self.assertIsNone(client._update_jira_ticket_fix_version_via_jira("ABC-1", {"name": "v1"}))
+
+            client._get_jira_ticket_detail_via_jira = lambda key: (_ for _ in ()).throw(BPMISError("boom"))  # type: ignore[method-assign]
+            with patch.dict(os.environ, {"JIRA_API_TOKEN": "token"}, clear=False):
+                self.assertEqual(client._with_live_jira_fields({"jiraKey": "ABC-1"}, "ABC-1")["jiraKey"], "ABC-1")
+            self.assertEqual(client._merge_live_jira_fields({"status": "Waiting"}, {"status": {"label": "Done"}, "fixVersions": ["v1"], "components": ["Core"]})["fixVersions"], ["v1"])
+
+            self.assertEqual(client._extract_issue_description({"desc": {"label": "Desc"}}), "Desc")
+            self.assertEqual(client._extract_issue_pm({"regionalPmPic": [{"email": "pm@npt.sg"}]}), "pm@npt.sg")
+            self.assertFalse(client._is_biz_project_issue({}))
+            self.assertTrue(client._is_biz_project_issue({"typeId": {"label": "Biz Project"}}))
+            self.assertFalse(client._is_subtask_row({"typeId": "Task", "parentIds": [10]}, "10"))
+            self.assertTrue(client._is_subtask_row({"typeId": "Sub-task"}, "10"))
+            self.assertEqual(client._extract_story_points({"storyPoints": "about 3.5 days"}), 3.5)
+            self.assertEqual(client._extract_story_points({"storyPoints": "bad"}), 0.0)
+            self.assertEqual(client._extract_release_date_from_version_value("not dict"), "")
+            self.assertEqual(client._extract_release_date_from_version_value({"timeline": [{"label": "Build", "value": "x"}]}), "")
+            self.assertEqual(client._prefix_summary("Bug", "SG", "Core", "Title"), "Title")
+            self.assertEqual(client._prefix_summary("Feature", "Regional", "", "[Feature][Productization]"), "[Feature][Productization]")
+            self.assertIsNone(client._normalize_ticket_link(""))
+            self.assertEqual(client._summarize_api_params({"search": "{bad"})["search_type"], "raw")
+            self.assertEqual(client._summarize_api_params({"search": json.dumps([1, 2])})["search_item_count"], 2)
+            self.assertEqual(client._summarize_api_payload({"data": [1, 2]})["data_count"], 2)
+            self.assertEqual(client._resolve_project_url(), "https://example.com/me")
+            no_token_settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token=None,
+            )
+            with self.assertRaises(BPMISNotConfiguredError):
+                BPMISDirectApiClient(no_token_settings)
+
+    def test_bpmis_remaining_branch_edges_for_full_module_coverage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+
+            client._get_issue_fields = lambda: {}  # type: ignore[method-assign]
+            client.ping()
+            self.assertEqual(client.find_project("123").project_id, "123")
+            self.assertEqual(client._bpmis_release_cutoff_subquery(datetime(2026, 5, 1))["subQueries"][0]["releaseDate"]["gte"], "2026-05-01")
+            self.assertEqual(client._extract_team_dashboard_version_id(object()), None)
+            self.assertIs(client._with_team_dashboard_release_version_detail({"fixVersionId": 1})["fixVersionId"], 1)
+            self.assertEqual(client._enrich_team_dashboard_fix_version_value(999), 999)
+
+            client._api_request = lambda *args, **kwargs: {"data": [{"id": 7, "emailAddress": "user@npt.sg"}, {"id": 8, "displayName": "Other"}]}  # type: ignore[method-assign]
+            self.assertEqual(client._resolve_jira_user_id("user@npt.sg"), 7)
+            self.assertEqual(client._resolve_jira_user_id("missing"), 7)
+            client._api_request = lambda *args, **kwargs: {"data": []}  # type: ignore[method-assign]
+            with self.assertRaises(BPMISError):
+                client._resolve_jira_user_id("missing")
+
+            version_page_queue = [
+                {"data": {"rows": [{"id": index, "fullName": "May Release"} for index in range(100)]}},
+                {"data": {"rows": []}},
+            ]
+            client._api_request = lambda *args, **kwargs: version_page_queue.pop(0)  # type: ignore[method-assign]
+            self.assertEqual(len(client.search_versions("May")), 99)
+            client._api_request = lambda *args, **kwargs: {"data": {"rows": [{"id": 1, "fullName": "Other"}, {"id": 1, "fullName": "May Release"}]}}  # type: ignore[method-assign]
+            self.assertEqual(len(client.search_versions("May")), 1)
+
+            client._api_request = lambda *args, **kwargs: {"data": {"rows": []}}  # type: ignore[method-assign]
+            self.assertEqual(client.list_issues_for_version(""), [])
+            self.assertEqual(client.list_issues_for_version("5"), [])
+            issue_page_queue = [
+                {"data": {"rows": [{"id": index, "jiraKey": f"ABC-{index}"} for index in range(200)]}},
+                {"data": {"rows": []}},
+            ]
+            client._api_request = lambda *args, **kwargs: issue_page_queue.pop(0)  # type: ignore[method-assign]
+            client._get_issue_details_via_list_bulk = lambda ids: {}  # type: ignore[method-assign]
+            with patch.object(client, "get_issue_detail", return_value={}):
+                self.assertEqual(len(client.list_issues_for_version("5")), 200)
+
+            client._api_request = lambda *args, **kwargs: {"data": {"rows": [{"id": index, "createdAt": "2026-01-01"} for index in range(200)]}}  # type: ignore[method-assign]
+            self.assertEqual(len(client._list_team_dashboard_jira_task_rows_via_list([1], max_pages=1, created_cutoff=datetime(2026, 5, 1))), 200)
+            self.assertGreater(client.request_stats["issue_list_created_cutoff_hit"], 0)
+            client._api_request = lambda *args, **kwargs: {"data": {"rows": [{"id": index, "createdAt": "2026-01-01"} for index in range(50)]}}  # type: ignore[method-assign]
+            self.assertEqual(len(client._list_team_dashboard_jira_task_rows_via_tree_field([1], field_name="reporter", fix_version_ids=[], max_pages=None, created_cutoff=datetime(2026, 5, 1))), 50)
+            client._list_team_dashboard_jira_task_rows_via_tree_field = lambda *args, **kwargs: (_ for _ in ()).throw(BPMISError("tree"))  # type: ignore[method-assign]
+            client._list_team_dashboard_jira_task_rows_via_list = lambda *args, **kwargs: (_ for _ in ()).throw(BPMISError("list"))  # type: ignore[method-assign]
+            self.assertIsNone(client._list_team_dashboard_jira_task_rows_via_tree_or_fallback_field([1], field_name="reporter", fix_version_ids=[], max_pages=None, created_cutoff=None))
+            client._worker_count = lambda *args: 1  # type: ignore[method-assign]
+            client._list_team_dashboard_jira_task_rows_via_tree_or_fallback_field = lambda *args, **kwargs: [{"summary": "No key"}]  # type: ignore[method-assign]
+            self.assertEqual(len(client._list_team_dashboard_jira_task_rows_via_tree([1], fix_version_ids=[], max_pages=None, created_cutoff=None)), 2)
+
+            release_page_queue = [
+                {"data": {"rows": [{"id": index} for index in range(1000)]}},
+                {"data": {"rows": []}},
+            ]
+            client._api_request = lambda *args, **kwargs: release_page_queue.pop(0)  # type: ignore[method-assign]
+            self.assertEqual(client._team_dashboard_release_version_ids(datetime(2026, 1, 1))[0], 1)
+            client._api_request = lambda *args, **kwargs: {"data": {"rows": [{"id": "bad"}]}}  # type: ignore[method-assign]
+            self.assertEqual(client._team_dashboard_release_version_ids(datetime(2026, 1, 1)), [])
+
+            client._api_request = lambda *args, **kwargs: {"data": {"rows": [{"id": "s1", "typeId": "Sub-task", "storyPoints": "2"}, {"id": "s2", "parentIds": [{"id": "task-a"}], "storyPoints": "1"}, "bad"]}}  # type: ignore[method-assign]
+            self.assertEqual(client._sum_open_subtask_story_points_by_project({"": ["x"], "p1": ["", "task-a"]})["p1"], 3.0)
+            client._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(BPMISError("boom"))  # type: ignore[method-assign]
+            self.assertEqual(client._sum_open_subtask_story_points_by_project({"p1": ["task-a"]})["p1"], 0.0)
+
+            client._api_request = lambda *args, **kwargs: {"data": {"rows": [{"id": "1", "parentIds": [{"id": "p1"}]}, "bad", {"id": "2", "parentIds": [{"id": "p1"}], "typeId": "Other"}]}}  # type: ignore[method-assign]
+            self.assertEqual([row["id"] for row in client._list_open_project_task_rows_via_list_bulk(["p1"])["p1"]], ["1"])
+            client._api_request = lambda *args, **kwargs: {"data": {"rows": [{"id": index, "parentIds": [{"id": "p1"}]} for index in range(50)]}}  # type: ignore[method-assign]
+            self.assertEqual(len(client._list_open_project_task_rows_via_tree("p1")), 50)
+            client._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(BPMISError("tree"))  # type: ignore[method-assign]
+            self.assertEqual(client._list_open_project_task_rows_via_tree("p1"), [])
+            chunk_page_queue = [
+                {"data": {"rows": [{"id": "1", "parentIds": [{"id": "p1"}]} for _ in range(200)]}},
+                {"data": {"rows": []}},
+            ]
+            client._api_request = lambda *args, **kwargs: chunk_page_queue.pop(0)  # type: ignore[method-assign]
+            self.assertGreaterEqual(len(client._list_jira_task_rows_for_parent_chunk([1], 200)), 200)
+
+            client._api_request = lambda *args, **kwargs: {"data": {"rows": [{"id": "1"}]}}  # type: ignore[method-assign]
+            self.assertFalse(client._issue_is_linked_to_parent("ABC-1", 225159))
+            client.get_jira_ticket_detail = lambda key: {"id": "77", "parentIds": [{"id": 225159}]}  # type: ignore[method-assign]
+            client._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("bad"))  # type: ignore[method-assign]
+            self.assertTrue(client._issue_is_linked_to_parent("ABC-1", 225159))
+            self.assertEqual(client._find_linked_bpmis_task_id("ABC-1", 225159), "77")
+
+            client._issue_is_linked_to_parent = lambda key, project_id: True  # type: ignore[method-assign]
+            client._verified_linked_jira_detail = lambda key, project_id: {"jiraKey": key, "parentIds": [str(project_id)]}  # type: ignore[method-assign]
+            self.assertEqual(client.link_jira_ticket_to_project("ABC-1", 225159)["jiraKey"], "ABC-1")
+            client._issue_is_linked_to_parent = lambda key, project_id: False  # type: ignore[method-assign]
+            client._find_bpmis_task_row_for_jira_key = lambda key: {}  # type: ignore[method-assign]
+            client._add_existing_jira_ticket_to_project = lambda key, project_id: None  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "still not linked"):
+                client.link_jira_ticket_to_project("ABC-1", 225159)
+            client._find_linked_bpmis_task_id = lambda key, project_id: "99"  # type: ignore[method-assign]
+            client._api_request = lambda *args, **kwargs: {"data": {}}  # type: ignore[method-assign]
+            client._issue_is_linked_to_parent = lambda key, project_id: True  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "still linked"):
+                client.delink_jira_ticket_from_project("ABC-1", 225159)
+
+            sleep_calls = []
+            with patch("bpmis_jira_tool.bpmis.time.sleep", side_effect=lambda seconds: sleep_calls.append(seconds)):
+                client._issue_is_linked_to_parent = lambda key, project_id: False  # type: ignore[method-assign]
+                self.assertFalse(client._wait_until_jira_ticket_is_linked("ABC-1", 225159))
+            self.assertEqual(sleep_calls, [0.5, 0.5])
+
+            client._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(BPMISError("safe fail"))  # type: ignore[method-assign]
+            self.assertIsNone(client._safe_api_request("/x"))
+            client._api_request = lambda *args, **kwargs: {"ok": True}  # type: ignore[method-assign]
+            self.assertEqual(client._safe_api_request("/x"), {"ok": True})
+            self.assertEqual(client._extract_parent_issue_ids({"parentIssueId": 1}), ["1"])
+            self.assertEqual(client._extract_parent_issue_payload({"parentIssueId": {"id": 1}}, "1")["id"], 1)
+            self.assertEqual(client._extract_parent_issue_payload({}, "1"), {})
+            self.assertFalse(client._value_matches_email([{"email": "other@npt.sg"}], "pm@npt.sg"))
+            self.assertFalse(client._value_matches_user("", "pm@npt.sg", {"1"}))
+            self.assertFalse(client._is_subtask_row({"typeId": "Bug"}, "1"))
+            self.assertFalse(client._is_subtask_row_for_any_task({"typeId": "Task", "parentIds": ["1"]}, {"1"}))
+            self.assertEqual(client._extract_story_points({"storyPoints": ""}), 0.0)
+            self.assertEqual(client._extract_issue_pm({}), "")
+            self.assertEqual(client._extract_issue_version_text({"fixVersionId": "123", "version": "Release"}), "Release")
+            self.assertEqual(client._extract_issue_jira_board_text({"jiraBoard": "Board"}, ""), "Board")
+            self.assertEqual(client._extract_links(" "), [])
+            self.assertEqual(client._extract_market_label(None), "")
+            self.assertEqual(client._stringify_person({"unknown": "x"}), "")
+            self.assertEqual(client._extract_version_name({}), "")
+            self.assertEqual(client._version_sort_key("May", "May"), (0, 3, "may"))
+            self.assertIsNone(client._normalize_ticket_link(" "))
+            self.assertFalse(client._looks_like_basic_auth_blob(""))
+            self.assertEqual(client._resolve_jira_status_id("Done"), None)
+            self.assertEqual(client._resolve_biz_project_status_id("Done"), None)
+
+            client._group_options_cache = {"g1": [{"label": "Alpha Beta", "value": 9}]}
+            self.assertEqual(client._resolve_option_value({"key": "x", "optionGroup": "g1"}, "Beta"), 9)
+            self.assertEqual(client._select_option_groups({"key": "x", "optionGroup": ["a", "b"], "optionGroupFilter": {"match": {"value": [1, 2]}}}, 2), ["b"])
+            client._api_request = lambda *args, **kwargs: {"data": [{"id": None}, {"id": 2, "email": "pm@npt.sg"}]}  # type: ignore[method-assign]
+            self.assertEqual(client._resolve_bpmis_user_ids_by_emails(["pm@npt.sg"])["pm@npt.sg"], [2])
+            client._issue_detail_cache.clear()
+            client._store_issue_detail("child", {"id": "child", "parentIds": [{"id": "parent"}]})
+            client._prime_biz_project_parent_details([{"parentIds": [{"id": "child"}]}])
+
+    def test_bpmis_final_uncovered_edges_for_coverage_policy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+
+            rows = [
+                "bad",
+                {"id": "1", "jiraKey": "ABC-1", "parentIds": [{"id": 1}]},
+                {"id": "2", "jiraKey": "ABC-2", "reporter": {"email": "other@npt.sg"}, "parentIds": [{"id": 1}]},
+                {"id": "3", "jiraKey": "", "reporter": {"email": "pm@npt.sg"}, "parentIds": [{"id": 2}]},
+                {"id": "4", "jiraKey": "ABC-4", "reporter": {"email": "pm@npt.sg"}, "parentIds": []},
+            ]
+            client._worker_count = lambda *args: 1  # type: ignore[method-assign]
+            client._list_jira_task_rows_for_parent_chunk = lambda *args, **kwargs: list(rows)  # type: ignore[method-assign]
+            client._issue_requires_user_enrichment = lambda row, email: row.get("id") == "1"  # type: ignore[method-assign]
+            client.get_issue_detail = lambda issue_id: {"id": issue_id, "reporter": {"email": "pm@npt.sg"}, "parentIds": [{"id": 1}]}  # type: ignore[method-assign]
+            client._get_jira_ticket_details_via_jira_bulk = lambda keys: {"ABC-1": {"jiraKey": "ABC-1", "summary": "Live"}}  # type: ignore[method-assign]
+            grouped = client.list_jira_tasks_for_projects_created_by_emails(["1", "2"], ["pm@npt.sg"])
+            self.assertEqual([task["jira_id"] for task in grouped["1"]], ["ABC-1"])
+
+            page_queue = [
+                {"data": {"rows": [{"id": index} for index in range(200)]}},
+                {"data": {"rows": []}},
+            ]
+            client._api_request = lambda *args, **kwargs: page_queue.pop(0)  # type: ignore[method-assign]
+            self.assertEqual(len(client._list_team_dashboard_jira_task_rows_via_list([1], max_pages=None, created_cutoff=None)), 200)
+
+            client._worker_count = lambda *args: 2  # type: ignore[method-assign]
+            client._list_team_dashboard_jira_task_rows_via_tree_or_fallback_field = lambda *args, **kwargs: None  # type: ignore[method-assign]
+            self.assertIsNone(client._list_team_dashboard_jira_task_rows_via_tree([1], fix_version_ids=[], max_pages=None, created_cutoff=None))
+            client._worker_count = lambda *args: 1  # type: ignore[method-assign]
+            client._list_team_dashboard_jira_task_rows_via_tree_or_fallback_field = lambda *args, **kwargs: None  # type: ignore[method-assign]
+            self.assertIsNone(client._list_team_dashboard_jira_task_rows_via_tree([1], fix_version_ids=[], max_pages=None, created_cutoff=None))
+
+            tree_pages = [
+                {"data": {"rows": [{"id": index, "createdAt": "2026-01-01"} for index in range(50)]}},
+                {"data": {"rows": []}},
+            ]
+            client._tree_page_size = lambda: 50  # type: ignore[method-assign]
+            client._api_request = lambda *args, **kwargs: tree_pages.pop(0)  # type: ignore[method-assign]
+            self.assertEqual(len(client._list_team_dashboard_jira_task_rows_via_tree_field([1], field_name="reporter", fix_version_ids=[], max_pages=None, created_cutoff=datetime(2026, 5, 1))), 50)
+
+            self.assertEqual(client._list_open_project_task_rows_via_list_bulk([]), {})
+            client._api_request = lambda *args, **kwargs: {"data": {"rows": ["bad", {"id": "1", "parentIds": [{"id": "p"}]}, {"id": "2", "parentIds": [{"id": "p"}]}]}}  # type: ignore[method-assign]
+            self.assertEqual([row["id"] for row in client._list_open_project_task_rows_via_list_bulk(["p"])["p"]], ["1", "2"])
+            tree_task_pages = [
+                {"data": {"rows": [{"id": str(index), "parentIds": [{"id": "p"}]} for index in range(50)]}},
+                {"data": {"rows": []}},
+            ]
+            client._api_request = lambda *args, **kwargs: tree_task_pages.pop(0)  # type: ignore[method-assign]
+            self.assertEqual(len(client._list_open_project_task_rows_via_tree("p")), 50)
+
+            self.assertEqual(client._sum_open_subtask_story_points({}), 0.0)
+            subtask_pages = [
+                {"data": {"rows": [{"id": "s", "parentIds": [{"id": "task"}], "storyPoints": "1"} for _ in range(200)]}},
+                {"data": {"rows": []}},
+            ]
+            client._api_request = lambda *args, **kwargs: subtask_pages.pop(0)  # type: ignore[method-assign]
+            self.assertEqual(client._sum_open_subtask_story_points_for_tasks(["task"]), 200.0)
+            by_project_pages = [
+                {"data": {"rows": [{"id": "s", "parentIds": [{"id": "task"}], "storyPoints": "1"} for _ in range(200)]}},
+                {"data": {"rows": []}},
+            ]
+            client._api_request = lambda *args, **kwargs: by_project_pages.pop(0)  # type: ignore[method-assign]
+            self.assertEqual(client._sum_open_subtask_story_points_by_project({"p": ["task"]})["p"], 200.0)
+            self.assertEqual(client._sum_open_subtask_story_points_by_project({"p": [""]})["p"], 0.0)
+
+            client._get_issue_fields = lambda: {"status": "bad"}  # type: ignore[method-assign]
+            self.assertIsNone(client._resolve_jira_status_id("Done"))
+            self.assertIsNone(client._resolve_biz_project_status_id("Done"))
+            self.assertEqual(client._extract_team_dashboard_version_id({"id": object()}), None)
+            self.assertIsNone(client._parse_issue_datetime(None))
+            self.assertEqual(client._parse_issue_datetime("1700000000000").year, 2023)
+            self.assertEqual(client._extract_release_date_from_version_value({"timeline": ["bad"]}), "")
+            self.assertEqual(client._extract_issue_version_text({"fixVersionId": "123"}), "123")
+
+            row = {"parentIssueId": {"id": "p", "summary": "Parent"}}
+            self.assertEqual(client._extract_parent_issue_payload(row, "p")["summary"], "Parent")
+            client._get_parent_issue_detail = lambda issue_id: {}  # type: ignore[method-assign]
+            self.assertEqual(client._resolve_biz_project_parent({}, "", {}), client._normalize_team_dashboard_parent_project({}))
+            self.assertEqual(client._resolve_biz_project_parent({"parentIds": [{"id": "a"}]}, "a", {"b": {"bpmis_id": "b"}})["bpmis_id"], "")
+
+            client._get_issue_detail_via_list = lambda issue_id: {}  # type: ignore[method-assign]
+            client.get_issue_detail = lambda issue_id: {"jiraKey": "ABC-1"}  # type: ignore[method-assign]
+            self.assertEqual(client._find_bpmis_task_row_for_jira_key(""), {})
+            client._safe_api_request = lambda *args, **kwargs: {"data": {"rows": [{"jiraKey": "ABC-1"}]}}  # type: ignore[method-assign]
+            self.assertEqual(client._find_bpmis_task_row_for_jira_key("ABC-1")["jiraKey"], "ABC-1")
+            client._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("bad"))  # type: ignore[method-assign]
+            client.get_jira_ticket_detail = lambda key: {"raw_jira": {}, "parentIds": [{"id": 1}], "id": "99"}  # type: ignore[method-assign]
+            self.assertEqual(client._find_linked_bpmis_task_id("ABC-1", 1), "")
+
+            client._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("bad"))  # type: ignore[method-assign]
+            client.get_jira_ticket_detail = lambda key: {}  # type: ignore[method-assign]
+            with self.assertRaises(ValueError):
+                client._issue_is_linked_to_parent("ABC-1", 1)
+
+            client._find_bpmis_task_row_for_jira_key = lambda key: {"id": "99", "parentIds": [{"id": 1}]}  # type: ignore[method-assign]
+            client._issue_is_linked_to_parent = lambda key, project_id: False  # type: ignore[method-assign]
+            client._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(BPMISError("link fail"))  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "Could not link"):
+                client.link_jira_ticket_to_project("ABC-1", 1)
+            client._find_linked_bpmis_task_id = lambda key, project_id: ""  # type: ignore[method-assign]
+            client._issue_is_linked_to_parent = lambda key, project_id: True  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "did not return"):
+                client.delink_jira_ticket_from_project("ABC-1", 1)
+
+            client._api_request = lambda *args, **kwargs: {"data": {"created": [{}]}}  # type: ignore[method-assign]
+            client._wait_until_jira_ticket_is_linked = lambda *args: False  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "verification"):
+                client._add_existing_jira_ticket_to_project("ABC-1", 1)
+            client._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("bad"))  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "Last error"):
+                client._add_existing_jira_ticket_to_project("ABC-1", 1)
+
+            client._update_jira_ticket_status_via_jira = lambda key, status: None  # type: ignore[method-assign]
+            client.get_jira_ticket_detail = lambda key: {"id": "99", "status": {"label": "Waiting"}}  # type: ignore[method-assign]
+            client._api_request = lambda *args, **kwargs: {"data": {}}  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "still 'Waiting'"):
+                client.update_jira_ticket_status("ABC-1", "Done")
+            client.get_issue_detail = lambda issue_id: {"id": issue_id, "status": {"label": "Testing"}}  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "still 'Testing'"):
+                client.update_biz_project_status("1", "UAT")
+
+            client._get_jira_ticket_detail_via_jira = BPMISDirectApiClient._get_jira_ticket_detail_via_jira.__get__(client, BPMISDirectApiClient)  # type: ignore[method-assign]
+            client._get_jira_ticket_details_via_jira_bulk_chunk = BPMISDirectApiClient._get_jira_ticket_details_via_jira_bulk_chunk.__get__(client, BPMISDirectApiClient)  # type: ignore[method-assign]
+            client._update_jira_ticket_status_via_jira = BPMISDirectApiClient._update_jira_ticket_status_via_jira.__get__(client, BPMISDirectApiClient)  # type: ignore[method-assign]
+            client._update_jira_ticket_fix_version_via_jira = BPMISDirectApiClient._update_jira_ticket_fix_version_via_jira.__get__(client, BPMISDirectApiClient)  # type: ignore[method-assign]
+            client._jira_api_request = lambda *args, **kwargs: (_ for _ in ()).throw(BPMISError("status 500"))  # type: ignore[method-assign]
+            with self.assertRaises(BPMISError):
+                client._get_jira_ticket_detail_via_jira("ABC-1")
+            with self.assertRaises(BPMISError):
+                client._get_jira_ticket_details_via_jira_bulk_chunk(["ABC-1"])
+            with self.assertRaises(BPMISError):
+                client._update_jira_ticket_status_via_jira("ABC-1", "Done")
+            with patch.dict(os.environ, {"JIRA_API_TOKEN": "token"}, clear=False):
+                with self.assertRaises(BPMISError):
+                    client._update_jira_ticket_fix_version_via_jira("ABC-1", {"name": "v1"})
+            client._get_jira_ticket_detail_via_jira = lambda key: None  # type: ignore[method-assign]
+            client._get_jira_ticket_details_via_jira_bulk = BPMISDirectApiClient._get_jira_ticket_details_via_jira_bulk.__get__(client, BPMISDirectApiClient)  # type: ignore[method-assign]
+            client._jira_api_request = lambda *args, **kwargs: {}  # type: ignore[method-assign]
+            with patch.dict(os.environ, {"JIRA_API_TOKEN": "token"}, clear=False):
+                self.assertEqual(client._update_jira_ticket_fix_version_via_jira("ABC-1", {"id": "123"})["fixVersions"], ["123"])
+                self.assertEqual(client._get_jira_ticket_details_via_jira_bulk(["ABC-1"] + [f"ABC-{index}" for index in range(2, 103)]), {})
+
+            client._jira_api_request = BPMISDirectApiClient._jira_api_request.__get__(client, BPMISDirectApiClient)  # type: ignore[method-assign]
+            with patch.dict(os.environ, {"JIRA_API_TOKEN": "token"}, clear=False):
+                with patch("bpmis_jira_tool.bpmis.requests.request", side_effect=requests.RequestException("down")):
+                    with self.assertRaisesRegex(BPMISError, "Jira API request failed"):
+                        client._jira_api_request("GET", "/down")
+                response_401 = self._FakeResponse(401, {"error": "bad"})
+                response_403 = self._FakeResponse(403, {"error": "bad"})
+                with patch("bpmis_jira_tool.bpmis.requests.request", side_effect=[response_401, response_403]):
+                    with self.assertRaisesRegex(BPMISError, "status 403"):
+                        client._jira_api_request("GET", "/denied")
+                with patch("bpmis_jira_tool.bpmis.requests.request", return_value=self._FakeResponse(200, None, "not-json")):
+                    self.assertEqual(client._jira_api_request("GET", "/empty", allow_empty=True), {})
+
+            client._api_request = BPMISDirectApiClient._api_request.__get__(client, BPMISDirectApiClient)  # type: ignore[method-assign]
+            client.session.request = lambda *args, **kwargs: (_ for _ in ()).throw(requests.RequestException("down"))  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "BPMIS API request failed"):
+                client._api_request("/down")
+
+    def test_bpmis_last_coverage_gap_edges(self):
+        class BadStr:
+            def __str__(self):
+                raise ValueError("bad str")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+
+            list_pages = [
+                {"data": {"rows": [{"id": index, "jiraKey": f"ABC-{index}", "reporter": {"email": "pm@npt.sg"}} for index in range(200)]}},
+                {"data": {"rows": []}},
+            ]
+            client._api_request = lambda *args, **kwargs: list_pages.pop(0)  # type: ignore[method-assign]
+            self.assertEqual(len(client.list_jira_tasks_for_project_created_by_email("1", "pm@npt.sg")), 200)
+
+            rows = [{"reporter": {"email": "pm@npt.sg"}, "parentIds": [{"id": 1}]}]
+            client._list_jira_task_rows_for_parent_chunk = lambda *args, **kwargs: rows  # type: ignore[method-assign]
+            client._worker_count = lambda *args: 1  # type: ignore[method-assign]
+            grouped = client.list_jira_tasks_for_projects_created_by_emails(["1"], ["pm@npt.sg"])
+            self.assertEqual(grouped["1"], [])
+            client._worker_count = lambda *args: 2  # type: ignore[method-assign]
+            client._list_jira_task_rows_for_parent_chunk = lambda *args, **kwargs: [{"summary": "No key", "reporter": {"email": "pm@npt.sg"}, "parentIds": [{"id": 1}]}]  # type: ignore[method-assign]
+            self.assertEqual(len(client.list_jira_tasks_for_projects_created_by_emails([str(i) for i in range(1, 60)], ["pm@npt.sg"])["1"]), 0)
+
+            client._api_request = lambda *args, **kwargs: {"data": {"rows": []}}  # type: ignore[method-assign]
+            self.assertEqual(client._list_team_dashboard_jira_task_rows_via_list([1], max_pages=0, created_cutoff=None), [])
+            self.assertEqual(client._extract_team_dashboard_version_id(BadStr()), None)
+            client._worker_count = lambda *args: 2  # type: ignore[method-assign]
+            client._list_team_dashboard_jira_task_rows_via_tree_or_fallback_field = lambda *args, **kwargs: [{"summary": "No key"}]  # type: ignore[method-assign]
+            self.assertEqual(len(client._list_team_dashboard_jira_task_rows_via_tree([1], fix_version_ids=[], max_pages=None, created_cutoff=None)), 2)
+
+            client._api_request = lambda *args, **kwargs: {"data": {"rows": [{"id": 1, "fullName": "May Release"}, {"id": 1, "fullName": "May Release"}]}}  # type: ignore[method-assign]
+            self.assertEqual(len(client.search_versions("May")), 1)
+            client._api_request = lambda *args, **kwargs: {"data": {"rows": [{"id": 1, "jiraKey": "ABC-1"}, {"id": 1, "jiraKey": "ABC-1"}]}}  # type: ignore[method-assign]
+            self.assertEqual(len(client.list_issues_for_version("1")), 1)
+
+            client._extract_issue_rows_from_response = lambda response: ["bad", {"id": "1", "parentIds": [{"id": "p"}], "typeId": "Other"}]  # type: ignore[method-assign]
+            self.assertEqual(client._list_open_project_task_rows_via_list_bulk(["p"])["p"], [])
+            bulk_pages = [
+                {"data": {"rows": [{"id": str(index), "parentIds": [{"id": "p"}]} for index in range(200)]}},
+                {"data": {"rows": []}},
+            ]
+            client._extract_issue_rows_from_response = BPMISDirectApiClient._extract_issue_rows_from_response.__get__(client, BPMISDirectApiClient)  # type: ignore[method-assign]
+            client._api_request = lambda *args, **kwargs: bulk_pages.pop(0)  # type: ignore[method-assign]
+            self.assertEqual(len(client._list_open_project_task_rows_via_list_bulk(["p"])["p"]), 200)
+            tree_response_count = {"count": 0}
+
+            def fake_tree_rows(response):
+                tree_response_count["count"] += 1
+                if tree_response_count["count"] == 1:
+                    return [{"id": str(index), "parentIds": [{"id": "p"}]} for index in range(50)]
+                return ["bad", {"id": "x", "parentIds": [{"id": "other"}]}]
+
+            client._tree_page_size = lambda: 50  # type: ignore[method-assign]
+            client._api_request = lambda *args, **kwargs: {"data": {"rows": []}}  # type: ignore[method-assign]
+            client._extract_issue_rows_from_response = fake_tree_rows  # type: ignore[method-assign]
+            self.assertEqual(len(client._list_open_project_task_rows_via_tree("p")), 50)
+            self.assertEqual(client._sum_open_subtask_story_points("task"), 0.0)
+
+            client._get_jira_ticket_detail_via_jira = lambda key: None  # type: ignore[method-assign]
+            detail_calls = {"count": 0}
+
+            def fake_safe_detail(*args, **kwargs):
+                detail_calls["count"] += 1
+                if detail_calls["count"] <= 6:
+                    return None
+                return {"data": {"rows": [{"jiraKey": "ABC-1", "summary": "Match without id"}]}}
+
+            client._safe_api_request = fake_safe_detail  # type: ignore[method-assign]
+            self.assertEqual(client.get_jira_ticket_detail("ABC-1")["summary"], "Match without id")
+
+            client._api_request = lambda *args, **kwargs: {"data": {}}  # type: ignore[method-assign]
+            client.get_issue_detail = lambda issue_id: {"status": ""}  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BPMISError, "Could not update BPMIS"):
+                client.update_biz_project_status("1", "UAT")
+
+            client._get_issue_fields = lambda: {"marketId": {"optionGroup": "market"}, "taskType": {"optionGroup": "taskType"}}  # type: ignore[method-assign]
+            client._group_options_cache = {"market": [{"label": "SG", "value": 1}], "taskType": [{"label": "Feature", "value": 4}]}
+            client._api_request = lambda *args, **kwargs: {"data": {"rows": [{"id": 123, "fullName": "Fallback"}]}}  # type: ignore[method-assign]
+            payload = client._build_create_payload(ProjectMatch(project_id="1", raw={}), {"Market": "SG", "Task Type": "Feature", "Summary": "S", "Fix Version": "Missing"})
+            self.assertEqual(payload["fixVersionId"], [123])
+
+            client.get_jira_ticket_detail = lambda key: {"parentIds": [{"id": 2}]}  # type: ignore[method-assign]
+            client._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(BPMISError("bad"))  # type: ignore[method-assign]
+            self.assertFalse(client._issue_is_linked_to_parent("ABC-1", 1))
+            client._get_jira_ticket_details_via_jira_bulk_chunk = lambda chunk: None  # type: ignore[method-assign]
+            with patch.dict(os.environ, {"JIRA_API_TOKEN": "token"}, clear=False):
+                self.assertIsNone(client._get_jira_ticket_details_via_jira_bulk([f"ABC-{index}" for index in range(101)]))
+            client._get_jira_ticket_details_via_jira_bulk_chunk = BPMISDirectApiClient._get_jira_ticket_details_via_jira_bulk_chunk.__get__(client, BPMISDirectApiClient)  # type: ignore[method-assign]
+            client._jira_api_request = lambda *args, **kwargs: None  # type: ignore[method-assign]
+            self.assertIsNone(client._get_jira_ticket_details_via_jira_bulk_chunk(["ABC-1"]))
+
+            with patch.dict(os.environ, {"JIRA_API_TOKEN": "token"}, clear=False):
+                client._jira_api_request = lambda *args, **kwargs: (_ for _ in ()).throw(BPMISError("status 401"))  # type: ignore[method-assign]
+                self.assertIsNone(client._update_jira_ticket_fix_version_via_jira("ABC-1", {"name": "v1"}))
+                client._get_jira_ticket_detail_via_jira = lambda key: None  # type: ignore[method-assign]
+                self.assertEqual(client._with_live_jira_fields({"jiraKey": "ABC-1"}, "ABC-1")["jiraKey"], "ABC-1")
+
+            client._get_parent_issue_detail = lambda issue_id: {"id": issue_id, "typeId": "TRD", "parentIds": [{"id": "b"}]}  # type: ignore[method-assign]
+            self.assertEqual(client._resolve_biz_project_parent({"parentIds": [{"id": "a"}]}, "a", {"b": {"bpmis_id": "b"}})["bpmis_id"], "b")
+            client._get_parent_issue_detail = lambda issue_id: {"id": issue_id, "typeId": "Closed", "status": "Closed"}  # type: ignore[method-assign]
+            rows = client._normalize_team_dashboard_biz_project_rows([{"id": "1", "summary": "", "status": ""}])
+            self.assertEqual(rows, [])
+            self.assertEqual(client._select_option_groups({"key": "x", "optionGroup": ["a", ""]}, None), ["a"])
 
 
 if __name__ == "__main__":

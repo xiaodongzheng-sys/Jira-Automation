@@ -853,6 +853,7 @@ def _extract_table_media_rows(media: dict[str, Any]) -> list[str]:
         return []
     soup = BeautifulSoup(html, "html.parser")
     rows: list[str] = []
+    seen_rows: set[str] = set()
     for row in soup.find_all("tr"):
         cells = [
             re.sub(r"\s+", " ", cell.get_text(" ", strip=True)).strip()
@@ -861,7 +862,12 @@ def _extract_table_media_rows(media: dict[str, Any]) -> list[str]:
         cells = [cell for cell in cells if cell]
         if not cells:
             continue
-        rows.append(" | ".join(cells))
+        row_text = " | ".join(cells)
+        row_key = row_text.casefold()
+        if row_key in seen_rows:
+            continue
+        seen_rows.add(row_key)
+        rows.append(row_text)
     if not rows:
         fallback = re.sub(r"\n{3,}", "\n\n", soup.get_text("\n", strip=True)).strip()
         if not fallback:
@@ -1031,7 +1037,7 @@ def _is_spurious_identifier_typo_finding(block_text: str, *, source_text: str, s
 
     candidates = _identifier_candidates_from_text(block_text)
     for display_value, normalized in candidates:
-        if not normalized or len(normalized) < 8:
+        if not normalized or len(normalized) < 8:  # pragma: no cover - candidate extraction filters these out.
             continue
         if normalized not in source_identifier_text:
             continue
@@ -1071,6 +1077,29 @@ def _build_prd_source_block(section: Any, index: int) -> str:
     content = str(getattr(section, "content", "") or "").strip()
     title = str(getattr(section, "section_path", "") or getattr(section, "title", "") or f"Section {index}")
     return f"## Section {index}: {title}\n{content}" if content else ""
+
+
+def _format_prd_review_context(
+    *,
+    jira_id: str,
+    jira_link: str,
+    page: IngestedConfluencePage,
+    prd_url: str,
+    include_updated_at: bool = True,
+    batch_label: str = "",
+) -> str:
+    lines: list[str] = []
+    if str(jira_id or "").strip():
+        lines.append(f"- Jira ID: {str(jira_id).strip()}")
+    if str(jira_link or "").strip():
+        lines.append(f"- Jira Link: {str(jira_link).strip()}")
+    lines.append(f"- PRD Title: {page.title}")
+    lines.append(f"- PRD Link: {prd_url}")
+    if include_updated_at:
+        lines.append(f"- PRD Updated At: {page.updated_at or '-'}")
+    if str(batch_label or "").strip():
+        lines.append(f"- Batch: {str(batch_label).strip()}")
+    return "\n".join(lines)
 
 
 def _prd_source_char_count(page: IngestedConfluencePage) -> int:
@@ -1479,7 +1508,7 @@ def _resolve_one_google_sheet_screenshot(
             cache_dir=cache_dir,
         )
         if cached is not None:
-            artifact.update(cached, {"cache_hit": True})
+            artifact.update({**cached, "cache_hit": True})
             return
         extracted = _extract_google_sheet_screenshot_evidence_from_image(
             image_bytes=content,
@@ -2208,6 +2237,7 @@ def _build_compact_prd_review_prompt(
     language: str,
     source: str,
 ) -> str:
+    context = _format_prd_review_context(jira_id=jira_id, jira_link=jira_link, page=page, prd_url=prd_url)
     if normalize_prd_review_language(language) == "en":
         return f"""# Role
 Senior PRD delivery-readiness reviewer using the `prd-review` skill.
@@ -2239,11 +2269,7 @@ State current PRD sections/tables reviewed. If evidence is missing, say `Source 
 Actionable yes/no or rule-choice questions ordered by priority.
 
 # Context
-- Jira ID: {jira_id or "-"}
-- Jira Link: {jira_link or "-"}
-- PRD Title: {page.title}
-- PRD Link: {prd_url}
-- PRD Updated At: {page.updated_at or "-"}
+{context}
 
 # PRD Content
 {source}
@@ -2281,11 +2307,7 @@ No report-template spreadsheet links were found in report-related PRD sections.
 按优先级列出 PM 要回答的 yes/no 或规则选择问题。
 
 # Context
-- Jira ID: {jira_id or "-"}
-- Jira Link: {jira_link or "-"}
-- PRD Title: {page.title}
-- PRD Link: {prd_url}
-- PRD Updated At: {page.updated_at or "-"}
+{context}
 
 # PRD Content
 {source}
@@ -2550,6 +2572,7 @@ def build_prd_review_prompt(
     google_sheet_screenshot_evidence: dict[str, Any] | None = None,
 ) -> str:
     source = _build_prd_source(page)
+    context = _format_prd_review_context(jira_id=jira_id, jira_link=jira_link, page=page, prd_url=prd_url)
     linked_source = _build_linked_spreadsheet_prompt_section(linked_spreadsheet_evidence or {})
     screenshot_source = _build_google_sheet_screenshot_prompt_section(google_sheet_screenshot_evidence or {})
     include_report_sections = _is_report_or_template_prd(page, linked_spreadsheet_evidence)
@@ -2679,11 +2702,7 @@ Return only concise Markdown in English. Every blocker or gap must include a sec
 ---
 
 # Review Context
-- Jira ID: {jira_id or "-"}
-- Jira Link: {jira_link or "-"}
-- PRD Title: {page.title}
-- PRD Link: {prd_url}
-- PRD Updated At: {page.updated_at or "-"}
+{context}
 
 # PRD Content
 {source}
@@ -2770,11 +2789,7 @@ Return only concise Markdown in English. Every blocker or gap must include a sec
 ---
 
 # Review Context
-- Jira ID: {jira_id or "-"}
-- Jira Link: {jira_link or "-"}
-- PRD Title: {page.title}
-- PRD Link: {prd_url}
-- PRD Updated At: {page.updated_at or "-"}
+{context}
 
 # PRD Content
 {source}
@@ -3010,16 +3025,20 @@ def build_prd_review_batch_prompt(
     batch_total: int,
 ) -> str:
     source = _build_prd_source(page, max_chars=PRD_REVIEW_MAX_SOURCE_CHARS)
+    context = _format_prd_review_context(
+        jira_id=jira_id,
+        jira_link=jira_link,
+        page=page,
+        prd_url=prd_url,
+        include_updated_at=False,
+        batch_label=f"{batch_index}/{batch_total}",
+    )
     if normalize_prd_review_language(language) == "en":
         return f"""# Task
 Review this PRD section batch for delivery-readiness evidence. Identify only material P0/P1/P2 delivery gaps from these sections, with section titles and evidence basis. Keep it concise; this will be synthesized with other batches. Preserve scenario/API/field identifiers exactly as written in the PRD and do not create spelling/typo findings for identifiers unless the exact typo is quoted from this batch. Do not treat `[MEDIA_ID_x]` placeholders themselves as PRD defects.
 
 # Context
-- Jira ID: {jira_id or "-"}
-- Jira Link: {jira_link or "-"}
-- PRD Title: {page.title}
-- PRD Link: {prd_url}
-- Batch: {batch_index}/{batch_total}
+{context}
 
 # PRD Batch Content
 {source}
@@ -3028,11 +3047,7 @@ Review this PRD section batch for delivery-readiness evidence. Identify only mat
 请评审这个 PRD section batch 的交付就绪度证据。只识别这些 section 内真正重要的 P0/P1/P2 交付缺口，必须带 section title 和 evidence basis。保持精炼，后续会和其他 batch 合成最终评审。场景名、API 名、字段名等 identifier 必须按 PRD 原文保留；除非能引用本 batch 原文里的 exact typo，否则不要输出 identifier 拼写/typo 类 finding。不能把 `[MEDIA_ID_x]` 占位符本身当作 PRD 缺口。
 
 # Context
-- Jira ID: {jira_id or "-"}
-- Jira Link: {jira_link or "-"}
-- PRD Title: {page.title}
-- PRD Link: {prd_url}
-- Batch: {batch_index}/{batch_total}
+{context}
 
 # PRD Batch Content
 {source}
@@ -3051,6 +3066,7 @@ def build_prd_review_synthesis_prompt(
     google_sheet_screenshot_evidence: dict[str, Any] | None = None,
 ) -> str:
     batch_reviews = _batch_outputs_markdown(batch_outputs)
+    context = _format_prd_review_context(jira_id=jira_id, jira_link=jira_link, page=page, prd_url=prd_url)
     linked_source = _build_linked_spreadsheet_prompt_section(linked_spreadsheet_evidence or {})
     screenshot_source = _build_google_sheet_screenshot_prompt_section(google_sheet_screenshot_evidence or {})
     include_report_sections = _is_report_or_template_prd(page, linked_spreadsheet_evidence)
@@ -3093,11 +3109,7 @@ Synthesize the batch reviews into one final prioritized PRD assessment. Keep onl
 Every finding must include Priority, Section, Problem, Why this is important, Suggested PRD patch, Acceptance check, and Evidence basis. {report_instruction} {screenshot_instruction} {identifier_instruction_en} If evidence is not in the reviewed sections, write `Source not found in selected sections`.
 
 # Context
-- Jira ID: {jira_id or "-"}
-- Jira Link: {jira_link or "-"}
-- PRD Title: {page.title}
-- PRD Link: {prd_url}
-- PRD Updated At: {page.updated_at or "-"}
+{context}
 
 # Batch Reviews
 {batch_reviews}
@@ -3124,11 +3136,7 @@ Every finding must include Priority, Section, Problem, Why this is important, Su
 每条 finding 必须包含优先级、Section、Problem、Why this is important、Suggested PRD patch、Acceptance check、Evidence basis。{report_instruction} {screenshot_instruction} {identifier_instruction_zh} 如果 reviewed sections 没有依据，写 `Source not found in selected sections`。
 
 # Context
-- Jira ID: {jira_id or "-"}
-- Jira Link: {jira_link or "-"}
-- PRD Title: {page.title}
-- PRD Link: {prd_url}
-- PRD Updated At: {page.updated_at or "-"}
+{context}
 
 # Batch Reviews
 {batch_reviews}

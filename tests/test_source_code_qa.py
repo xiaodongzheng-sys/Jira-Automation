@@ -1,6 +1,7 @@
 import json
 import io
 import os
+import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 import sqlite3
@@ -14,12 +15,19 @@ from types import SimpleNamespace
 
 from openpyxl import Workbook
 
+from bpmis_jira_tool import web as portal_web
+from bpmis_jira_tool import source_code_qa_llm_providers as llm_providers
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.source_code_qa import (
     CODE_INDEX_VERSION,
     CodexCliBridgeSourceCodeQALLMProvider,
     RepositoryEntry,
     SourceCodeQAService,
+)
+from bpmis_jira_tool.source_code_qa_stores import (
+    SourceCodeQAAttachmentStore,
+    SourceCodeQAGeneratedArtifactStore,
+    SourceCodeQARuntimeEvidenceStore,
 )
 from bpmis_jira_tool.source_code_qa_types import LLMGenerateResult
 from bpmis_jira_tool.user_config import TEAM_PROFILE_DEFAULTS
@@ -468,6 +476,265 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(forbidden_events.status_code, 403)
         self.assertEqual(empty.status_code, 400)
         self.assertEqual(empty.get_json()["message"], "Business requirement is empty.")
+
+    def test_source_code_qa_route_access_gate_and_json_error_boundaries(self):
+        with self.app.test_client() as client:
+            self._login(client, "external@example.com")
+            blocked = [
+                client.get("/source-code-qa", follow_redirects=False),
+                client.get("/api/source-code-qa/config"),
+                client.get("/api/source-code-qa/sync-jobs/missing"),
+                client.get("/api/source-code-qa/sessions"),
+                client.get("/api/source-code-qa/sessions/missing"),
+                client.post("/api/source-code-qa/sessions/missing/archive"),
+                client.post("/api/source-code-qa/attachments"),
+                client.get("/api/source-code-qa/attachments/missing"),
+                client.get("/api/source-code-qa/generated-artifacts/missing"),
+                client.post("/api/source-code-qa/query", json={"question": "x"}),
+                client.post("/api/source-code-qa/feedback", json={"rating": "ok"}),
+                client.get("/api/source-code-qa/query-jobs/missing"),
+                client.get("/api/source-code-qa/query-jobs/missing/events"),
+            ]
+            self._login(client, "xiaodong.zheng@npt.sg")
+            with patch("bpmis_jira_tool.web._build_source_code_qa_service", side_effect=RuntimeError("config exploded")):
+                config_error = client.get("/api/source-code-qa/config")
+            save_empty_payload = client.post("/api/source-code-qa/config", data="not-json", content_type="text/plain")
+            invalid_limit = client.get("/api/source-code-qa/sessions?limit=not-a-number")
+
+        self.assertTrue(all(response.status_code in {302, 403} for response in blocked))
+        self.assertEqual(config_error.status_code, 500)
+        self.assertEqual(config_error.get_json()["error_category"], "source_code_qa_internal")
+        self.assertIn(save_empty_payload.status_code, {200, 400})
+        self.assertEqual(invalid_limit.status_code, 200)
+
+    def test_source_code_qa_route_attachment_artifact_runtime_and_feedback_boundaries(self):
+        with self.app.test_client() as client:
+            self._login(client, "xiaodong.zheng@npt.sg")
+            created = client.post(
+                "/api/source-code-qa/sessions",
+                json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"},
+            )
+            session_id = created.get_json()["session"]["id"]
+
+            missing_file = client.post(
+                "/api/source-code-qa/attachments",
+                data={"session_id": session_id},
+                content_type="multipart/form-data",
+            )
+            missing_attachment = client.get(f"/api/source-code-qa/attachments/0bad?session_id={session_id}")
+            missing_artifact_session = client.get("/api/source-code-qa/generated-artifacts/0bad")
+            missing_artifact = client.get(f"/api/source-code-qa/generated-artifacts/0bad?session_id={session_id}")
+
+            runtime_store = self.app.config["SOURCE_CODE_QA_RUNTIME_EVIDENCE_STORE"]
+            with patch.object(runtime_store, "list", side_effect=ToolError("bad runtime scope")):
+                runtime_list_error = client.get("/api/source-code-qa/runtime-evidence?pm_team=AF&country=All")
+            runtime_missing_file = client.post(
+                "/api/source-code-qa/runtime-evidence",
+                data={"pm_team": "AF", "country": "All"},
+                content_type="multipart/form-data",
+            )
+            saved_runtime = client.post(
+                "/api/source-code-qa/runtime-evidence",
+                data={
+                    "pm_team": "AF",
+                    "country": "All",
+                    "source_type": "other",
+                    "file": (io.BytesIO(b"runtime note"), "runtime.txt"),
+                },
+                content_type="multipart/form-data",
+            )
+            evidence_id = saved_runtime.get_json()["evidence"]["id"]
+            runtime_deleted = client.delete(f"/api/source-code-qa/runtime-evidence/{evidence_id}?pm_team=AF&country=All")
+            runtime_delete_error = client.delete("/api/source-code-qa/runtime-evidence/not-a-valid-id?pm_team=AF&country=All")
+
+            with patch("bpmis_jira_tool.web._build_source_code_qa_service") as build_service:
+                build_service.return_value.save_feedback.side_effect = ToolError("feedback rejected")
+                feedback_error = client.post("/api/source-code-qa/feedback", json={"rating": "bad"})
+
+        self.assertEqual(missing_file.status_code, 400)
+        self.assertEqual(missing_attachment.status_code, 404)
+        self.assertEqual(missing_artifact_session.status_code, 400)
+        self.assertEqual(missing_artifact.status_code, 404)
+        self.assertEqual(runtime_list_error.status_code, 400)
+        self.assertEqual(runtime_missing_file.status_code, 400)
+        self.assertEqual(saved_runtime.status_code, 200)
+        self.assertEqual(runtime_deleted.status_code, 200)
+        self.assertTrue(runtime_deleted.get_json()["deleted"])
+        self.assertEqual(runtime_delete_error.status_code, 400)
+        self.assertEqual(feedback_error.status_code, 400)
+
+    def test_source_code_qa_route_async_queue_and_event_stream_boundaries(self):
+        class CapturingScheduler:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, **kwargs):
+                self.submissions.append(kwargs)
+
+        scheduler = CapturingScheduler()
+        with self.app.test_client() as client:
+            self._login(client, "teammate@npt.sg")
+            with patch("bpmis_jira_tool.web._source_code_qa_provider_available", return_value=False):
+                async_unavailable = client.post(
+                    "/api/source-code-qa/query",
+                    json={"pm_team": "AF", "country": "All", "question": "x", "llm_provider": "missing", "async": True},
+                )
+            created = client.post(
+                "/api/source-code-qa/sessions",
+                json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"},
+            )
+            session_id = created.get_json()["session"]["id"]
+            original_scheduler = self.app.config["SOURCE_CODE_QA_QUERY_SCHEDULER"]
+            self.app.config["SOURCE_CODE_QA_QUERY_SCHEDULER"] = scheduler
+            try:
+                with patch("bpmis_jira_tool.web._source_code_qa_provider_available", return_value=True):
+                    queued = client.post(
+                        "/api/source-code-qa/query",
+                        json={
+                            "pm_team": "AF",
+                            "country": "All",
+                            "question": "x",
+                            "llm_provider": "codex_cli_bridge",
+                            "session_id": session_id,
+                            "attachment_ids": ["bad-attachment-id"],
+                            "async": True,
+                        },
+                    )
+            finally:
+                self.app.config["SOURCE_CODE_QA_QUERY_SCHEDULER"] = original_scheduler
+
+            job_store: JobStore = self.app.config["JOB_STORE"]
+            failed_query_job = job_store.create("source-code-qa-query", title="Source Code Q&A Query", owner_email="teammate@npt.sg")
+            job_store.fail(failed_query_job.job_id, "query failed", error_category="test", error_code="failed", error_retryable=False)
+            failed_query_events = client.get(f"/api/source-code-qa/query-jobs/{failed_query_job.job_id}/events")
+            failed_query_events_data = failed_query_events.get_data()
+            failed_query_events.close()
+
+            running_query_job = job_store.create("source-code-qa-query", title="Source Code Q&A Query", owner_email="teammate@npt.sg")
+            job_store.update(running_query_job.job_id, state="running", stage="retrieval", message="running", current=1, total=2)
+            with patch("time.sleep", return_value=None):
+                keepalive_response = client.get(f"/api/source-code-qa/query-jobs/{running_query_job.job_id}/events", buffered=False)
+                keepalive_iter = iter(keepalive_response.response)
+                first_event = next(keepalive_iter)
+                keepalive_event = next(keepalive_iter)
+                keepalive_response.close()
+
+            transient_snapshot = {
+                "job_id": "transient",
+                "action": "source-code-qa-query",
+                "state": "running",
+                "owner_email": "teammate@npt.sg",
+            }
+            with patch("bpmis_jira_tool.web._source_code_qa_job_snapshot_for_current_user", side_effect=[transient_snapshot, None]):
+                missing_after_open = client.get("/api/source-code-qa/query-jobs/transient/events")
+                missing_after_open_data = missing_after_open.get_data()
+                missing_after_open.close()
+
+            self._login(client, "xiaodong.zheng@npt.sg")
+            missing_effort_status = client.get("/api/source-code-qa/effort-assessment-jobs/missing")
+            missing_effort_events = client.get("/api/source-code-qa/effort-assessment-jobs/missing/events")
+            missing_effort_events_data = missing_effort_events.get_data()
+            missing_effort_events.close()
+            failed_effort_job = job_store.create("source-code-qa-effort-assessment", title="Source Code Q&A Effort Assessment")
+            job_store.fail(failed_effort_job.job_id, "effort failed", error_category="test", error_code="failed", error_retryable=False)
+            failed_effort_events = client.get(f"/api/source-code-qa/effort-assessment-jobs/{failed_effort_job.job_id}/events")
+            failed_effort_events_data = failed_effort_events.get_data()
+            failed_effort_events.close()
+
+            running_effort_job = job_store.create("source-code-qa-effort-assessment", title="Source Code Q&A Effort Assessment")
+            job_store.update(running_effort_job.job_id, state="running", stage="retrieval", message="running", current=1, total=2)
+            with patch("time.sleep", return_value=None):
+                effort_keepalive_response = client.get(f"/api/source-code-qa/effort-assessment-jobs/{running_effort_job.job_id}/events", buffered=False)
+                effort_keepalive_iter = iter(effort_keepalive_response.response)
+                effort_first_event = next(effort_keepalive_iter)
+                effort_keepalive_event = next(effort_keepalive_iter)
+                effort_keepalive_response.close()
+
+        self.assertEqual(async_unavailable.status_code, 400)
+        self.assertEqual(queued.status_code, 200)
+        self.assertEqual(queued.get_json()["status"], "queued")
+        self.assertEqual(len(scheduler.submissions), 1)
+        self.assertEqual(failed_query_events.status_code, 200)
+        self.assertIn(b"event: failed", failed_query_events_data)
+        self.assertIn(b"event: message", first_event)
+        self.assertEqual(keepalive_event, b": keepalive\n\n")
+        self.assertIn(b"event: failed", missing_after_open_data)
+        self.assertEqual(missing_effort_status.status_code, 404)
+        self.assertIn(b"event: failed", missing_effort_events_data)
+        self.assertIn(b"event: failed", failed_effort_events_data)
+        self.assertIn(b"event: message", effort_first_event)
+        self.assertEqual(effort_keepalive_event, b": keepalive\n\n")
+
+    def test_source_code_qa_split_route_access_gate_early_returns_are_bound(self):
+        from flask import Flask
+        from bpmis_jira_tool import web_source_code_qa_routes as route_module
+        from bpmis_jira_tool.web_source_code_qa_routes import register_source_code_qa_routes
+
+        app = Flask("source-code-qa-access-gate-smoke")
+        app.secret_key = "secret"
+        blocked_response = ("blocked", 499)
+        override_globals = {
+            "_require_source_code_qa_access": lambda *_args, **_kwargs: blocked_response,
+            "_require_source_code_qa_manage_access": lambda *_args, **_kwargs: blocked_response,
+        }
+        missing = object()
+        original_globals = {key: route_module.__dict__.get(key, missing) for key in override_globals}
+        try:
+            register_source_code_qa_routes(app, object(), override_globals)
+            direct_calls = [
+                ("source_code_qa", "/source-code-qa"),
+                ("source_code_qa_config_api", "/api/source-code-qa/config"),
+                ("source_code_qa_sync_job_api", "/api/source-code-qa/sync-jobs/missing", "missing"),
+                ("source_code_qa_sessions_api", "/api/source-code-qa/sessions"),
+                ("source_code_qa_session_api", "/api/source-code-qa/sessions/missing", "missing"),
+                ("source_code_qa_session_archive_api", "/api/source-code-qa/sessions/missing/archive", "missing"),
+                ("source_code_qa_attachments_api", "/api/source-code-qa/attachments"),
+                ("source_code_qa_attachment_api", "/api/source-code-qa/attachments/missing", "missing"),
+                ("source_code_qa_generated_artifact_api", "/api/source-code-qa/generated-artifacts/missing", "missing"),
+                ("source_code_qa_runtime_evidence_delete_api", "/api/source-code-qa/runtime-evidence/missing", "missing"),
+                ("source_code_qa_query_api", "/api/source-code-qa/query"),
+                ("source_code_qa_feedback_api", "/api/source-code-qa/feedback"),
+                ("source_code_qa_query_job_api", "/api/source-code-qa/query-jobs/missing", "missing"),
+                ("source_code_qa_query_job_events_api", "/api/source-code-qa/query-jobs/missing/events", "missing"),
+            ]
+
+            for item in direct_calls:
+                endpoint, path, *args = item
+                with app.test_request_context(path):
+                    self.assertEqual(app.view_functions[endpoint](*args), blocked_response)
+        finally:
+            for key, value in original_globals.items():
+                if value is missing:
+                    route_module.__dict__.pop(key, None)
+                else:
+                    route_module.__dict__[key] = value
+
+    def test_source_code_qa_query_api_accepts_pre_resolved_attachments(self):
+        captured = {}
+
+        def fake_query(**kwargs):
+            captured.update(kwargs)
+            return {"status": "ok", "summary": "done", "matches": []}
+
+        with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today", return_value={"attempted": False, "status": "fresh"}), patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
+            side_effect=fake_query,
+        ):
+            with self.app.test_client() as client:
+                self._login(client, "teammate@npt.sg")
+                response = client.post(
+                    "/api/source-code-qa/query",
+                    json={
+                        "pm_team": "AF",
+                        "country": "All",
+                        "question": "x",
+                        "llm_provider": "codex_cli_bridge",
+                        "_resolved_attachments": [{"id": "pre-resolved", "filename": "context.txt"}],
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured["attachments"], [{"id": "pre-resolved", "filename": "context.txt"}])
 
     def test_effort_assessment_builds_crms_business_plan_and_candidates(self):
         requirement = (
@@ -2095,8 +2362,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertFalse(payload["llm_ready"])
         self.assertEqual(payload["llm_provider"], "codex_cli_bridge")
         self.assertEqual(payload["llm_policy"]["provider"]["provider"], "codex_cli_bridge")
-        self.assertEqual(payload["llm_policy"]["router"]["version"], 8)
-        self.assertEqual(payload["llm_policy"]["versions"]["cache"], 16)
+        self.assertEqual(payload["llm_policy"]["router"]["version"], 12)
+        self.assertEqual(payload["llm_policy"]["versions"]["cache"], 21)
         self.assertEqual(payload["llm_policy"]["versions"]["runtime"], 2)
         self.assertNotIn("max_retries", payload["llm_policy"]["runtime"])
         self.assertEqual(payload["llm_policy"]["model_policy"]["answer"]["model"], payload["llm_model"])
@@ -2850,6 +3117,23 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self._env_patch.stop()
         self.temp_dir.cleanup()
 
+    def _ensure_runtime_helper_app(self):
+        if hasattr(self, "app"):
+            return self.app
+        with patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": self.temp_dir.name,
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "SOURCE_CODE_QA_GITLAB_TOKEN": "secret-token",
+            },
+            clear=False,
+        ):
+            self.app = create_app()
+        self.app.testing = True
+        return self.app
+
     def test_service_uses_internal_responsibility_components(self):
         from bpmis_jira_tool.source_code_qa_components import (
             SourceCodeQAAnswerGenerationComponent,
@@ -2880,6 +3164,1490 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(self.service.codex_timeout_seconds, 360)
         self.assertEqual(tuned.codex_timeout_seconds, 600)
         self.assertEqual(tuned.base_data_root, self.service.base_data_root)
+
+    def test_service_misc_boundary_helpers_cover_source_code_qa_edges(self):
+        from bpmis_jira_tool import source_code_qa
+
+        source_code_qa._log_source_code_qa_timing(
+            "unit",
+            elapsed_ms=-1,
+            skipped=None,
+            tags=("a", "b"),
+            details={"ok": True, "nested": []},
+            marker=object(),
+        )
+        self.assertIs(self.service.with_llm_provider(self.service.llm_provider_name), self.service)
+        with patch.object(source_code_qa, "LLM_PROVIDER_ALLOWED_QUERY_CHOICES", {self.service.llm_provider_name, "other"}):
+            self.assertIsNot(self.service.with_llm_provider("other"), self.service)
+        self.assertIn("codex login", self.service.llm_unavailable_message())
+        self.assertIsInstance(self.service._build_llm_provider(), CodexCliBridgeSourceCodeQALLMProvider)
+
+        self.service.model_policy = {
+            "answer": {"model": "gpt-answer", "override": False},
+            "repair": {"model": "gpt-repair", "override": True},
+            "empty": {"model": "   ", "override": True},
+        }
+        self.assertEqual(self.service._model_for_role("answer"), "gpt-answer")
+        self.assertTrue(self.service._model_for_role("missing", fallback="fallback-model"))
+        self.assertEqual(self.service._model_for_role_or_budget("repair", {"model": "budget-model"}), "gpt-repair")
+        self.assertEqual(self.service._model_for_role_or_budget("empty", {"model": "budget-model"}), "budget-model")
+        self.assertEqual(
+            self.service._normalize_llm_usage({"promptTokenCount": "2", "candidatesTokenCount": "3"})["total_tokens"],
+            5,
+        )
+        self.assertIsNone(
+            self.service._normalize_llm_usage({"prompt_tokens": "bad", "completion_tokens": 3}).get("total_tokens")
+        )
+        merged_usage = self.service._merge_llm_usage({"prompt_tokens": 2, "label": "a"}, {"prompt_tokens": "bad", "label": "b"})
+        self.assertEqual(merged_usage["prompt_tokens"], "bad")
+        self.assertEqual(merged_usage["label"], "a")
+        self.assertEqual(self.service._llm_finish_reason({"candidates": [{"finishReason": "MAX_TOKENS"}]}), "MAX_TOKENS")
+        self.assertEqual(self.service._llm_finish_reason({"choices": [{"finish_reason": "length"}]}), "length")
+        self.assertEqual(self.service._llm_finish_reason({"finish_reason": "stop"}), "stop")
+        self.assertEqual(self.service._llm_finish_reason({}), "")
+
+        self.service.config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.service.config_path.write_text("{bad", encoding="utf-8")
+        with self.assertRaises(ToolError):
+            self.service.load_config()
+        self.service.config_path.write_text(json.dumps({"mappings": []}), encoding="utf-8")
+        self.assertEqual(self.service.load_config()["mappings"], {})
+
+        self.service.domain_profile_path = Path(self.temp_dir.name) / "profiles.json"
+        self.service.domain_knowledge_pack_path = Path(self.temp_dir.name) / "knowledge.json"
+        self.service.domain_profile_path.write_text("{bad", encoding="utf-8")
+        self.assertEqual(self.service.load_domain_profiles(), {"default": {}})
+        self.service.domain_profile_path.write_text(json.dumps({"default": {"api_terms": ["Api"]}, "AF": {"api_terms": ["RiskApi"]}}), encoding="utf-8")
+        self.service.domain_knowledge_pack_path.write_text("[]", encoding="utf-8")
+        self.assertEqual(self.service.load_domain_knowledge_packs(), {"version": 1, "domains": {}})
+
+        pack = {
+            "label": "Anti Fraud",
+            "summary": "Risk decisions",
+            "module_map": [
+                "bad",
+                {"name": "Decision Engine", "aliases": ["risk decision"], "code_hints": ["DecisionService"], "business_flows": ["review"]},
+            ],
+            "terminology": ["bad", {"term": "Rule", "aliases": ["policy"], "code_terms": ["RuleService"]}],
+            "key_artifacts": {
+                "apis": ["bad", {"name": "Decision API", "path": "/api/decision", "purpose": "entry"}],
+                "configs": [{"path": "application.yml"}],
+                "tables": [{"name": "", "path": "", "purpose": "skip"}],
+            },
+            "question_seeds": ["plain question", {"question": "How decision works?", "expected_terms": ["DecisionService"]}],
+            "evidence_rules": ["Prefer runtime evidence"],
+            "retrieval_terms": {"api_terms": ["DecisionClient"]},
+        }
+        self.service.domain_knowledge_pack_path.write_text(json.dumps({"domains": {"AF": pack}}), encoding="utf-8")
+        self.assertIn("DecisionService", self.service._domain_knowledge_terms(pack))
+        self.assertIn("DecisionClient", self.service._domain_profile("AF", "SG")["api_terms"])
+        domain_payload = self.service.domain_knowledge_payload()
+        self.assertEqual(domain_payload["domains"]["AF"]["module_count"], 2)
+        self.assertEqual(self.service._domain_knowledge_pack("AF")["label"], "Anti Fraud")
+        context_text = self.service._llm_domain_context(
+            pm_team="AF",
+            country="SG",
+            question="risk decision api config",
+            evidence_summary={"intent": {"api": True, "config": True}},
+        )
+        self.assertIn("Domain guidance", context_text)
+        self.assertEqual(self.service._matched_domain_modules({"module_map": ["bad"]}, "", {}), [])
+        self.assertTrue(self.service._domain_artifact_lines(pack, {"data_source": True, "module_dependency": True}))
+        self.assertTrue(self.service._domain_artifact_lines(pack, {"rule_logic": True, "impact_analysis": True}))
+        self.assertTrue(self.service._llm_answer_blueprint({"api": True}))
+        self.assertTrue(self.service._llm_answer_blueprint({"config": True}))
+        self.assertTrue(self.service._llm_answer_blueprint({"static_qa": True}))
+        self.assertTrue(self.service._llm_answer_blueprint({"impact_analysis": True}))
+        self.assertTrue(self.service._llm_answer_blueprint({"test_coverage": True}))
+        self.assertIn("CreditReviewCbsService", self.service._question_specific_retrieval_terms("credit review cbs report"))
+        self.assertEqual(self.service._question_specific_retrieval_terms("payslip only"), [])
+        self.assertIn("ExtractRecord", self.service._question_specific_retrieval_terms("payslip extracted fields stored"))
+
+        previous_repo = RepositoryEntry("Risk Engine", "https://git.example.com/af/risk-engine.git")
+        other_repo = RepositoryEntry("Other Service", "https://git.example.com/af/other-service.git")
+        conversation_context = {
+            "key": self.service.mapping_key("AF", "SG"),
+            "question": "How does DecisionService work?",
+            "answer": "It uses DecisionService and risk_table.",
+            "repo_scope": ["Risk Engine"],
+            "matches": [{"repo": "Risk Engine", "path": "src/DecisionService.java", "reason": "risk decision"}],
+            "recent_turns": [
+                "bad",
+                {
+                    "question": "previous DecisionService",
+                    "answer": "answer RiskPolicy",
+                    "matches_snapshot": [{"path": "src/RiskPolicy.java", "reason": "policy reason"}],
+                    "evidence_pack": {"confirmed_facts": ["risk_table"]},
+                    "codex_candidate_paths": [{"path": "src/CodexPath.java", "reason": "candidate"}],
+                },
+            ],
+            "codex_candidate_paths": [{"path": "src/DecisionClient.java", "reason": "client"}],
+            "codex_citation_validation": {"direct_file_refs": [{"path": "src/DirectRef.java"}]},
+            "evidence_pack": {"confirmed_facts": ["decision_table"]},
+            "answer_contract": {"confirmed_sources": ["DecisionSource"]},
+        }
+        augmented, followup = self.service._apply_conversation_context(
+            "What about this method?",
+            conversation_context,
+            current_key=self.service.mapping_key("AF", "SG"),
+            current_repositories=[previous_repo],
+        )
+        self.assertIn("Previous Source Code Q&A context terms", augmented)
+        self.assertTrue(followup["used"])
+        self.assertEqual(self.service._apply_conversation_context("q", None)[1], {"used": False})
+        self.assertEqual(
+            self.service._apply_conversation_context("q", {"key": "CRMS:SG"}, current_key=self.service.mapping_key("AF", "SG"))[1]["reason"],
+            "scope_mismatch",
+        )
+        self.assertEqual(
+            self.service._conversation_repo_scope("ask other service", conversation_context, [previous_repo, other_repo])["mismatch"],
+            True,
+        )
+        self.assertFalse(self.service._conversation_repo_scope("", {}, [previous_repo])["mismatch"])
+        self.assertFalse(self.service._conversation_repo_scope("risk engine", {"repo_scope": ["Risk Engine"]}, [previous_repo])["mismatch"])
+        self.assertEqual(self.service._mentioned_repository_aliases("", [previous_repo]), set())
+        selected, scope = self.service._filter_entries_for_question_repository_scope("risk engine details", [previous_repo, other_repo])
+        self.assertEqual([entry.display_name for entry in selected], ["Risk Engine"])
+        self.assertTrue(scope["active"])
+        all_selected, all_scope = self.service._filter_entries_for_question_repository_scope("", [previous_repo])
+        self.assertFalse(all_scope["active"])
+        self.assertEqual([entry.display_name for entry in all_selected], ["Risk Engine"])
+        self.assertFalse(self.service._repo_scope_alias_is_useful(""))
+        self.assertFalse(self.service._repo_scope_alias_is_useful("repo"))
+        self.assertTrue(self.service._repo_scope_alias_is_specific("risk engine"))
+        self.assertFalse(self.service._repo_scope_alias_is_specific(""))
+        self.assertFalse(self.service._repo_alias_in_text("", "risk engine"))
+        self.assertIn("Decision", self.service._conversation_title_terms("S1 Decision Decision"))
+
+    def test_service_sync_feedback_and_progress_boundaries(self):
+        from bpmis_jira_tool import source_code_qa
+
+        key = self.service.mapping_key("AF", "SG")
+        entry_payload = {"display_name": "Repo", "url": "https://git.example.com/team/repo.git"}
+        entry = RepositoryEntry("Repo", "https://git.example.com/team/repo.git")
+
+        self.assertIs(self.service.with_codex_timeout_seconds(self.service.codex_timeout_seconds), self.service)
+        self.assertTrue(self.service._llm_default_model())
+        self.service.domain_profile_path = Path(self.temp_dir.name) / "missing_profiles.json"
+        self.service.domain_knowledge_pack_path = Path(self.temp_dir.name) / "missing_knowledge.json"
+        self.assertEqual(self.service.load_domain_profiles(), {"default": {}})
+        self.assertEqual(self.service.load_domain_knowledge_packs(), {"version": 1, "domains": {}})
+        self.service.domain_knowledge_pack_path.write_text("{bad", encoding="utf-8")
+        self.assertEqual(self.service.load_domain_knowledge_packs(), {"version": 1, "domains": {}})
+        self.assertTrue(
+            self.service._apply_conversation_context(
+                "q",
+                {"pm_team": "UNKNOWN", "country": "SG"},
+                current_key=key,
+            )[1]["used"]
+        )
+        self.assertEqual(self.service._apply_conversation_context("this method", {}, current_key=None)[1], {"used": False})
+        self.assertEqual(self.service._conversation_title_terms("S1234 Decision Decision"), ["Decision"])
+        self.assertTrue(
+            self.service._conversation_repo_scope(
+                "risk engine",
+                {},
+                [RepositoryEntry("Risk Engine", "https://git.example.com/af/risk-engine.git")],
+            )["mismatch"]
+        )
+
+        with self.assertRaises(ToolError):
+            self.service.save_mapping(pm_team="AF", country="SG", repositories="bad")
+        no_token_service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name) / "no-token",
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gitlab_token="",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        with self.assertRaises(ToolError):
+            no_token_service._sync_impl(pm_team="AF", country="SG")
+        self.assertEqual(self.service._sync_impl(pm_team="AF", country="SG")["status"], "empty_config")
+
+        self.service.save_mapping(pm_team="AF", country="SG", repositories=[entry_payload])
+        finished_jobs: list[tuple[str, str, list[dict[str, object]]]] = []
+        with patch.object(self.service, "_start_sync_job", return_value={"job_id": "job-1"}), patch.object(
+            self.service,
+            "_sync_entry",
+            side_effect=RuntimeError("boom"),
+        ), patch.object(
+            self.service,
+            "_finish_sync_job",
+            side_effect=lambda _key, _job_id, *, status, results: finished_jobs.append((_key, status, results)),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.service._sync_impl(pm_team="AF", country="SG")
+        self.assertEqual(finished_jobs, [(key, "failed", [])])
+
+        with patch.dict(os.environ, {"SOURCE_CODE_QA_AUTO_SYNC_START_DATE": "bad", "SOURCE_CODE_QA_AUTO_SYNC_INTERVAL_DAYS": "bad"}):
+            self.assertEqual(self.service._auto_sync_start_date(), source_code_qa.DEFAULT_AUTO_SYNC_START_DATE)
+            self.assertEqual(self.service._auto_sync_interval_days(), source_code_qa.DEFAULT_AUTO_SYNC_INTERVAL_DAYS)
+        with patch.dict(os.environ, {"SOURCE_CODE_QA_AUTO_SYNC_START_DATE": "2099-01-01", "SOURCE_CODE_QA_AUTO_SYNC_INTERVAL_DAYS": "3"}):
+            self.assertEqual(self.service._auto_sync_start_date(), date(2099, 1, 1))
+            self.assertEqual(self.service._auto_sync_interval_days(), 3)
+            self.assertEqual(self.service._latest_completed_scheduled_sync_date(date(2098, 12, 31)), date(2099, 1, 1))
+
+        empty_service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name) / "empty-auto",
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        self.assertEqual(empty_service._ensure_synced_today_impl(pm_team="AF", country="SG")["status"], "empty_config")
+        skipped_service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name) / "skipped-auto",
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gitlab_token="",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        skipped_service.save_mapping(pm_team="AF", country="SG", repositories=[entry_payload])
+        with patch.object(skipped_service, "repo_status", return_value=[]), patch.object(
+            skipped_service,
+            "_index_freshness_payload",
+            return_value={"status": "stale_or_missing"},
+        ):
+            self.assertEqual(skipped_service._ensure_synced_today_impl(pm_team="AF", country="SG")["status"], "skipped")
+        with patch.object(self.service, "repo_status", return_value=[]), patch.object(
+            self.service,
+            "_index_freshness_payload",
+            return_value={"status": "stale_or_missing"},
+        ), patch.object(self.service, "sync", side_effect=ToolError("sync failed")):
+            failed_auto_sync = self.service._ensure_synced_today_impl(pm_team="AF", country="SG")
+        self.assertEqual(failed_auto_sync["status"], "failed")
+        with patch.object(self.service, "repo_status", return_value=[]), patch.object(
+            self.service,
+            "_index_freshness_payload",
+            return_value={"status": "fresh", "newest_indexed_at": datetime.now().astimezone().isoformat()},
+        ):
+            self.assertEqual(self.service._ensure_synced_today_impl(pm_team="AF", country="SG")["status"], "fresh")
+        with patch.object(self.service, "repo_status", return_value=[]), patch.object(
+            self.service,
+            "_index_freshness_payload",
+            return_value={"status": "fresh", "newest_indexed_at": "bad-date"},
+        ), patch.object(self.service, "sync", return_value={"status": "ok"}):
+            self.assertEqual(self.service._ensure_synced_today_impl(pm_team="AF", country="SG")["status"], "ok")
+
+        self.assertEqual(self.service._normalize_answer_mode("unexpected"), "auto")
+        self.assertFalse(self.service._query_deadline_hit(time.time(), reserve_seconds=0))
+        self.service.query_deadline_seconds = 1
+        self.assertTrue(self.service._query_deadline_hit(time.time() - 5, reserve_seconds=0))
+        self.service.query_deadline_seconds = 0
+        self.assertFalse(self.service._query_deadline_hit(time.time() - 5, reserve_seconds=0))
+        self.service._report_query_progress(None, "stage", "message")
+        self.service._report_query_progress(lambda *_args: (_ for _ in ()).throw(RuntimeError("callback")), "stage", "message")
+        phase_cache: dict[str, object] = {}
+        self.service._mark_query_phase(phase_cache, "forced", time.perf_counter(), force_log=True)
+        self.assertIn("forced", phase_cache["timing"])
+
+        slow = self.service._build_slow_query_attribution(
+            {
+                "query_timing": {"components": {"rank": "bad", "search": 10}},
+                "llm_timing": {"answer": "bad"},
+                "retrieval_latency_ms": 20,
+                "llm_cached": True,
+            },
+            latency_ms=1,
+        )
+        self.assertEqual(slow["reason"], "cache_hit")
+        deadline_slow = self.service._build_slow_query_attribution({"deadline_hit": True}, latency_ms=30_000)
+        self.assertEqual(deadline_slow["reason"], "deadline_hit")
+
+        with self.assertRaises(ToolError):
+            self.service.query(pm_team="AF", country="SG", question="")
+        with self.assertRaises(ToolError):
+            self.service.normalize_country("CRMS", "TH")
+        freshness = self.service._index_freshness_payload_impl(
+            [{"display_name": "Repo", "index": {"state": "ready", "git_revision": "abc", "updated_at": "2026-01-01T00:00:00+00:00"}}]
+        )
+        self.assertEqual(freshness["git_revisions"], [{"repo": "Repo", "git_revision": "abc"}])
+        with self.assertRaises(ToolError):
+            self.service.save_feedback(user_email="u@example.com", payload={"rating": "bad", "question": "q"})
+        with self.assertRaises(ToolError):
+            self.service.save_feedback(user_email="u@example.com", payload={"rating": "useful", "reason": "bad", "question": "q"})
+        feedback_payload = {
+            "rating": "useful",
+            "reason": "deprecated_class",
+            "question": "How?",
+            "matches": ["bad", {"repo": "Repo", "path": "src/App.java", "retrieval": "direct"}],
+            "answer_quality": [],
+            "extra": {"nested": {"value": object()}},
+        }
+        self.assertEqual(self.service.save_feedback(user_email="USER@EXAMPLE.COM", payload=feedback_payload)["status"], "ok")
+        self.assertIsNone(self.service._trim_feedback_value("deep", depth=6))
+        self.assertEqual(len(self.service._trim_feedback_value({str(i): i for i in range(90)}, dict_limit=80)), 80)
+        self.assertTrue(str(self.service._trim_feedback_value(object())).startswith("<object object at"))
+
+        with patch("bpmis_jira_tool.source_code_qa.subprocess.run", side_effect=source_code_qa.subprocess.TimeoutExpired(cmd=["git"], timeout=1)):
+            self.assertIn("timed out", self.service._sync_entry_impl(key, entry)["message"])
+        with patch("bpmis_jira_tool.source_code_qa.subprocess.run", side_effect=OSError("missing git")):
+            self.assertIn("could not start", self.service._sync_entry_impl(key, entry)["message"])
+        with patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            return_value=SimpleNamespace(returncode=1, stderr="https://alice:secret@git.example.com/repo.git", stdout=""),
+        ):
+            self.assertIn("Git clone failed", self.service._sync_entry_impl(key, entry)["message"])
+        with patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            return_value=SimpleNamespace(returncode=0, stderr="", stdout=""),
+        ), patch.object(self.service, "_build_repo_index", side_effect=ValueError("bad index")):
+            self.assertIn("code index failed", self.service._sync_entry_impl(key, entry)["message"])
+        pull_repo = self.service._repo_path(key, entry)
+        (pull_repo / ".git").mkdir(parents=True, exist_ok=True)
+        with patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            return_value=SimpleNamespace(returncode=0, stderr="", stdout=""),
+        ), patch.object(self.service, "_build_repo_index", return_value={"state": "ready", "files": 2, "lines": 10, "definitions": 1, "references": 1}):
+            self.assertEqual(self.service._sync_entry_impl(key, entry)["state"], "ok")
+        clone_entry = RepositoryEntry("Clone Repo", "https://git.example.com/team/clone.git")
+        clone_repo = self.service._repo_path(key, clone_entry)
+        clone_repo.mkdir(parents=True)
+        with patch.object(self.service, "_remove_incomplete_repo_dir") as remove_dir, patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            return_value=SimpleNamespace(returncode=0, stderr="", stdout=""),
+        ), patch.object(self.service, "_build_repo_index", return_value={"state": "ready", "files": 1, "lines": 5, "definitions": 0, "references": 0}):
+            self.assertEqual(self.service._sync_entry_impl(key, clone_entry)["state"], "ok")
+        remove_dir.assert_called_once_with(clone_repo)
+
+        self.service.sync_jobs_path.parent.mkdir(parents=True, exist_ok=True)
+        self.service.sync_jobs_path.write_text("{bad", encoding="utf-8")
+        self.assertEqual(self.service._sync_job_status_impl(key), {"status": "idle", "key": key})
+        with patch.object(type(self.service.sync_jobs_path), "exists", side_effect=OSError("stat failed")):
+            self.assertEqual(self.service._sync_job_status_impl(key), {"status": "idle", "key": key})
+        self.service.sync_jobs_path.write_text("{}", encoding="utf-8")
+        job = self.service._start_sync_job_impl(key, [entry])
+        self.service._finish_sync_job_impl(key, "wrong-job", status="ok", results=[])
+        self.service._finish_sync_job_impl(key, job["job_id"], status="ok", results=[{"state": "ok"}])
+        self.assertEqual(self.service._sync_job_status_impl(key)["status"], "ok")
+        self.service.sync_jobs_path.write_text("[]", encoding="utf-8")
+        self.service._write_sync_job_impl(key, {"job_id": "list-payload"})
+        self.assertEqual(self.service._sync_job_status_impl(key)["job_id"], "list-payload")
+        lock_path = self.service.sync_jobs_path.with_suffix(".lock")
+        lock_path.write_text("locked", encoding="utf-8")
+        with patch("bpmis_jira_tool.source_code_qa.SYNC_JOB_LOCK_TIMEOUT_SECONDS", 0), patch(
+            "bpmis_jira_tool.source_code_qa.time.monotonic",
+            side_effect=[0, 1],
+        ), patch("bpmis_jira_tool.source_code_qa.time.sleep", return_value=None):
+            self.service._write_sync_job_impl(key, {"job_id": "locked"})
+        lock_path.unlink(missing_ok=True)
+        with patch("bpmis_jira_tool.source_code_qa.os.open", side_effect=[FileExistsError(), OSError("denied")]), patch(
+            "bpmis_jira_tool.source_code_qa.time.monotonic",
+            return_value=0,
+        ), patch("bpmis_jira_tool.source_code_qa.time.sleep", return_value=None) as sleep:
+            self.service._write_sync_job_impl(key, {"job_id": "sleep-then-denied"})
+        sleep.assert_called()
+        with patch("bpmis_jira_tool.source_code_qa.os.open", side_effect=OSError("denied")):
+            self.service._write_sync_job_impl(key, {"job_id": "denied"})
+
+    def test_service_ranking_evidence_and_agent_helper_boundaries(self):
+        entry = RepositoryEntry("Repo", "https://git.example.com/team/repo.git")
+        repo_path = self.service._repo_path("AF:All", entry)
+        report_events: list[tuple[str, str, int, int]] = []
+
+        def report(*args):
+            report_events.append(args)
+
+        self.assertEqual(self.service._dedupe_agent_plan_steps([{"name": ""}, {"name": "x", "terms": []}]), [])
+        deduped_steps = self.service._dedupe_agent_plan_steps(
+            [
+                {"name": "x", "terms": ["Term", "Term", ""], "tools": ["search_code", "bad"]},
+                {"name": "x", "terms": ["Other"], "tools": ["search_code"]},
+            ]
+        )
+        self.assertEqual(deduped_steps[0]["tools"], ["search_code"])
+        self.assertEqual(self.service._planner_suffix_terms(["abc", "Risk"], ("Service",)), ["RiskService"])
+
+        base_match = {
+            "repo": "Repo",
+            "path": "src/main/java/RiskRepository.java",
+            "line_start": 1,
+            "line_end": 3,
+            "score": 100,
+            "snippet": "class RiskRepository { select * from risk_table; WebClient client; validate(permission); }",
+            "reason": "bm25 content match",
+            "retrieval": "direct",
+            "trace_stage": "direct",
+        }
+        self.assertEqual(self.service._rank_matches("q", []), [])
+        ranked_without_cache = self.service._rank_matches("risk table", [base_match])
+        self.assertEqual(ranked_without_cache[0]["path"], base_match["path"])
+        request_cache = self.service._new_retrieval_request_cache()
+        score_one = self.service._rerank_score_cached("risk table", base_match, request_cache=request_cache)
+        score_two = self.service._rerank_score_cached("risk table", base_match, request_cache=request_cache)
+        self.assertEqual(score_one, score_two)
+        self.assertGreaterEqual(request_cache["stats"]["rerank_hits"], 1)
+
+        exact_match = {
+            **base_match,
+            "path": "src/main/java/RiskMapper.java",
+            "snippet": "select * from risk_table",
+            "retrieval": "exact_table_path_lookup",
+            "trace_stage": "exact_lookup",
+            "exact_lookup": {"term": "risk_table", "lookup_value": "risk_table"},
+        }
+        module_match = {
+            **base_match,
+            "path": "build.gradle",
+            "snippet": "dependencies { implementation project(':risk') }",
+            "retrieval": "direct",
+            "trace_stage": "query_decomposition",
+        }
+        message_match = {
+            **base_match,
+            "path": "src/EventProducer.java",
+            "snippet": "kafkaTemplate.send(topic, event)",
+            "reason": "message_publish risk.topic",
+        }
+        test_match = {
+            **base_match,
+            "path": "src/test/java/RiskServiceTest.java",
+            "retrieval": "test_coverage",
+            "test_coverage": {"has_assertion": True},
+        }
+        boundary_match = {
+            **base_match,
+            "path": "src/RiskService.java",
+            "retrieval": "operational_boundary",
+            "operational_boundary": {"kind": "transactional"},
+        }
+        static_match = {
+            **base_match,
+            "retrieval": "static_qa",
+            "static_qa": {"kind": "hardcoded_secret", "severity": "high", "reason": "secret"},
+            "snippet": "String password = \"secret\";",
+        }
+        question_features = {
+            "intent": {
+                "data_source": True,
+                "api": True,
+                "config": True,
+                "module_dependency": True,
+                "message_flow": True,
+                "rule_logic": True,
+                "static_qa": True,
+            },
+            "tokens": {"riskmapper"},
+            "specific_terms": {"risk_table", "risk"},
+        }
+        self.assertGreater(self.service._rerank_score("credit review cbs", exact_match, question_features=question_features), 0)
+        self.assertGreater(self.service._rerank_score("gradle multi-module", module_match, question_features=question_features), 0)
+        self.assertGreater(
+            self.service._rerank_score(
+                "focused",
+                {**base_match, "trace_stage": "focused_search"},
+                question_features={"intent": {}, "tokens": set(), "specific_terms": set()},
+            ),
+            base_match["score"],
+        )
+        self.assertLess(
+            self.service._rerank_score(
+                "credit review cbs",
+                {**base_match, "path": "src/bulk/BulkJob.java", "snippet": "cbs"},
+                question_features={"intent": {}, "tokens": set(), "specific_terms": set()},
+            ),
+            base_match["score"],
+        )
+        self.assertGreater(
+            self.service._rerank_score(
+                "credit review cbs",
+                {**base_match, "path": "src/CreditReviewCbsService.java", "snippet": "cbs"},
+                question_features={"intent": {}, "tokens": set(), "specific_terms": set()},
+            ),
+            base_match["score"],
+        )
+        self.assertGreater(
+            self.service._rerank_score(
+                "maven pom",
+                {**module_match, "path": "pom.xml", "snippet": "<artifactId>risk</artifactId>"},
+                question_features={"intent": {"module_dependency": True}, "tokens": set(), "specific_terms": set()},
+            ),
+            module_match["score"],
+        )
+        self.assertGreater(
+            self.service._rerank_score(
+                "rule",
+                {**base_match, "snippet": "validate permission"},
+                question_features={"intent": {"rule_logic": True}, "tokens": set(), "specific_terms": set()},
+            ),
+            base_match["score"],
+        )
+        self.assertGreater(self.service._rerank_score("message flow", message_match, question_features=question_features), 0)
+        self.assertGreater(self.service._rerank_score("static qa", static_match, question_features=question_features), 0)
+        self.assertLess(
+            self.service._rerank_score("normal question", {**test_match, "retrieval": "direct"}, question_features={"intent": {}, "tokens": set(), "specific_terms": set()}),
+            test_match["score"],
+        )
+
+        rich_matches = [exact_match, module_match, message_match, test_match, boundary_match, static_match]
+        evidence_cache: dict[str, object] = {}
+        evidence_question = "risk data source api config maven dependency message test coverage transactional static qa"
+        evidence_summary = self.service._compress_evidence_cached(evidence_question, rich_matches, request_cache=evidence_cache)
+        cached_summary = self.service._compress_evidence_cached(evidence_question, rich_matches, request_cache=evidence_cache)
+        self.assertEqual(evidence_summary, cached_summary)
+        self.assertTrue(evidence_summary["entry_points"])
+        self.assertTrue(evidence_summary["data_sources"])
+        self.assertTrue(evidence_summary["module_dependencies"])
+        self.assertTrue(evidence_summary["message_flows"])
+        self.assertTrue(evidence_summary["test_coverage"])
+        self.assertTrue(evidence_summary["operational_boundaries"])
+        self.assertTrue(evidence_summary["static_findings"])
+
+        pack = self.service._build_evidence_pack(
+            question="risk data source api config",
+            evidence_summary={
+                **evidence_summary,
+                "entry_points": [""],
+                "source_conflicts": ["conflict"],
+                "impact_surfaces": ["upstream caller"],
+                "field_population": ["field set"],
+                "downstream_components": ["RiskClient"],
+                "source_tiers": ["test:1"],
+            },
+            matches=rich_matches,
+            trace_paths=[{}, {"edges": [{"to_name": "RiskController"}, {"edge_kind": "call"}]}],
+            quality_gate={"missing": ["missing hop"]},
+        )
+        self.assertTrue(pack["items"])
+        self.assertIn("missing hop", pack["missing_hops"])
+        empty_pack = self.service._new_evidence_pack("q", {"intent": {"data_source": True}})
+        empty_pack["items"] = ["bad", {"type": "table", "claim": ""}]
+        self.service._classify_evidence_pack_items(empty_pack)
+        self.assertTrue(empty_pack["evidence_limits"])
+        self.assertEqual(self.service._fact_source_label("Repo:file.java:1-2: table"), "Repo:file.java:1-2")
+        adder_target: list[str] = []
+        adder = self.service._limited_fact_adder(adder_target, 1)
+        adder("")
+        adder("first")
+        adder("second")
+        self.assertEqual(adder_target, ["first"])
+
+        self.assertEqual(self.service._evidence_source_tier("src/test/AppTest.java"), "test")
+        self.assertEqual(self.service._evidence_source_tier("docs/readme.md"), "docs")
+        self.assertEqual(self.service._evidence_source_tier("build/generated/App.java"), "generated")
+        self.assertEqual(self.service._evidence_source_tier("src/main/resources/application.yml"), "config")
+        self.assertEqual(self.service._interesting_lines("\nselect * from risk_table\nplain", ("missing",)), ["select * from risk_table"])
+        self.assertEqual(self.service._static_qa_findings_for_line(""), [])
+        self.assertFalse(self.service._is_concrete_source_line(""))
+        self.assertFalse(self.service._is_concrete_source_line("import java.util.List;"))
+        self.assertFalse(self.service._is_concrete_source_line("private RiskRepository riskRepository;"))
+        self.assertTrue(self.service._is_concrete_source_line("select * from risk_table"))
+        self.assertTrue(self.service._has_production_source_tier({"data_source_tiers": ["production:1"]}))
+        self.assertTrue(self.service._has_production_source_tier({"data_sources": ["source"]}))
+        self.assertEqual(self.service._best_snippet_window([], 1), (1, 1))
+        long_lines = ["x"] * 60
+        long_lines[14] = "class A {"
+        self.assertEqual(self.service._best_snippet_window(long_lines, 30), (15, 39))
+        self.assertIn("static QA", self.service._build_summary([static_match]))
+        self.assertIn("test coverage", self.service._build_summary([test_match]))
+        self.assertIn("operational boundary", self.service._build_summary([boundary_match]))
+        self.assertEqual(len(self.service._build_citations([base_match, dict(base_match)])), 1)
+        self.assertGreater(self.service._result_match_priority_sort_key(exact_match, intent={}, question="q")[0], 0)
+        self.assertGreater(self.service._result_match_priority_sort_key(module_match, intent={"module_dependency": True}, question="npm package gradle maven pom")[0], 0)
+        self.assertGreater(self.service._result_match_priority_sort_key({**module_match, "path": "pom.xml"}, intent={"module_dependency": True}, question="maven pom")[0], 0)
+        self.assertGreater(self.service._result_match_priority_sort_key(message_match, intent={"message_flow": True}, question="message")[0], 0)
+        self.assertGreater(self.service._result_match_priority_sort_key(test_match, intent={"test_coverage": True}, question="test")[0], 0)
+        self.assertGreater(self.service._result_match_priority_sort_key(boundary_match, intent={"operational_boundary": True}, question="boundary")[0], 0)
+        self.assertGreater(self.service._result_match_priority_sort_key({**base_match, "retrieval": "planner_caller"}, intent={"impact_analysis": True}, question="impact")[0], 0)
+
+        with patch.object(self.service, "_compress_evidence_cached", return_value={"intent": {}}), patch.object(
+            self.service,
+            "_quality_gate_cached",
+            return_value={"status": "sufficient", "confidence": "medium"},
+        ):
+            self.assertFalse(
+                self.service._should_expand_query_matches(
+                    question="q",
+                    top_matches=[base_match],
+                    exact_lookup_sufficient=False,
+                    simple_quality_trace=True,
+                    synced_entries=[(entry, repo_path)] * 5,
+                    started_at=time.time(),
+                    latency_guarded_query_expansion=False,
+                    request_cache=self.service._new_retrieval_request_cache(),
+                    report=report,
+                )
+            )
+        self.assertFalse(
+            self.service._should_expand_query_matches(
+                question="q",
+                top_matches=[base_match],
+                exact_lookup_sufficient=False,
+                simple_quality_trace=False,
+                synced_entries=[(entry, repo_path)],
+                started_at=time.time(),
+                latency_guarded_query_expansion=True,
+                request_cache=self.service._new_retrieval_request_cache(),
+                report=report,
+            )
+        )
+        self.assertFalse(
+            self.service._should_expand_query_matches(
+                question="q",
+                top_matches=[base_match],
+                exact_lookup_sufficient=False,
+                simple_quality_trace=False,
+                synced_entries=[(entry, repo_path)],
+                started_at=time.time() - 9,
+                latency_guarded_query_expansion=False,
+                request_cache=self.service._new_retrieval_request_cache(),
+                report=report,
+            )
+        )
+
+        with patch.object(self.service, "_agent_step_terms", return_value=[]):
+            self.assertEqual(
+                self.service._run_agent_plan(
+                    entries=[entry],
+                    key="AF:All",
+                    question="q",
+                    matches=[base_match],
+                    evidence_summary={},
+                    quality_gate={},
+                    agent_plan={"steps": [{"name": "empty", "tools": ["search_code"]}]},
+                    limit=3,
+                    tool_trace=[],
+                    request_cache=self.service._new_retrieval_request_cache(),
+                ),
+                [base_match],
+            )
+        repo_path.mkdir(parents=True, exist_ok=True)
+        (repo_path / ".git").mkdir(exist_ok=True)
+        new_match = {**base_match, "path": "src/New.java", "line_start": 2, "line_end": 4, "score": 200}
+        with patch.object(self.service, "_agent_step_terms", return_value=["RiskService"]), patch.object(
+            self.service,
+            "_execute_tool_loop_step",
+            return_value=[dict(base_match), new_match],
+        ), patch.object(self.service, "_search_repo", return_value=[]), patch.object(
+            self.service,
+            "_compress_evidence_cached",
+            return_value={"intent": {}},
+        ), patch.object(self.service, "_quality_gate_cached", return_value={"status": "sufficient"}):
+            collected = self.service._run_agent_plan(
+                entries=[entry],
+                key="AF:All",
+                question="q",
+                matches=[base_match],
+                evidence_summary={},
+                quality_gate={},
+                agent_plan={"steps": [{"name": "step", "terms": ["RiskService"], "tools": ["find_definition"]}]},
+                limit=3,
+                tool_trace=[],
+                request_cache=self.service._new_retrieval_request_cache(),
+            )
+        self.assertTrue(any(match["path"] == "src/New.java" for match in collected))
+        missing_repo = RepositoryEntry("Missing Repo", "https://git.example.com/team/missing.git")
+        with patch.object(self.service, "_agent_step_terms", return_value=["RiskService"]), patch.object(
+            self.service,
+            "_search_repo",
+            return_value=[],
+        ), patch.object(self.service, "_execute_tool_loop_step", return_value=[]) as execute_step:
+            self.assertEqual(
+                self.service._run_agent_plan(
+                    entries=[missing_repo],
+                    key="AF:All",
+                    question="q",
+                    matches=[base_match],
+                    evidence_summary={},
+                    quality_gate={},
+                    agent_plan={"steps": [{"name": "missing", "terms": ["RiskService"], "tools": ["find_definition"]}]},
+                    limit=3,
+                    tool_trace=[],
+                    request_cache=self.service._new_retrieval_request_cache(),
+                ),
+                [base_match],
+            )
+            execute_step.assert_called_once()
+        two_step_trace: list[dict[str, object]] = []
+        with patch.object(self.service, "_agent_step_terms", return_value=["RiskService"]), patch.object(
+            self.service,
+            "_execute_tool_loop_step",
+            return_value=[new_match],
+        ), patch.object(self.service, "_search_repo", return_value=[]), patch.object(
+            self.service,
+            "_compress_evidence_cached",
+            return_value={"intent": {}, "entry_points": ["src/New.java"]},
+        ), patch.object(self.service, "_quality_gate_cached", return_value={"status": "sufficient", "confidence": "high"}):
+            stopped = self.service._run_agent_plan(
+                entries=[entry],
+                key="AF:All",
+                question="q",
+                matches=[base_match],
+                evidence_summary={},
+                quality_gate={},
+                agent_plan={
+                    "steps": [
+                        {"name": "one", "terms": ["RiskService"], "tools": ["find_definition"]},
+                        {"name": "two", "terms": ["RiskService"], "tools": ["find_definition"]},
+                        {"name": "three", "terms": ["RiskService"], "tools": ["find_definition"]},
+                    ]
+                },
+                limit=3,
+                tool_trace=two_step_trace,
+                request_cache=self.service._new_retrieval_request_cache(),
+            )
+        self.assertTrue(any(match["path"] == "src/New.java" for match in stopped))
+        self.assertFalse(any(item.get("step") == "three" for item in two_step_trace))
+
+    def test_codex_context_runtime_and_answer_helper_boundaries(self):
+        key = self.service.mapping_key("AF", "SG")
+        entry = RepositoryEntry("Repo", "https://git.example.com/team/repo.git")
+        repo_path = self.service._repo_path(key, entry)
+        repo_path.mkdir(parents=True, exist_ok=True)
+        (repo_path / ".git").mkdir(exist_ok=True)
+        (repo_path / "src").mkdir(exist_ok=True)
+        (repo_path / "src" / "App.java").write_text("class App {}", encoding="utf-8")
+        index_path = self.service._index_path(repo_path)
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(index_path) as connection:
+            connection.execute("create table files (path text, lower_path text, symbols text)")
+            connection.execute("insert into files values ('src/App.java', 'src/app.java', '[]')")
+            connection.execute("insert into files values ('other/App.java', 'other/app.java', '[]')")
+            connection.commit()
+
+        base_match = {
+            "repo": "Repo",
+            "path": "src/App.java",
+            "line_start": 1,
+            "line_end": 1,
+            "score": 100,
+            "snippet": "select * from risk_table",
+            "reason": "direct",
+            "retrieval": "exact_table_path_lookup",
+            "trace_stage": "exact_lookup",
+        }
+        self.assertEqual(self.service._codex_cli_session_id({}), "")
+        self.service.codex_session_mode = "resume"
+        self.assertEqual(self.service._codex_cli_session_id({"codex_cli_session": {}}), "")
+        self.assertEqual(self.service._codex_cli_session_id({"codex_cli_session": "bad"}), "")
+        self.assertEqual(self.service._codex_cli_session_id({"codex_cli_session": {"session_id": " sess "}}), "sess")
+
+        evidence_pack = {
+            "tables": ["risk_table"],
+            "read_write_points": ["RiskRepository select"],
+            "data_sources": [{"claim": "risk_table", "source_id": "S1"}],
+            "typed_items": [{"claim": "Risk API", "source_id": "S2"}],
+        }
+        self.assertEqual(self.service._codex_sql_relevance_terms("", {"tables": [""]}), [])
+        self.assertIn("risk_table", [term.lower() for term in self.service._codex_sql_relevance_terms("select risk_table", evidence_pack)])
+        long_text = "\n".join(["header", "risk_table column", "nearby", *[f"line {i}" for i in range(400)]])
+        self.assertIn("relevance-filtered", self.service._compact_sql_runtime_evidence_text(long_text, question="risk_table", evidence_pack=evidence_pack, limit=500))
+        self.assertIn(
+            "runtime evidence text truncated",
+            self.service._compact_sql_runtime_evidence_text("x" * 2000, question="zzzz", evidence_pack={}, limit=100),
+        )
+        runtime_evidence = [
+            {
+                "id": "r1",
+                "filename": "dict.txt",
+                "mime_type": "text/plain",
+                "kind": "text",
+                "source_type": "data_dictionary",
+                "pm_team": "AF",
+                "country": "SG",
+                "size": 10,
+                "sha256": "a" * 64,
+                "text": "risk_table\n" + "x" * 70000,
+            },
+            {
+                "id": "r2",
+                "filename": "apollo.zip",
+                "mime_type": "application/zip",
+                "kind": "text",
+                "source_type": "apollo",
+                "pm_team": "AF",
+                "country": "SG",
+                "size": 10,
+                "sha256": "b" * 64,
+                "text": "config=value",
+            },
+        ]
+        self.assertEqual(self.service._runtime_evidence_sql_prompt_section([], question="q", evidence_pack={}), "")
+        self.assertIn("Uploaded runtime evidence for SQL generation", self.service._runtime_evidence_sql_prompt_section(runtime_evidence, question="risk_table", evidence_pack=evidence_pack, text_limit=500))
+        attachment_section = self.service._attachment_prompt_section(
+            [
+                {"filename": "long.txt", "mime_type": "text/plain", "kind": "text", "size": 1, "sha256": "c" * 64, "text": "x" * 7000},
+                {"filename": "shot.png", "mime_type": "image/png", "kind": "image", "size": 1, "sha256": "d" * 64},
+            ]
+        )
+        self.assertIn("attachment text truncated", attachment_section)
+        self.assertIn("Image content is attached", attachment_section)
+        self.assertIn("Data dictionary handling", self.service._runtime_evidence_prompt_section(runtime_evidence))
+        self.assertNotIn("text", self.service._runtime_evidence_for_budget(runtime_evidence, "cheap")[0])
+        self.assertLessEqual(len(self.service._runtime_evidence_for_budget([{"source_type": "other", "summary": "x" * 2000}], "cheap")[0]["summary"]), 1000)
+        self.assertIn("compacted", self.service._runtime_evidence_for_budget(runtime_evidence, "balanced")[0]["text"])
+        self.assertEqual(len(self.service._repair_candidate_paths_for_runtime_evidence([{"path": str(i)} for i in range(20)], [{}] * 4)), 8)
+        self.assertEqual(self.service._attachment_image_paths([{"kind": "text"}, {"kind": "image", "path": "/tmp/a.png"}]), ["/tmp/a.png"])
+        self.assertIn(
+            "No explicit allowlist",
+            self.service._codex_investigation_brief(
+                pm_team="AF",
+                country="SG",
+                question="q",
+                candidate_paths=[],
+                evidence_pack={},
+                quality_gate={},
+                followup_context=None,
+                scope_roots=[],
+            ),
+        )
+
+        candidate_paths = self.service._codex_candidate_paths(
+            entries=[entry],
+            key=key,
+            matches=[{}, base_match, dict(base_match), {**base_match, "repo": "", "path": "missing/App.java"}],
+        )
+        self.assertEqual(candidate_paths[0]["path_status"], "exact")
+        self.assertEqual(self.service._codex_candidate_path_status(repo_path, "/abs.java")["status"], "invalid")
+        self.assertEqual(self.service._codex_candidate_path_status(repo_path, "../App.java")["status"], "invalid")
+        self.assertEqual(self.service._codex_candidate_path_status(repo_path, "")["status"], "invalid")
+        self.assertEqual(self.service._codex_candidate_path_status(repo_path, ".")["status"], "missing")
+        self.assertEqual(self.service._codex_candidate_path_status(repo_path, "Nope.java")["status"], "missing")
+        self.assertEqual(self.service._codex_candidate_path_status(repo_path, "App.java")["status"], "ambiguous_filename")
+        outside_dir = Path(self.temp_dir.name) / "outside"
+        outside_dir.mkdir(exist_ok=True)
+        (outside_dir / "Leak.java").write_text("class Leak {}", encoding="utf-8")
+        (repo_path / "outlink").symlink_to(outside_dir, target_is_directory=True)
+        self.assertEqual(self.service._codex_candidate_path_status(repo_path, "outlink/Leak.java")["status"], "invalid")
+        with sqlite3.connect(index_path) as connection:
+            connection.execute("delete from files where path = 'other/App.java'")
+            connection.commit()
+        self.assertEqual(self.service._codex_candidate_path_status(repo_path, "App.java")["status"], "resolved_by_filename")
+        index_path.write_text("not sqlite", encoding="utf-8")
+        self.assertEqual(self.service._codex_candidate_path_status(repo_path, "App.java")["status"], "missing")
+        roots = self.service._codex_scope_roots(entries=[entry, entry], key=key)
+        self.assertEqual(len(roots), 1)
+
+        valid_followup_file = repo_path / "src" / "Followup.java"
+        valid_followup_file.write_text("class Followup {}", encoding="utf-8")
+        merged_paths = self.service._merge_codex_followup_candidate_paths(
+            candidate_paths[:1],
+            {
+                "codex_inspected_paths": [{"repo": "Repo", "repo_root": str(repo_path), "path": "src/Followup.java"}],
+                "codex_candidate_paths": [{"repo": "Repo", "path": "../bad.java"}, {"repo": "Repo", "path": "src/App.java"}],
+                "recent_turns": [{"codex_candidate_paths": [{"repo": "Repo", "repo_root": str(repo_path), "path": "missing.java"}]}],
+            },
+        )
+        self.assertTrue(any(item["path"] == "src/Followup.java" for item in merged_paths))
+        self.service.codex_top_path_limit = 1
+        self.assertEqual(
+            len(
+                self.service._merge_codex_followup_candidate_paths(
+                    candidate_paths[:1],
+                    {"codex_candidate_paths": [{"repo": "Repo", "repo_root": str(repo_path), "path": "src/Followup.java"}]},
+                )
+            ),
+            1,
+        )
+        self.service.codex_top_path_limit = 24
+        escaped_paths = self.service._merge_codex_followup_candidate_paths(
+            [],
+            {"codex_candidate_paths": [{"repo": "Repo", "repo_root": str(repo_path), "path": "outlink/Leak.java"}]},
+        )
+        self.assertEqual(escaped_paths, [])
+
+        context = self.service._codex_initial_candidate_context(
+            entries=[entry],
+            key=key,
+            question="generate SQL for risk_table",
+            matches=[],
+            selected_matches=[base_match],
+            followup_context={"codex_candidate_paths": merged_paths},
+        )
+        self.assertIn("sql_generation", context["prompt_mode"])
+        followup_match = {"repo": "Repo", "path": "src/App.java", "line_start": 1, "line_end": 1}
+        rich_brief = self.service._codex_investigation_brief(
+            pm_team="AF",
+            country="SG",
+            question="follow up",
+            candidate_paths=candidate_paths,
+            evidence_pack={"entry_points": ["src/App.java"], "tables": ["risk_table"], "missing_hops": ["missing upstream"]},
+            quality_gate={"status": "missing", "confidence": "low", "missing": ["caller"]},
+            followup_context={
+                "question": "previous q",
+                "answer": "previous a",
+                "rendered_answer": "previous rendered",
+                "summary": "previous summary",
+                "trace_id": "trace-1",
+                "matches_snapshot": [followup_match],
+                "codex_candidate_paths": [{**followup_match, "repo_root": str(repo_path)}],
+                "codex_citation_validation": {"status": "ok", "cited_path_count": 1, "direct_file_refs": [followup_match]},
+                "codex_cli_summary": {"prompt_mode": "answer", "candidate_path_count": 1, "repair_attempted": False},
+                "codex_inspected_paths": [{**followup_match, "repo_root": str(repo_path), "source": "manual"}],
+                "evidence_pack": {"entry_points": ["src/App.java"], "tables": ["risk_table"], "missing_hops": ["missing upstream"]},
+                "recent_turns": [
+                    {
+                        "question": "turn q",
+                        "answer": "turn a",
+                        "trace_id": "trace-0",
+                        "matches_snapshot": [followup_match],
+                        "codex_candidate_paths": [followup_match],
+                    }
+                ],
+            },
+            attachments=[{"filename": "shot.png", "mime_type": "image/png", "kind": "image", "size": 1, "sha256": "d" * 64}],
+            runtime_evidence=runtime_evidence,
+            scope_roots=[{"repo": "Repo", "repo_root": str(repo_path), "repo_relative_root": "Repo"}],
+            repair_issues=["fix citations"],
+        )
+        self.assertIn("User attachments", rich_brief)
+        self.assertIn("Previous Codex inspected paths", rich_brief)
+        self.assertIn("Prior evidence summary", rich_brief)
+        self.assertIn("Repair required", rich_brief)
+
+        answer = json.dumps({"claims": [{"text": "RiskRepository selects risk_table src/App.java:1", "citations": ["S99", "missing/File.java"]}]})
+        validation = self.service._validate_codex_citations(
+            answer,
+            candidate_paths,
+            [base_match],
+            scope_roots=[{"repo_root": str(repo_path)}],
+        )
+        self.assertEqual(validation["status"], "warn")
+        self.assertTrue(validation["warnings"])
+        self.assertEqual(self.service._append_fact_citation("", [base_match]), "")
+        self.assertEqual(self.service._append_fact_citation("already [S1]", [base_match]), "already [S1]")
+        self.assertIn("[S1]", self.service._append_fact_citation("Repo:src/App.java:1-1 source", [base_match]))
+        self.assertEqual(self.service._split_answer_claims("\n- First sentence. Second?"), ["First sentence.", "Second?"])
+        parsed = self.service._parse_structured_answer(
+            '```json\n{"claims":[{"text":"A","citations":["1"]},"B"],"investigation_steps":{"candidate_evidence":["x"]},"confidence":"high"}\n```'
+        )
+        self.assertEqual(parsed["claims"][0]["citations"], ["S1"])
+        self.assertFalse(self.service._codex_high_risk_question("What is RiskStatus?"))
+        self.assertTrue(self.service._codex_high_risk_question("why production fail data source"))
+        self.assertTrue(self.service._is_hard_codex_repair_reason("finish_reason_length"))
+        self.assertEqual(self.service._filter_codex_repair_reasons_for_tier(question="What is status?", repair_reasons=[], routed_budget_mode="cheap"), ([], [], ""))
+        allowed, suppressed, reason = self.service._filter_codex_repair_reasons_for_tier(
+            question="What is status?",
+            repair_reasons=["empty_codex_answer", "high_risk_claims_missing_scoped_file_evidence"],
+            routed_budget_mode="cheap",
+        )
+        self.assertEqual(allowed, ["empty_codex_answer"])
+        self.assertTrue(suppressed)
+        self.assertEqual(reason, "cheap_simple_first_pass")
+        self.assertEqual(
+            self.service._filter_codex_repair_reasons_for_tier(
+                question="why data source fail",
+                repair_reasons=["empty_codex_answer", "high_risk_claims_missing_scoped_file_evidence"],
+                routed_budget_mode="cheap",
+            )[2],
+            "cheap_hard_failures",
+        )
+        self.assertEqual(self.service._filter_codex_repair_reasons_for_tier(question="why fail", repair_reasons=["x"], routed_budget_mode="deep")[2], "severe_only")
+        self.assertEqual(self.service._codex_repair_remaining_timeout_seconds(time.time()), (None, ""))
+        self.assertTrue(
+            self.service._codex_deep_investigation_needed(
+                question="why data source failed",
+                answer="confirmed",
+                structured_answer={"confidence": "high"},
+                quality_gate={"status": "sufficient", "confidence": "high"},
+                answer_judge={"status": "repair"},
+                codex_validation={"status": "ok"},
+            )
+        )
+        with patch.object(self.service, "_codex_deep_investigation_terms", return_value=[]):
+            self.assertEqual(
+                self.service._codex_deep_investigation_matches(
+                    entries=[entry],
+                    key=key,
+                    question="why",
+                    matches=[base_match],
+                    selected_matches=[base_match],
+                    evidence_summary={},
+                    quality_gate={},
+                    structured_answer={},
+                    answer_judge={},
+                    codex_validation={},
+                    limit=3,
+                ),
+                [base_match],
+            )
+        self.service._codex_answer_timeout_seconds = 1
+        remaining, skip_reason = self.service._codex_repair_remaining_timeout_seconds(time.time() - 10)
+        self.assertEqual(remaining, 0)
+        self.assertIn("insufficient", skip_reason)
+        self.service._codex_answer_timeout_seconds = 100
+        self.assertGreaterEqual(self.service._codex_repair_remaining_timeout_seconds(time.time())[0], 10)
+        delattr(self.service, "_codex_answer_timeout_seconds")
+
+        severe = self.service._codex_severe_repair_reasons(
+            question="why production fail data source",
+            answer='{"detail":"Bad Request"}',
+            structured_answer={"format": "prose_fallback"},
+            quality_gate={"missing": ["source"]},
+            evidence_pack={"items": [{"type": "table", "claim": "risk_table", "support_level": "confirmed"}]},
+            answer_judge={"status": "repair"},
+            codex_validation={"status": "needs_citation", "out_of_scope_refs": [{}], "unsupported_claims": ["claim"]},
+            finish_reason="MAX_TOKENS",
+        )
+        self.assertIn("bad_request_answer", severe)
+        final = self.service._finalize_trusted_model_answer(
+            question="data source",
+            answer="RiskRepository selects risk_table",
+            structured_answer={"confidence": "high", "confirmed_from_code": ["confirmed"], "not_found": ["missing"]},
+            evidence_summary={"intent": {"data_source": True}, "data_sources": ["Repo:src/App.java:1-1: select * from risk_table"], "data_carriers": ["Carrier"], "field_population": ["field set"]},
+            quality_gate={"missing": ["missing"], "confidence": "medium"},
+            claim_check=self.service._trusted_provider_check(),
+            selected_matches=[base_match],
+            answer_judge=self.service._skipped_codex_answer_check(),
+            finish_reason="stop",
+        )
+        self.assertEqual(final["answer_contract"]["confidence"], "high")
+        with patch.object(self.service, "_build_agent_plan", return_value={"steps": []}), patch.object(
+            self.service,
+            "_quality_gate_trace_terms",
+            return_value=["RiskService"],
+        ), patch.object(self.service, "_run_agent_plan", return_value=[base_match]) as run_agent_plan:
+            self.assertEqual(
+                self.service._expand_answer_retry_matches(
+                    entries=[entry],
+                    key=key,
+                    question="q",
+                    matches=[base_match],
+                    evidence_summary={},
+                    quality_gate={},
+                    limit=3,
+                ),
+                [base_match],
+            )
+            self.assertEqual(run_agent_plan.call_args.kwargs["agent_plan"]["steps"][0]["name"], "answer_retry_deeper_trace")
+
+        mixed_matches = [
+            base_match,
+            {**base_match, "path": "src/SourceRepository.java", "snippet": "select * from risk_table", "retrieval": "direct", "line_start": 2},
+            {**base_match, "path": "src/CarrierDTO.java", "snippet": "class RiskDTO {}", "retrieval": "direct", "line_start": 3},
+            {**base_match, "path": "src/FieldSetter.java", "snippet": "target.setRisk(value)", "retrieval": "direct", "line_start": 4},
+            {**base_match, "path": "src/Static.java", "retrieval": "static_qa", "static_qa": {"kind": "todo"}, "line_start": 5},
+            {**base_match, "path": "src/Impact.java", "retrieval": "planner_caller", "line_start": 6},
+            {**base_match, "path": "src/Test.java", "retrieval": "test_coverage", "line_start": 7},
+            {**base_match, "path": "src/Boundary.java", "retrieval": "operational_boundary", "line_start": 8},
+        ]
+        self.assertEqual(self.service._select_llm_matches([], 3), [])
+        selected = self.service._select_llm_matches(
+            mixed_matches,
+            20,
+            question="data source static qa impact test coverage transactional boundary",
+        )
+        self.assertTrue(any(match["retrieval"] == "static_qa" for match in selected))
+        self.assertTrue(any(match["retrieval"] == "planner_caller" for match in selected))
+        self.assertTrue(any(match["retrieval"] == "test_coverage" for match in selected))
+        self.assertTrue(any(match["retrieval"] == "operational_boundary" for match in selected))
+        self.assertEqual(
+            len(self.service._select_llm_matches([{**base_match, "path": "src/Static.java", "retrieval": "static_qa", "trace_stage": "other", "static_qa": {"kind": "todo"}}], 1, question="static qa")),
+            1,
+        )
+        self.assertEqual(
+            len(self.service._select_llm_matches([{**base_match, "path": "src/Test.java", "retrieval": "test_coverage", "trace_stage": "test_coverage"}], 1, question="test coverage")),
+            1,
+        )
+        self.assertEqual(
+            len(self.service._select_llm_matches([{**base_match, "path": "src/Boundary.java", "retrieval": "operational_boundary", "trace_stage": "operational_boundary"}], 1, question="transactional boundary")),
+            1,
+        )
+        deep_mode = self.service._resolve_llm_budget(
+            "auto",
+            "why data source root cause",
+            [{**base_match, "trace_stage": "agent_plan_1", "retrieval": "flow_graph", "line_start": index} for index in range(8)],
+        )
+        self.assertEqual(deep_mode[0], "deep")
+        balanced_mode = self.service._resolve_llm_budget(
+            "auto",
+            "tell me implementation details",
+            [{**base_match, "retrieval": "direct", "line_start": index} for index in range(5)],
+        )
+        self.assertEqual(balanced_mode[0], "balanced")
+        self.assertFalse(self.service._is_short_definition_or_status_question(""))
+        self.assertFalse(self.service._is_short_definition_or_status_question("x" * 121 + " status"))
+        judge = self.service._judge_answer_impl(
+            "data source api static qa impact test coverage operational boundary",
+            "It likely works.",
+            evidence_pack={
+                "intent": {
+                    "data_source": True,
+                    "api": True,
+                    "static_qa": True,
+                    "impact_analysis": True,
+                    "test_coverage": True,
+                    "operational_boundary": True,
+                },
+                "items": [{"type": "table", "claim": "risk_table", "supports_answer": True}],
+                "missing_hops": ["missing upstream"],
+                "apis": ["POST /risk"],
+                "static_findings": ["high hardcoded_secret"],
+                "impact_surfaces": ["upstream caller"],
+                "test_coverage": ["RiskServiceTest"],
+                "operational_boundaries": ["@Transactional"],
+            },
+            claim_check={"status": "ok", "issues": []},
+        )
+        self.assertEqual(judge["status"], "repair")
+        self.assertTrue(judge["issues"])
+        cached_payload = self.service._cached_codex_answer_payload(
+            cached={"answer": "RiskRepository selects risk_table", "usage": {"totalTokenCount": 1}, "finish_reason": "stop"},
+            question="data source",
+            structured_answer={"claims": [], "confidence": "high"},
+            evidence_summary={"intent": {"data_source": True}, "data_sources": ["risk_table"]},
+            quality_gate={"status": "sufficient", "confidence": "high"},
+            evidence_pack={"intent": {"data_source": True}, "items": [{"type": "table", "claim": "risk_table"}]},
+            candidate_matches=[base_match],
+            candidate_paths=candidate_paths,
+            scope_roots=[{"repo_root": str(repo_path)}],
+            prompt_mode="codex_investigation_brief_v5",
+            llm_route={"prompt_mode": "codex_investigation_brief_v5"},
+            llm_budget_mode="auto",
+            routed_budget_mode="cheap",
+            cache_key="cache-key",
+        )
+        self.assertTrue(cached_payload["llm_cached"])
+        self.service.codex_repair_prompt_token_limit = 1
+        repair_context = self.service._codex_repair_answer_context(
+            pm_team="AF",
+            country="SG",
+            question="why data source failed",
+            answer="initial answer",
+            structured_answer={"claims": []},
+            scope_roots=[{"repo_root": str(repo_path)}],
+            candidate_paths=candidate_paths,
+            runtime_evidence=[],
+            repair_issues=["missing citation"],
+            deep_needed=False,
+            repair_issue_count=1,
+            repair_reason="severe_only",
+            deep_investigation_added=0,
+            selected_model="codex",
+            query_mode="deep",
+            trace_id="trace",
+            progress_callback=None,
+            codex_cli_session_id="",
+            attachments=[],
+            timing={},
+            evidence_pack={},
+            codex_validation={"status": "needs_citation"},
+            claim_check={"status": "needs_citation"},
+            answer_judge={"status": "repair"},
+            usage={},
+            effective_model="codex",
+            attempts=1,
+            llm_latency_ms=1,
+            llm_attempt_log=[],
+            finish_reason="stop",
+            codex_cli_trace={},
+            repair_attempted=True,
+            repair_skipped_reason="",
+        )
+        self.assertFalse(repair_context["repair_attempted"])
+        self.assertIn("repair_prompt_too_large", repair_context["repair_skipped_reason"])
+        self.service.codex_repair_prompt_token_limit = 60_000
+        with patch.object(self.service.llm_provider, "generate", side_effect=ToolError("initial failed")):
+            with self.assertRaises(ToolError):
+                self.service._codex_initial_answer_result(
+                    prompt_context="context",
+                    prompt_mode="codex_investigation_brief_v5",
+                    progress_callback=None,
+                    codex_cli_session_id="",
+                    attachments=[],
+                    trace_id="trace",
+                    initial_prompt_stats={"estimated_prompt_tokens": 1},
+                    candidate_paths=candidate_paths,
+                    candidate_repo_count=1,
+                    selected_model="codex",
+                    reasoning_effort="low",
+                    routed_budget_mode="cheap",
+                    query_mode="deep",
+                    question="q",
+                    evidence_pack={},
+                    timing={},
+                    scope_roots=[{"repo_root": str(repo_path)}],
+                )
+        with patch.object(self.service, "_codex_deep_investigation_matches", return_value=[{**base_match, "path": "src/Deep.java", "line_start": 9}]), patch.object(
+            self.service,
+            "_build_trace_paths",
+            return_value=[{"edges": [{"to_name": "Deep"}]}],
+        ), patch.object(self.service, "_quality_gate_cached", return_value={"status": "sufficient", "confidence": "high"}):
+            deep_context = self.service._codex_deep_investigation_context(
+                entries=[entry],
+                key=key,
+                question="why data source failed",
+                matches=[base_match],
+                candidate_matches=[base_match],
+                candidate_paths=candidate_paths,
+                candidate_path_layers={},
+                llm_route={},
+                evidence_summary={"intent": {"data_source": True}},
+                quality_gate={"status": "missing"},
+                evidence_pack={},
+                answer="missing",
+                structured_answer={"direct_answer": "missing"},
+                answer_judge={"issues": ["missing"]},
+                codex_validation={"unsupported_claims": ["claim"]},
+                budget={"match_limit": 3},
+                request_cache=self.service._new_retrieval_request_cache(),
+                followup_context=None,
+                progress_callback=None,
+                trace_id="trace",
+                selected_model="codex",
+                query_mode="deep",
+            )
+        self.assertIn("trace_paths", deep_context["evidence_summary"])
+
+    def test_query_orchestration_deadline_and_direct_search_edges(self):
+        key = self.service.mapping_key("AF", "SG")
+        entry = RepositoryEntry("Repo", "https://git.example.com/team/repo.git")
+        entry_payload = {"display_name": entry.display_name, "url": entry.url}
+        repo_path = self.service._repo_path(key, entry)
+        repo_path.mkdir(parents=True, exist_ok=True)
+        (repo_path / ".git").mkdir(exist_ok=True)
+        self.service.save_mapping(pm_team="AF", country="SG", repositories=[entry_payload])
+
+        weak = self.service.query(pm_team="AF", country="SG", question="???")
+        self.assertEqual(weak["status"], "weak_question")
+
+        common_patches = [
+            patch.object(self.service, "repo_status", return_value=[]),
+            patch.object(self.service, "_index_freshness_payload", return_value={"status": "fresh"}),
+            patch.object(self.service, "_synced_query_entries", return_value=[(entry, repo_path)]),
+            patch.object(self.service, "_queryable_index_entries", return_value=[(entry, repo_path)]),
+        ]
+        with common_patches[0], common_patches[1], common_patches[2], common_patches[3], patch.object(
+            self.service,
+            "_query_exact_lookup_terms",
+            return_value=(["src/Missing.java"], []),
+        ), patch.object(self.service, "_exact_table_path_lookup_repo", return_value=[]):
+            strict_miss = self.service.query(pm_team="AF", country="SG", question="src/Missing.java")
+        self.assertEqual(strict_miss["status"], "no_match")
+
+        focused_match = {
+            "repo": entry.display_name,
+            "path": "src/Focused.java",
+            "line_start": 1,
+            "line_end": 1,
+            "score": 100,
+            "snippet": "class Focused {}",
+            "reason": "focused",
+            "retrieval": "direct",
+            "trace_stage": "focused_search",
+        }
+        with patch.object(self.service, "repo_status", return_value=[]), patch.object(
+            self.service,
+            "_index_freshness_payload",
+            return_value={"status": "stale_or_missing"},
+        ), patch.object(self.service, "_synced_query_entries", return_value=[(entry, repo_path)]), patch.object(
+            self.service,
+            "_queryable_index_entries",
+            return_value=[(entry, repo_path)],
+        ), patch.object(self.service, "_query_exact_lookup_terms", return_value=([], ["FocusedTerm"])), patch.object(
+            self.service,
+            "_search_repo",
+            return_value=[focused_match],
+        ), patch.object(
+            self.service,
+            "_query_direct_and_decomposed_matches",
+            return_value={"matches": [focused_match], "latency_guarded_query_expansion": False},
+        ), patch.object(
+            self.service,
+            "_rank_and_expand_query_matches",
+            return_value=([], False),
+        ):
+            no_top = self.service.query(pm_team="AF", country="SG", question="FocusedTerm")
+        self.assertEqual(no_top["status"], "no_match")
+
+        report_events: list[tuple[object, ...]] = []
+
+        def report(*args):
+            report_events.append(args)
+
+        many_matches = [
+            {
+                "repo": entry.display_name,
+                "path": f"src/Hit{index}.java",
+                "line_start": 1,
+                "line_end": 1,
+                "score": 100 + index,
+                "snippet": "class Hit {}",
+                "reason": "hit",
+                "retrieval": "direct",
+                "trace_stage": "direct",
+            }
+            for index in range(30)
+        ]
+        with patch.object(self.service, "_search_repo", return_value=many_matches), patch.object(
+            self.service,
+            "_rank_matches",
+            side_effect=lambda _question, matches, request_cache=None: matches,
+        ), patch.object(
+            self.service,
+            "_select_result_matches",
+            side_effect=lambda matches, _limit, question="": matches,
+        ), patch.object(
+            self.service,
+            "_compress_evidence_cached",
+            return_value={"intent": {}},
+        ), patch.object(self.service, "_quality_gate_cached", return_value={"status": "sufficient", "confidence": "high"}), patch(
+            "bpmis_jira_tool.source_code_qa.time.time",
+            return_value=100.0,
+        ):
+            direct_context = self.service._query_direct_and_decomposed_matches_impl(
+                question="api config",
+                matches=[],
+                tokens=["api"],
+                synced_entries=[(entry, repo_path)] * 5,
+                simple_quality_trace=True,
+                started_at=92.0,
+                result_limit=12,
+                limit=12,
+                query_plan={"intent": {"api": True}, "components": [{"terms": [""]}]},
+                request_cache=self.service._new_retrieval_request_cache(),
+                report=report,
+            )
+        self.assertFalse(direct_context["latency_guarded_query_expansion"])
+
+        with patch.object(self.service, "_search_repo", return_value=many_matches), patch.object(
+            self.service,
+            "_rank_matches",
+            side_effect=lambda _question, matches, request_cache=None: matches,
+        ), patch.object(
+            self.service,
+            "_select_result_matches",
+            side_effect=lambda matches, _limit, question="": matches,
+        ), patch.object(
+            self.service,
+            "_compress_evidence_cached",
+            return_value={"intent": {}},
+        ), patch.object(self.service, "_quality_gate_cached", return_value={"status": "missing", "confidence": "low"}), patch(
+            "bpmis_jira_tool.source_code_qa.time.time",
+            return_value=100.0,
+        ):
+            latency_context = self.service._query_direct_and_decomposed_matches_impl(
+                question="api config",
+                matches=[],
+                tokens=["api"],
+                synced_entries=[(entry, repo_path)] * 3,
+                simple_quality_trace=True,
+                started_at=92.0,
+                result_limit=12,
+                limit=12,
+                query_plan={"intent": {"api": True}, "components": [{"terms": [""]}]},
+                request_cache=self.service._new_retrieval_request_cache(),
+                report=report,
+            )
+        self.assertTrue(latency_context["matches"])
+
+        payload: dict[str, object] = {}
+        non_codex_provider = SimpleNamespace(name="other")
+        with patch.object(self.service, "llm_provider", non_codex_provider):
+            self.service._augment_query_payload_with_llm_answer(
+                payload=payload,
+                entries=[entry],
+                key=key,
+                pm_team="AF",
+                country="SG",
+                question="q",
+                matches=[focused_match],
+                llm_budget_mode="cheap",
+                query_mode="deep",
+                trace_id="trace",
+                followup_context={},
+                normalized_answer_mode="auto",
+                request_cache=self.service._new_retrieval_request_cache(),
+                progress_callback=None,
+                attachments=[],
+                runtime_evidence=[],
+                effort_assessment=False,
+                retrieval_latency_ms=1,
+                evidence_pack={},
+                report=report,
+                query_started_at=time.time() - 200,
+            )
+        self.assertTrue(payload["deadline_hit"])
+
+        payload = {}
+        with patch.object(self.service, "_build_llm_answer", side_effect=ToolError("timed out")):
+            self.service._augment_query_payload_with_llm_answer(
+                payload=payload,
+                entries=[entry],
+                key=key,
+                pm_team="AF",
+                country="SG",
+                question="q",
+                matches=[focused_match],
+                llm_budget_mode="cheap",
+                query_mode="deep",
+                trace_id="trace",
+                followup_context={},
+                normalized_answer_mode="auto",
+                request_cache=self.service._new_retrieval_request_cache(),
+                progress_callback=None,
+                attachments=[],
+                runtime_evidence=[],
+                effort_assessment=False,
+                retrieval_latency_ms=1,
+                evidence_pack={},
+                report=report,
+                query_started_at=time.time(),
+            )
+        self.assertTrue(payload["deadline_hit"])
+        payload = {}
+        self.service._codex_answer_timeout_seconds = 123
+        with patch.object(self.service, "_build_llm_answer", side_effect=ToolError("bad request")):
+            with self.assertRaises(ToolError):
+                self.service._augment_query_payload_with_llm_answer(
+                    payload=payload,
+                    entries=[entry],
+                    key=key,
+                    pm_team="AF",
+                    country="SG",
+                    question="q",
+                    matches=[focused_match],
+                    llm_budget_mode="cheap",
+                    query_mode="deep",
+                    trace_id="trace",
+                    followup_context={},
+                    normalized_answer_mode="auto",
+                    request_cache=self.service._new_retrieval_request_cache(),
+                    progress_callback=None,
+                    attachments=[],
+                    runtime_evidence=[],
+                    effort_assessment=False,
+                    retrieval_latency_ms=1,
+                    evidence_pack={},
+                    report=report,
+                    query_started_at=time.time(),
+                )
+        self.assertEqual(self.service._codex_answer_timeout_seconds, 123)
+        delattr(self.service, "_codex_answer_timeout_seconds")
+
+        with patch.object(self.service, "_search_repo", return_value=many_matches), patch(
+            "bpmis_jira_tool.source_code_qa.time.time",
+            return_value=100.0,
+        ):
+            guarded = self.service._query_direct_and_decomposed_matches_impl(
+                question="broad",
+                matches=list(many_matches) * 2,
+                tokens=["broad"],
+                synced_entries=[(entry, repo_path)],
+                simple_quality_trace=False,
+                started_at=92.0,
+                result_limit=12,
+                limit=12,
+                query_plan={"intent": {}, "components": [{"terms": ["risk"]}]},
+                request_cache=self.service._new_retrieval_request_cache(),
+                report=report,
+            )
+        self.assertTrue(guarded["latency_guarded_query_expansion"])
+        with patch.object(self.service, "_search_repo", return_value=[]):
+            empty_expansion = self.service._query_direct_and_decomposed_matches_impl(
+                question="broad",
+                matches=[],
+                tokens=["broad"],
+                synced_entries=[(entry, repo_path)],
+                simple_quality_trace=False,
+                started_at=time.time(),
+                result_limit=12,
+                limit=12,
+                query_plan={"intent": {}, "components": [{"terms": ["of"]}]},
+                request_cache=self.service._new_retrieval_request_cache(),
+                report=report,
+            )
+        self.assertEqual(empty_expansion["matches"], [])
 
     def _build_index_for_entry(self, key, entry):
         repo_entry = type("Entry", (), entry)()
@@ -2989,6 +4757,37 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("extract visible facts exactly", section)
         self.assertIn("missing_production_evidence", section)
         self.assertEqual(image_paths, [str(image_path)])
+
+    def test_runtime_evidence_prompt_dry_run_dedupes_identical_uploads(self):
+        duplicate = {
+            "id": "runtime-1",
+            "filename": "apollo.json",
+            "mime_type": "application/json",
+            "kind": "text",
+            "source_type": "apollo",
+            "pm_team": "AF",
+            "country": "SG",
+            "sha256": "a" * 64,
+            "text": "AF rollout flag enabled",
+        }
+        unique = {
+            "id": "runtime-2",
+            "filename": "db.txt",
+            "mime_type": "text/plain",
+            "kind": "text",
+            "source_type": "db",
+            "pm_team": "AF",
+            "country": "SG",
+            "sha256": "b" * 64,
+            "text": "Ticket status is APPROVED",
+        }
+
+        section = self.service._runtime_evidence_prompt_section([duplicate, dict(duplicate), unique])
+
+        self.assertEqual(section.count("AF rollout flag enabled"), 1)
+        self.assertIn("Ticket status is APPROVED", section)
+        legacy_duplicate_section = section + "\n  Extracted text/summary:\nAF rollout flag enabled"
+        self.assertLess(len(section), len(legacy_duplicate_section))
 
     def test_non_crms_country_normalizes_to_shared_repository_mapping(self):
         self.assertEqual(self.service.mapping_key("AF", "PH"), "AF:All")
@@ -3236,6 +5035,1448 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertLessEqual(len(rows["lines"]), 1200)
         self.assertEqual(request_cache["stats"]["targeted_index_rows_misses"], 1)
 
+    def test_retrieval_tool_cache_and_fallback_edges(self):
+        from bpmis_jira_tool import source_code_qa_retrieval_tools as retrieval_tools
+
+        index_path = Path(self.temp_dir.name) / "retrieval_edges.sqlite3"
+        with sqlite3.connect(index_path) as connection:
+            connection.execute("create table files (path text, lower_path text, symbols text)")
+            connection.execute(
+                "create table lines (file_path text, line_no integer, line_text text, lower_text text, symbols text, is_declaration integer, has_pathish integer)"
+            )
+            connection.execute("create table definitions (name text, lower_name text, kind text, file_path text, line_no integer, signature text)")
+            connection.execute("create table references_index (target text, lower_target text, kind text, file_path text, line_no integer, context text)")
+            connection.execute(
+                "create table semantic_chunks (chunk_id text, file_path text, start_line integer, end_line integer, chunk_text text, lower_text text, tokens text, symbols text)"
+            )
+            connection.execute("create virtual table files_fts using fts5(path)")
+            connection.execute("create virtual table lines_fts using fts5(file_path, line_no unindexed, line_text)")
+            connection.execute("create virtual table semantic_chunks_fts using fts5(chunk_id unindexed, file_path, chunk_text)")
+            connection.execute("insert into files values ('src/App.java', 'src/app.java', '[\"appsymbol\"]')")
+            connection.execute("insert into lines values ('src/App.java', 1, 'class App { jdbcTemplate.query(); }', 'class app { jdbctemplate.query(); }', '[\"appsymbol\"]', 1, 1)")
+            connection.execute("insert into definitions values ('AppService', 'appservice', 'class', 'src/App.java', 1, 'class AppService')")
+            connection.execute("insert into references_index values ('/api/app', '/api/app', 'route', 'src/App.java', 1, 'RequestMapping')")
+            connection.execute("insert into semantic_chunks values ('chunk-1', 'src/App.java', 1, 1, 'jdbcTemplate selects account_table', 'jdbctemplate selects account_table', '[\"account_table\"]', '[\"AppService\"]')")
+            connection.execute("insert into files_fts(rowid, path) values (1, 'src/App.java')")
+            connection.execute("insert into lines_fts(rowid, file_path, line_no, line_text) values (1, 'src/App.java', 1, 'class App jdbcTemplate')")
+            connection.execute("insert into semantic_chunks_fts(rowid, chunk_id, file_path, chunk_text) values (1, 'chunk-1', 'src/App.java', 'jdbcTemplate account_table')")
+            connection.commit()
+
+        request_cache = self.service._new_retrieval_request_cache()
+        with sqlite3.connect(index_path) as connection:
+            connection.row_factory = sqlite3.Row
+            self.assertEqual(self.service._cached_file_lines(connection, index_path, ""), [])
+            self.assertEqual(self.service._file_fts_search_rows(connection, ["the"], [], index_path=index_path), [])
+            self.assertEqual(self.service._fts_search_rows(connection, ["the"], [], index_path=index_path), [])
+            self.assertEqual(self.service._semantic_fts_search_rows(connection, ["the"], [], index_path=index_path), [])
+            self.assertEqual(
+                self.service._cached_structure_like_rows(
+                    connection,
+                    index_path,
+                    table="bad",
+                    lower_column="lower_name",
+                    term="app",
+                    limit=5,
+                    request_cache=request_cache,
+                ),
+                [],
+            )
+            self.assertEqual(
+                self.service._cached_structure_like_rows(
+                    connection,
+                    index_path,
+                    table="definitions",
+                    lower_column="lower_name",
+                    term="ap",
+                    limit=5,
+                    request_cache=request_cache,
+                ),
+                [],
+            )
+            first_file_fts = self.service._file_fts_search_rows(connection, ["app"], [], index_path=index_path, request_cache=request_cache)
+            second_file_fts = self.service._file_fts_search_rows(connection, ["app"], [], index_path=index_path, request_cache=request_cache)
+            first_line_fts = self.service._fts_search_rows(connection, ["jdbctemplate"], [], index_path=index_path, request_cache=request_cache)
+            second_line_fts = self.service._fts_search_rows(connection, ["jdbctemplate"], [], index_path=index_path, request_cache=request_cache)
+            first_semantic_fts = self.service._semantic_fts_search_rows(connection, ["account_table"], [], index_path=index_path, request_cache=request_cache)
+            second_semantic_fts = self.service._semantic_fts_search_rows(connection, ["account_table"], [], index_path=index_path, request_cache=request_cache)
+            first_structure = self.service._cached_structure_like_rows(
+                connection,
+                index_path,
+                table="definitions",
+                lower_column="lower_name",
+                term="appservice",
+                limit=5,
+                request_cache=request_cache,
+            )
+            second_structure = self.service._cached_structure_like_rows(
+                connection,
+                index_path,
+                table="definitions",
+                lower_column="lower_name",
+                term="appservice",
+                limit=5,
+                request_cache=request_cache,
+            )
+            semantic_matches = self.service._semantic_chunk_matches(
+                connection,
+                entry=RepositoryEntry("Repo", "https://git.example.com/repo.git"),
+                tokens=["account_table"],
+                question="Which data source does App use?",
+                focus_terms=["AppService"],
+                trace_stage="dependency",
+                repo_score=3,
+                trace_stage_bonus=5,
+                rows=None,
+                intent={"data_source": True},
+            )
+
+        self.assertEqual(first_file_fts, second_file_fts)
+        self.assertEqual(first_line_fts, second_line_fts)
+        self.assertEqual(first_semantic_fts, second_semantic_fts)
+        self.assertEqual(first_structure, second_structure)
+        self.assertTrue(semantic_matches)
+        self.assertIn("dependency trace", semantic_matches[0]["reason"])
+        self.assertEqual(request_cache["stats"]["file_fts_hits"], 1)
+        self.assertEqual(request_cache["stats"]["fts_hits"], 1)
+        self.assertEqual(request_cache["stats"]["semantic_fts_hits"], 1)
+        self.assertEqual(request_cache["stats"]["structure_like_hits"], 1)
+        self.assertFalse(retrieval_tools._is_large_index_file(Path(self.temp_dir.name) / "missing.sqlite3"))
+        self.assertEqual(
+            self.service._structure_lookup_query_terms(
+                ["the", "simple", "veryveryveryverylongplainterm", "path/name", "module.name", "low"],
+                ["focused_term"],
+                large_index=True,
+                limit=4,
+            ),
+            ["focused_term", "simple", "path/name", "module.name"],
+        )
+
+    def test_targeted_index_rows_use_degraded_sqlite_fallbacks(self):
+        index_path = Path(self.temp_dir.name) / "targeted_fallback.sqlite3"
+        with sqlite3.connect(index_path) as connection:
+            connection.execute("create table files (path text, lower_path text, symbols text)")
+            connection.execute(
+                "create table lines (file_path text, line_no integer, line_text text, lower_text text, symbols text, is_declaration integer, has_pathish integer)"
+            )
+            connection.execute(
+                "create table semantic_chunks (chunk_id text, file_path text, start_line integer, end_line integer, chunk_text text, lower_text text, tokens text, symbols text)"
+            )
+            connection.execute("insert into files values ('src/NeedleConfig.yaml', 'src/needleconfig.yaml', '[]')")
+            connection.execute(
+                "insert into lines values ('src/NeedleConfig.yaml', 7, 'needleValue: true', 'needlevalue: true', '[]', 0, 1)"
+            )
+            connection.execute(
+                "insert into semantic_chunks values ('needle-chunk', 'src/NeedleConfig.yaml', 7, 7, 'needleValue config', 'needlevalue config', '[\"needlevalue\"]', '[]')"
+            )
+            connection.commit()
+
+        with sqlite3.connect(index_path) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = self.service._targeted_index_rows(
+                connection,
+                index_path,
+                tokens=["needlevalue"],
+                focus_terms=["needleconfig"],
+                intent={"config": True},
+                request_cache=self.service._new_retrieval_request_cache(),
+            )
+
+        self.assertIn("src/NeedleConfig.yaml", rows["files_by_path"])
+        self.assertTrue(any(row["file_path"] == "src/NeedleConfig.yaml" for row in rows["lines"]))
+        self.assertTrue(any(row["file_path"] == "src/NeedleConfig.yaml" for row in rows["semantic_chunks"]))
+
+    def test_exact_lookup_and_search_repo_edge_paths(self):
+        entry = RepositoryEntry(display_name="Repo", url="https://git.example.com/team/repo.git")
+        repo_path = self.service._repo_path("AF:All", entry)
+        (repo_path / ".git").mkdir(parents=True)
+        index_path = self.service._index_path(repo_path)
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(index_path) as connection:
+            connection.execute("create table files (path text, lower_path text, symbols text)")
+            connection.execute(
+                "create table lines (file_path text, line_no integer, line_text text, lower_text text, symbols text, is_declaration integer, has_pathish integer)"
+            )
+            connection.execute("create table line_tokens (token text, file_path text, line_no integer)")
+            connection.execute("create table references_index (target text, lower_target text, kind text, file_path text, line_no integer, context text)")
+            connection.execute("create virtual table lines_fts using fts5(file_path, line_no unindexed, line_text)")
+            connection.execute("insert into files values ('src/AccountMapper.java', 'src/accountmapper.java', '[\"AccountMapper\"]')")
+            connection.execute(
+                "insert into lines values ('src/AccountMapper.java', 4, 'select * from ads_account_snapshot_table', 'select * from ads_account_snapshot_table', '[\"ads_account_snapshot_table\"]', 0, 0)"
+            )
+            connection.execute(
+                "insert into references_index values ('ads_account_snapshot_table', 'ads_account_snapshot_table', 'sql_table', 'src/AccountMapper.java', 4, 'select')"
+            )
+            connection.execute("insert into line_tokens values ('fallback_only_table', 'src/AccountMapper.java', 4)")
+            connection.execute("insert into lines_fts(rowid, file_path, line_no, line_text) values (1, 'src/AccountMapper.java', 4, 'text_only_lookup_table')")
+            connection.commit()
+
+        terms = self.service._extract_exact_lookup_terms(
+            "Open https://example.com then inspect src/AccountMapper.java and db.ads_account_snapshot_table plus very_long_identifier_with_many_parts"
+        )
+        self.assertIn("src/accountmapper.java", terms)
+        self.assertIn("db.ads_account_snapshot_table", terms)
+        self.assertIn("very_long_identifier_with_many_parts", terms)
+        self.assertNotIn("https://example.com", terms)
+        self.assertTrue(self.service._is_strict_exact_lookup_term("src/AccountMapper.java"))
+        self.assertFalse(self.service._is_strict_exact_lookup_term("api/account"))
+        self.assertFalse(self.service._exact_lookup_is_sufficient([], []))
+        with patch.object(self.service, "_require_ready_repo_index", return_value={"state": "ready"}):
+            matches = self.service._exact_table_path_lookup_repo(
+                entry,
+                repo_path,
+                [
+                    "db.ads_account_snapshot_table",
+                    "src/accountmapper.java",
+                    "fallback_only_table",
+                    "text_only_lookup_table",
+                ],
+                question="where is account snapshot table",
+                request_cache=self.service._new_retrieval_request_cache(),
+            )
+        lookup_sources = {match["exact_lookup"]["source"] for match in matches}
+        self.assertIn("references_index", lookup_sources)
+        self.assertIn("files", lookup_sources)
+        self.assertIn("line_tokens", lookup_sources)
+        self.assertIn("lines_fts", lookup_sources)
+        self.assertTrue(self.service._exact_lookup_is_sufficient(["src/accountmapper.java"], matches))
+        with patch.object(self.service, "_require_ready_repo_index", side_effect=sqlite3.Error("broken")):
+            self.assertEqual(self.service._search_repo(entry, repo_path, ["account"], question="account"), [])
+
+    def test_planner_tools_cover_index_edges_and_fallbacks(self):
+        entry = RepositoryEntry(display_name="Repo", url="https://git.example.com/team/repo.git")
+        repo_path = self.service._repo_path("AF:All", entry)
+        (repo_path / ".git").mkdir(parents=True)
+        index_path = self.service._index_path(repo_path)
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(index_path) as connection:
+            connection.execute("create table files (path text, lower_path text, symbols text)")
+            connection.execute(
+                "create table lines (file_path text, line_no integer, line_text text, lower_text text, symbols text, is_declaration integer, has_pathish integer)"
+            )
+            connection.execute("create table definitions (name text, lower_name text, kind text, file_path text, line_no integer, signature text)")
+            connection.execute("create table code_entities (name text, lower_name text, kind text, file_path text, line_no integer)")
+            connection.execute(
+                "create table references_index (target text, lower_target text, kind text, file_path text, line_no integer, context text)"
+            )
+            connection.execute(
+                "create table flow_edges (edge_kind text, from_name text, to_name text, evidence text, from_kind text, to_kind text, from_file text, from_line integer, to_file text, to_line integer)"
+            )
+            connection.execute(
+                "create table graph_edges (edge_kind text, symbol text, from_file text, from_line integer, to_file text, to_line integer)"
+            )
+            connection.execute(
+                "create table entity_edges (edge_kind text, from_name text, to_name text, from_file text, from_line integer, to_file text, to_line integer)"
+            )
+            rows = {
+                "src/service/IssueService.java": [
+                    "class IssueService {",
+                    "  String password = \"secret-token\";",
+                    "  void createIssue() { mapper.save(); }",
+                    "}",
+                ],
+                "src/controller/IssueController.java": [
+                    "@PostMapping(\"/api/issues\")",
+                    "class IssueController { IssueService service; }",
+                ],
+                "src/repository/IssueMapper.java": [
+                    "class IssueMapper {",
+                    "  void save() { select * from issue_table; }",
+                    "}",
+                ],
+                "src/client/ExternalClient.java": ["class ExternalClient {}"],
+                "tests/IssueServiceTest.java": [
+                    "@Test",
+                    "void createIssueTest() { assertThat(service.createIssue()).isNotNull(); }",
+                ],
+                "node_modules/dist/app.min.js": ["const password = \"ignored-secret\";"],
+            }
+            for path, lines in rows.items():
+                connection.execute("insert into files values (?, ?, ?)", (path, path.lower(), "[]"))
+                for line_no, text in enumerate(lines, start=1):
+                    connection.execute(
+                        "insert into lines values (?, ?, ?, ?, ?, ?, ?)",
+                        (path, line_no, text, text.lower(), "[]", 1 if "class " in text else 0, 0),
+                    )
+            connection.execute("insert into definitions values ('IssueService', 'issueservice', 'class', 'src/service/IssueService.java', 1, '')")
+            connection.execute("insert into definitions values ('IssueMapper', 'issuemapper', 'class', 'src/repository/IssueMapper.java', 1, '')")
+            connection.execute("insert into code_entities values ('ExternalClient', 'externalclient', 'class', 'src/client/ExternalClient.java', 1)")
+            connection.execute(
+                "insert into references_index values ('issue_table', 'issue_table', 'sql_table', 'src/repository/IssueMapper.java', 2, 'select from issue_table')"
+            )
+            connection.execute(
+                "insert into references_index values ('unused_table', 'unused_table', 'sql_table', 'src/repository/IssueMapper.java', 2, 'plain context')"
+            )
+            connection.execute(
+                "insert into references_index values ('/api/issues', '/api/issues', 'route', 'src/controller/IssueController.java', 1, 'PostMapping')"
+            )
+            connection.execute(
+                "insert into references_index values ('IssueService', 'issueservice', 'test_subject', 'tests/IssueServiceTest.java', 2, 'assertThat')"
+            )
+            connection.execute(
+                "insert into references_index values ('Transactional', 'transactional', 'operational_boundary', 'src/service/IssueService.java', 3, '@Transactional createIssue')"
+            )
+            connection.execute(
+                "insert into references_index values ('Transactional', 'transactional', 'operational_boundary', 'src/service/IssueService.java', 3, '@Transactional duplicate')"
+            )
+            connection.execute(
+                "insert into flow_edges values ('service', 'IssueController', 'IssueService', 'controller calls service', 'controller', 'service', 'src/controller/IssueController.java', 2, 'src/service/IssueService.java', 3)"
+            )
+            connection.execute(
+                "insert into flow_edges values ('repository', 'IssueService', 'IssueMapper', 'service calls mapper', 'service', 'repository', 'src/service/IssueService.java', 3, 'src/repository/IssueMapper.java', 2)"
+            )
+            connection.execute(
+                "insert into flow_edges values ('repository', 'IssueService', 'IssueMapper', 'service calls mapper duplicate', 'service', 'repository', 'src/service/IssueService.java', 3, 'src/repository/IssueMapper.java', 2)"
+            )
+            connection.execute(
+                "insert into flow_edges values ('client', 'IssueService', 'ExternalClient', 'client without file', 'service', 'client', 'src/service/IssueService.java', 3, '', 0)"
+            )
+            connection.execute(
+                "insert into flow_edges values ('client', 'IssueService', 'IssueMapper', 'definition fallback without file', 'service', 'client', 'src/service/IssueService.java', 3, '', 0)"
+            )
+            connection.execute(
+                "insert into graph_edges values ('call', 'createIssue', 'src/service/IssueService.java', 3, 'src/repository/IssueMapper.java', 2)"
+            )
+            connection.execute(
+                "insert into entity_edges values ('injects', 'IssueController', 'IssueService', 'src/controller/IssueController.java', 2, 'src/service/IssueService.java', 1)"
+            )
+            connection.commit()
+
+        request_cache = self.service._new_retrieval_request_cache()
+        base_matches = [
+            {
+                "repo": entry.display_name,
+                "path": "src/service/IssueService.java",
+                "line_start": 3,
+                "line_end": 3,
+                "score": 200,
+                "snippet": "createIssue mapper.save",
+                "reason": "seed",
+                "retrieval": "persistent_index",
+            }
+        ]
+        with patch.object(self.service, "_require_ready_repo_index", return_value={"state": "ready"}):
+            static_matches = self.service._tool_find_static_findings(
+                entry,
+                repo_path,
+                ["secret"],
+                "find static secret risks",
+                1,
+                request_cache=request_cache,
+            )
+            test_matches = self.service._tool_find_test_coverage(
+                entry,
+                repo_path,
+                ["IssueService"],
+                "does IssueService have test coverage?",
+                2,
+                request_cache=request_cache,
+            )
+            boundary_matches = self.service._tool_find_operational_boundaries(
+                entry,
+                repo_path,
+                ["Transactional"],
+                "what transactional boundary exists?",
+                3,
+                request_cache=request_cache,
+            )
+            caller_matches = self.service._tool_find_callers(
+                entry,
+                repo_path,
+                base_matches,
+                ["IssueService"],
+                "who calls IssueService?",
+                4,
+                request_cache=request_cache,
+            )
+            callee_matches = self.service._tool_find_callees(
+                entry,
+                repo_path,
+                base_matches,
+                ["IssueMapper"],
+                "what does IssueService call?",
+                5,
+                request_cache=request_cache,
+            )
+            open_matches = self.service._tool_open_file_window(
+                entry,
+                repo_path,
+                base_matches,
+                "open service",
+                6,
+                request_cache=request_cache,
+            )
+            structure_matches = self.service._tool_lookup_structure(
+                entry,
+                repo_path,
+                ["IssueMapper"],
+                question="find mapper definition",
+                table="definitions",
+                name_column="name",
+                lower_column="lower_name",
+                line_column="line_no",
+                kind_column="kind",
+                trace_stage="tool_loop_7",
+                retrieval="planner_definition",
+                request_cache=request_cache,
+            )
+            graph_matches = self.service._tool_trace_graph(
+                entry,
+                repo_path,
+                base_matches,
+                "trace graph",
+                8,
+                request_cache=request_cache,
+            )
+            flow_matches = self.service._tool_trace_flow(
+                entry,
+                repo_path,
+                base_matches,
+                "trace flow",
+                9,
+                request_cache=request_cache,
+            )
+            entity_matches = self.service._tool_trace_entity(
+                entry,
+                repo_path,
+                [{"repo": entry.display_name, "path": "src/controller/IssueController.java"}],
+                "trace entity",
+                10,
+                request_cache=request_cache,
+            )
+            impact_matches = self.service._expand_impact_matches(
+                entries=[entry],
+                key="AF:All",
+                question="IssueService impact upstream downstream IssueMapper",
+                base_matches=base_matches,
+                limit=8,
+                request_cache=request_cache,
+            )
+            skipped_table_matches = self.service._tool_lookup_references_by_kind(
+                entry,
+                repo_path,
+                ["notpresent"],
+                kinds={"sql_table"},
+                question="unmatched table",
+                trace_stage="tool_loop_11",
+                retrieval="planner_table",
+                score=100,
+                request_cache=request_cache,
+            )
+
+        self.assertTrue(static_matches)
+        self.assertEqual({match["path"] for match in static_matches}, {"src/service/IssueService.java"})
+        self.assertTrue(
+            any(
+                "issueservice" in match.get("test_coverage", {}).get("terms", [])
+                or match.get("test_coverage", {}).get("target") == "IssueService"
+                for match in test_matches
+            )
+        )
+        self.assertEqual(boundary_matches[0]["operational_boundary"]["kind"], "operational_boundary")
+        self.assertTrue(any(match["path"] == "src/controller/IssueController.java" for match in caller_matches))
+        self.assertTrue(any(match["path"] == "src/repository/IssueMapper.java" for match in callee_matches))
+        self.assertTrue(open_matches)
+        self.assertEqual(structure_matches[0]["path"], "src/repository/IssueMapper.java")
+        self.assertTrue(graph_matches)
+        self.assertTrue(flow_matches)
+        self.assertTrue(entity_matches)
+        self.assertTrue(any(match["retrieval"] == "planner_caller" for match in impact_matches))
+        self.assertTrue(any(match["retrieval"] == "planner_callee" for match in impact_matches))
+        self.assertTrue(all(match["reason"].endswith("issue_table") for match in skipped_table_matches))
+
+        with patch.object(self.service, "_require_ready_repo_index", side_effect=sqlite3.Error("broken")):
+            self.assertEqual(self.service._tool_find_static_findings(entry, repo_path, ["secret"], "q", 1), [])
+            self.assertEqual(self.service._tool_find_test_coverage(entry, repo_path, ["IssueService"], "q", 1), [])
+            self.assertEqual(self.service._tool_find_operational_boundaries(entry, repo_path, ["Transactional"], "q", 1), [])
+            self.assertEqual(
+                self.service._tool_lookup_references_by_kind(
+                    entry,
+                    repo_path,
+                    ["issue_table"],
+                    kinds={"sql_table"},
+                    question="q",
+                    trace_stage="tool_loop_1",
+                    retrieval="planner_table",
+                    score=100,
+                ),
+                [],
+            )
+        with patch.object(self.service, "_require_ready_repo_index", return_value={"state": "ready"}):
+            self.assertEqual(
+                self.service._expand_impact_matches(
+                    entries=[entry],
+                    key="AF:All",
+                    question="Fallback",
+                    base_matches=[{"repo": entry.display_name, "path": "src/Fallback.java"}],
+                    limit=3,
+                ),
+                [],
+            )
+            self.assertEqual(
+                self.service._tool_lookup_structure(
+                    entry,
+                    repo_path,
+                    ["IssueMapper"],
+                    question="q",
+                    table="missing_definitions",
+                    name_column="name",
+                    lower_column="lower_name",
+                    line_column="line_no",
+                    kind_column="kind",
+                    trace_stage="tool_loop_1",
+                    retrieval="planner_definition",
+                ),
+                [],
+            )
+            with patch(
+                "bpmis_jira_tool.source_code_qa_retrieval_tools.sqlite3.connect",
+                side_effect=sqlite3.Error("broken"),
+            ):
+                self.assertEqual(self.service._tool_trace_graph(entry, repo_path, base_matches, "q", 1), [])
+
+    def test_retrieval_edge_helpers_cover_remaining_boundaries(self):
+        from bpmis_jira_tool import source_code_qa_retrieval_tools as retrieval_tools
+
+        self.assertEqual(self.service._structure_lookup_query_terms(["", "of", "valid", "valid"], [], large_index=False, limit=3), ["valid"])
+
+        indexed_text_root = Path(self.temp_dir.name) / "text-files"
+        (indexed_text_root / ".git").mkdir(parents=True)
+        (indexed_text_root / "src").mkdir()
+        (indexed_text_root / "node_modules").mkdir()
+        (indexed_text_root / "src" / "App.py").write_text("print('ok')\n", encoding="utf-8")
+        (indexed_text_root / "node_modules" / "lib.py").write_text("skip\n", encoding="utf-8")
+        (indexed_text_root / "src" / "image.bin").write_bytes(b"skip")
+        (indexed_text_root / "src" / "large.py").write_text("x" * (self.service.max_file_bytes + 1), encoding="utf-8")
+        iterated_paths = {path.name for path in self.service._iter_text_files(indexed_text_root)}
+        self.assertEqual(iterated_paths, {"App.py"})
+
+        with self.assertRaises(ToolError):
+            self.service._normalize_entry("bad")
+        with self.assertRaises(ToolError):
+            self.service._normalize_entry({"url": ""})
+        self.assertEqual(self.service._entry_to_dict({"display_name": "", "url": "https://git.example.com/team/demo.git"})["display_name"], "demo")
+        self.assertIn("https://***:***@", self.service._sanitize_error_detail("https://alice:secret-token@git.example.com/repo.git"))
+
+        request_cache = self.service._new_retrieval_request_cache()
+        index_path = Path(self.temp_dir.name) / "large_targeted.sqlite3"
+        with sqlite3.connect(index_path) as connection:
+            connection.execute("create table files (path text, lower_path text, symbols text)")
+            connection.execute(
+                "create table lines (file_path text, line_no integer, line_text text, lower_text text, symbols text, is_declaration integer, has_pathish integer)"
+            )
+            connection.execute(
+                "create table semantic_chunks (chunk_id text, file_path text, start_line integer, end_line integer, chunk_text text, lower_text text, tokens text, symbols text)"
+            )
+            connection.execute("create virtual table lines_fts using fts5(file_path, line_no unindexed, line_text)")
+            connection.execute("create virtual table files_fts using fts5(path)")
+            connection.execute("create virtual table semantic_chunks_fts using fts5(chunk_id unindexed, file_path, chunk_text)")
+            for index in range(2001):
+                path = f"src/File{index}.java"
+                connection.execute("insert into files values (?, ?, ?)", (path, path.lower(), "[]"))
+                connection.execute("insert into lines values (?, 1, 'class File {}', 'class file {}', '[]', 1, 0)", (path,))
+            connection.execute("insert into semantic_chunks values ('chunk-1', 'src/File1.java', 1, 1, 'api config', 'api config', '[\"config\"]', '[]')")
+            connection.commit()
+        with sqlite3.connect(index_path) as connection:
+            connection.row_factory = sqlite3.Row
+            targeted = self.service._targeted_index_rows(
+                connection,
+                index_path,
+                tokens=["loan", "averyveryveryveryveryveryverylongterm", "mediumlengthtermxxx", "src/file1.java"],
+                focus_terms=["focusedplainterm"],
+                intent={"api": True},
+                request_cache=request_cache,
+            )
+            targeted_again = self.service._targeted_index_rows(
+                connection,
+                index_path,
+                tokens=["loan", "averyveryveryveryveryveryverylongterm", "mediumlengthtermxxx", "src/file1.java"],
+                focus_terms=["focusedplainterm"],
+                intent={"api": True},
+                request_cache=request_cache,
+            )
+            self.assertIs(targeted, targeted_again)
+            self.assertLessEqual(len(targeted["files"]), 48)
+
+            old_semantic_enabled = self.service.semantic_index_enabled
+            try:
+                self.service.semantic_index_enabled = False
+                self.assertEqual(
+                    self.service._targeted_semantic_rows_by_id(
+                        connection,
+                        index_path,
+                        tokens=["config"],
+                        focus_terms=[],
+                        query_terms=["config"],
+                        file_paths=["src/File1.java"],
+                        simple_intent=True,
+                        max_target_semantic_chunks=2,
+                    ),
+                    {},
+                )
+                self.assertEqual(
+                    self.service._semantic_chunk_matches(
+                        connection,
+                        entry=RepositoryEntry("Repo", "https://git.example.com/repo.git"),
+                        tokens=["config"],
+                        question="config",
+                        focus_terms=[],
+                        trace_stage="direct",
+                        repo_score=0,
+                        trace_stage_bonus=0,
+                    ),
+                    [],
+                )
+            finally:
+                self.service.semantic_index_enabled = old_semantic_enabled
+            self.assertEqual(
+                self.service._semantic_chunk_matches(
+                    connection,
+                    entry=RepositoryEntry("Repo", "https://git.example.com/repo.git"),
+                    tokens=["the"],
+                    question="the",
+                    focus_terms=[],
+                    trace_stage="direct",
+                    repo_score=0,
+                    trace_stage_bonus=0,
+                    rows=[],
+                    intent={},
+                ),
+                [],
+            )
+
+        with sqlite3.connect(Path(self.temp_dir.name) / "no_semantic_table.sqlite3") as connection:
+            connection.row_factory = sqlite3.Row
+            self.assertEqual(
+                self.service._semantic_chunk_matches(
+                    connection,
+                    entry=RepositoryEntry("Repo", "https://git.example.com/repo.git"),
+                    tokens=["config"],
+                    question="config",
+                    focus_terms=[],
+                    trace_stage="direct",
+                    repo_score=0,
+                    trace_stage_bonus=0,
+                    rows=None,
+                    intent={},
+                ),
+                [],
+            )
+
+        missing_entry = RepositoryEntry("Missing", "https://git.example.com/missing.git")
+        self.assertEqual(
+            self.service._expand_dependency_matches(entries=[missing_entry], key="AF:All", question="", base_matches=[], limit=3),
+            [],
+        )
+        with patch.object(self.service, "_dependency_focus_terms", return_value=["IssueService"]):
+            self.assertEqual(
+                self.service._expand_dependency_matches(entries=[missing_entry], key="AF:All", question="dependency", base_matches=[], limit=3),
+                [],
+            )
+        with patch.object(self.service, "_two_hop_trace_terms", return_value=["IssueService"]):
+            self.assertEqual(
+                self.service._expand_two_hop_matches(entries=[missing_entry], key="AF:All", question="two hop", base_matches=[], limit=3),
+                [],
+            )
+        with patch.object(self.service, "_agent_trace_terms", return_value=["IssueService"]):
+            self.assertEqual(
+                self.service._expand_agent_trace_matches(entries=[missing_entry], key="AF:All", question="agent", base_matches=[], limit=3),
+                [],
+            )
+
+        with patch.object(self.service, "_tool_loop_terms", return_value=[]), patch.object(
+            self.service,
+            "_build_tool_loop_plan",
+            return_value=[{"tool": "unknown", "terms": ["x"]}, {"tool": "find_definition", "terms": []}],
+        ):
+            self.assertIsNone(
+                self.service._choose_next_tool_step(
+                    question="",
+                    matches=[],
+                    evidence_summary={"intent": {}},
+                    quality_gate={},
+                    executed_steps=set(),
+                )
+            )
+        self.assertEqual(
+            self.service._execute_tool_loop_step(
+                entries=[missing_entry],
+                key="AF:All",
+                question="q",
+                matches=[],
+                step={"tool": "trace_graph", "terms": ["IssueService"]},
+                step_index=1,
+            ),
+            [],
+        )
+        self.assertFalse(self.service._is_strict_exact_lookup_term(""))
+        self.assertTrue(self.service._is_strict_exact_lookup_term("./src/App.java"))
+        self.assertTrue(self.service._exact_lookup_miss_should_stop(["./src/App.java"]))
+        self.assertFalse(self.service._exact_lookup_miss_should_stop(["api/account"]))
+        self.assertFalse(retrieval_tools._is_large_index_file(Path(self.temp_dir.name) / "does-not-exist.sqlite3"))
+        self.assertNotIn("https://example.com/path/to/app.java", retrieval_tools._extract_exact_lookup_terms("https://example.com/path/to/app.java"))
+        self.assertNotIn("abc.def", retrieval_tools._extract_exact_lookup_terms("abc.def"))
+        self.assertEqual(
+            retrieval_tools._extract_exact_lookup_terms("pkg.alpha_beta_gamma_delta_value alpha_beta_gamma_delta_value"),
+            ["pkg.alpha_beta_gamma_delta_value"],
+        )
+        class FakeExactUrlPattern:
+            def finditer(self, _text):
+                class Match:
+                    def group(self, _index):
+                        return "https://example.com/path.java"
+
+                return [Match()]
+
+        with patch.object(retrieval_tools, "EXACT_LOOKUP_TERM_PATTERN", FakeExactUrlPattern()):
+            self.assertEqual(retrieval_tools._extract_exact_lookup_terms(""), [])
+        self.assertNotIn("http://example.com/very/long/path.java", self.service._extract_exact_lookup_terms("http://example.com/very/long/path.java"))
+        self.assertIn("foo/bar/app.java", self.service._extract_exact_lookup_terms("foo/bar/app.java"))
+        self.assertEqual(
+            self.service._extract_exact_lookup_terms("db.ads_account_snapshot_table ads_account_snapshot_table"),
+            ["db.ads_account_snapshot_table"],
+        )
+        self.assertTrue(self.service._is_strict_exact_lookup_term("foo/bar/App.java"))
+        self.assertTrue(retrieval_tools._is_strict_exact_lookup_term("src/foo"))
+        temp_repo = Path(self.temp_dir.name) / "incomplete"
+        temp_repo.mkdir()
+        self.service._remove_incomplete_repo_dir(temp_repo)
+        self.assertFalse(temp_repo.exists())
+        self.assertIn("quality-gate trace", self.service._match_reason([], "", "", file_symbols=set(), question="", trace_stage="quality_gate"))
+
+    def test_repo_dependency_graph_matches_routes_messages_tables_and_artifacts(self):
+        source = RepositoryEntry(display_name="source-service", url="https://git.example.com/team/source-service.git")
+        target = RepositoryEntry(display_name="target-service", url="https://git.example.com/team/target-service.git")
+        entries = [source, target]
+        source_config = {
+            "target.base-url": ["https://target.internal/api"],
+            "target.topic": ["risk.events"],
+            "inventory.service": ["inventory-service"],
+        }
+        route_index = {
+            target.display_name: [
+                {"route": "/api/issues/create", "file": "src/TargetController.java", "line": 8},
+                {"route": "/create", "file": "src/TooGenericController.java", "line": 2},
+            ]
+        }
+        message_index = {target.display_name: [{"message": "risk.events", "file": "src/Consumer.java", "line": 12}]}
+        artifact_index = {target.display_name: [{"artifact": "target-client", "file": "pom.xml", "line": 4}]}
+        table_index = {target.display_name: [{"table": "issue_table", "edge_kind": "db_read", "file": "src/Reader.java", "line": 7}]}
+
+        route_candidate = self.service._match_repo_dependency_candidate(
+            row={
+                "edge_kind": "client",
+                "to_name": "${target.base-url}/issues/create",
+                "evidence": "WebClient ${target.base-url}/issues/create",
+                "from_file": "src/TargetClient.java",
+            },
+            entries=entries,
+            source_name=source.display_name,
+            route_index=route_index,
+            source_config=source_config,
+        )
+        artifact_candidate = self.service._match_repo_dependency_candidate(
+            row={"edge_kind": "module_dependency", "to_name": "com.example:target-client", "evidence": "com.example:target-client"},
+            entries=entries,
+            source_name=source.display_name,
+            route_index={},
+            artifact_index=artifact_index,
+        )
+        table_candidate = self.service._match_repo_dependency_candidate(
+            row={"edge_kind": "db_write", "to_name": "db.issue_table", "evidence": "insert issue_table"},
+            entries=entries,
+            source_name=source.display_name,
+            route_index={},
+            table_index=table_index,
+        )
+        message_candidate = self.service._match_repo_dependency_candidate(
+            row={"edge_kind": "event_publish", "to_name": "${target.topic}", "evidence": "publish"},
+            entries=entries,
+            source_name=source.display_name,
+            route_index={},
+            message_index=message_index,
+            source_config=source_config,
+        )
+        skipped_table_candidate = self.service._match_repo_dependency_candidate(
+            row={"edge_kind": "db_write", "to_name": "db.issue_table", "evidence": "insert issue_table"},
+            entries=entries,
+            source_name=source.display_name,
+            route_index={},
+            table_index={target.display_name: [{"table": "issue_table", "edge_kind": "db_write"}]},
+        )
+        skipped_message_candidate = self.service._match_repo_dependency_candidate(
+            row={"edge_kind": "message_publish", "to_name": "!!!", "evidence": ""},
+            entries=entries,
+            source_name=source.display_name,
+            route_index={},
+            message_index=message_index,
+            source_config={},
+        )
+        alias_candidate = self.service._match_repo_dependency_candidate(
+            row={"edge_kind": "import", "to_name": "import com.example.targetservice.Client", "evidence": "", "from_file": "src/Client.java"},
+            entries=entries,
+            source_name=source.display_name,
+            route_index={},
+        )
+
+        self.assertEqual(route_candidate["edge_kind"], "http_path")
+        self.assertEqual(route_candidate["to_file"], "src/TargetController.java")
+        self.assertEqual(artifact_candidate["edge_kind"], "module_dependency")
+        self.assertEqual(table_candidate["edge_kind"], "shared_table")
+        self.assertEqual(message_candidate["edge_kind"], "event_flow")
+        self.assertIsNone(skipped_table_candidate)
+        self.assertIsNone(skipped_message_candidate)
+        self.assertEqual(alias_candidate["edge_kind"], "import")
+        self.assertEqual(self.service._normalize_message_name("${target.topic:default}"), "target.topic")
+        self.assertIn("target-client", self.service._artifact_values_from_text("com.example:target-client"))
+        self.assertEqual(self.service._normalize_table_name("db.issue_table"), "issue_table")
+        self.assertEqual(
+            self.service._prefer_specific_routes([{"route": "/issues"}, {"route": "/api/issues"}]),
+            [{"route": "/api/issues"}],
+        )
+        self.assertEqual(self.service._join_config_routes("/create", ["https://target.internal/api"]), ["/api/create"])
+        self.assertEqual(self.service._resolve_config_placeholders("${target.base-url}/x", source_config), ["https://target.internal/api"])
+        self.assertIn("https://target.internal/api", self.service._candidate_dependency_config_values(source_config))
+        self.assertEqual(self.service._route_overlap_score("/api/issues/create", "https://target.internal/api/issues/create"), 0.96)
+        self.assertEqual(self.service._route_overlap_score("/", "/"), 0.0)
+        self.assertEqual(self.service._route_overlap_score("/{id}", "/{name}"), 0.0)
+        self.assertEqual(self.service._join_routes("", "/health"), "/health")
+        self.assertEqual(self.service._join_routes("/health", ""), "/health")
+        self.assertEqual(self.service._join_routes("https://host/base", "/v1"), "https://host/base/v1")
+        self.assertGreater(self.service._repo_alias_match_score("targetservice client", target), 0)
+        self.assertGreater(self.service._repo_alias_match_score("target", target), 0)
+        self.assertEqual(self.service._repo_alias_match_score("", target), 0)
+
+    def test_repo_dependency_indexes_build_from_persistent_indexes(self):
+        source = RepositoryEntry(display_name="source-service", url="https://git.example.com/team/source-service.git")
+        target = RepositoryEntry(display_name="target-service", url="https://git.example.com/team/target-service.git")
+        missing = RepositoryEntry(display_name="missing-service", url="https://git.example.com/team/missing-service.git")
+        entries = [source, target, missing]
+
+        def create_repo_index(entry, *, lines, flow_rows):
+            repo_path = self.service._repo_path("AF:All", entry)
+            (repo_path / ".git").mkdir(parents=True)
+            index_path = self.service._index_path(repo_path)
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(index_path) as connection:
+                connection.execute(
+                    "create table lines (file_path text, line_no integer, line_text text, lower_text text, symbols text, is_declaration integer, has_pathish integer)"
+                )
+                connection.execute(
+                    "create table flow_edges (edge_kind text, to_name text, evidence text, from_file text, from_line integer, to_file text, to_line integer)"
+                )
+                for file_path, line_no, line_text in lines:
+                    connection.execute(
+                        "insert into lines values (?, ?, ?, ?, '[]', 0, 0)",
+                        (file_path, line_no, line_text, line_text.lower()),
+                    )
+                for row in flow_rows:
+                    connection.execute("insert into flow_edges values (?, ?, ?, ?, ?, ?, ?)", row)
+                connection.commit()
+
+        create_repo_index(
+            source,
+            lines=[
+                ("src/main/resources/application.properties", 1, "target.base-url=https://target.internal"),
+                ("src/main/resources/application.yml", 1, "messaging:"),
+                ("src/main/resources/application.yml", 2, "  topic: risk.events"),
+            ],
+            flow_rows=[
+                ("client", "${target.base-url}/api/issues/create", "WebClient ${target.base-url}/api/issues/create", "src/TargetClient.java", 10, "", 0),
+                ("module_dependency", "com.example:target-client", "com.example:target-client", "pom.xml", 4, "", 0),
+                ("event_publish", "${messaging.topic}", "publish risk event", "src/Publisher.java", 12, "", 0),
+                ("db_write", "db.issue_table", "insert issue_table", "src/Writer.java", 20, "", 0),
+            ],
+        )
+        create_repo_index(
+            target,
+            lines=[
+                ("src/main/resources/application.properties", 1, "target.client.enabled=true"),
+                ("src/main/resources/application.properties", 2, "messaging.topic=risk.events"),
+            ],
+            flow_rows=[
+                ("route", "/api/issues/create", "@PostMapping", "src/TargetController.java", 8, "", 0),
+                ("module_dependency", "target-client", "target-client", "pom.xml", 4, "", 0),
+                ("message_consume", "${messaging.topic}", "consume topic", "src/Consumer.java", 12, "", 0),
+                ("db_read", "issue_table", "select issue_table", "src/Reader.java", 7, "", 0),
+            ],
+        )
+        request_cache = self.service._new_retrieval_request_cache()
+        with patch.object(self.service, "_require_ready_repo_index", return_value={"state": "ready"}):
+            route_index = self.service._repo_route_index(key="AF:All", entries=entries, request_cache=request_cache)
+            config_index = self.service._repo_config_index(key="AF:All", entries=entries, request_cache=request_cache)
+            message_index = self.service._repo_message_index(
+                key="AF:All",
+                entries=entries,
+                config_index=config_index,
+                request_cache=request_cache,
+            )
+            artifact_index = self.service._repo_artifact_index(key="AF:All", entries=entries, request_cache=request_cache)
+            table_index = self.service._repo_table_index(key="AF:All", entries=entries, request_cache=request_cache)
+            graph = self.service._build_repo_dependency_graph(key="AF:All", entries=entries, request_cache=request_cache)
+
+        self.assertEqual(route_index[target.display_name][0]["route"], "/api/issues/create")
+        self.assertEqual(config_index[source.display_name]["target.base-url"], ["https://target.internal"])
+        self.assertIn("risk.events", message_index[target.display_name][0]["message"])
+        self.assertEqual(artifact_index[target.display_name][0]["artifact"], "target-client")
+        self.assertEqual(table_index[target.display_name][0]["table"], "issue_table")
+        self.assertTrue(any(edge["edge_kind"] in {"http_path", "module_dependency", "event_flow", "shared_table"} for edge in graph["edges"]))
+
+        broken = RepositoryEntry(display_name="broken-service", url="https://git.example.com/team/broken-service.git")
+        broken_path = self.service._repo_path("AF:All", broken)
+        (broken_path / ".git").mkdir(parents=True)
+        self.service._index_path(broken_path).parent.mkdir(parents=True, exist_ok=True)
+        self.service._index_path(broken_path).write_text("not sqlite", encoding="utf-8")
+        with patch.object(self.service, "_require_ready_repo_index", return_value={"state": "ready"}):
+            self.assertEqual(self.service._repo_message_index(key="AF:All", entries=[broken]), {broken.display_name: []})
+            self.assertEqual(self.service._repo_artifact_index(key="AF:All", entries=[broken]), {broken.display_name: []})
+            self.assertEqual(self.service._repo_table_index(key="AF:All", entries=[broken]), {broken.display_name: []})
+            self.assertEqual(self.service._repo_route_index(key="AF:All", entries=[broken]), {broken.display_name: []})
+            self.assertEqual(self.service._repo_config_index(key="AF:All", entries=[broken]), {broken.display_name: {}})
+            broken_graph = self.service._build_repo_dependency_graph(key="AF:All", entries=[broken])
+        self.assertEqual(broken_graph["edges"], [])
+
+    def test_retrieval_fallbacks_and_empty_guards(self):
+        entry = RepositoryEntry(display_name="Repo", url="https://git.example.com/team/repo.git")
+        repo_path = self.service._repo_path("AF:All", entry)
+        (repo_path / ".git").mkdir(parents=True)
+        index_path = self.service._index_path(repo_path)
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(index_path) as connection:
+            connection.execute("create table files (path text, lower_path text, symbols text)")
+            connection.execute(
+                "create table lines (file_path text, line_no integer, line_text text, lower_text text, symbols text, is_declaration integer, has_pathish integer)"
+            )
+            connection.execute("create table references_index (target text, lower_target text, kind text, file_path text, line_no integer, context text)")
+            connection.execute(
+                "create table flow_edges (edge_kind text, from_name text, to_name text, evidence text, from_kind text, to_kind text, from_file text, from_line integer, to_file text, to_line integer)"
+            )
+            connection.execute("create table definitions (name text, lower_name text, kind text, file_path text, line_no integer, signature text)")
+            connection.execute("create table code_entities (name text, lower_name text, kind text, file_path text, line_no integer)")
+            connection.execute("insert into files values ('src/Fallback.java', 'src/fallback.java', '[\"Fallback\"]')")
+            connection.execute(
+                "insert into lines values ('src/Fallback.java', 1, 'class Fallback { void act() {} }', 'class fallback { void act() {} }', '[\"act\"]', 1, 0)"
+            )
+            connection.execute("insert into files values ('tests/NoHitTest.java', 'tests/nohittest.java', '[]')")
+            connection.execute("insert into lines values ('tests/NoHitTest.java', 1, 'void testOther() {}', 'void testother() {}', '[]', 0, 0)")
+            connection.execute("insert into references_index values ('plain_table', 'plain_table', 'sql_table', 'src/Fallback.java', 1, 'plain context')")
+            connection.execute("insert into flow_edges values ('client', 'Unknown', '', 'empty target', 'client', 'service', 'src/Fallback.java', 1, '', 0)")
+            connection.execute("insert into flow_edges values ('client', 'Unknown', 'Fallback', 'empty upstream path', 'client', 'service', '', 1, 'src/Fallback.java', 1)")
+            connection.commit()
+
+        request_cache = self.service._new_retrieval_request_cache()
+        with sqlite3.connect(index_path) as connection:
+            connection.row_factory = sqlite3.Row
+            many_hits = {
+                f"src/File{index}.java": {
+                    "best_score": index,
+                    "best_line": 1,
+                    "path_text": f"src/file{index}.java",
+                    "file_symbols": set(),
+                    "structure_hits": [],
+                }
+                for index in range(65)
+            }
+            many_hits["src/Fallback.java"] = {
+                "best_score": 100,
+                "best_line": 1,
+                "path_text": "src/fallback.java",
+                "file_symbols": {"fallback"},
+                "structure_hits": ["class definition Fallback"],
+            }
+            many_hits["src/Zero.java"] = {"best_score": 0}
+            many_hits["src/Missing.java"] = {"best_score": 99, "best_line": 1, "path_text": "src/missing.java", "file_symbols": set()}
+            pruned_matches = self.service._persistent_index_matches_from_hits(
+                connection,
+                index_path,
+                entry=entry,
+                tokens=["fallback"],
+                question="fallback",
+                focus_terms=[],
+                trace_stage="direct",
+                simple_intent=True,
+                file_hits=many_hits,
+                request_cache=request_cache,
+            )
+            self.assertEqual(request_cache["stats"]["simple_file_hit_prunes"], 1)
+            self.assertTrue(any(match["path"] == "src/Fallback.java" for match in pruned_matches))
+            self.assertNotIn("src/Zero.java", {match["path"] for match in pruned_matches})
+            self.assertEqual(
+                self.service._persistent_index_matches_from_hits(
+                    connection,
+                    index_path,
+                    entry=entry,
+                    tokens=["zero"],
+                    question="zero",
+                    focus_terms=[],
+                    trace_stage="direct",
+                    simple_intent=False,
+                    file_hits={"src/Zero.java": {"best_score": 0}},
+                    request_cache=request_cache,
+                ),
+                [],
+            )
+
+            self.assertIsNone(
+                self.service._match_from_index_location(
+                    entry,
+                    connection,
+                    "src/DoesNotExist.java",
+                    1,
+                    score=1,
+                    reason="missing",
+                    question="q",
+                    trace_stage="direct",
+                    retrieval="test",
+                )
+            )
+
+        empty_index = Path(self.temp_dir.name) / "empty_targeted.sqlite3"
+        with sqlite3.connect(empty_index) as connection:
+            connection.row_factory = sqlite3.Row
+            self.assertEqual(
+                self.service._targeted_index_rows(
+                    connection,
+                    empty_index,
+                    tokens=[],
+                    focus_terms=[],
+                    intent={},
+                    request_cache=self.service._new_retrieval_request_cache(),
+                )["files"],
+                [],
+            )
+
+        with patch.object(self.service, "_choose_next_tool_step", return_value=None), patch.object(
+            self.service,
+            "_compress_evidence_cached",
+            return_value={},
+        ), patch.object(self.service, "_quality_gate_cached", return_value={}):
+            trace = []
+            self.assertEqual(
+                self.service._run_planner_tool_loop(
+                    entries=[entry],
+                    key="AF:All",
+                    question="q",
+                    base_matches=[],
+                    limit=3,
+                    tool_trace=trace,
+                    request_cache=self.service._new_retrieval_request_cache(),
+                ),
+                [],
+            )
+            self.assertEqual(trace[0]["reason"], "no_next_tool")
+
+        with patch.object(self.service, "_require_ready_repo_index", return_value={"state": "ready"}), patch.object(
+            self.service,
+            "_static_qa_findings_for_line",
+            return_value=[
+                {"kind": "duplicate", "severity": "medium", "reason": "first", "score": 10},
+                {"kind": "duplicate", "severity": "medium", "reason": "second", "score": 10},
+            ],
+        ):
+            static_matches = self.service._tool_find_static_findings(entry, repo_path, ["duplicate"], "q", 0)
+            self.assertEqual(len([match for match in static_matches if match["path"] == "src/Fallback.java"]), 1)
+
+        with patch.object(self.service, "_require_ready_repo_index", return_value={"state": "ready"}):
+            self.assertEqual(self.service._tool_find_test_coverage(entry, repo_path, ["coverage"], "", 1), [])
+            self.assertEqual(self.service._tool_find_test_coverage(entry, repo_path, ["MissingSubject"], "MissingSubject", 1), [])
+
+            class DuplicateItems(dict):
+                def __bool__(self):
+                    return True
+
+                def items(self):
+                    return [
+                        ("tests/DuplicateTest.java", ["void testSubject() { assertTrue(subject); }"]),
+                        ("tests/DuplicateTest.java", ["void testSubject() { assertTrue(subject); }"]),
+                    ]
+
+            with patch.object(self.service, "_cached_index_rows", return_value={"lines_by_path": DuplicateItems()}), patch.object(
+                self.service,
+                "_match_from_index_location",
+                return_value={"path": "tests/DuplicateTest.java", "score": 1},
+            ):
+                duplicate_test_matches = self.service._tool_find_test_coverage(entry, repo_path, ["subject"], "subject", 1)
+            self.assertEqual(len(duplicate_test_matches), 1)
+            self.assertEqual(duplicate_test_matches[0]["path"], "tests/DuplicateTest.java")
+            self.assertEqual(
+                self.service._tool_lookup_structure(
+                    entry,
+                    repo_path,
+                    ["ab"],
+                    question="q",
+                    table="references_index",
+                    name_column="target",
+                    lower_column="lower_target",
+                    line_column="line_no",
+                    kind_column="kind",
+                    trace_stage="tool_loop_1",
+                    retrieval="planner_reference",
+                ),
+                [],
+            )
+            self.assertEqual(
+                self.service._execute_tool_loop_step(
+                    entries=[entry],
+                    key="AF:All",
+                    question="q",
+                    matches=[{"repo": entry.display_name, "path": "src/Fallback.java"}],
+                    step={"tool": "trace_graph", "terms": ["Fallback"]},
+                    step_index=1,
+                    request_cache=self.service._new_retrieval_request_cache(),
+                ),
+                [],
+            )
+        with patch.object(self.service, "_require_ready_repo_index", side_effect=sqlite3.Error("broken")):
+            self.assertEqual(self.service._tool_lookup_flow_edges(entry, repo_path, terms=["x"], seed_paths=["src/Fallback.java"], direction="callers", question="q", step_index=1), [])
+            self.assertEqual(self.service._tool_open_file_window(entry, repo_path, [{"repo": entry.display_name, "path": "src/Fallback.java"}], "q", 1), [])
+            self.assertEqual(self.service._tool_trace_flow(entry, repo_path, [{"repo": entry.display_name, "path": "src/Fallback.java"}], "q", 1), [])
+            self.assertEqual(self.service._tool_trace_entity(entry, repo_path, [{"repo": entry.display_name, "path": "src/Fallback.java"}], "q", 1), [])
+            self.assertEqual(
+                self.service._expand_impact_matches(
+                    entries=[entry],
+                    key="AF:All",
+                    question="Fallback",
+                    base_matches=[{"repo": entry.display_name, "path": "src/Fallback.java"}],
+                    limit=3,
+                ),
+                [],
+            )
+        with patch.object(self.service, "_require_ready_repo_index", return_value={"state": "ready"}):
+            impact_matches = self.service._expand_impact_matches(
+                entries=[entry],
+                key="AF:All",
+                question="Fallback",
+                base_matches=[{"repo": entry.display_name, "path": "src/Fallback.java"}],
+                limit=3,
+                request_cache=self.service._new_retrieval_request_cache(),
+            )
+        self.assertTrue(any(match["path"] == "src/Fallback.java" for match in impact_matches))
+
+        no_git = RepositoryEntry("No Git", "https://git.example.com/no-git.git")
+        self.assertEqual(
+            self.service._expand_impact_matches(
+                entries=[no_git],
+                key="AF:All",
+                question="q",
+                base_matches=[{"repo": no_git.display_name, "path": "src/App.java"}],
+                limit=3,
+            ),
+            [],
+        )
+        self.assertEqual(
+            self.service._expand_impact_matches(entries=[entry], key="AF:All", question="q", base_matches=[], limit=3),
+            [],
+        )
+        self.assertEqual(
+            self.service._build_trace_paths(entries=[entry], key="AF:All", matches=[], question="q", request_cache=request_cache),
+            [],
+        )
+
+    def test_sqlite_exception_fallbacks_for_targeted_and_exact_lookup(self):
+        entry = RepositoryEntry(display_name="Repo", url="https://git.example.com/team/repo.git")
+        repo_path = self.service._repo_path("AF:All", entry)
+        (repo_path / ".git").mkdir(parents=True)
+        index_path = self.service._index_path(repo_path)
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(index_path) as connection:
+            connection.execute("create table files (path text, lower_path text, symbols text)")
+            connection.execute(
+                "create table lines (file_path text, line_no integer, line_text text, lower_text text, symbols text, is_declaration integer, has_pathish integer)"
+            )
+            connection.execute("create table references_index (target text, lower_target text, kind text, file_path text, line_no integer, context text)")
+            connection.execute("create virtual table lines_fts using fts5(file_path, line_no unindexed, line_text)")
+            connection.execute("insert into files values ('src/Exact.java', 'src/exact.java', '[]')")
+            connection.execute("insert into lines values ('src/Exact.java', 1, 'select exact_table', 'select exact_table', '[]', 0, 0)")
+            connection.execute("insert into references_index values ('missing_file_table', 'missing_file_table', 'sql_table', 'src/Missing.java', 1, 'select')")
+            connection.commit()
+
+        with patch.object(self.service, "_require_ready_repo_index", return_value={"state": "ready"}):
+            misses = self.service._exact_table_path_lookup_repo(
+                entry,
+                repo_path,
+                ["missing_file_table", "not_found_table"],
+                question="q",
+                request_cache=self.service._new_retrieval_request_cache(),
+            )
+        self.assertFalse(any(match.get("path") == "src/Missing.java" for match in misses))
+        with patch.object(self.service, "_require_ready_repo_index", side_effect=sqlite3.Error("broken")):
+            self.assertEqual(self.service._exact_table_path_lookup_repo(entry, repo_path, ["exact_table"], question="q"), [])
+        with patch.object(self.service, "_require_ready_repo_index", return_value={"state": "ready"}):
+            empty_term_misses = self.service._exact_table_path_lookup_repo(
+                entry,
+                repo_path,
+                ["", "not_found_table"],
+                question="q",
+                request_cache=self.service._new_retrieval_request_cache(),
+            )
+        self.assertEqual(empty_term_misses, [])
+
+        no_fts_entry = RepositoryEntry(display_name="No FTS", url="https://git.example.com/team/no-fts.git")
+        no_fts_repo_path = self.service._repo_path("AF:All", no_fts_entry)
+        (no_fts_repo_path / ".git").mkdir(parents=True)
+        no_fts_index_path = self.service._index_path(no_fts_repo_path)
+        no_fts_index_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(no_fts_index_path) as connection:
+            connection.execute("create table files (path text, lower_path text, symbols text)")
+            connection.execute(
+                "create table lines (file_path text, line_no integer, line_text text, lower_text text, symbols text, is_declaration integer, has_pathish integer)"
+            )
+            connection.execute("create table references_index (target text, lower_target text, kind text, file_path text, line_no integer, context text)")
+            connection.commit()
+        with patch.object(self.service, "_require_ready_repo_index", return_value={"state": "ready"}):
+            self.assertEqual(
+                self.service._exact_table_path_lookup_repo(
+                    no_fts_entry,
+                    no_fts_repo_path,
+                    ["not_found_table"],
+                    question="q",
+                    request_cache=self.service._new_retrieval_request_cache(),
+                ),
+                [],
+            )
+
+        no_tables_path = Path(self.temp_dir.name) / "targeted_no_tables.sqlite3"
+        with sqlite3.connect(no_tables_path) as connection:
+            connection.row_factory = sqlite3.Row
+            with patch.object(self.service, "_file_fts_search_rows", return_value=[{"path": "src/Missing.java"}]), patch.object(
+                self.service,
+                "_fts_search_rows",
+                return_value=[{"file_path": "src/Missing.java", "line_no": 1}],
+            ), patch.object(
+                self.service,
+                "_cached_structure_like_rows",
+                return_value=[{"file_path": "src/Missing.java", "line_no": 1}],
+            ):
+                payload = self.service._targeted_index_rows(
+                    connection,
+                    no_tables_path,
+                    tokens=["needle"],
+                    focus_terms=[],
+                    intent={"config": True},
+                    request_cache=self.service._new_retrieval_request_cache(),
+                )
+        self.assertEqual(payload["files"], [])
+        self.assertEqual(payload["lines"], [])
+
+        line_token_only_path = Path(self.temp_dir.name) / "targeted_line_token_only.sqlite3"
+        with sqlite3.connect(line_token_only_path) as connection:
+            connection.execute(
+                "create table lines (file_path text, line_no integer, line_text text, lower_text text, symbols text, is_declaration integer, has_pathish integer)"
+            )
+            connection.execute("create table line_tokens (token text, file_path text, line_no integer)")
+            connection.execute("insert into lines values ('src/OnlyLine.java', 1, 'needle', 'needle', '[]', 0, 0)")
+            connection.execute("insert into line_tokens values ('needle', 'src/OnlyLine.java', 1)")
+            connection.commit()
+            connection.row_factory = sqlite3.Row
+            line_only_payload = self.service._targeted_index_rows(
+                connection,
+                line_token_only_path,
+                tokens=["needle"],
+                focus_terms=[],
+                intent={},
+                request_cache=self.service._new_retrieval_request_cache(),
+            )
+        self.assertEqual(line_only_payload["files"], [])
+
+        files_only_path = Path(self.temp_dir.name) / "targeted_files_only.sqlite3"
+        with sqlite3.connect(files_only_path) as connection:
+            connection.execute("create table files (path text, lower_path text, symbols text)")
+            connection.execute("insert into files values ('src/OnlyFile.java', 'src/onlyfile.java', '[]')")
+            connection.commit()
+            connection.row_factory = sqlite3.Row
+            with patch.object(self.service, "_file_fts_search_rows", return_value=[{"path": "src/OnlyFile.java"}]):
+                files_only_payload = self.service._targeted_index_rows(
+                    connection,
+                    files_only_path,
+                    tokens=["onlyfile"],
+                    focus_terms=[],
+                    intent={},
+                    request_cache=self.service._new_retrieval_request_cache(),
+                )
+        self.assertEqual(len(files_only_payload["files"]), 1)
+
+        semantic_path = Path(self.temp_dir.name) / "semantic_no_tables.sqlite3"
+        with sqlite3.connect(semantic_path) as connection:
+            connection.row_factory = sqlite3.Row
+            with patch.object(self.service, "_semantic_fts_search_rows", return_value=[{"chunk_id": "missing"}]):
+                semantic_rows = self.service._targeted_semantic_rows_by_id(
+                    connection,
+                    semantic_path,
+                    tokens=["needle"],
+                    focus_terms=[],
+                    query_terms=["needle"],
+                    file_paths=["src/Missing.java"],
+                    simple_intent=False,
+                    max_target_semantic_chunks=1,
+                    request_cache=self.service._new_retrieval_request_cache(),
+                )
+        self.assertEqual(semantic_rows, {})
+
+        semantic_limited_path = Path(self.temp_dir.name) / "semantic_limited.sqlite3"
+        with sqlite3.connect(semantic_limited_path) as connection:
+            connection.execute(
+                "create table semantic_chunks (chunk_id text, file_path text, start_line integer, end_line integer, chunk_text text, lower_text text, tokens text, symbols text)"
+            )
+            connection.execute("insert into semantic_chunks values ('c1', 'a.java', 1, 1, 'needle', 'needle', '[]', '[]')")
+            connection.execute("insert into semantic_chunks values ('c2', 'b.java', 1, 1, 'needle', 'needle', '[]', '[]')")
+            connection.execute("create table semantic_chunk_tokens (token text, chunk_id text, file_path text)")
+            connection.execute("insert into semantic_chunk_tokens values ('needle', 'c1', 'a.java')")
+            connection.execute("insert into semantic_chunk_tokens values ('needle', 'c2', 'b.java')")
+            connection.commit()
+            connection.row_factory = sqlite3.Row
+            with patch.object(self.service, "_semantic_fts_search_rows", return_value=[{"chunk_id": "c1"}, {"chunk_id": "c2"}]):
+                semantic_limited = self.service._targeted_semantic_rows_by_id(
+                    connection,
+                    semantic_limited_path,
+                    tokens=["needle"],
+                    focus_terms=[],
+                    query_terms=["needle"],
+                    file_paths=["a.java", "b.java"],
+                    simple_intent=False,
+                    max_target_semantic_chunks=1,
+                    request_cache=self.service._new_retrieval_request_cache(),
+                )
+            semantic_from_tokens = self.service._targeted_semantic_rows_by_id(
+                connection,
+                semantic_limited_path,
+                tokens=[],
+                focus_terms=[],
+                query_terms=["needle"],
+                file_paths=[],
+                simple_intent=False,
+                max_target_semantic_chunks=1,
+                request_cache=self.service._new_retrieval_request_cache(),
+            )
+        semantic_fallback_path = Path(self.temp_dir.name) / "semantic_fallback_limited.sqlite3"
+        with sqlite3.connect(semantic_fallback_path) as connection:
+            connection.execute(
+                "create table semantic_chunks (chunk_id text, file_path text, start_line integer, end_line integer, chunk_text text, lower_text text, tokens text, symbols text)"
+            )
+            connection.execute("insert into semantic_chunks values ('f1', 'a.java', 1, 1, 'needle', 'needle', '[]', '[]')")
+            connection.execute("insert into semantic_chunks values ('f2', 'b.java', 1, 1, 'other', 'other', '[]', '[]')")
+            connection.commit()
+            connection.row_factory = sqlite3.Row
+            semantic_from_fallback = self.service._targeted_semantic_rows_by_id(
+                connection,
+                semantic_fallback_path,
+                tokens=[],
+                focus_terms=[],
+                query_terms=["needle", "other"],
+                file_paths=[],
+                simple_intent=False,
+                max_target_semantic_chunks=1,
+                request_cache=self.service._new_retrieval_request_cache(),
+            )
+        self.assertEqual(len(semantic_limited), 1)
+        self.assertEqual(len(semantic_from_tokens), 1)
+        self.assertEqual(len(semantic_from_fallback), 1)
+
+    def test_search_repo_index_fallback_rows_and_targeted_limits(self):
+        entry = RepositoryEntry(display_name="Repo", url="https://git.example.com/team/repo.git")
+        repo_path = self.service._repo_path("AF:All", entry)
+        (repo_path / ".git").mkdir(parents=True)
+        index_path = self.service._index_path(repo_path)
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(index_path) as connection:
+            connection.execute("create table files (path text, lower_path text, symbols text)")
+            connection.execute(
+                "create table lines (file_path text, line_no integer, line_text text, lower_text text, symbols text, is_declaration integer, has_pathish integer)"
+            )
+            for index in range(200):
+                path = f"src/Limit{index}.java"
+                connection.execute("insert into files values (?, ?, ?)", (path, path.lower(), "[]"))
+                connection.execute("insert into lines values (?, 1, 'class Limit {}', 'class limit {}', '[]', 1, 0)", (path,))
+            connection.execute("insert into files values ('src/SymbolOnly.java', 'src/symbolonly.java', '[\"act\"]')")
+            connection.execute("insert into lines values ('src/SymbolOnly.java', 1, 'class SymbolOnly {}', 'class symbolonly {}', '[]', 1, 0)")
+            connection.execute("insert into files values ('src/LineOnly.java', 'src/lineonly.java', '[]')")
+            connection.execute("insert into lines values ('src/LineOnly.java', 1, 'void run() { act(); }', 'void run() { act(); }', '[\"act\"]', 0, 0)")
+            connection.commit()
+
+        request_cache = self.service._new_retrieval_request_cache()
+        with sqlite3.connect(index_path) as connection:
+            connection.row_factory = sqlite3.Row
+            all_files = connection.execute("select * from files order by path").fetchall()
+            all_lines = connection.execute("select * from lines order by file_path, line_no").fetchall()
+            files_by_path = {str(row["path"]): row for row in all_files}
+
+        with patch.object(self.service, "_question_retrieval_features", return_value={"intent": {}}), patch.object(
+            self.service,
+            "_structure_lookup_query_terms",
+            return_value=["ab", "act"],
+        ), patch.object(
+            self.service,
+            "_targeted_index_rows",
+            return_value={
+                "files": all_files,
+                "files_by_path": files_by_path,
+                "lines": all_lines,
+                "semantic_chunks": [],
+            },
+        ), patch.object(self.service, "_cached_structure_like_rows", return_value=[]), patch.object(
+            self.service,
+            "_fts_search_rows",
+            return_value=[],
+        ), patch.object(self.service, "_semantic_chunk_matches", return_value=[]):
+            matches = self.service._search_repo_index(
+                entry,
+                repo_path,
+                ["act"],
+                question="where is act",
+                focus_terms=[],
+                request_cache=request_cache,
+            )
+
+        self.assertTrue(any(match["path"] == "src/SymbolOnly.java" for match in matches))
+        self.assertTrue(any(match["path"] == "src/LineOnly.java" for match in matches))
+
+        orphan_line = dict(all_lines[0])
+        orphan_line["file_path"] = "src/Orphan.java"
+        with patch.object(self.service, "_question_retrieval_features", return_value={"intent": {}}), patch.object(
+            self.service,
+            "_structure_lookup_query_terms",
+            return_value=[],
+        ), patch.object(
+            self.service,
+            "_targeted_index_rows",
+            return_value={
+                "files": [],
+                "files_by_path": {},
+                "lines": [orphan_line],
+                "semantic_chunks": [],
+            },
+        ), patch.object(self.service, "_fts_search_rows", return_value=[]), patch.object(
+            self.service,
+            "_semantic_chunk_matches",
+            return_value=[],
+        ):
+            self.assertEqual(
+                self.service._search_repo_index(entry, repo_path, ["act"], question="orphan", request_cache=self.service._new_retrieval_request_cache()),
+                [],
+            )
+
+        with sqlite3.connect(index_path) as connection:
+            connection.row_factory = sqlite3.Row
+            with patch.object(
+                self.service,
+                "_file_fts_search_rows",
+                return_value=[{"path": f"src/Limit{index}.java"} for index in range(200)],
+            ), patch.object(
+                self.service,
+                "_fts_search_rows",
+                return_value=[{"file_path": f"src/Limit{index}.java", "line_no": 1} for index in range(200)],
+            ), patch.object(self.service, "_targeted_semantic_rows_by_id", return_value={}):
+                limited = self.service._targeted_index_rows(
+                    connection,
+                    index_path,
+                    tokens=["limit"],
+                    focus_terms=[],
+                    intent={"api": True},
+                    request_cache=self.service._new_retrieval_request_cache(),
+                )
+
+        self.assertLessEqual(len(limited["files"]), 48)
+        self.assertLessEqual(len(limited["lines"]), 160)
+
     def test_evidence_outline_summarizes_support_and_primary_sources(self):
         outline = self.service._build_evidence_outline(
             {
@@ -3412,6 +6653,1212 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertEqual(info["state"], "ready")
         self.assertFalse(lock_path.exists())
+
+    def test_indexing_low_level_helpers_cover_lock_git_and_sqlite_edges(self):
+        repo_path = Path(self.temp_dir.name) / "edge-repo"
+        repo_path.mkdir()
+
+        lock_path = repo_path / "missing.lock"
+        with patch.dict(os.environ, {"SOURCE_CODE_QA_INDEX_LOCK_STALE_SECONDS": "0"}, clear=False):
+            self.assertFalse(self.service._index_lock_is_stale(lock_path))
+        self.assertTrue(self.service._index_lock_is_stale(lock_path))
+
+        fake_file = SimpleNamespace(stat=lambda: (_ for _ in ()).throw(OSError("gone")))
+        with patch.object(self.service, "_iter_text_files", return_value=[fake_file]):
+            self.assertEqual(self.service._repo_fingerprint(repo_path), {"file_count": 0, "latest_mtime_ns": 0, "total_size": 0})
+
+        with patch("subprocess.run", side_effect=OSError("git missing")):
+            self.assertFalse(self.service._repo_worktree_clean(repo_path))
+            self.assertEqual(self.service._repo_git_revision(repo_path), "")
+        with patch("subprocess.run", return_value=SimpleNamespace(returncode=0, stdout="")):
+            self.assertTrue(self.service._repo_worktree_clean(repo_path))
+        with patch("subprocess.run", return_value=SimpleNamespace(returncode=1, stdout="abc\n")):
+            self.assertEqual(self.service._repo_git_revision(repo_path), "")
+        with patch("subprocess.run", return_value=SimpleNamespace(returncode=0, stdout="abc123\n")):
+            self.assertEqual(self.service._repo_git_revision(repo_path), "abc123")
+
+        missing_entry = RepositoryEntry(display_name="Missing", url="https://git.example.com/missing.git")
+        self.assertEqual(self.service._repo_index_info("AF:All", missing_entry, repo_path)["state"], "missing")
+        bad_index = self.service._index_path(repo_path)
+        bad_index.parent.mkdir(parents=True, exist_ok=True)
+        bad_index.write_text("not sqlite", encoding="utf-8")
+        self.assertEqual(self.service._repo_index_info("AF:All", missing_entry, repo_path)["state"], "stale")
+        bad_index.unlink()
+        with sqlite3.connect(bad_index) as connection:
+            connection.execute("drop table if exists metadata")
+            connection.execute("create table metadata (key text primary key, value text not null)")
+            for key, value in {
+                "version": str(CODE_INDEX_VERSION),
+                "git_revision": "abc123",
+                "indexed_files": "0",
+                "indexed_lines": "0",
+            }.items():
+                connection.execute("insert into metadata values (?, ?)", (key, value))
+            connection.commit()
+        with patch.object(self.service, "_repo_git_revision", return_value="abc123"), patch.object(
+            self.service,
+            "_repo_worktree_clean",
+            return_value=True,
+        ):
+            self.assertEqual(self.service._repo_index_info("AF:All", missing_entry, repo_path)["state"], "ready")
+
+        old_index = repo_path / "old.sqlite3"
+        with sqlite3.connect(old_index) as connection:
+            connection.execute("create table metadata (key text primary key, value text not null)")
+            connection.execute("insert into metadata values ('version', ?)", (str(CODE_INDEX_VERSION - 1),))
+            connection.commit()
+        self.assertIsNone(self.service._open_reusable_index(old_index))
+        old_index.write_text("broken", encoding="utf-8")
+        self.assertIsNone(self.service._open_reusable_index(old_index))
+        self.assertIsNone(self.service._open_reusable_index(repo_path / "absent.sqlite3"))
+
+        class StatFailingPath:
+            def relative_to(self, _root):
+                return Path("stat-failed.py")
+
+            def stat(self):
+                raise OSError("stat failed")
+
+        class ReadFailingPath:
+            def relative_to(self, _root):
+                return Path("read-failed.py")
+
+            def stat(self):
+                return SimpleNamespace(st_size=10, st_mtime_ns=20)
+
+            def read_text(self, **_kwargs):
+                raise OSError("read failed")
+
+        build_repo = Path(self.temp_dir.name) / "build-edge-repo"
+        build_repo.mkdir()
+        with patch.object(self.service, "_iter_text_files", return_value=[StatFailingPath(), ReadFailingPath()]):
+            info = self.service._build_repo_index("AF:All", missing_entry, build_repo)
+        self.assertEqual(info["files"], 0)
+
+    def test_indexing_reuse_and_token_helpers_cover_error_fallbacks(self):
+        old_db = Path(self.temp_dir.name) / "old-index.sqlite3"
+        new_db = Path(self.temp_dir.name) / "new-index.sqlite3"
+        with sqlite3.connect(old_db) as old_connection, sqlite3.connect(new_db) as new_connection:
+            old_connection.row_factory = sqlite3.Row
+            new_connection.row_factory = sqlite3.Row
+            old_connection.execute(
+                "create table files(path text primary key, lower_path text, size integer, mtime_ns integer, line_count integer, symbols text)"
+            )
+            old_connection.execute(
+                "create table lines(file_path text, line_no integer, line_text text, lower_text text, symbols text, is_declaration integer, has_pathish integer)"
+            )
+            old_connection.execute("create table file_tokens(token text, file_path text)")
+            old_connection.execute("create table line_tokens(token text, file_path text, line_no integer)")
+            old_connection.execute("create table definitions(name text, lower_name text, kind text, file_path text, line_no integer, signature text)")
+            old_connection.execute(
+                "create table references_index(target text, lower_target text, kind text, file_path text, line_no integer, context text)"
+            )
+            old_connection.execute(
+                "create table code_entities(entity_id text, name text, lower_name text, kind text, language text, file_path text, line_no integer, parent text, signature text)"
+            )
+            old_connection.execute(
+                "create table entity_edges(from_entity_id text, from_file text, from_line integer, edge_kind text, to_name text, lower_to_name text, to_entity_id text, to_file text, to_line integer, evidence text)"
+            )
+            old_connection.execute(
+                "create table semantic_chunks(chunk_id text, file_path text, start_line integer, end_line integer, chunk_text text, lower_text text, tokens text, symbols text)"
+            )
+            old_connection.execute("create table semantic_chunk_tokens(token text, chunk_id text, file_path text)")
+            old_connection.execute(
+                "insert into files values ('src/App.java', 'src/app.java', 12, 34, 1, 'not-json')"
+            )
+            old_connection.execute(
+                "insert into lines values ('src/App.java', 1, 'class App {}', 'class app {}', '[]', 1, 0)"
+            )
+            old_connection.execute(
+                "insert into semantic_chunks values ('chunk-1', 'src/App.java', 1, 1, 'class App {}', 'class app {}', 'bad-json', 'also-bad')"
+            )
+            old_connection.commit()
+
+            self.assertEqual(
+                self.service._copy_reused_index_rows(
+                    None,
+                    new_connection,
+                    "src/App.java",
+                    "select 1 where ?",
+                    "insert into nowhere values (?)",
+                ),
+                [],
+            )
+            self.service._create_repo_index_schema(new_connection)
+            copied = self.service._copy_unchanged_index_file(
+                old_connection,
+                new_connection,
+                "src/App.java",
+                SimpleNamespace(st_size=12, st_mtime_ns=34),
+                file_fts_enabled=True,
+                fts_enabled=True,
+                semantic_fts_enabled=True,
+            )
+            self.assertEqual(copied["lines"], 1)
+            self.assertEqual(copied["semantic_chunks"], 1)
+            self.assertIsNone(
+                self.service._copy_unchanged_index_file(
+                    old_connection,
+                    new_connection,
+                    "missing.java",
+                    SimpleNamespace(st_size=1, st_mtime_ns=1),
+                    file_fts_enabled=False,
+                    fts_enabled=False,
+                    semantic_fts_enabled=False,
+                )
+            )
+            self.assertIsNone(
+                self.service._copy_unchanged_index_file(
+                    old_connection,
+                    new_connection,
+                    "src/App.java",
+                    SimpleNamespace(st_size=99, st_mtime_ns=34),
+                    file_fts_enabled=False,
+                    fts_enabled=False,
+                    semantic_fts_enabled=False,
+                )
+            )
+            row = old_connection.execute("select * from files where path = 'src/App.java'").fetchone()
+            with sqlite3.connect(":memory:") as no_fts_connection:
+                self.service._create_repo_index_schema(no_fts_connection)
+                self.service._insert_reused_file_row(
+                    no_fts_connection,
+                    "src/App.java",
+                    file_fts_enabled=False,
+                    file_row=row,
+                )
+                self.assertEqual(no_fts_connection.execute("select count(*) from files_fts").fetchone()[0], 0)
+
+        class AlwaysBrokenConnection:
+            def execute(self, *_args, **_kwargs):
+                raise sqlite3.Error("broken")
+
+        with sqlite3.connect(":memory:") as broken_new, sqlite3.connect(old_db) as old_connection:
+            old_connection.row_factory = sqlite3.Row
+            self.assertIsNone(
+                self.service._copy_unchanged_index_file(
+                    old_connection,
+                    broken_new,
+                    "src/App.java",
+                    SimpleNamespace(st_size=12, st_mtime_ns=34),
+                    file_fts_enabled=False,
+                    fts_enabled=False,
+                    semantic_fts_enabled=False,
+                )
+            )
+            self.assertIsNone(
+                self.service._copy_unchanged_index_file(
+                    old_connection,
+                    AlwaysBrokenConnection(),
+                    "src/App.java",
+                    SimpleNamespace(st_size=12, st_mtime_ns=34),
+                    file_fts_enabled=False,
+                    fts_enabled=False,
+                    semantic_fts_enabled=False,
+                )
+            )
+
+        with sqlite3.connect(":memory:") as connection:
+            connection.execute("create table file_tokens(token text, file_path text)")
+            connection.execute("create table semantic_chunk_tokens(token text, chunk_id text, file_path text)")
+            self.service._insert_file_tokens(connection, "src/App.java", "client gateway helper", {"SymbolName"})
+            self.service._insert_semantic_chunk_tokens(
+                connection,
+                [("chunk-2", "src/App.java", 1, 1, "gateway helper", "", "bad-json", "also-bad")],
+            )
+            self.assertGreater(connection.execute("select count(*) from file_tokens").fetchone()[0], 0)
+            self.assertGreater(connection.execute("select count(*) from semantic_chunk_tokens").fetchone()[0], 0)
+
+        self.assertEqual(self.service._build_semantic_chunks("src/Empty.java", []), [])
+        self.assertEqual(self.service._build_semantic_chunks("src/Blank.java", ["", "   "]), [])
+        build_chunks_globals = getattr(self.service._build_semantic_chunks, "__globals__", {})
+        with patch.dict(build_chunks_globals, {"range": lambda *_args: [100]}, clear=False):
+            self.assertEqual(self.service._build_semantic_chunks("src/OutOfRange.java", ["line"]), [])
+        self.assertIn("identifier", self.service._index_tokens_for_text("identifier client", {"client"}))
+        self.assertIn("gateway", self.service._semantic_tokens("api/gateway:GatewayClient.run()"))
+
+    def test_indexing_schema_spring_aop_and_flow_helpers_cover_fallbacks(self):
+        with sqlite3.connect(":memory:") as connection:
+            self.service._create_repo_index_schema(connection)
+            self.assertFalse(self.service._try_create_file_fts(connection))
+            self.assertFalse(self.service._try_create_fts(connection))
+            self.assertFalse(self.service._try_create_semantic_fts(connection))
+        with sqlite3.connect(":memory:") as connection:
+            self.assertEqual(self.service._spring_config_rows(connection), [])
+
+        with sqlite3.connect(":memory:") as connection:
+            connection.execute("create table lines(file_path text, line_no integer, line_text text)")
+            connection.executemany(
+                "insert into lines values (?, ?, ?)",
+                [
+                    ("src/main/resources/application.yml", 1, "spring:"),
+                    ("src/main/resources/application.yml", 2, "  profiles:"),
+                    ("src/main/resources/application.yml", 3, "    active: prod,qa"),
+                    ("src/main/resources/application.yml", 4, "---"),
+                    ("src/main/resources/application.yml", 5, "spring:"),
+                    ("src/main/resources/application.yml", 6, "  config:"),
+                    ("src/main/resources/application.yml", 7, "    activate:"),
+                    ("src/main/resources/application.yml", 8, "      on-profile: prod"),
+                    ("src/main/resources/application.yml", 9, "issue:"),
+                    ("src/main/resources/application.yml", 10, "  enabled: true"),
+                    ("src/main/resources/application.yml", 11, "# ignored"),
+                    ("src/main/resources/application.yml", 12, "empty.value="),
+                    ("src/main/resources/application-dev.properties", 1, "issue.enabled=false"),
+                ],
+            )
+            rows = self.service._spring_config_rows(connection)
+            values = self.service._spring_config_values(connection)
+            self.assertIn("prod", self.service._active_spring_profiles_from_rows(rows))
+            self.assertIn("true", values["issue.enabled"])
+            self.assertNotIn("false", values["issue.enabled"])
+        with sqlite3.connect(":memory:") as connection, patch.object(
+            SourceCodeQAService,
+            "_spring_config_rows",
+            return_value=[("application.yml", "issue.empty", "", "")],
+        ):
+            self.assertEqual(self.service._spring_config_values(connection), {})
+
+        self.assertEqual(self.service._spring_profile_from_config_path("bootstrap-prod.yaml"), "prod")
+        self.assertFalse(self.service._spring_profile_matches("", {"prod"}))
+        self.assertTrue(self.service._spring_profile_matches("!dev | prod", {"prod"}))
+        self.assertFalse(self.service._spring_condition_matches("missing", {}))
+        self.assertTrue(self.service._spring_condition_matches("issue.enabled=<present>", {"issue.enabled": {"true"}}))
+        self.assertTrue(self.service._spring_condition_matches("issue.enabled=<missing:true>", {}))
+        self.assertEqual(self.service._symbol_lookup_keys("com.example.IssueService"), ["com.example.issueservice", "issueservice"])
+        self.assertEqual(self.service._symbol_lookup_keys(""), [])
+        self.assertEqual(self.service._aop_pointcut_expression("ref:myPointcut()", {"mypointcut": "execution(* IssueService.run(..))"}), "execution(* IssueService.run(..))")
+        self.assertEqual(
+            self.service._aop_execution_target_names(
+                "execution(* com.example.IssueService.run(..)) || call(* *.*.save(..)) || * *..IssueRepository.find(..)",
+                {"issueservice": {"PrimaryIssueService"}, "issuerepository": {"JpaIssueRepository"}},
+            ),
+            [
+                "IssueService.run",
+                "PrimaryIssueService.run",
+                "save",
+                "IssueRepository.find",
+                "JpaIssueRepository.find",
+            ],
+        )
+        definitions = {
+            "issueservice.run": [("service/IssueService.java", 10, "IssueService.run")],
+            "com.example.issueservice.run": [("service/FqIssueService.java", 11, "com.example.IssueService.run")],
+            "run": [("service/Run.java", 12, "run")],
+        }
+        self.assertEqual(self.service._definition_matches_for_aop_target(definitions, ""), [])
+        self.assertEqual(len(self.service._definition_matches_for_aop_target(definitions, "IssueService.run")), 2)
+        self.assertEqual(len(self.service._definition_matches_for_aop_target(definitions, "run")), 1)
+        self.assertEqual(self.service._member_call_variable("return issueService.create();", "create"), "issueService")
+        self.assertEqual(self.service._qualified_variable_targets('@Qualifier("primary") final IssueService issueService;'), {"issueService": ["primary"]})
+        self.assertEqual(self.service._service_like_types_from_generic("List<IssueService> Map<AuditGateway, Repo>"), ["IssueService", "AuditGateway"])
+        self.assertEqual(self.service._flow_role_for_path("src/web/IssueController.java"), "controller")
+        self.assertEqual(self.service._flow_role_for_path("src/IssueDao.java"), "dao")
+        self.assertEqual(self.service._flow_role_for_path("src/GatewayClient.java"), "client")
+        self.assertEqual(self.service._flow_role_for_path("src/application.yml"), "config")
+        self.assertEqual(self.service._classify_flow_edge("implementation_call", "", "src/IssueService.java", "run"), "service")
+        self.assertEqual(self.service._classify_flow_edge("implementation_call", "", "src/App.java", "run"), "implementation")
+        self.assertEqual(self.service._classify_flow_edge("aop_applies_to", "", "src/IssueRepository.java", "run"), "repository")
+        self.assertEqual(self.service._classify_flow_edge("aop_applies_to", "", "src/App.java", "run"), "framework")
+        self.assertEqual(self.service._classify_flow_edge("unknown", "", "src/IssueController.java", "run"), "controller")
+        self.assertEqual(self.service._classify_flow_edge("unknown", "", "src/App.java", "IssueGateway"), "client")
+        self.assertEqual(self.service._classify_flow_edge("unknown", "", "src/App.java", "run"), "call")
+        self.assertEqual(len(self.service._entity_id("a.py", "class", "A", 1)), 24)
+
+        with sqlite3.connect(":memory:") as connection:
+            self.service._create_repo_index_schema(connection)
+            connection.execute(
+                "insert into code_entities values ('impl-id', 'IssueServiceImpl', 'issueserviceimpl', 'class', 'java', 'IssueServiceImpl.java', 1, '', '')"
+            )
+            connection.execute(
+                "insert into code_entities values ('caller-id', 'IssueController', 'issuecontroller', 'class', 'java', 'IssueController.java', 1, '', '')"
+            )
+            connection.execute(
+                "insert into entity_edges values ('impl-id', 'IssueServiceImpl.java', 1, 'implements', 'IssueService', 'issueservice', '', '', 0, '')"
+            )
+            connection.execute(
+                "insert into entity_edges values ('caller-id', 'IssueController.java', 2, 'call', 'IssueService.create', 'issueservice.create', '', '', 0, 'issueService.create()')"
+            )
+            connection.commit()
+            self.assertEqual(self.service._build_implementation_edges(connection), 0)
+
+    def test_structure_node_parser_and_runtime_trace_helpers_cover_edges(self):
+        self.assertIsNone(self.service._tree_sitter_parser_for_language(""))
+        self.assertIsNone(self.service._tree_sitter_parser_for_language("ruby"))
+        self.assertEqual(self.service._tree_sitter_language_for_suffix(".jsx"), "javascript")
+        self.assertEqual(self.service._tree_sitter_language_for_suffix(".unknown"), "")
+        self.assertEqual(self.service._language_for_suffix(".sql"), "sql")
+        self.assertEqual(self.service._language_for_suffix(".unknown"), "text")
+
+        bad_node = SimpleNamespace(start_byte="bad", end_byte=1, start_point=("bad",))
+        self.assertEqual(self.service._node_text(b"abc", bad_node), "")
+        self.assertEqual(self.service._node_line(["one"], bad_node), "one")
+        self.assertEqual(self.service._node_line([], SimpleNamespace(start_point=(99, 0))), "")
+        self.assertEqual(self.service._node_start_line(bad_node), 1)
+
+        child = SimpleNamespace(type="identifier", start_byte=0, end_byte=4)
+        self.assertEqual(
+            self.service._first_named_child_text(b"Name()", SimpleNamespace(named_children=[child]), {"identifier"}),
+            "Name",
+        )
+        self.assertEqual(self.service._first_named_child_text(b"Name()", SimpleNamespace(named_children=[]), {"identifier"}), "")
+
+        class FieldBrokenNode:
+            type = "call"
+            named_children = [child]
+            start_point = (0, 0)
+            start_byte = 0
+            end_byte = 10
+
+            def child_by_field_name(self, _name):
+                raise RuntimeError("field unavailable")
+
+        self.assertEqual(self.service._tree_sitter_name_for_node(b"Fallback()", FieldBrokenNode()), "Fall")
+        self.assertEqual(self.service._tree_sitter_call_target(b"this.issueService.create()", FieldBrokenNode()), "issue")
+        self.assertEqual(self.service._tree_sitter_type_text_for_node(b"Type field", FieldBrokenNode()), "")
+        self.assertEqual(self.service._tree_sitter_string_values(b'@GetMapping("/api/a")', SimpleNamespace(start_byte=0, end_byte=21)), ["/api/a"])
+
+        callbacks = {"definitions": [], "references": [], "entities": [], "edges": []}
+
+        def add_definition(*args):
+            callbacks["definitions"].append(args)
+
+        def add_reference(*args):
+            callbacks["references"].append(args)
+
+        def add_entity(name, kind, line_no, signature, parent=""):
+            entity_id = f"{kind}:{name}:{line_no}:{parent}"
+            callbacks["entities"].append((entity_id, name, kind, line_no, signature, parent))
+            return entity_id
+
+        def add_edge(*args):
+            callbacks["edges"].append(args)
+
+        class RaisingParser:
+            def parse(self, _source):
+                raise RuntimeError("parse failed")
+
+        self.service._tree_sitter_parsers["edge"] = RaisingParser()
+        self.assertEqual(
+            self.service._extract_tree_sitter_structure(
+                relative_path="src/App.edge",
+                lines=["class App {}"],
+                language="edge",
+                add_definition=add_definition,
+                add_reference=add_reference,
+                add_entity=add_entity,
+                add_entity_edge=add_edge,
+                file_entity_id="file-id",
+            ),
+            (False, "parse failed"),
+        )
+
+        class ErrorParser:
+            def parse(self, _source):
+                return SimpleNamespace(root_node=SimpleNamespace(has_error=True))
+
+        self.service._tree_sitter_parsers["bad"] = ErrorParser()
+        self.assertEqual(
+            self.service._extract_tree_sitter_structure(
+                relative_path="src/App.bad",
+                lines=["class App {"],
+                language="bad",
+                add_definition=add_definition,
+                add_reference=add_reference,
+                add_entity=add_entity,
+                add_entity_edge=add_edge,
+                file_entity_id="file-id",
+            ),
+            (False, "parse error"),
+        )
+
+        self.assertFalse(self.service._is_runtime_trace_file("notes.txt"))
+        self.assertTrue(self.service._is_runtime_trace_file("runtime-traces/trace.jsonl"))
+        self.assertEqual(self.service._runtime_trace_edge({"path": "/api/issues"}), ("runtime_route", "/api/issues"))
+        self.assertEqual(self.service._runtime_trace_edge({"sql": "select * from issue_table"}), ("runtime_sql", "issue_table"))
+        self.assertEqual(self.service._runtime_trace_edge({"topic": "issue.created"}), ("runtime_message", "issue.created"))
+        self.assertEqual(self.service._runtime_trace_edge({"key": "issue.enabled"}), ("runtime_config", "issue.enabled"))
+        self.assertEqual(self.service._runtime_trace_edge({"operation": "IssueService.create"}), ("runtime_call", "IssueService.create"))
+        self.assertEqual(self.service._runtime_trace_string({"payload": {"a": 1}}, ("payload",)), '{"a": 1}')
+        self.assertEqual(self.service._runtime_trace_string({"empty": "   ", "none": None}, ("empty", "none")), "")
+        self.assertIn('"kind": "unknown"', self.service._runtime_trace_evidence({"kind": "unknown"}))
+
+        refs: list[tuple[str, str, int, str]] = []
+        edges: list[tuple[str, str, str, int, str]] = []
+        self.service._extract_runtime_trace_structure(
+            relative_path="source-code-qa-traces/events.jsonl",
+            lines=[
+                "",
+                "not json",
+                "[]",
+                json.dumps({"kind": "http_request", "path": "/api/issues", "from": "Controller", "trace_id": "t1"}),
+            ],
+            add_reference=lambda target, kind, line_no, context: refs.append((target, kind, line_no, context)),
+            add_entity_edge=lambda entity_id, kind, target, line_no, context: edges.append((entity_id, kind, target, line_no, context)),
+            file_entity_id="file-id",
+        )
+        self.assertEqual(refs, [("/api/issues", "runtime_route", 4, "from=Controller | to=/api/issues | t1")])
+        self.assertEqual(edges[0][1:4], ("runtime_route", "/api/issues", 4))
+
+    def test_structure_parser_loader_and_callback_guards_cover_edges(self):
+        class FakeLanguage:
+            def __init__(self, grammar):
+                self.grammar = grammar
+
+        class FakeParser:
+            def __init__(self, language):
+                self.language = language
+
+        fake_tree_sitter = SimpleNamespace(Language=FakeLanguage, Parser=FakeParser)
+        fake_javascript = SimpleNamespace(language=lambda: "javascript-grammar")
+        fake_typescript = SimpleNamespace(
+            language_typescript=lambda: "typescript-grammar",
+            language_tsx=lambda: "tsx-grammar",
+        )
+        with patch.dict(
+            sys.modules,
+            {
+                "tree_sitter": fake_tree_sitter,
+                "tree_sitter_javascript": fake_javascript,
+                "tree_sitter_typescript": fake_typescript,
+            },
+        ):
+            self.service._tree_sitter_parsers.pop("javascript", None)
+            self.service._tree_sitter_parsers.pop("tsx", None)
+            javascript_parser = self.service._tree_sitter_parser_for_language("javascript")
+            tsx_parser = self.service._tree_sitter_parser_for_language("tsx")
+
+        self.assertEqual(javascript_parser.language.grammar, "javascript-grammar")
+        self.assertEqual(tsx_parser.language.grammar, "tsx-grammar")
+
+        broken_javascript = SimpleNamespace(language=lambda: (_ for _ in ()).throw(RuntimeError("missing grammar")))
+        with patch.dict(
+            sys.modules,
+            {"tree_sitter": fake_tree_sitter, "tree_sitter_javascript": broken_javascript},
+        ):
+            self.service._tree_sitter_parsers.pop("javascript", None)
+            self.assertIsNone(self.service._tree_sitter_parser_for_language("javascript"))
+
+        self.assertIn("missing grammar", self.service._tree_sitter_load_errors["javascript"])
+
+        def exercise_callbacks(*, add_definition, add_reference, add_entity, add_entity_edge, **_kwargs):
+            add_definition("", "empty", 1, "")
+            add_reference("x", "too_short", 2, "")
+            add_entity("", "empty_entity", 3, "")
+            add_entity_edge("", "too_short_edge", "x", 4, "")
+
+        with patch.object(self.service, "_extract_python_ast_structure", side_effect=exercise_callbacks):
+            rows = self.service._extract_structure_rows("guard.py", ["print('guard')"])
+
+        self.assertEqual(rows["definitions"], [])
+        self.assertFalse(any(row[4] == "x" for row in rows["entity_edges"]))
+
+        structure_globals = self.service._extract_structure_rows.__func__.__globals__
+        fake_mybatis_attr_pattern = SimpleNamespace(findall=lambda _line: [("type", "")])
+        fake_generic_pattern = SimpleNamespace(findall=lambda _line: [("List<IssueService>", "issueService")])
+        with patch.dict(
+            structure_globals,
+            {
+                "MYBATIS_ATTR_REFERENCE_PATTERN": fake_mybatis_attr_pattern,
+                "GENERIC_FIELD_VAR_TYPE_PATTERN": fake_generic_pattern,
+            },
+        ):
+            guarded_rows = self.service._extract_structure_rows(
+                "mapper/IssueMapper.xml",
+                ["<select id=\"find\" resultType=\"Issue\">", "IssueService issueService"],
+            )
+
+        self.assertFalse(any(row[2] == "mybatis_type_ref" and row[0] == "" for row in guarded_rows["references"]))
+        self.assertIn(
+            ("IssueService", "issueservice", "field_type", "mapper/IssueMapper.xml", 2, "IssueService issueService"),
+            guarded_rows["references"],
+        )
+
+    def test_structure_static_extractors_and_build_file_edges(self):
+        self.assertIsNone(self.service._extract_config_assignment("# comment"))
+        self.assertIsNone(self.service._extract_config_assignment("not assignment"))
+        self.assertIsNone(self.service._extract_config_assignment("empty.value="))
+        self.assertIsNone(self.service._extract_config_assignment('empty.value=""'))
+        self.assertEqual(self.service._extract_config_assignment("issue.enabled=true"), ("issue.enabled", "true"))
+        yaml_stack: list[tuple[int, str]] = []
+        self.assertIsNone(self.service._extract_yaml_config_assignment("# ignored", yaml_stack))
+        self.assertEqual(self.service._extract_yaml_config_assignment("spring:", yaml_stack), ("spring", ""))
+        self.assertEqual(self.service._extract_yaml_config_assignment("  profiles:", yaml_stack), ("spring.profiles", ""))
+        self.assertEqual(self.service._extract_yaml_config_assignment("    active: prod # comment", yaml_stack), ("spring.profiles.active", "prod"))
+
+        class BlankYamlKeyMatch:
+            def group(self, index):
+                return {1: "", 2: "", 3: "value"}[index]
+
+        with patch("bpmis_jira_tool.source_code_qa_structure.re.match", return_value=BlankYamlKeyMatch()):
+            self.assertIsNone(self.service._extract_yaml_config_assignment("blank: value", []))
+
+        self.assertEqual(self.service._spring_annotation_arg_values('name={"a","b"}, matchIfMissing=true', "name"), ["a", "b"])
+        self.assertEqual(
+            self.service._spring_conditional_on_property_entries('prefix="issue", name={"enabled","ready"}, havingValue="true", matchIfMissing=true'),
+            ["issue.enabled=true", "issue.enabled=<missing:true>", "issue.ready=true", "issue.ready=<missing:true>"],
+        )
+        self.assertEqual(self.service._annotation_target_text('pointcut = "execution(* run())"'), "execution(* run())")
+        self.assertEqual(self.service._annotation_target_text("value = issuePointcut()"), "issuePointcut()")
+        self.assertEqual(self.service._scheduled_target_text(""), "scheduled")
+        self.assertEqual(self.service._scheduled_target_text('fixedRate=5000, initialDelayString="PT1S"'), "initialDelayString=PT1S;fixedRate=5000")
+        self.assertEqual(self.service._extract_message_names('"issue.created", "${topic.name:default}", "plain"'), ["issue.created", "${topic.name:default}", "topic.name"])
+        self.assertEqual(
+            self.service._extract_event_names('publisher.publishEvent(new IssueCreatedEvent()); @EventListener(IssueCommand.class); "custom-message"'),
+            ["IssueCreatedEvent", "IssueCommand", "custom-message"],
+        )
+        self.assertEqual(self.service._runtime_trace_sql_target({"sql": "nonsense sql"}), "nonsense sql")
+        self.assertEqual(self.service._spring_conditional_on_property_entries('prefix="issue", name=., havingValue=true'), [])
+        self.assertEqual(self.service._normalize_gradle_module_name(":risk:api"), "risk-api")
+        self.assertEqual(self.service._first_line_number_containing(["abc", "needle"], "needle"), 2)
+        self.assertEqual(self.service._first_line_number_containing(["abc"], ""), 1)
+
+        refs: list[tuple[str, str, int, str]] = []
+        defs: list[tuple[str, str, int, str]] = []
+        edges: list[tuple[str, str, str, int, str]] = []
+
+        def add_definition(target, kind, line_no, context):
+            defs.append((target, kind, line_no, context))
+
+        def add_reference(target, kind, line_no, context):
+            refs.append((target, kind, line_no, context))
+
+        def add_edge(entity_id, kind, target, line_no, context):
+            edges.append((entity_id, kind, target, line_no, context))
+
+        self.service._extract_build_file_structure(
+            relative_path="package.json",
+            lines=['{"name":"portal","dependencies":{"axios":"1.0.0"},"devDependencies":"","peerDependencies":{"": "x"}}'],
+            add_definition=add_definition,
+            add_reference=add_reference,
+            add_entity_edge=add_edge,
+            file_entity_id="file-id",
+        )
+        self.service._extract_build_file_structure(
+            relative_path="package.json",
+            lines=["{bad json"],
+            add_definition=add_definition,
+            add_reference=add_reference,
+            add_entity_edge=add_edge,
+            file_entity_id="file-id",
+        )
+        self.service._extract_build_file_structure(
+            relative_path="pom.xml",
+            lines=[
+                "<project><groupId>com.example</groupId><artifactId>portal</artifactId><dependencies>",
+                "<dependency><groupId>org.demo</groupId><artifactId>demo-client</artifactId></dependency>",
+                "<dependency><groupId>${skip}</groupId><artifactId>${skip}</artifactId></dependency>",
+                "</dependencies></project>",
+            ],
+            add_definition=add_definition,
+            add_reference=add_reference,
+            add_entity_edge=add_edge,
+            file_entity_id="file-id",
+        )
+        self.service._extract_build_file_structure(
+            relative_path="settings.gradle",
+            lines=[
+                "// ignored",
+                "include ':risk:api'",
+                "implementation 'org.demo:demo-client:1.0.0'",
+                "implementation project(':risk:worker')",
+            ],
+            add_definition=add_definition,
+            add_reference=add_reference,
+            add_entity_edge=add_edge,
+            file_entity_id="file-id",
+        )
+        self.assertIn(("portal", "npm_package", 1, "portal"), defs)
+        self.assertTrue(any(item[0] == "axios" and item[1] == "module_dependency" for item in refs))
+        self.assertTrue(any(item[0] == "com.example:portal" and item[1] == "maven_coordinate" for item in defs))
+        self.assertTrue(any(item[0] == "org.demo:demo-client" and item[1] == "module_dependency" for item in refs))
+        self.assertTrue(any(item[0] == "risk-api" and item[1] == "gradle_module" for item in defs))
+        self.assertTrue(any(item[0] == "risk-worker" and item[1] == "gradle_project_dependency" for item in refs))
+
+    def test_structure_rows_cover_inline_spring_runtime_config_and_events(self):
+        java_source = (
+            "public class InlineAnnotations {\n"
+            "    private IssueService issueService;\n"
+            "    public void run() { @Transactional @Before(\"execution(* com.example.IssueService.create(..))\") @Scheduled(fixedRate=100) issueService.create(); }\n"
+            "    private @Component(\"inlineBean\") @Primary @Aspect @Profile(\"uat\") @ConditionalOnProperty(prefix=\"feature\", name=\"enabled\") String marker;\n"
+            "    public void events(ApplicationEventPublisher publisher) { publisher.publishEvent(new IssueCreatedEvent()); }\n"
+            "    @EventListener(IssueCreatedEvent.class)\n"
+            "    public void consume(IssueCreatedEvent event) { }\n"
+            "}\n"
+        )
+        java_rows = self.service._extract_structure_rows("src/InlineAnnotations.java", java_source.splitlines())
+        java_refs = {(row[2], row[0]) for row in java_rows["references"]}
+        java_edges = {(row[3], row[4]) for row in java_rows["entity_edges"]}
+        self.assertIn(("bean_name", "inlineBean"), java_refs)
+        self.assertIn(("bean_primary", "InlineAnnotations"), java_refs)
+        self.assertIn(("framework_binding", "Aspect"), java_refs)
+        self.assertIn(("spring_profile", "uat"), java_refs)
+        self.assertIn(("bean_condition", "feature.enabled=<present>"), java_refs)
+        self.assertIn(("operational_boundary", "Transactional"), java_edges)
+        self.assertTrue(any(kind == "aop_advice" for kind, _target in java_edges))
+        self.assertIn(("scheduled_job", "fixedRate=100"), java_edges)
+        self.assertIn(("event_publish", "IssueCreatedEvent"), java_refs)
+        self.assertIn(("event_consume", "IssueCreatedEvent"), java_refs)
+
+        generic_skip_rows = self.service._extract_structure_rows(
+            "src/GenericSkip.java",
+            ["public class GenericSkip {", "    private List<IssueService> services;", "}"],
+        )
+        self.assertEqual(
+            [row for row in generic_skip_rows["references"] if row[2] == "field_type" and row[0] == "IssueService"],
+            [("IssueService", "issueservice", "field_type", "src/GenericSkip.java", 2, "private List<IssueService> services;")],
+        )
+
+        config_rows = self.service._extract_structure_rows("application.properties", ["server:", "feature.enabled="])
+        config_defs = {(row[2], row[0]) for row in config_rows["definitions"]}
+        self.assertIn(("config_key", "feature.enabled"), config_defs)
+
+        runtime_rows = self.service._extract_structure_rows(
+            "source-code-qa-traces/runtime.jsonl",
+            [json.dumps({"kind": "http_request"})],
+        )
+        self.assertEqual([row for row in runtime_rows["references"] if row[2].startswith("runtime_")], [])
+
+        python_rows = self.service._extract_structure_rows(
+            "worker/calls.py",
+            [
+                "class Client:",
+                "    def run(self):",
+                "        pkg.client.send()",
+                "        (factory())()",
+            ],
+        )
+        python_refs = {(row[2], row[0]) for row in python_rows["references"]}
+        self.assertIn(("call", "pkg.client.send"), python_refs)
+
+    def test_structure_rows_cover_pending_spring_and_python_ast_edges(self):
+        java_source = (
+            "package com.example;\n"
+            "import com.example.repo.IssueRepository;\n"
+            "@Component(\"issueBean\")\n"
+            "@Primary\n"
+            "@Aspect\n"
+            "@Profile(\"prod\")\n"
+            "@ConditionalOnProperty(prefix=\"issue\", name=\"enabled\", matchIfMissing=true)\n"
+            "@RequestMapping(\"/api/issues\")\n"
+            "public class IssueController implements IssueApi {\n"
+            "    @Qualifier(\"primaryRepo\")\n"
+            "    private IssueRepository issueRepository;\n"
+            "    @Transactional\n"
+            "    @Scheduled(fixedDelay=1000)\n"
+            "    @Before(\"execution(* com.example.IssueService.create(..))\")\n"
+            "    @PostMapping(\"/create\")\n"
+            "    public Issue create() {\n"
+            "        issueRepository.findIssue();\n"
+            "        this.primaryRepository = issueRepository;\n"
+            "        return new Issue();\n"
+            "    }\n"
+            "}\n"
+        )
+        rows = self.service._extract_structure_rows("controller/IssueController.java", java_source.splitlines())
+        references = {(row[2], row[0]) for row in rows["references"]}
+        edges = {(row[3], row[4]) for row in rows["entity_edges"]}
+        self.assertIn(("bean_name", "issueBean"), references)
+        self.assertIn(("bean_primary", "IssueController"), references)
+        self.assertIn(("framework_binding", "Aspect"), references)
+        self.assertIn(("spring_profile", "prod"), references)
+        self.assertIn(("bean_condition", "issue.enabled=<missing:true>"), references)
+        self.assertIn(("route", "/api/issues/create"), references)
+        self.assertIn(("bean_qualifier_target", "issueRepository=primaryRepo"), references)
+        self.assertIn(("bean_qualifier_target", "primaryRepository=primaryRepo"), references)
+        self.assertIn(("operational_boundary", "Transactional"), references)
+        self.assertIn(("scheduled_job", "fixedDelay=1000"), references)
+        self.assertTrue(any(kind == "aop_advice" for kind, _target in edges))
+
+        generic_source = (
+            "import com.example.gateway.AuditGateway;\n"
+            "public class IssueService {\n"
+            "    @Qualifier(\"audit\")\n"
+            "    private List<AuditGateway> gateways;\n"
+            "    public void run() {\n"
+            "        gateways.stream().map(gateway -> gateway.sendAudit()).collect(toList());\n"
+            "        gateways.get().sendAudit();\n"
+            "    }\n"
+            "}\n"
+        )
+        generic_rows = self.service._extract_structure_rows("service/IssueService.java", generic_source.splitlines())
+        generic_refs = {(row[2], row[0]) for row in generic_rows["references"]}
+        self.assertIn(("field_type", "AuditGateway"), generic_refs)
+        self.assertIn(("field_type", "com.example.gateway.AuditGateway"), generic_refs)
+        self.assertIn(("call", "AuditGateway.sendAudit"), generic_refs)
+        self.assertIn(("call", "com.example.gateway.AuditGateway.sendAudit"), generic_refs)
+
+        test_rows = self.service._extract_structure_rows(
+            "src/test/java/IssueServiceTest.java",
+            ["@Test", "void shouldCreateIssue() {", "  assertEquals(1, issueService.create());", "  IssueService subject = new IssueService();", "}"],
+        )
+        test_refs = {(row[2], row[0]) for row in test_rows["references"]}
+        self.assertIn(("test_case", "test_case"), test_refs)
+        self.assertIn(("test_assertion", "assertion"), test_refs)
+        self.assertIn(("test_subject", "IssueService"), test_refs)
+
+        syntax_rows = self.service._extract_structure_rows("bad.py", ["def broken(:"])
+        self.assertNotIn("python_function", {row[2] for row in syntax_rows["definitions"]})
+        python_rows = self.service._extract_structure_rows(
+            "worker/tasks.py",
+            [
+                "import os",
+                "from service.issue import create_issue",
+                "class Worker:",
+                "    async def run(self):",
+                "        await create_issue()",
+            ],
+        )
+        python_defs = {(row[2], row[0]) for row in python_rows["definitions"]}
+        python_refs = {(row[2], row[0]) for row in python_rows["references"]}
+        self.assertIn(("python_class", "Worker"), python_defs)
+        self.assertIn(("python_async_function", "run"), python_defs)
+        self.assertIn(("import", "os"), python_refs)
+        self.assertIn(("import", "service.issue.create_issue"), python_refs)
+        self.assertIn(("call", "create_issue"), python_refs)
+
+    def test_source_code_qa_session_store_covers_persistence_and_turn_edges(self):
+        broken_path = Path(self.temp_dir.name) / "broken-sessions.json"
+        broken_path.write_text("{bad", encoding="utf-8")
+        self.assertEqual(SourceCodeQASessionStore(broken_path).list(owner_email="owner@npt.sg"), [])
+        valid_path = Path(self.temp_dir.name) / "valid-sessions.json"
+        valid_path.write_text(json.dumps({"sessions": {"s1": {"id": "s1"}, "bad": "ignored"}}), encoding="utf-8")
+        self.assertEqual(SourceCodeQASessionStore(valid_path).list(owner_email="owner@npt.sg"), [])
+        with patch("bpmis_jira_tool.source_code_qa_stores.os.replace", side_effect=OSError("replace failed")):
+            SourceCodeQASessionStore(valid_path).create(owner_email="owner@npt.sg", pm_team="AF", country="All", llm_provider="", title="")
+
+        memory_store = SourceCodeQASessionStore()
+        self.assertEqual(memory_store._title_from_question(""), "New Source Code Chat")
+        self.assertIsNone(memory_store._recent_turn_from_context({"question": "", "answer": ""}))
+        extended = memory_store._extend_recent_turns(
+            {"question": "new", "answer": "new", "codex_session_max_turns": 1},
+            {"question": "old", "answer": "old", "trace_id": "t", "recent_turns": [{"question": "old", "trace_id": "t"}]},
+        )
+        self.assertEqual(len(extended["recent_turns"]), 1)
+        self.assertIsNone(memory_store.get_context("missing", owner_email="owner@npt.sg"))
+        self.assertIsNone(memory_store.append_pending_question("missing", owner_email="owner@npt.sg", pm_team="AF", country="All", llm_provider="", question="", job_id=""))
+
+        session = memory_store.create(owner_email="owner@npt.sg", pm_team="", country="", llm_provider="", title="")
+        self.assertIsNone(memory_store.get(session["id"], owner_email="other@npt.sg"))
+        self.assertIsNone(memory_store.archive("missing", owner_email="owner@npt.sg"))
+        self.assertIsNone(memory_store.archive(session["id"], owner_email="other@npt.sg"))
+        self.assertIsNone(
+            memory_store.append_exchange(
+                "missing",
+                owner_email="owner@npt.sg",
+                pm_team="AF",
+                country="All",
+                llm_provider="codex_cli_bridge",
+                question="missing",
+                result={},
+                context={},
+            )
+        )
+        self.assertIsNone(
+            memory_store.append_exchange(
+                session["id"],
+                owner_email="other@npt.sg",
+                pm_team="AF",
+                country="All",
+                llm_provider="codex_cli_bridge",
+                question="wrong owner",
+                result={},
+                context={},
+            )
+        )
+        self.assertIsNone(
+            memory_store.append_pending_question(
+                "missing",
+                owner_email="owner@npt.sg",
+                pm_team="AF",
+                country="All",
+                llm_provider="codex_cli_bridge",
+                question="pending",
+                job_id="job-1",
+            )
+        )
+        self.assertIsNone(
+            memory_store.append_pending_question(
+                session["id"],
+                owner_email="other@npt.sg",
+                pm_team="AF",
+                country="All",
+                llm_provider="codex_cli_bridge",
+                question="pending",
+                job_id="job-1",
+            )
+        )
+        pending = memory_store.append_pending_question(
+            session["id"],
+            owner_email="owner@npt.sg",
+            pm_team="AF",
+            country="SG",
+            llm_provider="codex_cli_bridge",
+            question=" pending question ",
+            job_id="job-1",
+            attachments=[{"id": "a1", "filename": "notes.txt", "mime_type": "text/plain", "kind": "text", "size": 1}],
+        )
+        self.assertEqual(pending["messages"][-1]["pending_job_id"], "job-1")
+        updated = memory_store.append_exchange(
+            session["id"],
+            owner_email="owner@npt.sg",
+            pm_team="GRC",
+            country="All",
+            llm_provider="codex_cli_bridge",
+            question="pending question",
+            result={
+                "status": "ok",
+                "summary": "done",
+                "llm_answer": "answer",
+                "trace_id": "trace-2",
+                "llm_route": {"candidate_paths": [{"path": "src/App.java"}]},
+                "structured_answer": {"claims": [{"claim": "c"}]},
+                "attachments": [{"id": "a1", "filename": "notes.txt"}],
+                "runtime_evidence": [{"id": "e1", "filename": "apollo.properties"}],
+                "generated_artifacts": [{"id": "g1", "filename": "source-code-qa-sql-package.zip"}],
+                "matches": [{"repo": "Repo", "path": "src/App.java", "score": 9}],
+            },
+            context={
+                "question": "pending question",
+                "rendered_answer": "rendered",
+                "trace_id": "trace-2",
+                "codex_cli_session": {"id": "old"},
+                "codex_session_max_turns": "bad",
+            },
+            attachments=[{"id": "a1", "filename": "notes.txt"}],
+        )
+
+        self.assertEqual(updated["message_count"], 2)
+        self.assertNotIn("codex_cli_session", updated["last_context"])
+        self.assertEqual(memory_store.get_context(session["id"], owner_email="owner@npt.sg")["session_title"], "pending question")
+        self.assertIsNotNone(memory_store.archive(session["id"], owner_email="owner@npt.sg"))
+        self.assertEqual(memory_store.list(owner_email="owner@npt.sg"), [])
+
+    def test_source_code_qa_attachment_store_covers_file_boundaries(self):
+        store = SourceCodeQAAttachmentStore(Path(self.temp_dir.name) / "attachments")
+        self.assertEqual(store._safe_filename("../bad\x00:name?.txt"), "bad_name_.txt")
+        with self.assertRaisesRegex(ToolError, "valid Source Code"):
+            store._safe_session_id("bad/session")
+        with self.assertRaisesRegex(ToolError, "not configured"):
+            SourceCodeQAAttachmentStore()._session_dir(owner_email="owner@npt.sg", session_id="session123")
+        with self.assertRaisesRegex(ToolError, "empty"):
+            store.save_bytes(owner_email="owner@npt.sg", session_id="session123", filename="empty.txt", content=b"")
+        with self.assertRaisesRegex(ToolError, "too large"):
+            store.save_bytes(owner_email="owner@npt.sg", session_id="session123", filename="large.txt", content=b"x" * (store.MAX_FILE_BYTES + 1))
+        with self.assertRaisesRegex(ToolError, "Executable"):
+            store.save_bytes(owner_email="owner@npt.sg", session_id="session123", filename="tool.exe", content=b"x")
+        with self.assertRaisesRegex(ToolError, "Unknown binary"):
+            store.save_bytes(owner_email="owner@npt.sg", session_id="session123", filename="blob", content=b"\x00binary")
+        with self.assertRaisesRegex(ToolError, "Unsupported attachment"):
+            store.save_bytes(owner_email="owner@npt.sg", session_id="session123", filename="blob", content=b"text")
+
+        metadata_path = store._metadata_path(owner_email="owner@npt.sg", session_id="session123")
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        metadata_path.write_text("{bad", encoding="utf-8")
+        self.assertEqual(store._load_metadata_locked(owner_email="owner@npt.sg", session_id="session123"), {})
+
+        text_item = store.save_bytes(
+            owner_email="owner@npt.sg",
+            session_id="session123",
+            filename="notes.txt",
+            content="hello\r\nworld".encode("utf-8"),
+            mime_type="text/plain",
+        )
+        image_items = [
+            store.save_bytes(
+                owner_email="owner@npt.sg",
+                session_id="session123",
+                filename=f"img{index}.png",
+                content=b"png-bytes",
+                mime_type="image/png",
+            )
+            for index in range(store.MAX_IMAGES + 1)
+        ]
+        with self.assertRaisesRegex(ToolError, "At most"):
+            store.resolve_many(owner_email="owner@npt.sg", session_id="session123", attachment_ids=[item["id"] for item in image_items])
+        with self.assertRaisesRegex(ToolError, "At most"):
+            store.resolve_many(owner_email="owner@npt.sg", session_id="session123", attachment_ids=[str(index) for index in range(store.MAX_ATTACHMENTS + 1)])
+        with self.assertRaisesRegex(ToolError, "not found"):
+            store.resolve_many(owner_email="owner@npt.sg", session_id="session123", attachment_ids=["0" * 32])
+
+        odd = store.save_bytes(
+            owner_email="owner@npt.sg",
+            session_id="session123",
+            filename="notes.unknown",
+            content=b"fallback text",
+        )
+        self.assertEqual(odd["kind"], "text")
+        self.assertEqual(store._extract_attachment_text("raw.txt", "text/plain", b"\xfflatin")[0], "ÿ")
+        with self.assertRaisesRegex(ToolError, "Unable to parse"):
+            store._extract_attachment_text("raw.txt", "text/plain", b"")
+        with patch.object(SourceCodeQAAttachmentStore, "_extract_pdf_text", return_value="pdf text") as pdf_extract:
+            self.assertEqual(store._extract_attachment_text("file.pdf", "application/pdf", b"pdf"), "pdf text")
+            pdf_extract.assert_called_once()
+        with patch.object(SourceCodeQAAttachmentStore, "_extract_docx_text", return_value="docx text") as docx_extract:
+            self.assertEqual(store._extract_attachment_text("file.docx", "", b"docx"), "docx text")
+            docx_extract.assert_called_once()
+        with patch.object(SourceCodeQAAttachmentStore, "_extract_xlsx_text", return_value="xlsx text") as xlsx_extract:
+            self.assertEqual(store._extract_attachment_text("file.xlsx", "", b"xlsx"), "xlsx text")
+            xlsx_extract.assert_called_once()
+
+        metadata = store._load_metadata_locked(owner_email="owner@npt.sg", session_id="session123")
+        (store._session_dir(owner_email="owner@npt.sg", session_id="session123") / metadata[text_item["id"]]["stored_name"]).unlink()
+        with self.assertRaisesRegex(ToolError, "missing"):
+            store.resolve_many(owner_email="owner@npt.sg", session_id="session123", attachment_ids=[text_item["id"]])
+        metadata[text_item["id"]]["stored_name"] = metadata[image_items[0]["id"]]["stored_name"]
+        store._persist_metadata_locked(owner_email="owner@npt.sg", session_id="session123", metadata=metadata)
+        with patch("pathlib.Path.read_bytes", side_effect=OSError("unreadable")):
+            with self.assertRaisesRegex(ToolError, "unreadable"):
+                store.resolve_many(owner_email="owner@npt.sg", session_id="session123", attachment_ids=[text_item["id"]])
+
+        with patch.object(SourceCodeQAAttachmentStore, "resolve_many", return_value=[]):
+            with self.assertRaisesRegex(ToolError, "was not found"):
+                store.get_bytes(owner_email="owner@npt.sg", session_id="session123", attachment_id=text_item["id"])
+        with patch.object(SourceCodeQAAttachmentStore, "resolve_many", return_value=[{"path": str(Path(self.temp_dir.name) / "missing.txt")}]):
+            with self.assertRaisesRegex(ToolError, "unreadable"):
+                store.get_bytes(owner_email="owner@npt.sg", session_id="session123", attachment_id=text_item["id"])
+        with patch("builtins.__import__", side_effect=ImportError("no module")):
+            with self.assertRaisesRegex(ToolError, "PDF attachments"):
+                store._extract_pdf_text(b"%PDF")
+            with self.assertRaisesRegex(ToolError, "DOCX attachments"):
+                store._extract_docx_text(b"docx")
+            with self.assertRaisesRegex(ToolError, "XLSX attachments"):
+                store._extract_xlsx_text(b"xlsx")
+        fake_pdf_module = SimpleNamespace(PdfReader=lambda _buffer: SimpleNamespace(pages=[SimpleNamespace(extract_text=lambda: "page text")]))
+        with patch.dict(sys.modules, {"pypdf": fake_pdf_module}):
+            self.assertEqual(store._extract_pdf_text(b"pdf"), "page text")
+        fake_empty_pdf_module = SimpleNamespace(PdfReader=lambda _buffer: SimpleNamespace(pages=[SimpleNamespace(extract_text=lambda: "")]))
+        with patch.dict(sys.modules, {"pypdf": fake_empty_pdf_module}):
+            with self.assertRaisesRegex(ToolError, "readable text"):
+                store._extract_pdf_text(b"pdf")
+        fake_docx_module = SimpleNamespace(Document=lambda _buffer: SimpleNamespace(paragraphs=[SimpleNamespace(text="doc text")]))
+        with patch.dict(sys.modules, {"docx": fake_docx_module}):
+            self.assertEqual(store._extract_docx_text(b"docx"), "doc text")
+        fake_empty_docx_module = SimpleNamespace(Document=lambda _buffer: SimpleNamespace(paragraphs=[SimpleNamespace(text="")]))
+        with patch.dict(sys.modules, {"docx": fake_empty_docx_module}):
+            with self.assertRaisesRegex(ToolError, "readable text"):
+                store._extract_docx_text(b"docx")
+        real_import = __import__
+        fake_empty_openpyxl = SimpleNamespace(load_workbook=lambda *_args, **_kwargs: SimpleNamespace(worksheets=[]))
+        with patch("builtins.__import__", side_effect=lambda name, *args, **kwargs: fake_empty_openpyxl if name == "openpyxl" else real_import(name, *args, **kwargs)):
+            with self.assertRaisesRegex(ToolError, "readable text"):
+                store._extract_xlsx_text(b"xlsx")
+        xlsx_workbook = Workbook()
+        xlsx_workbook.active.append(["field", "meaning"])
+        xlsx_buffer = io.BytesIO()
+        xlsx_workbook.save(xlsx_buffer)
+        self.assertIn("field\tmeaning", store._extract_xlsx_text(xlsx_buffer.getvalue()))
+
+    def test_source_code_qa_runtime_evidence_store_covers_scope_zip_and_data_dictionary_edges(self):
+        root = Path(self.temp_dir.name) / "runtime-evidence"
+        store = SourceCodeQARuntimeEvidenceStore(root)
+        with self.assertRaisesRegex(ToolError, "PM Team"):
+            store._safe_scope(pm_team="OPS", country="SG")
+        with self.assertRaisesRegex(ToolError, "Shared All-country"):
+            store._safe_scope(pm_team="CRMS", country="All")
+        with self.assertRaisesRegex(ToolError, "country"):
+            store._safe_scope(pm_team="AF", country="MY")
+        with self.assertRaisesRegex(ToolError, "source type"):
+            store._safe_source_type("secret")
+        with self.assertRaisesRegex(ToolError, "not configured"):
+            SourceCodeQARuntimeEvidenceStore()._scope_dir(pm_team="AF", country="SG")
+        with self.assertRaisesRegex(ToolError, "empty"):
+            store.save_bytes(pm_team="AF", country="SG", source_type="apollo", uploaded_by="owner", filename="empty.txt", content=b"")
+        with self.assertRaisesRegex(ToolError, "too large"):
+            store.save_bytes(pm_team="AF", country="SG", source_type="apollo", uploaded_by="owner", filename="large.txt", content=b"x" * (store.MAX_FILE_BYTES + 1))
+        with self.assertRaisesRegex(ToolError, "not an image"):
+            store.save_bytes(pm_team="AF", country="SG", source_type="apollo", uploaded_by="owner", filename="img.png", content=b"png", mime_type="image/png")
+        with self.assertRaisesRegex(ToolError, "Executable"):
+            store.save_bytes(pm_team="AF", country="SG", source_type="apollo", uploaded_by="owner", filename="archive.jar", content=b"jar")
+
+        scope_dir = store._scope_dir(pm_team="AF", country="SG")
+        scope_dir.mkdir(parents=True, exist_ok=True)
+        (scope_dir / "metadata.json").write_text("{bad", encoding="utf-8")
+        self.assertEqual(store.list(pm_team="AF", country="SG"), [])
+
+        with patch.object(SourceCodeQARuntimeEvidenceStore, "MAX_FILES_PER_SCOPE", 1), patch("pathlib.Path.unlink", side_effect=OSError("unlink failed")):
+            stale = store.save_bytes(
+                pm_team="AF",
+                country="SG",
+                source_type="db",
+                uploaded_by="owner@npt.sg",
+                filename="stale.txt",
+                content=b"stale",
+                mime_type="text/plain",
+            )
+            latest = store.save_bytes(
+                pm_team="AF",
+                country="SG",
+                source_type="db",
+                uploaded_by="owner@npt.sg",
+                filename="latest.txt",
+                content=b"latest",
+                mime_type="text/plain",
+            )
+        self.assertEqual([item["id"] for item in store.list(pm_team="AF", country="SG")], [latest["id"]])
+        self.assertNotEqual(stale["id"], latest["id"])
+        self.assertTrue(store.delete(pm_team="AF", country="SG", evidence_id=latest["id"]))
+
+        first = store.save_bytes(
+            pm_team="AF",
+            country="All",
+            source_type="apollo",
+            uploaded_by="owner@npt.sg",
+            filename="apollo.properties",
+            content=b"feature.enabled=true",
+            mime_type="text/plain",
+        )
+        second = store.save_bytes(
+            pm_team="AF",
+            country="SG",
+            source_type="db",
+            uploaded_by="owner@npt.sg",
+            filename="rules.csv",
+            content=b"rule,status\nA,on",
+            mime_type="text/csv",
+        )
+        resolved = store.resolve_scope(pm_team="AF", country="SG")
+        self.assertEqual({item["id"] for item in resolved}, {first["id"], second["id"]})
+        self.assertEqual(store.resolve_scope(pm_team="CRMS", country=""), [])
+
+        missing_metadata = store._load_metadata_locked(pm_team="AF", country="SG")
+        missing_metadata[first["id"]] = dict(store._load_metadata_locked(pm_team="AF", country="All")[first["id"]])
+        missing_metadata[second["id"]]["stored_name"] = "missing.txt"
+        store._persist_metadata_locked(pm_team="AF", country="SG", metadata=missing_metadata)
+        with patch("pathlib.Path.read_bytes", side_effect=OSError("read failed")):
+            self.assertEqual(store.resolve_scope(pm_team="AF", country="All"), [])
+        self.assertEqual([item["id"] for item in store.resolve_scope(pm_team="AF", country="SG")], [first["id"]])
+        self.assertFalse(store.delete(pm_team="AF", country="SG", evidence_id="f" * 32))
+        with self.assertRaisesRegex(ToolError, "invalid"):
+            store.delete(pm_team="AF", country="SG", evidence_id="bad")
+        deletable = store.save_bytes(
+            pm_team="AF",
+            country="PH",
+            source_type="db",
+            uploaded_by="owner@npt.sg",
+            filename="delete-me.txt",
+            content=b"delete me",
+            mime_type="text/plain",
+        )
+        with patch("pathlib.Path.unlink", side_effect=OSError("delete failed")):
+            self.assertTrue(store.delete(pm_team="AF", country="PH", evidence_id=deletable["id"]))
+
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "Tables"
+        worksheet.append([None, None, None])
+        worksheet.append(["table", "column", "meaning"])
+        worksheet.append(["risk_rule", "rule_id", "Risk rule id"])
+        empty_sheet = workbook.create_sheet("Empty")
+        skipped_sheet = workbook.create_sheet("Skipped")
+        workbook_buffer = io.BytesIO()
+        workbook.save(workbook_buffer)
+        with patch.object(SourceCodeQARuntimeEvidenceStore, "MAX_DATA_DICTIONARY_XLSX_SHEETS", 2):
+            dictionary_text = store._extract_data_dictionary_xlsx_text(workbook_buffer.getvalue())
+        self.assertIn("[Data dictionary sheet: Tables]", dictionary_text)
+        self.assertIn("risk_rule", dictionary_text)
+        self.assertIn("(empty sheet)", dictionary_text)
+        self.assertIn("[Data dictionary skipped sheets: 1]", dictionary_text)
+        with patch("builtins.__import__", side_effect=ImportError("no openpyxl")):
+            with self.assertRaisesRegex(ToolError, "openpyxl"):
+                store._extract_data_dictionary_xlsx_text(b"xlsx")
+        real_import = __import__
+        fake_empty_openpyxl = SimpleNamespace(load_workbook=lambda *_args, **_kwargs: SimpleNamespace(worksheets=[]))
+        with patch("builtins.__import__", side_effect=lambda name, *args, **kwargs: fake_empty_openpyxl if name == "openpyxl" else real_import(name, *args, **kwargs)):
+            with self.assertRaisesRegex(ToolError, "readable text"):
+                store._extract_data_dictionary_xlsx_text(b"xlsx")
+        with patch.object(SourceCodeQARuntimeEvidenceStore, "MAX_DATA_DICTIONARY_XLSX_TEXT_CHARS", 30):
+            truncated_dictionary_text = store._extract_data_dictionary_xlsx_text(workbook_buffer.getvalue())
+        self.assertLessEqual(len(truncated_dictionary_text), 30)
+
+        with self.assertRaisesRegex(ToolError, "Unable to read"):
+            store._extract_zip_text(b"not a zip")
+        too_many_zip = io.BytesIO()
+        with zipfile.ZipFile(too_many_zip, "w") as archive:
+            archive.writestr("a.txt", "a")
+            archive.writestr("b.txt", "b")
+        with patch.object(SourceCodeQARuntimeEvidenceStore, "MAX_ZIP_MEMBERS", 1):
+            with self.assertRaisesRegex(ToolError, "too many"):
+                store._extract_zip_text(too_many_zip.getvalue())
+        too_large_zip = io.BytesIO()
+        with zipfile.ZipFile(too_large_zip, "w") as archive:
+            archive.writestr("large.txt", "large text")
+        with patch.object(SourceCodeQARuntimeEvidenceStore, "MAX_ZIP_UNCOMPRESSED_BYTES", 1):
+            with self.assertRaisesRegex(ToolError, "too large"):
+                store._extract_zip_text(too_large_zip.getvalue())
+        class BrokenArchive:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def infolist(self):
+                return [SimpleNamespace(is_dir=lambda: False, filename="broken.txt", file_size=1)]
+
+            def read(self, _member):
+                raise RuntimeError("read failed")
+
+        with patch("bpmis_jira_tool.source_code_qa_stores.zipfile.ZipFile", return_value=BrokenArchive()):
+            with self.assertRaisesRegex(ToolError, "Unable to read broken.txt"):
+                store._extract_zip_text(b"fake zip")
+        empty_zip = io.BytesIO()
+        with zipfile.ZipFile(empty_zip, "w") as archive:
+            archive.writestr("../unsafe.txt", "skip")
+            archive.writestr("binary.txt", b"\x00skip")
+            archive.writestr("empty.txt", "")
+        with self.assertRaisesRegex(ToolError, "did not contain"):
+            store._extract_zip_text(empty_zip.getvalue())
+
+        readable_zip = io.BytesIO()
+        with zipfile.ZipFile(readable_zip, "w") as archive:
+            archive.writestr("__MACOSX/ignored.txt", "skip")
+            archive.writestr("config/app.properties", "app.enabled=true")
+            archive.writestr("latin.txt", b"\xfflatin")
+            archive.writestr("image.png", "skip")
+        zip_text = store._extract_zip_text(readable_zip.getvalue())
+        self.assertIn("[ZIP file: config/app.properties]", zip_text)
+        self.assertIn("[ZIP skipped files:", zip_text)
+        with patch.object(SourceCodeQARuntimeEvidenceStore, "MAX_ZIP_TEXT_CHARS", 20):
+            truncated_zip = store._extract_zip_text(readable_zip.getvalue())
+        self.assertLessEqual(len(truncated_zip), 20)
+
+    def test_source_code_qa_generated_artifact_store_covers_errors_and_zip_roundtrip(self):
+        store = SourceCodeQAGeneratedArtifactStore(Path(self.temp_dir.name) / "artifacts")
+        with self.assertRaisesRegex(ToolError, "not configured"):
+            SourceCodeQAGeneratedArtifactStore()._session_dir(owner_email="owner@npt.sg", session_id="session123")
+        with self.assertRaisesRegex(ToolError, "empty"):
+            store.save_sql_package(owner_email="owner@npt.sg", session_id="session123", pm_team="AF", country="SG", question="", sql="", readme="")
+        with patch.object(SourceCodeQAGeneratedArtifactStore, "MAX_SQL_BYTES", 4):
+            with self.assertRaisesRegex(ToolError, "too large"):
+                store.save_sql_package(owner_email="owner@npt.sg", session_id="session123", pm_team="AF", country="SG", question="", sql="select * from table", readme="")
+
+        metadata_path = store._metadata_path(owner_email="owner@npt.sg", session_id="session123")
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        metadata_path.write_text("{bad", encoding="utf-8")
+        self.assertEqual(store._load_metadata_locked(owner_email="owner@npt.sg", session_id="session123"), {})
+
+        artifact = store.save_sql_package(
+            owner_email="owner@npt.sg",
+            session_id="session123",
+            pm_team="af",
+            country="sg",
+            question="how to query",
+            sql="select 1",
+            readme="read me",
+        )
+        public_metadata, content = store.get_bytes(owner_email="owner@npt.sg", session_id="session123", artifact_id=artifact["id"])
+        self.assertEqual(public_metadata["pm_team"], "AF")
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            self.assertIn("query.sql", archive.namelist())
+        with self.assertRaisesRegex(ToolError, "invalid"):
+            store.get_bytes(owner_email="owner@npt.sg", session_id="session123", artifact_id="bad")
+        with self.assertRaisesRegex(ToolError, "not found"):
+            store.get_bytes(owner_email="owner@npt.sg", session_id="session123", artifact_id="f" * 32)
+
+        metadata = store._load_metadata_locked(owner_email="owner@npt.sg", session_id="session123")
+        (store._session_dir(owner_email="owner@npt.sg", session_id="session123") / metadata[artifact["id"]]["stored_name"]).unlink()
+        with self.assertRaisesRegex(ToolError, "unreadable"):
+            store.get_bytes(owner_email="owner@npt.sg", session_id="session123", artifact_id=artifact["id"])
 
     def test_retrieval_query_returns_path_line_and_snippet(self):
         self.service.save_mapping(
@@ -8461,7 +12908,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(telemetry["llm_model"], expected_model)
         self.assertEqual(telemetry["llm_thinking_budget"], 0)
         self.assertEqual(telemetry["llm_route"]["mode"], "manual")
-        self.assertEqual(telemetry["versions"]["cache"], 16)
+        self.assertEqual(telemetry["versions"]["cache"], 21)
         self.assertIn("llm_latency_ms", telemetry)
         self.assertIn("llm_attempt_log", telemetry)
         self.assertIn("answer_contract", telemetry)
@@ -8728,7 +13175,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         )
         cached = service._load_cached_answer(cache_key)
         self.assertIsNotNone(cached)
-        self.assertEqual(cached["versions"]["cache"], 16)
+        self.assertEqual(cached["versions"]["cache"], 21)
         cache_path = service.answer_cache_root / f"{cache_key}.json"
         stale_payload = json.loads(cache_path.read_text(encoding="utf-8"))
         stale_payload["versions"]["router"] = -1
@@ -9098,6 +13545,243 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(routed_mode, "cheap")
         self.assertEqual(routed_budget["model"], service.llm_budgets["cheap"]["model"])
         self.assertEqual(route["reason"], "short_definition_or_status")
+
+    def test_cheap_status_question_skips_soft_codex_repair(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+
+        decision = service._codex_repair_decision(
+            question="Rule outcome = pass 是什么意思?",
+            answer="Not found in the repository.",
+            structured_answer={"confidence": "low"},
+            quality_gate={"status": "sufficient", "confidence": "high"},
+            evidence_pack={"items": [{"kind": "config", "target": "Rule outcome = pass"}]},
+            answer_judge={"status": "repair", "issues": ["answer missed retrieval hints"]},
+            codex_validation={"status": "needs_citation", "unsupported_claims": ["Rule outcome pass was not found"]},
+            finish_reason="stop",
+            effort_assessment=False,
+            trace_id="trace-cheap-repair",
+            selected_model=service.llm_budgets["cheap"]["model"],
+            query_mode="deep",
+            routed_budget_mode="cheap",
+        )
+
+        self.assertFalse(service._codex_high_risk_question("Rule outcome = pass 是什么意思?"))
+        self.assertFalse(decision["repair_will_run"])
+        self.assertEqual(decision["repair_policy"], "cheap_simple_first_pass")
+        self.assertIn("not_found_answer_conflicts_with_retrieval_hints", decision["suppressed_repair_reasons"])
+        self.assertTrue(decision["repair_skipped_reason"].startswith("codex_repair_tier_skipped:cheap_simple_first_pass"))
+        route_fields = service._codex_repair_route_fields(
+            codex_validation={"status": "needs_citation", "scoped_file_refs": [], "out_of_scope_refs": []},
+            repair_attempted=False,
+            repair_policy=decision["repair_policy"],
+            repair_reason="",
+            repair_skipped_reason=decision["repair_skipped_reason"],
+            repair_decision_ms=1,
+            deep_investigation_rounds=0,
+            deep_investigation_terms=[],
+            deep_investigation_added=0,
+        )
+        self.assertEqual(route_fields["codex_repair_policy"], "cheap_simple_first_pass")
+
+    def test_cheap_budget_still_repairs_hard_codex_failures(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+
+        decision = service._codex_repair_decision(
+            question="where is batchCreateJiraIssue",
+            answer="",
+            structured_answer={},
+            quality_gate={"status": "sufficient", "confidence": "high"},
+            evidence_pack={},
+            answer_judge={"status": "ok", "issues": []},
+            codex_validation={"status": "skipped"},
+            finish_reason="stop",
+            effort_assessment=False,
+            trace_id="trace-cheap-hard-repair",
+            selected_model=service.llm_budgets["cheap"]["model"],
+            query_mode="deep",
+            routed_budget_mode="cheap",
+        )
+
+        self.assertTrue(decision["repair_will_run"])
+        self.assertEqual(decision["severe_repair_reasons"], ["empty_codex_answer"])
+        self.assertEqual(decision["suppressed_repair_reasons"], [])
+
+    def test_codex_repair_skips_when_answer_generation_budget_is_low(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        service._codex_answer_timeout_seconds = 120
+
+        with patch("bpmis_jira_tool.source_code_qa.time.time", return_value=1040):
+            remaining_seconds, skip_reason = service._codex_repair_remaining_timeout_seconds(1000)
+
+        self.assertEqual(remaining_seconds, 75)
+        self.assertEqual(skip_reason, "codex_repair_insufficient_query_budget:75<90")
+
+    def test_codex_repair_reserves_deep_investigation_budget(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        service._codex_answer_timeout_seconds = 220
+
+        with patch("bpmis_jira_tool.source_code_qa.time.time", return_value=1100):
+            remaining_seconds, skip_reason = service._codex_repair_remaining_timeout_seconds(1000, reserve_seconds=40)
+
+        self.assertEqual(remaining_seconds, 75)
+        self.assertEqual(skip_reason, "codex_repair_insufficient_query_budget:75<90")
+
+    def test_sufficient_bounded_negative_answer_skips_soft_codex_repair(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+
+        decision = service._codex_repair_decision(
+            question="why is SG notification template mapping missing from source evidence?",
+            answer=(
+                "I cannot confirm those SG template IDs from the scoped source repository. "
+                "The code references notification rule wiring, but the concrete template registry appears to be runtime or production DB evidence."
+            ),
+            structured_answer={
+                "direct_answer": "I cannot confirm those SG template IDs from scoped source code.",
+                "claims": [
+                    {"text": "Rule notification code is present", "citations": ["S1"]},
+                    {"text": "Template ID mapping requires production DB evidence", "citations": []},
+                ],
+                "missing_evidence": ["Production msg-center template registry for SG"],
+                "confidence": "medium",
+            },
+            quality_gate={"status": "sufficient", "confidence": "medium"},
+            evidence_pack={"items": [{"kind": "config", "target": "template ID"}]},
+            answer_judge={"status": "repair", "issues": ["unsupported runtime ID mapping"]},
+            codex_validation={"status": "needs_citation", "unsupported_claims": ["runtime template mapping"]},
+            finish_reason="stop",
+            effort_assessment=False,
+            trace_id="trace-soft-skip",
+            selected_model=service.llm_budgets["deep"]["model"],
+            query_mode="deep",
+            routed_budget_mode="deep",
+        )
+
+        self.assertFalse(decision["repair_will_run"])
+        self.assertEqual(decision["repair_policy"], "first_pass_quality_gate")
+        self.assertEqual(decision["repair_skipped_reason"], "codex_repair_skipped:first_pass_sufficient_for_deep_gap")
+
+    def test_catalog_questions_do_not_skip_soft_codex_repair_on_generic_negative_answer(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+
+        decision = service._codex_repair_decision(
+            question="What are the available functions I can use for my rules?",
+            answer=(
+                "This information is not present in the provided Source Code or Runtime Evidence. "
+                "Please verify if the feature is implemented or escalate to the engineering lead."
+            ),
+            structured_answer={"direct_answer": "This information is not present.", "claims": [], "confidence": "medium"},
+            quality_gate={"status": "sufficient", "confidence": "medium"},
+            evidence_pack={"items": [{"kind": "code", "target": "function catalog"}]},
+            answer_judge={"status": "repair", "issues": ["generic negative answer"]},
+            codex_validation={"status": "needs_citation", "unsupported_claims": ["no function catalog"]},
+            finish_reason="stop",
+            effort_assessment=False,
+            trace_id="trace-catalog-repair",
+            selected_model=service.llm_budgets["balanced"]["model"],
+            query_mode="deep",
+            routed_budget_mode="balanced",
+        )
+
+        self.assertTrue(decision["repair_will_run"])
+        self.assertNotEqual(decision["repair_policy"], "first_pass_quality_gate")
+
+    def test_ambiguous_business_flow_still_allows_soft_codex_repair(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+
+        decision = service._codex_repair_decision(
+            question="why can a user authorize action plan before authorize new incident?",
+            answer=(
+                "Yes, but only if the action plan task is already created. "
+                "The exact state ordering needs source confirmation across incident authorization."
+            ),
+            structured_answer={
+                "direct_answer": "Yes, but only if the action plan task is already created.",
+                "claims": [{"text": "Action plan authorization has state checks", "citations": ["S1"]}],
+                "missing_evidence": ["Incident authorization ordering guard"],
+                "confidence": "medium",
+            },
+            quality_gate={"status": "sufficient", "confidence": "medium"},
+            evidence_pack={"items": [{"kind": "code", "target": "authorize"}]},
+            answer_judge={"status": "repair", "issues": ["business state ordering ambiguity"]},
+            codex_validation={"status": "needs_citation", "unsupported_claims": ["state ordering"]},
+            finish_reason="stop",
+            effort_assessment=False,
+            trace_id="trace-business-repair",
+            selected_model=service.llm_budgets["deep"]["model"],
+            query_mode="deep",
+            routed_budget_mode="deep",
+        )
+
+        self.assertTrue(decision["repair_will_run"])
+        self.assertIn("high_risk_claims_missing_scoped_file_evidence", decision["severe_repair_reasons"])
+
+    def test_nested_json_direct_answer_is_normalized_before_final_output(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        inner = json.dumps(
+            {
+                "direct_answer": "Authorization email links use the ticket id when the template receives one.",
+                "claims": [{"text": "Ticket id is passed into the email template", "citations": ["S1"]}],
+                "missing_evidence": [],
+                "confidence": "high",
+            }
+        )
+
+        answer, structured = service._normalize_codex_answer_text(
+            json.dumps({"direct_answer": inner, "claims": [], "confidence": "medium"}),
+            {"direct_answer": inner, "claims": [], "confidence": "medium", "format": "json"},
+        )
+
+        self.assertEqual(answer, "Authorization email links use the ticket id when the template receives one.")
+        self.assertEqual(structured["confidence"], "high")
+        self.assertEqual(structured["claims"][0]["citations"], ["S1"])
 
     def test_root_cause_definition_like_question_does_not_route_to_cheap(self):
         service = SourceCodeQAService(
@@ -10420,6 +15104,814 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("Production code, mapper, client, SQL, and config evidence beats tests", request_text)
         self.assertIn("read-only code investigator", system_text)
         self.assertEqual(payload["llm_thinking_budget"], 0)
+
+    def test_source_code_qa_runtime_helpers_cover_local_agent_and_auth_boundaries(self):
+        self._ensure_runtime_helper_app()
+        session_lock = portal_web._source_code_qa_codex_session_lock("")
+        self.assertIs(session_lock, portal_web._source_code_qa_codex_session_lock(""))
+
+        class FakeRemoteStore:
+            def __init__(self, client):
+                self.client = client
+
+        class FakeLocalService:
+            llm_provider_name = "codex_cli_bridge"
+
+            def with_llm_provider(self, provider):
+                self.llm_provider_name = provider
+                return self
+
+        fake_client = object()
+        fake_service = FakeLocalService()
+        self.app.config["SOURCE_CODE_QA_SERVICE"] = fake_service
+        globals_dict = portal_web._get_source_code_qa_session_store.__globals__
+        with self.app.app_context(), patch.dict(
+            globals_dict,
+            {
+                "_local_agent_source_code_qa_enabled": lambda settings: True,
+                "_build_local_agent_client": lambda settings: fake_client,
+                "RemoteSourceCodeQASessionStore": FakeRemoteStore,
+                "RemoteSourceCodeQAAttachmentStore": FakeRemoteStore,
+                "RemoteSourceCodeQAGeneratedArtifactStore": FakeRemoteStore,
+                "RemoteSourceCodeQARuntimeEvidenceStore": FakeRemoteStore,
+                "RemoteSourceCodeQAService": lambda client, service, llm_provider="": SimpleNamespace(
+                    client=client,
+                    service=service,
+                    llm_provider_name=llm_provider,
+                ),
+            },
+        ):
+            self.assertIs(portal_web._get_source_code_qa_session_store().client, fake_client)
+            self.assertIs(portal_web._get_source_code_qa_attachment_store().client, fake_client)
+            self.assertIs(portal_web._get_source_code_qa_generated_artifact_store().client, fake_client)
+            self.assertIs(portal_web._get_source_code_qa_runtime_evidence_store().client, fake_client)
+            self.assertIs(portal_web._build_source_code_qa_service("codex_cli_bridge").client, fake_client)
+
+        self.assertFalse(portal_web._source_code_qa_git_auth_ready(SimpleNamespace(git_auth_ready=lambda: False), self.app.config["SETTINGS"]))
+        self.assertTrue(portal_web._source_code_qa_git_auth_ready(SimpleNamespace(), SimpleNamespace(source_code_qa_gitlab_token="token")))
+        self.assertTrue(portal_web._source_code_qa_provider_available(" codex_cli_bridge "))
+        self.assertFalse(portal_web._source_code_qa_provider_available("gemini"))
+        self.assertEqual(portal_web._source_code_qa_public_answer_mode("exact"), "auto")
+        self.assertEqual(portal_web._source_code_qa_query_mode("cheap"), "deep")
+
+    def test_source_code_qa_runtime_helpers_cover_auto_sync_edges(self):
+        self._ensure_runtime_helper_app()
+        progress_events = []
+
+        class BrokenHealthService:
+            def index_health_payload(self):
+                raise RuntimeError("health failed")
+
+        class NonListRepoHealthService:
+            def index_health_payload(self):
+                return {"keys": {"AF:All": {"repos": "invalid"}}}
+
+        with self.app.app_context():
+            self.assertTrue(portal_web._source_code_qa_scope_has_queryable_index(BrokenHealthService(), "AF:All"))
+            self.assertTrue(portal_web._source_code_qa_scope_has_queryable_index(NonListRepoHealthService(), "AF:All"))
+
+        class BackgroundService:
+            def __init__(self, *, fail=False):
+                self.fail = fail
+                self.calls = []
+
+            def mapping_key(self, pm_team, country):
+                return f"{pm_team}:{country}"
+
+            def index_health_payload(self):
+                return {"keys": {"AF:SG": {"repos": [{"index": {"queryable": True, "state": "ready"}}]}}}
+
+            def ensure_synced_today(self, *, pm_team, country):
+                self.calls.append(("sync", pm_team, country))
+                if self.fail:
+                    raise RuntimeError("background failed")
+                return {"attempted": True, "status": "ok", "key": f"{pm_team}:{country}"}
+
+        class FakeThread:
+            def __init__(self, target, daemon=False):
+                self.target = target
+                self.daemon = daemon
+
+            def start(self):
+                self.target()
+
+        with patch.dict(os.environ, {"SOURCE_CODE_QA_QUERY_SYNC_MODE": "background"}, clear=False), patch.dict(
+            portal_web._prepare_source_code_qa_auto_sync.__globals__,
+            {"threading": SimpleNamespace(Thread=FakeThread)},
+        ):
+            with self.app.app_context():
+                result = portal_web._prepare_source_code_qa_auto_sync(
+                    BackgroundService(),
+                    pm_team="AF",
+                    country="SG",
+                    progress_callback=lambda event, message, current, total: progress_events.append(event),
+                )
+                failed_background = portal_web._prepare_source_code_qa_auto_sync(
+                    BackgroundService(fail=True),
+                    pm_team="AF",
+                    country="SG",
+                )
+
+        self.assertEqual(result["status"], "background_queued")
+        self.assertEqual(failed_background["status"], "background_queued")
+        self.assertIn("auto_sync_queued", progress_events)
+
+        class BlockingService:
+            def __init__(self, attempted=False):
+                self.attempted = attempted
+
+            def ensure_synced_today(self, *, pm_team, country):
+                return {"attempted": self.attempted, "status": "fresh", "key": f"{pm_team}:{country}"}
+
+        with patch.dict(os.environ, {"SOURCE_CODE_QA_QUERY_SYNC_MODE": "blocking"}, clear=False):
+            with self.app.app_context():
+                attempted_blocking_result = portal_web._prepare_source_code_qa_auto_sync(
+                    BlockingService(attempted=True),
+                    pm_team="AF",
+                    country="SG",
+                    progress_callback=lambda event, message, current, total: progress_events.append(event),
+                )
+                blocking_result = portal_web._prepare_source_code_qa_auto_sync(
+                    BlockingService(),
+                    pm_team="AF",
+                    country="SG",
+                    progress_callback=lambda event, message, current, total: progress_events.append(event),
+                )
+
+        self.assertEqual(attempted_blocking_result["status"], "fresh")
+        self.assertEqual(blocking_result["status"], "fresh")
+        self.assertEqual(progress_events[-4:], ["auto_sync_check", "auto_sync_completed", "auto_sync_check", "auto_sync_completed"])
+
+    def test_source_code_qa_runtime_helpers_cover_capability_dictionary_and_store_failure(self):
+        self._ensure_runtime_helper_app()
+
+        class CapabilityStore:
+            def __init__(self, fail=False):
+                self.fail = fail
+
+            def list(self, *, pm_team, country):
+                if self.fail:
+                    raise RuntimeError("store unavailable")
+                if pm_team == "AF" and country == "SG":
+                    return [{"source_type": "data_dictionary"}]
+                return []
+
+        with patch.dict(
+            portal_web._source_code_qa_runtime_capabilities_payload.__globals__,
+            {"_get_source_code_qa_runtime_evidence_store": lambda: CapabilityStore()},
+        ):
+            capabilities = portal_web._source_code_qa_runtime_capabilities_payload()
+        self.assertTrue(capabilities["AF"]["SG"]["hasDictionary"])
+
+        with patch.dict(
+            portal_web._source_code_qa_runtime_capabilities_payload.__globals__,
+            {"_get_source_code_qa_runtime_evidence_store": lambda: CapabilityStore(fail=True)},
+        ):
+            failed_capabilities = portal_web._source_code_qa_runtime_capabilities_payload()
+        self.assertFalse(failed_capabilities["AF"]["SG"]["hasDictionary"])
+
+    def test_source_code_qa_runtime_helpers_cover_attachment_evidence_and_artifact_edges(self):
+        self._ensure_runtime_helper_app()
+        max_attachments = portal_web.SourceCodeQAAttachmentStore.MAX_ATTACHMENTS
+        with self.assertRaisesRegex(ToolError, "attachment_ids must be a list"):
+            portal_web._source_code_qa_attachment_ids({"attachment_ids": "not-list"})
+        with self.assertRaisesRegex(ToolError, "At most"):
+            portal_web._source_code_qa_attachment_ids({"attachment_ids": [str(index) for index in range(max_attachments + 1)]})
+        self.assertEqual(portal_web._source_code_qa_attachment_ids({"attachment_ids": None}), [])
+
+        with self.assertRaisesRegex(ToolError, "session is required"):
+            portal_web._resolve_source_code_qa_query_attachments(
+                {"attachment_ids": ["a1"]},
+                owner_email="teammate@npt.sg",
+                session_id="",
+            )
+
+        class MissingSessionStore:
+            def get(self, session_id, *, owner_email):
+                return None
+
+        class FoundSessionStore:
+            def get(self, session_id, *, owner_email):
+                return {"id": session_id, "owner_email": owner_email}
+
+        class AttachmentStore:
+            def resolve_many(self, *, owner_email, session_id, attachment_ids):
+                return [{"id": attachment_ids[0], "filename": "evidence.txt", "size": 5}]
+
+        with patch.dict(
+            portal_web._resolve_source_code_qa_query_attachments.__globals__,
+            {
+                "_get_source_code_qa_session_store": lambda: MissingSessionStore(),
+                "_get_source_code_qa_attachment_store": lambda: AttachmentStore(),
+            },
+        ):
+            with self.assertRaisesRegex(ToolError, "session was not found"):
+                portal_web._resolve_source_code_qa_query_attachments(
+                    {"attachment_ids": ["a1"]},
+                    owner_email="teammate@npt.sg",
+                    session_id="s1",
+                )
+
+        with patch.dict(
+            portal_web._resolve_source_code_qa_query_attachments.__globals__,
+            {
+                "_get_source_code_qa_session_store": lambda: FoundSessionStore(),
+                "_get_source_code_qa_attachment_store": lambda: AttachmentStore(),
+            },
+        ):
+            resolved = portal_web._resolve_source_code_qa_query_attachments(
+                {"attachment_ids": ["a1"]},
+                owner_email="teammate@npt.sg",
+                session_id="s1",
+            )
+        self.assertEqual(resolved[0]["filename"], "evidence.txt")
+        self.assertEqual(portal_web._source_code_qa_public_attachments([resolved[0], "bad"])[0]["id"], "a1")
+        self.assertEqual(
+            portal_web._source_code_qa_public_runtime_evidence(
+                [{"id": "r1", "filename": "apollo.properties", "source_type": "apollo", "pm_team": "AF", "country": "SG"}, None]
+            )[0]["source_type"],
+            "apollo",
+        )
+        self.assertEqual(portal_web._source_code_qa_public_generated_artifacts([{"id": "g1", "question": "q"}, None])[0]["id"], "g1")
+
+        class RuntimeEvidenceStore:
+            def __init__(self, result=None, error=None):
+                self.result = result
+                self.error = error
+
+            def resolve_scope(self, *, pm_team, country):
+                if self.error:
+                    raise self.error
+                return self.result
+
+        self.assertEqual(portal_web._resolve_source_code_qa_runtime_evidence(pm_team="AF", country="All"), [])
+        with patch.dict(
+            portal_web._resolve_source_code_qa_runtime_evidence.__globals__,
+            {"_get_source_code_qa_runtime_evidence_store": lambda: RuntimeEvidenceStore(error=ToolError("bad scope"))},
+        ):
+            with self.assertRaisesRegex(ToolError, "bad scope"):
+                portal_web._resolve_source_code_qa_runtime_evidence(pm_team="AF", country="SG")
+        with self.app.app_context(), patch.dict(
+            portal_web._resolve_source_code_qa_runtime_evidence.__globals__,
+            {"_get_source_code_qa_runtime_evidence_store": lambda: RuntimeEvidenceStore(error=RuntimeError("store down"))},
+        ):
+            self.assertEqual(portal_web._resolve_source_code_qa_runtime_evidence(pm_team="AF", country="SG"), [])
+
+        class GeneratedArtifactStore:
+            def __init__(self, fail=False):
+                self.fail = fail
+
+            def save_sql_package(self, **kwargs):
+                if self.fail:
+                    raise RuntimeError("disk full")
+                return {"id": "artifact-1", "sql": kwargs["sql"], "readme": kwargs["readme"]}
+
+        artifact_globals = portal_web._build_source_code_qa_generated_artifacts.__globals__
+        with patch.dict(
+            artifact_globals,
+            {
+                "_extract_source_code_qa_sql_blocks": lambda text: ["select 1"] if "sql" in text else [],
+                "_build_source_code_qa_sql_readme": lambda **kwargs: "readme",
+                "_get_source_code_qa_generated_artifact_store": lambda: GeneratedArtifactStore(),
+            },
+        ):
+            self.assertEqual(
+                portal_web._build_source_code_qa_generated_artifacts(
+                    owner_email="teammate@npt.sg",
+                    session_id="s1",
+                    pm_team="AF",
+                    country="SG",
+                    question="q",
+                    result={"llm_answer": "no block"},
+                    runtime_evidence=[],
+                ),
+                [],
+            )
+            generated = portal_web._build_source_code_qa_generated_artifacts(
+                owner_email="teammate@npt.sg",
+                session_id="s1",
+                pm_team="AF",
+                country="SG",
+                question="q",
+                result={"llm_answer": "sql"},
+                runtime_evidence=[],
+            )
+        self.assertEqual(generated[0]["id"], "artifact-1")
+
+        with self.app.app_context(), patch.dict(
+            artifact_globals,
+            {
+                "_extract_source_code_qa_sql_blocks": lambda text: ["select 1"],
+                "_build_source_code_qa_sql_readme": lambda **kwargs: "readme",
+                "_get_source_code_qa_generated_artifact_store": lambda: GeneratedArtifactStore(fail=True),
+            },
+        ):
+            self.assertEqual(
+                portal_web._build_source_code_qa_generated_artifacts(
+                    owner_email="teammate@npt.sg",
+                    session_id="s1",
+                    pm_team="AF",
+                    country="SG",
+                    question="q",
+                    result={"llm_answer": "sql"},
+                    runtime_evidence=[],
+                ),
+                [],
+            )
+
+    def test_source_code_qa_prompt_evidence_dedupes_empty_and_non_dict_items(self):
+        deduped = SourceCodeQAService._dedupe_prompt_evidence_items(  # noqa: SLF001
+            [
+                "not-a-dict",
+                {"filename": "first.txt"},
+                {"filename": "first.txt"},
+            ]
+        )
+
+        self.assertEqual(deduped, [{"filename": "first.txt"}])
+
+    def test_source_code_qa_runtime_helpers_cover_context_release_gate_access_and_jobs(self):
+        self._ensure_runtime_helper_app()
+        result = {
+            "summary": "summary",
+            "llm_answer": "answer",
+            "matches": [{"repo": "repo-a"}, {"repo": "repo-a"}, {"repo": "repo-b"}],
+            "llm_route": {
+                "candidate_paths": [
+                    {"path": "repo/src/Main.java", "repo": "repo-a"},
+                    {"path": "repo/src/Followup.java", "repo": "repo-b", "trace_stage": "followup_memory"},
+                ],
+                "codex_session_max_turns": 12,
+            },
+            "codex_cli_trace": {
+                "session_id": "session-1",
+                "session_mode": "resume",
+                "probable_inspected_files": ["opened repo/src/Main.java"],
+            },
+            "trace_paths": ["trace-a", "trace-b", "trace-c", "trace-d", "trace-e", "trace-f"],
+        }
+        context = portal_web._build_source_code_qa_session_context(result, {"pm_team": "AF", "country": "SG", "question": "q"})
+        self.assertEqual(context["codex_cli_session"]["session_id"], "session-1")
+        self.assertEqual(context["codex_inspected_paths"][0]["path"], "repo/src/Main.java")
+        self.assertEqual(context["repo_scope"], ["repo-a", "repo-b"])
+        fallback_context = portal_web._build_source_code_qa_session_context(
+            {"llm_route": {"candidate_paths": [{"path": "repo/src/Followup.java", "trace_stage": "followup_memory"}]}},
+            {"pm_team": "AF"},
+        )
+        self.assertEqual(fallback_context["codex_inspected_paths"][0]["trace_stage"], "followup_memory")
+
+        project_root = Path(self.temp_dir.name) / "project-root"
+        data_root = project_root / "relative-data-root"
+        run_dir = data_root / "run"
+        eval_dir = data_root / "source_code_qa" / "eval_runs"
+        run_dir.mkdir(parents=True)
+        eval_dir.mkdir(parents=True)
+        (run_dir / "source_code_qa_release_gate.json").write_text(
+            json.dumps({"status": "pass", "timestamp": "2026-01-01T00:00:00Z", "summary": "green", "thresholds": {"failures": 0}}),
+            encoding="utf-8",
+        )
+        (eval_dir / "latest.json").write_text(
+            json.dumps({"status": "eval-pass", "eval": {"failures": 0}, "llm_smoke": {"failures": 0}, "report_path": "report.json"}),
+            encoding="utf-8",
+        )
+        settings = SimpleNamespace(team_portal_data_dir=Path("relative-data-root"))
+        with patch.dict(portal_web._source_code_qa_release_gate_payload.__globals__, {"PROJECT_ROOT": project_root}):
+            gate = portal_web._source_code_qa_release_gate_payload(settings)
+        self.assertEqual(gate["status"], "pass")
+        self.assertEqual(gate["latest_eval"]["report_path"], "report.json")
+
+        access_globals = portal_web._require_source_code_qa_access.__globals__
+        with self.app.test_request_context("/api/source-code-qa/config"), patch.dict(
+            access_globals,
+            {"_require_google_login": lambda settings, api=False: ("login-required", 401)},
+        ):
+            self.assertEqual(portal_web._require_source_code_qa_access(settings, api=True), ("login-required", 401))
+
+        with self.app.test_request_context("/api/source-code-qa/config"), patch.dict(
+            access_globals,
+            {"_require_google_login": lambda settings, api=False: None, "_can_access_source_code_qa": lambda settings: False},
+        ):
+            response, status = portal_web._require_source_code_qa_access(settings, api=True)
+            self.assertEqual(status, 403)
+            self.assertEqual(response.get_json()["status"], "error")
+
+        with self.app.test_request_context("/source-code-qa"), patch.dict(
+            access_globals,
+            {"_require_google_login": lambda settings, api=False: None, "_can_access_source_code_qa": lambda settings: False},
+        ):
+            response = portal_web._require_source_code_qa_access(settings, api=False)
+            self.assertEqual(response.status_code, 302)
+
+        manage_globals = portal_web._require_source_code_qa_manage_access.__globals__
+        with self.app.test_request_context("/source-code-qa/admin"), patch.dict(
+            manage_globals,
+            {
+                "_require_source_code_qa_access": lambda settings, api=False: "access-gate",
+            },
+        ):
+            self.assertEqual(portal_web._require_source_code_qa_manage_access(settings, api=False), "access-gate")
+
+        with self.app.test_request_context("/source-code-qa/admin"), patch.dict(
+            manage_globals,
+            {
+                "_require_source_code_qa_access": lambda settings, api=False: None,
+                "_source_code_qa_auth_payload": lambda settings: {"signed_in_email": "teammate@npt.sg"},
+                "_can_manage_source_code_qa": lambda settings: False,
+            },
+        ):
+            response = portal_web._require_source_code_qa_manage_access(settings, api=False)
+            self.assertEqual(response.status_code, 302)
+
+        classifications = [
+            portal_web._classify_source_code_qa_job_error("local-agent connection refused"),
+            portal_web._classify_source_code_qa_job_error("ERR_NGROK_3200 html error"),
+            portal_web._classify_source_code_qa_job_error("rate limit quota"),
+            portal_web._classify_source_code_qa_job_error("timed out"),
+            portal_web._classify_source_code_qa_job_error("other"),
+        ]
+        self.assertEqual(classifications[0]["error_code"], "local_agent_unavailable")
+        self.assertEqual(classifications[1]["error_code"], "gateway_disconnected")
+        self.assertEqual(classifications[2]["error_code"], "llm_rate_limited")
+        self.assertEqual(classifications[3]["error_code"], "llm_timeout")
+        self.assertEqual(classifications[4]["error_code"], "source_code_qa_job_failed")
+
+        stalled = portal_web._public_source_code_qa_job_snapshot(
+            {
+                "owner_email": "teammate@npt.sg",
+                "state": "queued",
+                "eta_seconds_range": [-1, "5", 12],
+                "stalled_retryable": True,
+            }
+        )
+        self.assertNotIn("owner_email", stalled)
+        self.assertEqual(stalled["error_code"], "job_stalled_retryable")
+        self.assertEqual(stalled["eta_seconds_range"], [0, 5])
+        self.assertEqual(portal_web._public_source_code_qa_job_snapshot({"state": "running"})["error_category"], "job_running")
+        self.assertEqual(portal_web._public_source_code_qa_job_snapshot({"state": "failed", "error": "quota"})["error_code"], "llm_rate_limited")
+
+        with self.app.app_context():
+            self.app.config["JOB_STORE"] = SimpleNamespace(snapshot=lambda job_id: None)
+            self.assertIsNone(portal_web._source_code_qa_job_snapshot_for_current_user("missing"))
+            self.app.config["JOB_STORE"] = SimpleNamespace(snapshot=lambda job_id: {"action": "other"})
+            self.assertIsNone(portal_web._source_code_qa_job_snapshot_for_current_user("wrong-action"))
+
+    def test_codex_llm_provider_base_and_static_edges(self):
+        base = llm_providers.SourceCodeQALLMProvider()
+        self.assertFalse(base.ready())
+        with self.assertRaisesRegex(ToolError, "not supported"):
+            base.generate(payload={}, primary_model="p", fallback_model="f")
+        with self.assertRaisesRegex(ToolError, "unreadable"):
+            base.extract_text({})
+        self.assertEqual(base.public_config(), {"provider": "unknown", "ready": False})
+
+        unsupported = llm_providers.UnsupportedSourceCodeQALLMProvider("")
+        self.assertEqual(unsupported.name, "unknown")
+        with self.assertRaisesRegex(ToolError, "unknown"):
+            unsupported.generate(payload={}, primary_model="p", fallback_model="f")
+
+        with patch.dict(os.environ, {"SOURCE_CODE_QA_CODEX_BINARY": ""}, clear=False):
+            provider = CodexCliBridgeSourceCodeQALLMProvider(
+                workspace_root=Path(self.temp_dir.name),
+                timeout_seconds=1,
+                concurrency_limit=99,
+                session_mode="bad-mode",
+                codex_binary="",
+            )
+        self.assertEqual(provider.timeout_seconds, 10)
+        self.assertEqual(provider.concurrency_limit, 4)
+        self.assertEqual(provider.session_mode, "ephemeral")
+        self.assertEqual(provider.codex_binary, "codex")
+        self.assertIs(provider._semaphore_for_limit(2), provider._semaphore_for_limit(2))
+        self.assertEqual(provider._semaphore_limit, 2)
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value=None):
+            self.assertFalse(provider.ready())
+
+        self.assertEqual(provider._reasoning_effort_from_payload({"_codex_reasoning_effort": "xhigh"}), "xhigh")
+        self.assertEqual(provider._reasoning_effort_from_payload({"_codex_reasoning_effort": "verbose"}), "")
+        self.assertEqual(provider._reasoning_config_args("medium"), ["-c", 'model_reasoning_effort="medium"'])
+        self.assertEqual(provider._reasoning_config_args("bad"), [])
+        self.assertEqual(provider._sanitize_cli_output(" a\n\t b "), "a b")
+        self.assertEqual(provider._command_summary(["codex", "--output-last-message", "/tmp/out", "-"]), ["codex", "--output-last-message", "<output-file>", "-"])
+        self.assertEqual(provider._tail_for_log("x" * 200, limit=10), "x" * 100)
+        with self.assertRaisesRegex(ToolError, "no readable answer"):
+            provider.extract_text({"text": "   "})
+
+        self.assertEqual(provider._codex_error_answer_detail(""), "")
+        self.assertEqual(provider._codex_error_answer_detail("{bad"), "")
+        self.assertEqual(provider._codex_error_answer_detail("[]"), "")
+        self.assertEqual(provider._codex_error_answer_detail("{}"), "")
+        self.assertEqual(provider._codex_error_answer_detail('{"message":"ordinary"}'), "")
+        self.assertIn("Invalid request: bad image", provider._codex_error_answer_detail('{"error":{"message":"Invalid request: bad image"}}'))
+        self.assertEqual(
+            provider._codex_failure_context_from_payload(
+                {
+                    "_codex_trace_id": "trace",
+                    "_codex_phase": "repair",
+                    "_codex_prompt_chars": 12,
+                    "_codex_prompt_bytes": 13,
+                    "_codex_estimated_prompt_tokens": 4,
+                    "_codex_candidate_path_count": 2,
+                    "_codex_candidate_repo_count": 1,
+                    "_codex_repair_issue_count": 3,
+                    "_codex_ignored": [],
+                }
+            ),
+            {
+                "trace_id": "trace",
+                "phase": "repair",
+                "prompt_chars": 12,
+                "prompt_bytes": 13,
+                "estimated_prompt_tokens": 4,
+                "candidate_path_count": 2,
+                "candidate_repo_count": 1,
+                "repair_issue_count": 3,
+            },
+        )
+
+    def test_codex_llm_provider_command_prompt_and_event_parsing_edges(self):
+        provider = CodexCliBridgeSourceCodeQALLMProvider(
+            workspace_root=Path(self.temp_dir.name),
+            timeout_seconds=20,
+            session_mode="resume",
+            codex_binary="codex",
+        )
+        command, mode = provider._build_codex_command(
+            output_file="/tmp/out",
+            model="gpt-5.4",
+            reasoning_effort="high",
+            image_paths=["/tmp/a.png"],
+        )
+        self.assertEqual(mode, "new_persistent")
+        self.assertIn("--model", command)
+        self.assertIn("-c", command)
+        self.assertIn("--image", command)
+        self.assertIn("new_persistent", mode)
+        resume_command, resume_mode = provider._build_codex_command(
+            output_file="/tmp/out",
+            model="codex-cli",
+            reasoning_effort="",
+            session_id="session-1",
+        )
+        self.assertEqual(resume_mode, "resume")
+        self.assertIn("session-1", resume_command)
+
+        ephemeral = CodexCliBridgeSourceCodeQALLMProvider(
+            workspace_root=Path(self.temp_dir.name),
+            timeout_seconds=20,
+            codex_binary="codex",
+        )
+        ep_command, ep_mode = ephemeral._build_codex_command(
+            output_file="/tmp/out",
+            model="gpt-5.4",
+            reasoning_effort="medium",
+            image_paths=["/tmp/a.png"],
+        )
+        self.assertEqual(ep_mode, "ephemeral")
+        self.assertLess(ep_command.index("--model"), ep_command.index("--image"))
+        self.assertIn('model_reasoning_effort="medium"', ep_command)
+
+        prompt = ephemeral._prompt_from_llm_payload(
+            {
+                "systemInstruction": {"parts": [{"text": " system "}, {"text": ""}]},
+                "contents": [{"parts": [{"text": " user 1 "}, {"text": ""}]}, {"parts": [{"text": "user 2"}]}],
+            }
+        )
+        self.assertIn("system", prompt)
+        self.assertIn("user 1", prompt)
+        self.assertIn("user 2", prompt)
+
+        output = "\n".join(
+            [
+                "not-json",
+                "[]",
+                '{"message":"first"}',
+                '{"text":"second"}',
+                '{"output_text":"third"}',
+                '{"item":{"content":"final"}}',
+            ]
+        )
+        self.assertEqual(ephemeral._extract_last_json_event_message(output), "final")
+        progress = ephemeral._extract_progress_json_event_message(
+            json.dumps(
+                {
+                    "message": "top",
+                    "item": {
+                        "text": "item text",
+                        "content": [{"text": "content text"}, {"output_text": "content output"}],
+                    },
+                }
+            )
+        )
+        self.assertEqual(progress, "content output")
+        self.assertEqual(ephemeral._extract_progress_json_event_message("not-json"), "")
+        self.assertEqual(ephemeral._extract_progress_json_event_message("[]"), "")
+
+        stdout = "\n".join(
+            [
+                '{"session_id":"session-top","command":"rg foo src/Main.java"}',
+                '{"item":{"type":"session","id":"session-item","cmd":"grep bar app/Service.java"}}',
+                "sed -n 1,20p repo/src/main/java/app/Service.java",
+            ]
+        )
+        trace = ephemeral._extract_codex_trace(stdout, "cat repo/tests/ServiceTest.java")
+        self.assertEqual(trace["session_id"], "session-item")
+        self.assertTrue(any("rg foo" in command for command in trace["command_summaries"]))
+        self.assertTrue(any("Service.java" in path for path in trace["probable_inspected_files"]))
+
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value=None), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.Path.exists",
+            return_value=False,
+        ):
+            self.assertEqual(ephemeral._codex_rg_hint(), "")
+
+    def test_codex_llm_provider_generate_failure_and_stdout_fallback_edges(self):
+        provider = CodexCliBridgeSourceCodeQALLMProvider(
+            workspace_root=Path(self.temp_dir.name),
+            timeout_seconds=20,
+            codex_binary="codex",
+        )
+
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
+            return_value=SimpleNamespace(returncode=0, stdout="Logged in using API key\n", stderr=""),
+        ):
+            with self.assertRaisesRegex(ToolError, "Codex is unavailable"):
+                provider.generate(payload={"contents": [{"parts": [{"text": "hi"}]}]}, primary_model="codex-cli", fallback_model="codex-cli")
+
+        missing_image = Path(self.temp_dir.name) / "missing.png"
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
+            return_value=SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr=""),
+        ):
+            with self.assertRaisesRegex(ToolError, "image attachment is missing"):
+                provider.generate(
+                    payload={"contents": [{"parts": [{"text": "hi"}]}], "_codex_image_paths": [str(missing_image)]},
+                    primary_model="codex-cli",
+                    fallback_model="codex-cli",
+                )
+
+        def fake_timeout(command, **kwargs):
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            raise llm_providers.subprocess.TimeoutExpired(command, 10)
+
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
+            side_effect=fake_timeout,
+        ):
+            with self.assertRaisesRegex(ToolError, "timed out"):
+                provider.generate(payload={"contents": [{"parts": [{"text": "hi"}]}]}, primary_model="codex-cli", fallback_model="codex-cli")
+
+        def fake_os_error(command, **kwargs):
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            raise OSError("spawn failed")
+
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
+            side_effect=fake_os_error,
+        ):
+            with self.assertRaisesRegex(ToolError, "spawn failed"):
+                provider.generate(payload={"contents": [{"parts": [{"text": "hi"}]}]}, primary_model="codex-cli", fallback_model="codex-cli")
+
+        def fake_stdout_answer(command, **kwargs):
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text("", encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout='{"message":"answer from stdout","session_id":"s1"}\n', stderr="")
+
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
+            side_effect=fake_stdout_answer,
+        ):
+            result = provider.generate(payload={"contents": [{"parts": [{"text": "hi"}]}]}, primary_model="codex-cli", fallback_model="codex-cli")
+        self.assertEqual(result.payload["text"], "answer from stdout")
+
+        def fake_empty_answer(command, **kwargs):
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text("", encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
+            side_effect=fake_empty_answer,
+        ):
+            with self.assertRaisesRegex(ToolError, "no readable answer"):
+                provider.generate(payload={"contents": [{"parts": [{"text": "hi"}]}]}, primary_model="codex-cli", fallback_model="codex-cli")
+
+    def test_codex_llm_provider_streaming_and_queue_wait_edges(self):
+        provider = CodexCliBridgeSourceCodeQALLMProvider(
+            workspace_root=Path(self.temp_dir.name),
+            timeout_seconds=20,
+            codex_binary="codex",
+        )
+        progress_events = []
+
+        def fake_run(command, **kwargs):
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            raise AssertionError("streaming path should not call subprocess.run")
+
+        def fake_streaming(**kwargs):
+            output_path = kwargs["command"][kwargs["command"].index("--output-last-message") + 1]
+            Path(output_path).write_text("streamed answer", encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout='{"session_id":"stream-session"}\n', stderr="")
+
+        time_values = iter([100.0, 100.0, 100.0, 100.4, 101.0, 101.0, 101.0])
+
+        def fake_time():
+            return next(time_values, 101.0)
+
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
+            side_effect=fake_run,
+        ), patch.object(provider, "_run_codex_streaming", side_effect=fake_streaming), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.time.time",
+            side_effect=fake_time,
+        ):
+            result = provider.generate(
+                payload={
+                    "contents": [{"parts": [{"text": "hi"}]}],
+                    "_progress_callback": lambda event, message, current, total: progress_events.append((event, message)),
+                },
+                primary_model="codex-cli",
+                fallback_model="codex-cli",
+            )
+
+        self.assertEqual(result.payload["text"], "streamed answer")
+        self.assertTrue(any(event == "codex_queue" and "acquired" in message for event, message in progress_events))
+
+        class FakePipe:
+            def __init__(self, lines):
+                self.lines = list(lines)
+
+            def readline(self):
+                if self.lines:
+                    return self.lines.pop(0)
+                return ""
+
+            def close(self):
+                raise RuntimeError("close failed")
+
+        class FakeStdin:
+            def write(self, value):
+                self.value = value
+
+            def close(self):
+                return None
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdout = FakePipe(['{"message":"stream progress"}\n'])
+                self.stderr = FakePipe(["stderr line\n"])
+                self.stdin = FakeStdin()
+                self.returncode = 0
+                self.poll_count = 0
+
+            def poll(self):
+                self.poll_count += 1
+                return None if self.poll_count < 4 else 0
+
+            def kill(self):
+                self.killed = True
+
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.subprocess.Popen", return_value=FakeProcess()):
+            completed = provider._run_codex_streaming(
+                command=["codex", "exec"],
+                prompt="prompt",
+                progress_callback=lambda event, message, current, total: (_ for _ in ()).throw(RuntimeError("callback failed")),
+                timeout_seconds=20,
+            )
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("stream progress", completed.stdout)
+        self.assertIn("stderr line", completed.stderr)
+
+        class TimeoutProcess(FakeProcess):
+            def __init__(self):
+                super().__init__()
+                self.stdout = FakePipe([])
+                self.stderr = FakePipe([])
+                self.killed = False
+
+            def poll(self):
+                return None
+
+        timeout_process = TimeoutProcess()
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.subprocess.Popen", return_value=timeout_process), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.time.time",
+            side_effect=[0.0, 11.0],
+        ):
+            with self.assertRaises(llm_providers.subprocess.TimeoutExpired):
+                provider._run_codex_streaming(
+                    command=["codex", "exec"],
+                    prompt="prompt",
+                    progress_callback=lambda *args: None,
+                    timeout_seconds=10,
+                )
+        self.assertTrue(timeout_process.killed)
 
 if __name__ == "__main__":
     unittest.main()

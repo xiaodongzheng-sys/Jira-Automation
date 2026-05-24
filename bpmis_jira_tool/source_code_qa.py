@@ -170,6 +170,8 @@ from bpmis_jira_tool.source_code_qa_runtime_policy import (
     DEFAULT_CODEX_TOP_PATH_LIMIT,
     DEFAULT_CODEX_REPAIR_TOP_PATH_LIMIT,
     DEFAULT_CODEX_REPAIR_PROMPT_TOKEN_LIMIT,
+    DEFAULT_CODEX_REPAIR_MIN_REMAINING_SECONDS,
+    DEFAULT_CODEX_DEEP_REPAIR_RESERVE_SECONDS,
     CODEX_INVESTIGATION_PROMPT_MODE,
     CODEX_SQL_GENERATION_PROMPT_MODE,
     CODEX_SQL_RUNTIME_EVIDENCE_CHAR_LIMIT,
@@ -314,6 +316,26 @@ class SourceCodeQAService:
             4_000,
             int(os.getenv("SOURCE_CODE_QA_CODEX_REPAIR_PROMPT_TOKEN_LIMIT", DEFAULT_CODEX_REPAIR_PROMPT_TOKEN_LIMIT) or DEFAULT_CODEX_REPAIR_PROMPT_TOKEN_LIMIT),
         )
+        self.codex_repair_min_remaining_seconds = max(
+            0,
+            int(
+                os.getenv(
+                    "SOURCE_CODE_QA_CODEX_REPAIR_MIN_REMAINING_SECONDS",
+                    DEFAULT_CODEX_REPAIR_MIN_REMAINING_SECONDS,
+                )
+                or DEFAULT_CODEX_REPAIR_MIN_REMAINING_SECONDS
+            ),
+        )
+        self.codex_deep_repair_reserve_seconds = max(
+            0,
+            int(
+                os.getenv(
+                    "SOURCE_CODE_QA_CODEX_DEEP_REPAIR_RESERVE_SECONDS",
+                    DEFAULT_CODEX_DEEP_REPAIR_RESERVE_SECONDS,
+                )
+                or DEFAULT_CODEX_DEEP_REPAIR_RESERVE_SECONDS
+            ),
+        )
         self.codex_repair_enabled = bool(codex_repair_enabled)
         normalized_codex_session_mode = str(codex_session_mode or CODEX_SESSION_MODE_EPHEMERAL).strip().lower()
         self.codex_session_mode = normalized_codex_session_mode if normalized_codex_session_mode in {CODEX_SESSION_MODE_EPHEMERAL, CODEX_SESSION_MODE_RESUME} else CODEX_SESSION_MODE_EPHEMERAL
@@ -429,12 +451,18 @@ class SourceCodeQAService:
                     {"budget": "balanced", "reason": "api_config_rule_or_5_plus_matches"},
                     {"budget": "cheap", "reason": "simple_lookup"},
                 ],
-                "token_pressure": {
-                    "compact_threshold": LLM_PROMPT_COMPACT_THRESHOLD_TOKENS,
-                    "tight_threshold": LLM_PROMPT_TIGHT_THRESHOLD_TOKENS,
-                    "strategy": "switch balanced/deep answers to compact_deep before the model call when estimated prompt tokens are high",
-                },
+            "token_pressure": {
+                "compact_threshold": LLM_PROMPT_COMPACT_THRESHOLD_TOKENS,
+                "tight_threshold": LLM_PROMPT_TIGHT_THRESHOLD_TOKENS,
+                "strategy": "switch balanced/deep answers to compact_deep before the model call when estimated prompt tokens are high",
             },
+            "repair": {
+                "policy": "tiered_severe_budgeted",
+                "cheap": "repair only hard generation/citation failures; return first-pass answers for soft evidence gaps",
+                "min_remaining_seconds": self.codex_repair_min_remaining_seconds,
+                "deep_repair_reserve_seconds": self.codex_deep_repair_reserve_seconds,
+            },
+        },
             "planner_tools": self._planner_tool_registry(),
             "cache": {
                 "version": LLM_CACHE_VERSION,
@@ -5982,6 +6010,7 @@ class SourceCodeQAService:
         llm_route: dict[str, Any],
         codex_validation: dict[str, Any],
         repair_attempted: bool,
+        repair_policy: str,
         repair_reason: str,
         repair_skipped_reason: str,
         repair_decision_ms: int,
@@ -6005,6 +6034,7 @@ class SourceCodeQAService:
         attempts: int,
         evidence_pack: dict[str, Any],
     ) -> dict[str, Any]:
+        answer, structured_answer = self._normalize_codex_answer_text(answer, structured_answer)
         final = self._finalize_trusted_model_answer(
             question=question,
             answer=answer,
@@ -6021,6 +6051,7 @@ class SourceCodeQAService:
             **self._codex_repair_route_fields(
                 codex_validation=codex_validation,
                 repair_attempted=repair_attempted,
+                repair_policy=repair_policy,
                 repair_reason=repair_reason,
                 repair_skipped_reason=repair_skipped_reason,
                 repair_decision_ms=repair_decision_ms,
@@ -6045,6 +6076,7 @@ class SourceCodeQAService:
             llm_route=llm_route,
             codex_validation=codex_validation,
             repair_attempted=repair_attempted,
+            repair_policy=repair_policy,
             repair_reason=repair_reason,
             repair_skipped_reason=repair_skipped_reason,
             scope_roots=scope_roots,
@@ -6076,6 +6108,58 @@ class SourceCodeQAService:
             cache_key=cache_key,
             timing=timing,
         )
+
+    def _structured_json_payload_from_text(self, text: str) -> dict[str, Any] | None:
+        stripped = str(text or "").strip()
+        if not stripped or not stripped.startswith("{"):
+            return None
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        answer_keys = {
+            "direct_answer",
+            "answer",
+            "claims",
+            "confirmed_from_code",
+            "inferred_from_code",
+            "not_found",
+            "missing_evidence",
+            "missing_production_evidence",
+        }
+        return parsed if answer_keys & set(parsed.keys()) else None
+
+    def _normalize_codex_answer_text(self, answer: str, structured_answer: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        normalized_answer = str(answer or "").strip()
+        normalized_structured = dict(structured_answer or {})
+
+        outer_payload = self._structured_json_payload_from_text(normalized_answer)
+        if outer_payload is not None:
+            parsed_outer = self._parse_structured_answer(normalized_answer)
+            normalized_structured = {
+                **parsed_outer,
+                **{key: value for key, value in normalized_structured.items() if value not in (None, "", [], {})},
+            }
+            direct = str(parsed_outer.get("direct_answer") or "").strip()
+            if direct:
+                normalized_answer = direct
+
+        direct_payload = self._structured_json_payload_from_text(str(normalized_structured.get("direct_answer") or ""))
+        if direct_payload is not None:
+            parsed_direct = self._parse_structured_answer(str(normalized_structured.get("direct_answer") or ""))
+            normalized_structured = {
+                **normalized_structured,
+                **{key: value for key, value in parsed_direct.items() if value not in (None, "", [], {})},
+            }
+            direct = str(parsed_direct.get("direct_answer") or "").strip()
+            if direct:
+                normalized_answer = direct
+
+        if normalized_answer and normalized_structured.get("direct_answer") != normalized_answer:
+            normalized_structured["direct_answer"] = normalized_answer
+        return normalized_answer, normalized_structured
 
     def _codex_repair_answer_context(
         self,
@@ -6757,6 +6841,7 @@ class SourceCodeQAService:
         trace_id: str,
         selected_model: str,
         query_mode: str,
+        routed_budget_mode: str = "",
     ) -> dict[str, Any]:
         repair_prepare_started = time.perf_counter()
         deep_needed_raw = self._codex_deep_investigation_needed(
@@ -6785,10 +6870,34 @@ class SourceCodeQAService:
                 repair_reasons=severe_repair_reasons,
             )
         severe_repair_reasons = list(dict.fromkeys([reason for reason in severe_repair_reasons if reason]))
+        original_repair_reasons = list(severe_repair_reasons)
+        severe_repair_reasons, suppressed_repair_reasons, repair_policy = self._filter_codex_repair_reasons_for_tier(
+            question=question,
+            repair_reasons=severe_repair_reasons,
+            routed_budget_mode=routed_budget_mode,
+        )
+        first_pass_skip_reason = self._codex_first_pass_soft_repair_skip_reason(
+            question=question,
+            answer=answer,
+            structured_answer=structured_answer,
+            quality_gate=quality_gate,
+            answer_judge=answer_judge,
+            codex_validation=codex_validation,
+            repair_reasons=severe_repair_reasons,
+        )
+        if first_pass_skip_reason:
+            suppressed_repair_reasons = list(dict.fromkeys([*suppressed_repair_reasons, *severe_repair_reasons]))
+            severe_repair_reasons = []
+            repair_policy = "first_pass_quality_gate"
         repair_issues = severe_repair_reasons
         deep_needed = any(reason == "deep_investigation_needed_for_high_risk_question" for reason in severe_repair_reasons)
         repair_issue_count = len([issue for issue in repair_issues if issue]) + (1 if deep_needed else 0)
         repair_will_run = bool(self.codex_repair_enabled and severe_repair_reasons)
+        repair_skipped_reason = ""
+        if first_pass_skip_reason:
+            repair_skipped_reason = first_pass_skip_reason
+        elif original_repair_reasons and not severe_repair_reasons and suppressed_repair_reasons:
+            repair_skipped_reason = f"codex_repair_tier_skipped:{repair_policy}:{','.join(suppressed_repair_reasons[:4])}"
         repair_decision_ms = int((time.perf_counter() - repair_prepare_started) * 1000)
         _log_source_code_qa_timing(
             "codex_repair_prepare",
@@ -6799,23 +6908,148 @@ class SourceCodeQAService:
             query_mode=query_mode,
             phase="repair_prepare",
             repair_enabled=self.codex_repair_enabled,
-            repair_policy="severe_only",
+            repair_policy=repair_policy,
             repair_will_run=repair_will_run,
             repair_reason="; ".join(severe_repair_reasons[:6]),
+            repair_skipped_reason=repair_skipped_reason,
             repair_issue_count=repair_issue_count,
+            suppressed_repair_issue_count=len(suppressed_repair_reasons),
             validation_issue_count=len([issue for issue in codex_validation.get("issues") or [] if issue]),
             validation_warning_count=len([issue for issue in codex_validation.get("warnings") or [] if issue]),
             judge_issue_count=len([issue for issue in answer_judge.get("issues") or [] if issue]),
             deep_investigation_needed=bool(deep_needed),
+            routed_budget_mode=routed_budget_mode,
         )
         return {
             "severe_repair_reasons": severe_repair_reasons,
+            "suppressed_repair_reasons": suppressed_repair_reasons,
             "repair_issues": repair_issues,
             "deep_needed": deep_needed,
             "repair_issue_count": repair_issue_count,
             "repair_will_run": repair_will_run,
+            "repair_skipped_reason": repair_skipped_reason,
+            "repair_policy": repair_policy,
             "repair_decision_ms": repair_decision_ms,
         }
+
+    def _codex_first_pass_soft_repair_skip_reason(
+        self,
+        *,
+        question: str,
+        answer: str,
+        structured_answer: dict[str, Any],
+        quality_gate: dict[str, Any],
+        answer_judge: dict[str, Any],
+        codex_validation: dict[str, Any],
+        repair_reasons: list[str],
+    ) -> str:
+        reasons = list(dict.fromkeys(str(reason or "").strip() for reason in repair_reasons if str(reason or "").strip()))
+        if not reasons or any(self._is_hard_codex_repair_reason(reason) for reason in reasons):
+            return ""
+        soft_reasons = {
+            "not_found_answer_conflicts_with_retrieval_hints",
+            "high_risk_claims_missing_scoped_file_evidence",
+            "high_risk_answer_judge_requires_repair",
+            "deep_investigation_needed_for_high_risk_question",
+        }
+        if any(reason not in soft_reasons for reason in reasons):
+            return ""
+        if str(quality_gate.get("status") or "").lower() != "sufficient":
+            return ""
+        answer_text = " ".join(
+            [
+                str(answer or ""),
+                str(structured_answer.get("direct_answer") or ""),
+                " ".join(str(item) for item in structured_answer.get("not_found") or []),
+                " ".join(str(item) for item in structured_answer.get("missing_evidence") or []),
+                " ".join(str(item) for item in structured_answer.get("missing_production_evidence") or []),
+            ]
+        ).strip()
+        if len(answer_text) < 80:
+            return ""
+        lowered_question = f" {str(question or '').lower()} "
+        catalog_markers = ("available", "list", "catalog", "what are", "which", "有哪些", "列表")
+        function_markers = ("function", "functions", "rule", "rules", "template", "id", "notification")
+        if any(marker in lowered_question for marker in catalog_markers) and any(marker in lowered_question for marker in function_markers):
+            return ""
+        quality_confidence = str(quality_gate.get("confidence") or "").lower()
+        answer_confidence = str(structured_answer.get("confidence") or "").lower()
+        confidence_ok = quality_confidence in {"medium", "high"} or answer_confidence in {"medium", "high"}
+        if not confidence_ok:
+            return ""
+        claims = [claim for claim in structured_answer.get("claims") or [] if isinstance(claim, dict) and str(claim.get("text") or "").strip()]
+        cited_claim_count = len([claim for claim in claims if claim.get("citations")])
+        evidence_count = (
+            cited_claim_count
+            + len(structured_answer.get("confirmed_from_code") or [])
+            + len(structured_answer.get("source_code_evidence") or [])
+        )
+        missing_count = (
+            len(structured_answer.get("not_found") or [])
+            + len(structured_answer.get("missing_evidence") or [])
+            + len(structured_answer.get("missing_production_evidence") or [])
+        )
+        lowered_answer = answer_text.lower()
+        generic_negative = (
+            "this information is not present in the provided source code or runtime evidence" in lowered_answer
+            or "please verify if the feature is implemented" in lowered_answer
+            or "escalate to the engineering lead" in lowered_answer
+            or "not present in the provided source code" in lowered_answer and len(claims) == 0 and evidence_count == 0
+        )
+        if generic_negative:
+            return ""
+        bounded_negative = missing_count > 0 or any(
+            marker in lowered_answer
+            for marker in (
+                "cannot confirm",
+                "cannot verify",
+                "not found",
+                "missing production",
+                "runtime evidence",
+                "production db",
+                "production database",
+                "source repository does not",
+                "无法确认",
+                "未找到",
+                "没有找到",
+                "生产",
+            )
+        )
+        if self._codex_business_flow_ambiguity_question(question) and any(
+            reason in reasons
+            for reason in (
+                "high_risk_claims_missing_scoped_file_evidence",
+                "deep_investigation_needed_for_high_risk_question",
+            )
+        ):
+            return ""
+        if "not_found_answer_conflicts_with_retrieval_hints" in reasons and bounded_negative and (
+            evidence_count > 0 or len(claims) >= 2 or missing_count > 0
+        ):
+            return "codex_repair_skipped:first_pass_bounded_negative_answer"
+        if "deep_investigation_needed_for_high_risk_question" in reasons and (bounded_negative or evidence_count > 0 or len(claims) >= 2):
+            return "codex_repair_skipped:first_pass_sufficient_for_deep_gap"
+        if "high_risk_claims_missing_scoped_file_evidence" in reasons and (evidence_count > 0 or len(claims) >= 2):
+            return "codex_repair_skipped:first_pass_sufficient_scoped_answer"
+        return ""
+
+    @staticmethod
+    def _codex_business_flow_ambiguity_question(question: str) -> bool:
+        lowered = f" {str(question or '').lower()} "
+        decision_markers = ("can ", "could ", "should ", "before", "after", "if ", "when ", "whether")
+        flow_markers = (
+            "authorize",
+            "authorise",
+            "approval",
+            "approve",
+            "action plan",
+            "incident",
+            "checker",
+            "maker",
+            "permission",
+            "allowed",
+        )
+        return any(marker in lowered for marker in decision_markers) and any(marker in lowered for marker in flow_markers)
 
     def _codex_deep_investigation_needed(
         self,
@@ -7219,6 +7453,7 @@ class SourceCodeQAService:
         llm_route: dict[str, Any],
         codex_validation: dict[str, Any],
         repair_attempted: bool,
+        repair_policy: str,
         repair_reason: str,
         repair_skipped_reason: str,
         scope_roots: list[dict[str, str]],
@@ -7241,7 +7476,7 @@ class SourceCodeQAService:
             "out_of_scope_refs": codex_validation.get("out_of_scope_refs") or [],
             "warning_count": codex_validation.get("warning_count", 0),
             "repair_attempted": repair_attempted,
-            "repair_policy": "severe_only",
+            "repair_policy": repair_policy or "severe_only",
             "repair_reason": repair_reason,
             "repair_skipped_reason": repair_skipped_reason,
             "retrieval_role": "hints",
@@ -7266,6 +7501,7 @@ class SourceCodeQAService:
         *,
         codex_validation: dict[str, Any],
         repair_attempted: bool,
+        repair_policy: str,
         repair_reason: str,
         repair_skipped_reason: str,
         repair_decision_ms: int,
@@ -7276,7 +7512,7 @@ class SourceCodeQAService:
         return {
             "codex_citation_validation_status": codex_validation.get("status"),
             "codex_repair_attempted": repair_attempted,
-            "codex_repair_policy": "severe_only",
+            "codex_repair_policy": repair_policy or "severe_only",
             "codex_repair_reason": repair_reason,
             "codex_repair_skipped_reason": repair_skipped_reason,
             "codex_cited_path_count": codex_validation.get("cited_path_count", 0),
@@ -7450,7 +7686,7 @@ class SourceCodeQAService:
         evidence_pack: dict[str, Any] | None,
         text_limit: int = CODEX_SQL_RUNTIME_EVIDENCE_CHAR_LIMIT,
     ) -> str:
-        normalized = [item for item in runtime_evidence or [] if isinstance(item, dict)]
+        normalized = cls._dedupe_prompt_evidence_items(runtime_evidence)
         if not normalized:
             return ""
         lines = [
@@ -7543,9 +7779,35 @@ class SourceCodeQAService:
             "text_char_count": int(item.get("text_char_count") or 0),
         }
 
+    @staticmethod
+    def _dedupe_prompt_evidence_items(items: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            sha = str(item.get("sha256") or "").strip().lower()
+            item_id = str(item.get("id") or "").strip().lower()
+            text = str(item.get("text") or item.get("summary") or "").strip()
+            if sha:
+                key = f"sha:{sha}"
+            elif item_id:
+                key = f"id:{item_id}"
+            elif text:
+                key = "text:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+            else:
+                key = "meta:" + hashlib.sha256(
+                    json.dumps(SourceCodeQAService._public_runtime_evidence_metadata(item), sort_keys=True).encode("utf-8")
+                ).hexdigest()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(item)
+        return normalized
+
     @classmethod
     def _runtime_evidence_prompt_section(cls, runtime_evidence: list[dict[str, Any]]) -> str:
-        normalized = [item for item in runtime_evidence or [] if isinstance(item, dict)]
+        normalized = cls._dedupe_prompt_evidence_items(runtime_evidence)
         if not normalized:
             return ""
         lines = [
@@ -7598,7 +7860,7 @@ class SourceCodeQAService:
         runtime_evidence: list[dict[str, Any]],
         budget_mode: str,
     ) -> list[dict[str, Any]]:
-        normalized = [item for item in runtime_evidence or [] if isinstance(item, dict)]
+        normalized = SourceCodeQAService._dedupe_prompt_evidence_items(runtime_evidence)
         mode = str(budget_mode or "").strip().lower()
         if mode == "cheap":
             limit = 4
@@ -8252,6 +8514,8 @@ class SourceCodeQAService:
         )
 
     def _codex_high_risk_question(self, question: str) -> bool:
+        if self._is_short_definition_or_status_question(question):
+            return False
         if self._is_simple_symbol_lookup_question(question):
             return False
         intent = self._question_intent(question)
@@ -8288,6 +8552,50 @@ class SourceCodeQAService:
                 "生产",
             )
         )
+
+    @staticmethod
+    def _is_hard_codex_repair_reason(reason: str) -> bool:
+        normalized = str(reason or "").strip()
+        return normalized in {
+            "empty_codex_answer",
+            "malformed_json_answer",
+            "bad_request_answer",
+            "out_of_scope_citations",
+        } or normalized.startswith("finish_reason_")
+
+    def _filter_codex_repair_reasons_for_tier(
+        self,
+        *,
+        question: str,
+        repair_reasons: list[str],
+        routed_budget_mode: str,
+    ) -> tuple[list[str], list[str], str]:
+        reasons = list(dict.fromkeys(str(reason or "").strip() for reason in repair_reasons if str(reason or "").strip()))
+        if not reasons:
+            return [], [], ""
+        mode = str(routed_budget_mode or "").strip().lower()
+        if mode != "cheap":
+            return reasons, [], "severe_only"
+        allowed = [reason for reason in reasons if self._is_hard_codex_repair_reason(reason)]
+        suppressed = [reason for reason in reasons if reason not in allowed]
+        if not suppressed:
+            return allowed, [], "cheap_hard_failures"
+        if self._is_short_definition_or_status_question(question) or self._is_simple_symbol_lookup_question(question):
+            return allowed, suppressed, "cheap_simple_first_pass"
+        return allowed, suppressed, "cheap_hard_failures"
+
+    def _codex_repair_remaining_timeout_seconds(self, answer_started_at: float, reserve_seconds: int = 0) -> tuple[int | None, str]:
+        answer_timeout_seconds = getattr(self, "_codex_answer_timeout_seconds", None)
+        if not answer_timeout_seconds:
+            return None, ""
+        reserve = max(0, int(reserve_seconds or 0))
+        remaining_seconds = int(float(answer_timeout_seconds) - (time.time() - answer_started_at) - 5 - reserve)
+        if remaining_seconds < int(self.codex_repair_min_remaining_seconds or 0):
+            return max(0, remaining_seconds), (
+                f"codex_repair_insufficient_query_budget:{max(0, remaining_seconds)}"
+                f"<{int(self.codex_repair_min_remaining_seconds or 0)}"
+            )
+        return max(10, remaining_seconds), ""
 
     def _codex_severe_repair_reasons(
         self,

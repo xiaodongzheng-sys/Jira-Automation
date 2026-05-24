@@ -188,6 +188,29 @@
 
   const projectById = (bpmisId) => projects.find((project) => String(project.bpmis_id || '') === String(bpmisId || ''));
 
+  const updateProjectTicket = (bpmisId, ticketId, patch = {}) => {
+    const project = projectById(bpmisId);
+    if (!project || !Array.isArray(project.jira_tickets)) return null;
+    const ticket = project.jira_tickets.find((item) => String(item?.id || '') === String(ticketId || ''));
+    if (!ticket) return null;
+    Object.assign(ticket, patch || {});
+    return ticket;
+  };
+
+  const replaceProjectTickets = (bpmisId, tickets) => {
+    const project = projectById(bpmisId);
+    if (!project || !Array.isArray(tickets)) return;
+    project.jira_tickets = tickets;
+  };
+
+  const renderTaskPanelFromCache = (bpmisId) => {
+    const panel = body.querySelector(`[data-task-panel="${cssEscape(bpmisId)}"]`);
+    const project = projectById(bpmisId);
+    if (!panel || !project) return;
+    panel.innerHTML = taskMarkup(Array.isArray(project.jira_tickets) ? project.jira_tickets : []);
+    panel.dataset.loaded = 'true';
+  };
+
   const orderedProjectIdsFromDom = () => [...body.querySelectorAll('[data-project-card]')]
     .map((card) => card.dataset.projectCard || '')
     .filter(Boolean);
@@ -368,6 +391,7 @@
       });
       const payload = await readJson(response, 'Could not load live Jira status.');
       const liveTickets = Array.isArray(payload.tickets) ? payload.tickets : [];
+      replaceProjectTickets(bpmisId, liveTickets);
       panel.innerHTML = taskMarkup(liveTickets);
       panel.dataset.liveLoaded = 'true';
     } catch (error) {
@@ -477,15 +501,18 @@
         credentials: 'same-origin',
         body: JSON.stringify({ status: nextStatus }),
       });
-      await readJson(response, 'Could not update Jira status.');
-      panel.dataset.loaded = 'false';
-      panel.dataset.liveLoaded = 'false';
-      await loadTasks(bpmisId, { force: true });
+      const payload = await readJson(response, 'Could not update Jira status.');
+      updateProjectTicket(bpmisId, ticketId, {
+        ...(payload.ticket || {}),
+        status: nextStatus,
+        live_jira_status: payload.ticket?.live_jira_status || nextStatus,
+      });
+      panel.dataset.liveLoaded = 'true';
+      renderTaskPanelFromCache(bpmisId);
       setStatus(`Jira status updated to ${nextStatus}.`, 'success');
     } catch (error) {
       setStatus(error.message || 'Could not update Jira status.', 'error');
-      panel.dataset.liveLoaded = 'false';
-      await loadTasks(bpmisId, { force: true });
+      renderTaskPanelFromCache(bpmisId);
     }
   };
 
@@ -634,15 +661,19 @@
         credentials: 'same-origin',
         body: JSON.stringify({ version_name: versionName, version_id: versionId }),
       });
-      await readJson(response, 'Could not update Jira fix version.');
-      panel.dataset.loaded = 'false';
-      panel.dataset.liveLoaded = 'false';
-      await loadTasks(bpmisId, { force: true });
+      const payload = await readJson(response, 'Could not update Jira fix version.');
+      updateProjectTicket(bpmisId, ticketId, {
+        ...(payload.ticket || {}),
+        fix_version_name: versionName,
+        fix_version_id: versionId,
+        live_fix_version: payload.ticket?.live_fix_version || versionName,
+      });
+      panel.dataset.liveLoaded = 'true';
+      renderTaskPanelFromCache(bpmisId);
       setStatus(`Jira fix version updated to ${versionName}.`, 'success');
     } catch (error) {
       setStatus(error.message || 'Could not update Jira fix version.', 'error');
-      panel.dataset.liveLoaded = 'false';
-      await loadTasks(bpmisId, { force: true });
+      renderTaskPanelFromCache(bpmisId);
     }
   };
 
@@ -886,8 +917,11 @@
         credentials: 'same-origin',
       });
       await readJson(response, 'Could not delink Jira task from BPMIS Biz Project.');
-      expandedProjectId = bpmisId;
-      await loadProjects();
+      const project = projectById(bpmisId);
+      if (project && Array.isArray(project.jira_tickets)) {
+        project.jira_tickets = project.jira_tickets.filter((ticket) => String(ticket?.id || '') !== String(ticketId));
+      }
+      renderTaskPanelFromCache(bpmisId);
       setStatus('Jira task delinked from BPMIS Biz Project.', 'success');
     } catch (error) {
       setStatus(error.message || 'Could not delink Jira task from BPMIS Biz Project.', 'error');
@@ -934,7 +968,8 @@
         credentials: 'same-origin',
       });
       await readJson(response, 'Could not remove BPMIS project from this portal.');
-      await loadProjects();
+      projects = projects.filter((project) => String(project.bpmis_id || '') !== String(bpmisId));
+      renderProjects();
       setStatus('BPMIS project removed from this portal. BPMIS itself was not changed.', 'success');
     } catch (error) {
       setStatus(error.message || 'Could not remove BPMIS project from this portal.', 'error');

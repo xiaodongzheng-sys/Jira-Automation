@@ -222,12 +222,15 @@ def build_codex_llm_answer(
         trace_id=trace_id,
         selected_model=selected_model,
         query_mode=query_mode,
+        routed_budget_mode=routed_budget_mode,
     )
     severe_repair_reasons = repair_decision["severe_repair_reasons"]
     repair_issues = repair_decision["repair_issues"]
     deep_needed = repair_decision["deep_needed"]
     repair_issue_count = repair_decision["repair_issue_count"]
     repair_will_run = repair_decision["repair_will_run"]
+    repair_policy = str(repair_decision.get("repair_policy") or "severe_only")
+    repair_skipped_reason = str(repair_decision.get("repair_skipped_reason") or repair_skipped_reason)
     repair_decision_ms = repair_decision["repair_decision_ms"]
     if repair_will_run and int(service.codex_repair_deadline_seconds or 0) > 0:
         elapsed_seconds = time.time() - codex_started_at
@@ -247,6 +250,31 @@ def build_codex_llm_answer(
                 elapsed_seconds=round(elapsed_seconds, 3),
                 codex_initial_ms=codex_initial_ms,
             )
+    if repair_will_run:
+        deep_reserve_seconds = int(service.codex_deep_repair_reserve_seconds or 0) if deep_needed else 0
+        remaining_repair_timeout_seconds, budget_skip_reason = service._codex_repair_remaining_timeout_seconds(
+            codex_started_at,
+            reserve_seconds=deep_reserve_seconds,
+        )
+        if budget_skip_reason:
+            repair_will_run = False
+            repair_skipped_reason = budget_skip_reason
+            _log_source_code_qa_timing(
+                "codex_repair_skip",
+                elapsed_ms=0,
+                trace_id=trace_id,
+                provider=service.llm_provider.name,
+                model=selected_model,
+                query_mode=query_mode,
+                reason="codex_repair_insufficient_query_budget",
+                phase="repair",
+                remaining_seconds=int(remaining_repair_timeout_seconds or 0),
+                min_remaining_seconds=int(service.codex_repair_min_remaining_seconds or 0),
+                reserve_seconds=deep_reserve_seconds,
+                codex_initial_ms=codex_initial_ms,
+            )
+        elif remaining_repair_timeout_seconds is not None and not deep_needed:
+            service._codex_answer_timeout_seconds = remaining_repair_timeout_seconds
     if repair_will_run:
         repair_attempted = True
         repair_reason = "; ".join(severe_repair_reasons[:6])
@@ -323,6 +351,29 @@ def build_codex_llm_answer(
             deep_investigation_rounds = deep_context["deep_investigation_rounds"]
             deep_investigation_terms = deep_context["deep_investigation_terms"]
             deep_investigation_added = deep_context["deep_investigation_added"]
+            remaining_repair_timeout_seconds, budget_skip_reason = service._codex_repair_remaining_timeout_seconds(codex_started_at)
+            if budget_skip_reason:
+                repair_will_run = False
+                repair_attempted = False
+                repair_skipped_reason = budget_skip_reason
+                _log_source_code_qa_timing(
+                    "codex_repair_skip",
+                    elapsed_ms=0,
+                    trace_id=trace_id,
+                    provider=service.llm_provider.name,
+                    model=service._model_for_role("repair"),
+                    query_mode=query_mode,
+                    reason="codex_repair_insufficient_query_budget_after_deep_investigation",
+                    phase="repair",
+                    remaining_seconds=int(remaining_repair_timeout_seconds or 0),
+                    min_remaining_seconds=int(service.codex_repair_min_remaining_seconds or 0),
+                    codex_initial_ms=codex_initial_ms,
+                    deep_investigation_rounds=deep_investigation_rounds,
+                    deep_investigation_added=deep_investigation_added,
+                )
+            elif remaining_repair_timeout_seconds is not None:
+                service._codex_answer_timeout_seconds = remaining_repair_timeout_seconds
+    if repair_will_run:
         repair_context_result = service._codex_repair_answer_context(
             pm_team=pm_team,
             country=country,
@@ -385,6 +436,7 @@ def build_codex_llm_answer(
         llm_route=llm_route,
         codex_validation=codex_validation,
         repair_attempted=repair_attempted,
+        repair_policy=repair_policy,
         repair_reason=repair_reason,
         repair_skipped_reason=repair_skipped_reason,
         repair_decision_ms=repair_decision_ms,

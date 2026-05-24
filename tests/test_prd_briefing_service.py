@@ -1,7 +1,11 @@
 import tempfile
 import unittest
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, replace
+import hashlib
 import io
+import sys
+import types
 from pathlib import Path
 from unittest.mock import patch
 import json
@@ -9,6 +13,8 @@ import json
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ToolError
 
+import prd_briefing.reviewer as reviewer
+import prd_briefing.service as briefing_service
 from prd_briefing.confluence import ConfluenceConnector, IngestedConfluencePage, ParsedSection, SpreadsheetLink
 from prd_briefing.reviewer import (
     PRD_BRIEFING_REVIEW_CACHE_KEY,
@@ -18,8 +24,46 @@ from prd_briefing.reviewer import (
     PRDBriefingReviewRequest,
     PRDReviewRequest,
     PRDReviewService,
+    _build_generation_coverage,
+    _build_google_sheet_screenshot_prompt_section,
+    _build_linked_spreadsheet_prompt_section,
+    _build_prd_source_payload,
+    _build_review_section_content,
+    _build_section_coverage,
+    _cache_key_for_section_selection,
+    _coerce_download_bytes,
+    _collect_section_image_artifacts,
+    _collect_table_media_coverage,
+    _emit_prd_progress,
+    _extract_google_sheet_screenshot_evidence_from_image,
+    _format_template_metadata_for_prompt,
+    _generation_mode_for_page,
+    _google_sheet_screenshot_cache_key,
+    _google_drive_file_id_from_url,
+    _google_sheet_screenshot_public_payload,
+    _image_suffix_from_url,
+    _is_anti_fraud_prd,
+    _is_confluence_spreadsheet_url,
+    _is_google_spreadsheet_url,
+    _is_report_or_template_prd,
+    _limit_extracted_workbook_text,
+    _linked_artifact_public_payload,
+    _normalize_selected_section_indexes,
+    _parse_json_object,
+    _prd_token_risk,
+    _resolve_one_google_sheet_screenshot,
+    _resolve_linked_spreadsheet_evidence,
+    _section_selection_hash,
+    _store_cached_google_sheet_screenshot_evidence,
+    _load_cached_google_sheet_screenshot_evidence,
+    _use_compact_review_prompt,
+    build_prd_review_batch_prompt,
     build_prd_review_prompt,
+    build_prd_review_synthesis_prompt,
+    build_prd_review_system_text,
+    build_prd_summary_batch_prompt,
     build_prd_summary_prompt,
+    build_prd_summary_synthesis_prompt,
     prd_briefing_review_prompt_version,
     prd_summary_prompt_version,
 )
@@ -1142,7 +1186,9 @@ class PRDBriefingServiceTests(unittest.TestCase):
             page=page,
         )
 
-        self.assertIn("Jira ID: -", prompt)
+        self.assertNotIn("Jira ID: -", prompt)
+        self.assertNotIn("Jira Link: -", prompt)
+        self.assertIn(f"PRD Link: {page.source_url}", prompt)
         self.assertIn("Executive Verdict", prompt)
         self.assertIn("Top Must-Fix Delivery Blockers", prompt)
         self.assertIn("Section Patch Suggestions", prompt)
@@ -1384,6 +1430,1119 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(payload["sections"][0]["linked_spreadsheet_count"], 0)
         self.assertEqual(payload["sections"][1]["linked_spreadsheet_count"], 1)
 
+    def test_prd_reviewer_normalization_and_empty_section_boundaries(self):
+        empty_page = IngestedConfluencePage(
+            page_id="empty",
+            title="Empty PRD",
+            source_url="https://example.atlassian.net/wiki/pages/empty",
+            updated_at="2026-05-20T00:00:00Z",
+            language="en",
+            sections=[],
+        )
+        service = PRDReviewService(
+            store=self.store,
+            confluence=FakeConnector(empty_page),
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        with self.assertRaisesRegex(ToolError, "Owner identity"):
+            PRDReviewService._normalize_request(
+                PRDReviewRequest(owner_key="", jira_id="AF-1", jira_link="", prd_url="https://example/prd")
+            )
+        with self.assertRaisesRegex(ToolError, "Jira ID"):
+            PRDReviewService._normalize_request(
+                PRDReviewRequest(owner_key="anon:test", jira_id="", jira_link="", prd_url="https://example/prd")
+            )
+        with self.assertRaisesRegex(ToolError, "PRD link is required"):
+            PRDReviewService._normalize_request(
+                PRDReviewRequest(owner_key="anon:test", jira_id="AF-1", jira_link="", prd_url="")
+            )
+        with self.assertRaisesRegex(ToolError, "HTTP or HTTPS"):
+            PRDReviewService._normalize_request(
+                PRDReviewRequest(owner_key="anon:test", jira_id="AF-1", jira_link="", prd_url="file:///tmp/prd")
+            )
+        normalized = PRDReviewService._normalize_request(
+            PRDReviewRequest(
+                owner_key=" anon:test ",
+                jira_id=" AF-1 ",
+                jira_link=" https://jira/browse/AF-1 ",
+                prd_url=" https://example/prd ",
+                force_refresh=1,
+                google_credentials={"token": "x"},
+            )
+        )
+        with self.assertRaisesRegex(ToolError, "Owner identity"):
+            PRDReviewService._normalize_briefing_review_request(
+                PRDBriefingReviewRequest(owner_key="", prd_url="https://example/prd")
+            )
+        with self.assertRaisesRegex(ToolError, "PRD link is required"):
+            PRDReviewService._normalize_briefing_review_request(
+                PRDBriefingReviewRequest(owner_key="anon:test", prd_url="")
+            )
+        with self.assertRaisesRegex(ToolError, "HTTP or HTTPS"):
+            PRDReviewService._normalize_briefing_review_request(
+                PRDBriefingReviewRequest(owner_key="anon:test", prd_url="ftp://example/prd")
+            )
+        with self.assertRaisesRegex(ToolError, "readable sections"):
+            service.list_url_sections(
+                PRDBriefingReviewRequest(owner_key="anon:test", prd_url="https://example.atlassian.net/wiki/pages/empty")
+            )
+
+        self.assertEqual(normalized.owner_key, "anon:test")
+        self.assertEqual(normalized.jira_id, "AF-1")
+        self.assertTrue(normalized.force_refresh)
+        self.assertEqual(normalized.google_credentials, {"token": "x"})
+
+    def test_prd_reviewer_source_table_and_section_helper_boundaries(self):
+        empty_media_page = IngestedConfluencePage(
+            page_id="media",
+            title="Media PRD",
+            source_url="https://example.atlassian.net/wiki/pages/media",
+            updated_at="2026-05-20T00:00:00Z",
+            language="en",
+            sections=[
+                ParsedSection(
+                    title="Table",
+                    section_path="3.1 Scenario ApplyCard",
+                    content="See [MEDIA_ID_1]\nDetached: [MEDIA_ID_2]",
+                    media_refs=["", "MEDIA_ID_1", "MEDIA_ID_2", "MEDIA_ID_3"],
+                )
+            ],
+            media_dict={
+                "MEDIA_ID_1": {"type": "table", "content": "<table><tr><td></td></tr></table>"},
+                "MEDIA_ID_2": {"type": "table", "content": "<table><tr><td>Fallback only</td></tr></table>"},
+                "MEDIA_ID_3": {"type": "image", "url": "https://example/image.png"},
+            },
+        )
+        plain_page = IngestedConfluencePage(
+            page_id="plain",
+            title="Plain PRD",
+            source_url="https://example.atlassian.net/wiki/pages/plain",
+            updated_at="2026-05-20T00:00:00Z",
+            language="en",
+            sections=[ParsedSection(title="Blank", section_path="Blank", content="")],
+        )
+        long_page = IngestedConfluencePage(
+            page_id="long",
+            title="Long PRD",
+            source_url="https://example.atlassian.net/wiki/pages/long",
+            updated_at="2026-05-20T00:00:00Z",
+            language="en",
+            sections=[
+                ParsedSection(title="One", section_path="One", content="a" * 20),
+                ParsedSection(title="Two", section_path="Two", content="b" * 20),
+            ],
+        )
+
+        content = _build_review_section_content(page=empty_media_page, section=empty_media_page.sections[0])
+        coverage_tables = _collect_table_media_coverage(empty_media_page)
+        with self.assertRaisesRegex(ToolError, "readable text"):
+            _build_prd_source_payload(plain_page)
+        truncated_payload = _build_prd_source_payload(long_page, max_chars=25)
+        section_coverage = _build_section_coverage(
+            total_sections=2,
+            selected_indexes=[1, 2],
+            selected_sections=long_page.sections,
+            selection_hash="hash",
+        )
+
+        self.assertIn("Fallback only", content)
+        self.assertEqual(coverage_tables[0]["media_id"], "MEDIA_ID_2")
+        self.assertTrue(truncated_payload["truncated"])
+        self.assertEqual(_generation_mode_for_page(long_page), "single")
+        self.assertEqual(_build_generation_coverage(long_page, mode="hybrid")["mode"], "hybrid")
+        self.assertEqual(section_coverage["status"], "full")
+        self.assertEqual(_section_selection_hash([2, 1]), _section_selection_hash([2, 1]))
+        cache_key = _cache_key_for_section_selection(
+            "prefix",
+            page=long_page,
+            selected_section_indexes=[1],
+            linked_artifact_fingerprint="linked",
+            google_sheet_screenshot_fingerprint="shot",
+        )
+        self.assertIn(":sections:", cache_key)
+        self.assertIn(":linked:", cache_key)
+        self.assertIn(":sheetshots:", cache_key)
+
+    def test_prd_reviewer_table_postprocess_and_batch_helper_tail_boundaries(self):
+        page = IngestedConfluencePage(
+            page_id="table-tail",
+            title="AF Delivery PRD",
+            source_url="https://example.atlassian.net/wiki/pages/table-tail",
+            updated_at="2026-05-20T00:00:00Z",
+            language="en",
+            sections=[
+                ParsedSection(
+                    title="Scenario ApplyCard",
+                    section_path="3.1 Scenario ApplyCard",
+                    content="ApplyCard owner handles state ApplyCardStatus1.",
+                    media_refs=["MEDIA_TABLE", "MEDIA_TABLE", "MEDIA_IMAGE"],
+                    image_refs=["https://example.com/sheet.png", "https://example.com/sheet.png", ""],
+                )
+            ],
+            media_dict={
+                "MEDIA_TABLE": {
+                    "type": "table",
+                    "content": "<table><tr><th>Scenario</th><th>Action</th></tr><tr><td>ApplyCard</td><td>Approve</td></tr></table>",
+                },
+                "MEDIA_IMAGE": {"type": "image", "source_url": "https://example.com/media.png"},
+                "MEDIA_OTHER": {"type": "panel", "content": "not table"},
+            },
+        )
+        context = reviewer._new_table_pack_context()
+        first_table = reviewer._format_table_media_for_review("MEDIA_TABLE", page.media_dict["MEDIA_TABLE"], section=page.sections[0], table_context=context)
+        cached_table = reviewer._format_table_media_for_review("MEDIA_TABLE", page.media_dict["MEDIA_TABLE"], section=page.sections[0], table_context=context)
+        empty_rows = reviewer._extract_table_media_rows({"content": ""})
+        empty_fallback_rows = reviewer._extract_table_media_rows({"content": "<div>   </div>"})
+        budget_omitted = reviewer._pack_table_rows_for_review(media_id="T1", rows=["Field | Rule"], section=None, remaining_chars=0)
+        tiny_budget = reviewer._pack_table_rows_for_review(
+            media_id="T2",
+            rows=["x" * 120, "Scenario ApplyCard | Approve"],
+            section=page.sections[0],
+            remaining_chars=160,
+        )
+        no_identifier_terms = reviewer._section_identifier_terms(None)
+        typo_without_priority = reviewer._is_spurious_identifier_typo_finding(
+            "Fix typo for ApplyCardStatus1",
+            source_text="ApplyCardStatus1",
+            source_identifier_text=reviewer._normalize_identifier_for_comparison("ApplyCardStatus1"),
+        )
+        typo_from_normalized_identifier = reviewer._is_spurious_identifier_typo_finding(
+            "- **Priority:** P2\n  - **Clarification:** Fix typo for Apply Card Status1",
+            source_text="ApplyCardStatus1",
+            source_identifier_text=reviewer._normalize_identifier_for_comparison("ApplyCardStatus1"),
+        )
+        empty_block = reviewer._build_prd_source_block(ParsedSection(title="Blank", section_path="Blank", content=""), 1)
+        coverage = reviewer._table_stats_to_coverage(
+            [
+                {"media_id": "", "rows_total": 1},
+                {"media_id": "MEDIA_OTHER", "rows_total": 1},
+                {"media_id": "MEDIA_TABLE", "rows_total": 2, "rows_included": 1, "rows_omitted": 1, "truncated": True, "char_count": 99},
+            ],
+            page=page,
+        )
+        with self.assertRaisesRegex(ToolError, "readable text"):
+            reviewer._split_prd_page_batches(
+                IngestedConfluencePage(
+                    page_id="empty-batch",
+                    title="Empty",
+                    source_url="https://example.atlassian.net/wiki/pages/empty-batch",
+                    updated_at="2026-05-20T00:00:00Z",
+                    language="en",
+                    sections=[],
+                )
+            )
+        artifacts = reviewer._collect_section_image_artifacts(page=page, selected_section_indexes=[3])
+        postprocessed_without_source = reviewer._postprocess_prd_review_markdown(
+            "### Secondary Clarifications\n- **Priority:** P2\n  - **Clarification:** typo\n",
+            page=IngestedConfluencePage(
+                page_id="blank",
+                title="",
+                source_url="https://example.atlassian.net/wiki/pages/blank",
+                updated_at="",
+                language="en",
+                sections=[],
+            ),
+        )
+
+        self.assertEqual(first_table, cached_table)
+        self.assertEqual(empty_rows, [])
+        self.assertEqual(empty_fallback_rows, [])
+        self.assertEqual(budget_omitted["rows_omitted"], 1)
+        self.assertIn("row truncated", tiny_budget["text"])
+        self.assertEqual(no_identifier_terms, set())
+        self.assertFalse(typo_without_priority)
+        self.assertTrue(typo_from_normalized_identifier)
+        self.assertEqual(empty_block, "")
+        self.assertEqual(coverage[0]["media_id"], "MEDIA_TABLE")
+        self.assertEqual(len(artifacts), 2)
+        self.assertEqual(artifacts[0]["image_id"], "MEDIA_IMAGE")
+        self.assertEqual(artifacts[1]["image_id"], "IMAGE_3_1")
+        self.assertTrue(reviewer._contains_anti_fraud_marker(" AF "))
+        self.assertEqual(postprocessed_without_source.splitlines()[0], "### Secondary Clarifications")
+
+    def test_prd_reviewer_misc_parsing_and_linked_evidence_boundaries(self):
+        report_page = IngestedConfluencePage(
+            page_id="report",
+            title="[AF] Report PRD",
+            source_url="https://example.atlassian.net/wiki/pages/report",
+            updated_at="2026-05-20T00:00:00Z",
+            language="en",
+            ancestor_titles=["2.2 Authentication & Antifraud"],
+            sections=[
+                ParsedSection(
+                    title="Report Layout",
+                    section_path="3.11.1 Report Layout and Field Name & Format",
+                    content="Report format section.",
+                    spreadsheet_links=[
+                        SpreadsheetLink(
+                            title="Unsupported",
+                            url="https://example.atlassian.net/download/attachments/123/Legacy.xls",
+                            source_section="Report Layout",
+                            filename="Legacy.xls",
+                        ),
+                        SpreadsheetLink(
+                            title="Unsupported duplicate",
+                            url="https://example.atlassian.net/download/attachments/123/Legacy.xls",
+                            source_section="Report Layout",
+                            filename="Legacy.xls",
+                        ),
+                        SpreadsheetLink(
+                            title="Other",
+                            url="https://example.com/template.csv",
+                            source_section="Report Layout",
+                            filename="template.csv",
+                        ),
+                    ],
+                )
+            ],
+        )
+        evidence_disabled = _resolve_linked_spreadsheet_evidence(
+            confluence=FakeConnector(report_page),
+            page=report_page,
+            selected_section_indexes=[1],
+            google_credentials=None,
+            include_linked_spreadsheets=False,
+        )
+        evidence = _resolve_linked_spreadsheet_evidence(
+            confluence=FakeConnector(report_page),
+            page=report_page,
+            selected_section_indexes=[1],
+            google_credentials=None,
+            include_linked_spreadsheets=True,
+        )
+        progress_calls = []
+
+        def old_progress(stage, message, current, total):
+            progress_calls.append((stage, message, current, total))
+
+        _emit_prd_progress(old_progress, "stage", "message", 1, 2, estimated_prompt_tokens=10, token_risk="normal")
+
+        self.assertEqual(evidence_disabled, {"artifacts": [], "cache_fingerprint": ""})
+        self.assertEqual(len(evidence["artifacts"]), 2)
+        self.assertEqual(evidence["artifacts"][0]["reason"], "unsupported_xls_format")
+        self.assertEqual(evidence["artifacts"][1]["reason"], "unsupported_link")
+        self.assertIn("Linked artifact not reviewed", _build_linked_spreadsheet_prompt_section(evidence))
+        self.assertIn("No report-template", _build_linked_spreadsheet_prompt_section({"artifacts": []}))
+        self.assertEqual(progress_calls, [("stage", "message", 1, 2)])
+        self.assertTrue(_is_anti_fraud_prd(report_page))
+        self.assertTrue(_is_report_or_template_prd(report_page))
+        self.assertTrue(_is_google_spreadsheet_url("https://docs.google.com/spreadsheets/d/sheet123/edit"))
+        self.assertTrue(_is_google_spreadsheet_url("https://drive.google.com/open?id=sheet123"))
+        self.assertFalse(_is_google_spreadsheet_url("https://example.com/spreadsheets/d/sheet123"))
+        self.assertTrue(_is_confluence_spreadsheet_url("https://example.atlassian.net/download/attachments/123/Template.xlsx"))
+        self.assertFalse(_is_confluence_spreadsheet_url("https://example.atlassian.net/download/attachments/123/Template.csv"))
+        self.assertEqual(_google_drive_file_id_from_url("https://docs.google.com/spreadsheets/d/sheet123/edit"), "sheet123")
+        self.assertEqual(_google_drive_file_id_from_url("https://drive.google.com/open?id=sheet456"), "sheet456")
+        self.assertEqual(_google_drive_file_id_from_url("https://drive.google.com/open"), "")
+        self.assertEqual(_image_suffix_from_url("https://example.com/a%20b.JPG?x=1"), ".jpg")
+        self.assertEqual(_image_suffix_from_url("https://example.com/image"), ".png")
+        self.assertEqual(_parse_json_object("```json\n{\"ok\": true}\n```"), {"ok": True})
+        self.assertEqual(_parse_json_object("prefix {\"ok\": 1} suffix"), {"ok": 1})
+        self.assertIsNone(_parse_json_object("[1,2]"))
+        self.assertEqual(_prd_token_risk(10), "normal")
+        self.assertEqual(_prd_token_risk(45_000), "elevated")
+        self.assertEqual(_prd_token_risk(80_000), "high")
+        self.assertEqual(_normalize_selected_section_indexes([1, "2", 2]), [1, 2])
+        with self.assertRaisesRegex(ToolError, "integer"):
+            _normalize_selected_section_indexes([True])
+        with self.assertRaisesRegex(ToolError, "integer"):
+            _normalize_selected_section_indexes(["bad"])
+        self.assertEqual(_limit_extracted_workbook_text({"text": "abcdef"}, max_chars=3)["text"], "abc")
+        self.assertIn("omitted", _limit_extracted_workbook_text({"text": "abcdef"}, max_chars=0)["text"])
+        self.assertEqual(_coerce_download_bytes("hello"), b"hello")
+        self.assertEqual(_coerce_download_bytes(bytearray(b"hello")), b"hello")
+        self.assertEqual(_linked_artifact_public_payload(evidence["artifacts"][0])["status"], "failed")
+        self.assertFalse(
+            _google_sheet_screenshot_public_payload({"status": "ok", "used_in_findings": True})["cache_hit"]
+        )
+
+    def test_prd_reviewer_google_sheet_screenshot_helper_boundaries(self):
+        page = IngestedConfluencePage(
+            page_id="image-prd",
+            title="AF Sheet Screenshot PRD",
+            source_url="https://example.atlassian.net/wiki/pages/image-prd",
+            updated_at="2026-05-20T00:00:00Z",
+            language="en",
+            sections=[
+                ParsedSection(
+                    title="Report Image",
+                    section_path="3.11 Report Image",
+                    content="See screenshots.",
+                    media_refs=["MEDIA_ID_1", "MEDIA_ID_2", "MEDIA_ID_3"],
+                    image_refs=["https://example.atlassian.net/download/attachments/123/direct.png", ""],
+                )
+            ],
+            media_dict={
+                "MEDIA_ID_1": {"type": "image", "source_url": "https://example.atlassian.net/download/attachments/123/sheet.png"},
+                "MEDIA_ID_2": {"type": "image", "source_url": "https://example.atlassian.net/download/attachments/123/sheet.png"},
+                "MEDIA_ID_3": {"type": "table", "content": "<table><tr><td>Not image</td></tr></table>"},
+            },
+        )
+        artifacts = _collect_section_image_artifacts(page=page, selected_section_indexes=[1])
+        settings = self._settings()
+        cache_dir = Path(self.temp_dir.name) / "sheetshot-cache"
+        ok_artifact = dict(artifacts[0])
+        skipped_artifact = dict(artifacts[0])
+        empty_artifact = dict(artifacts[0])
+        tool_error_artifact = dict(artifacts[0])
+        unexpected_error_artifact = dict(artifacts[0])
+
+        with patch(
+            "prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image",
+            return_value={
+                "is_google_sheet_screenshot": True,
+                "reason": "",
+                "classification": "visible spreadsheet grid",
+                "evidence_text": "Sheet headers: Field, Rule",
+            },
+        ) as extract:
+            _resolve_one_google_sheet_screenshot(
+                confluence=FakeAttachmentConnector(page, b"image-bytes"),
+                artifact=ok_artifact,
+                cache_dir=cache_dir,
+                workspace_root=Path(self.temp_dir.name),
+                settings=settings,
+            )
+        cached_artifact = dict(artifacts[0])
+        cached_bytes = b"cached-image"
+        cached_hash = hashlib.sha256(cached_bytes).hexdigest()[:16]
+        _store_cached_google_sheet_screenshot_evidence(
+            url=cached_artifact["url"],
+            content_hash=cached_hash,
+            cache_dir=cache_dir,
+            extracted={
+                "status": "ok",
+                "reason": "",
+                "is_google_sheet_screenshot": True,
+                "evidence_text": "Cached sheet evidence",
+                "evidence_hash": "cached-hash",
+            },
+        )
+        cached_resolve_artifact = dict(artifacts[0])
+        with patch(
+            "prd_briefing.reviewer._load_cached_google_sheet_screenshot_evidence",
+            return_value={"status": "ok", "evidence_text": "Cached sheet evidence"},
+        ):
+            _resolve_one_google_sheet_screenshot(
+                confluence=FakeAttachmentConnector(page, cached_bytes),
+                artifact=cached_resolve_artifact,
+                cache_dir=cache_dir,
+                workspace_root=Path(self.temp_dir.name),
+                settings=settings,
+            )
+        cached_payload = _load_cached_google_sheet_screenshot_evidence(
+            url=cached_artifact["url"],
+            content_hash=cached_hash,
+            cache_dir=cache_dir,
+        )
+
+        with patch(
+            "prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image",
+            return_value={
+                "is_google_sheet_screenshot": False,
+                "reason": "normal_product_screenshot",
+                "classification": "not spreadsheet",
+                "evidence_text": "ignored",
+            },
+        ):
+            _resolve_one_google_sheet_screenshot(
+                confluence=FakeAttachmentConnector(page, b"other-image"),
+                artifact=skipped_artifact,
+                cache_dir=None,
+                workspace_root=Path(self.temp_dir.name),
+                settings=settings,
+            )
+        _resolve_one_google_sheet_screenshot(
+            confluence=FakeAttachmentConnector(page, b""),
+            artifact=empty_artifact,
+            cache_dir=None,
+            workspace_root=Path(self.temp_dir.name),
+            settings=settings,
+        )
+        with patch(
+            "prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image",
+            side_effect=ToolError("ocr_failed"),
+        ):
+            _resolve_one_google_sheet_screenshot(
+                confluence=FakeAttachmentConnector(page, b"tool-error"),
+                artifact=tool_error_artifact,
+                cache_dir=None,
+                workspace_root=Path(self.temp_dir.name),
+                settings=settings,
+            )
+        with patch(
+            "prd_briefing.reviewer._extract_google_sheet_screenshot_evidence_from_image",
+            side_effect=RuntimeError("boom"),
+        ):
+            _resolve_one_google_sheet_screenshot(
+                confluence=FakeAttachmentConnector(page, b"unexpected-error"),
+                artifact=unexpected_error_artifact,
+                cache_dir=None,
+                workspace_root=Path(self.temp_dir.name),
+                settings=settings,
+            )
+
+        key = _google_sheet_screenshot_cache_key(url=ok_artifact["url"], content_hash=ok_artifact["content_hash"])
+        bad_cache_path = cache_dir / f"{key}.json"
+        bad_cache_path.write_text("{bad-json", encoding="utf-8")
+        invalid_cache = _load_cached_google_sheet_screenshot_evidence(
+            url=ok_artifact["url"],
+            content_hash=ok_artifact["content_hash"],
+            cache_dir=cache_dir,
+        )
+        _store_cached_google_sheet_screenshot_evidence(
+            url="https://example/none.png",
+            content_hash="hash",
+            cache_dir=None,
+            extracted={"status": "ok"},
+        )
+        prompt_section = _build_google_sheet_screenshot_prompt_section(
+            {
+                "artifacts": [
+                    ok_artifact,
+                    skipped_artifact,
+                    {"status": "failed", "image_id": "IMG_BAD", "source_section_title": "Report", "url": "https://example/bad.png", "reason": ""},
+                ]
+            }
+        )
+        metadata_text = _format_template_metadata_for_prompt(
+            {
+                "workbook_sheet_count": 2,
+                "hidden_sheets": ["Hidden"],
+                "sheets": [
+                    {
+                        "name": "Register",
+                        "max_row": 10,
+                        "max_column": 4,
+                        "header_row": ["Field", ""],
+                        "merged_range_count": 1,
+                        "formula_cell_count": 2,
+                        "hidden_rows_count": 1,
+                        "hidden_columns_count": 1,
+                        "empty_header_count": 1,
+                        "duplicate_headers": ["Field"],
+                        "multi_level_header_risk": True,
+                        "wide_template_risk": False,
+                    },
+                    "bad-sheet",
+                ],
+            }
+        )
+
+        self.assertEqual(len(artifacts), 2)
+        self.assertEqual(ok_artifact["status"], "ok")
+        self.assertTrue(cached_resolve_artifact["cache_hit"])
+        self.assertEqual(cached_payload["evidence_text"], "Cached sheet evidence")
+        self.assertEqual(extract.call_count, 1)
+        self.assertEqual(skipped_artifact["status"], "skipped")
+        self.assertEqual(empty_artifact["reason"], "empty_download")
+        self.assertEqual(tool_error_artifact["reason"], "ocr_failed")
+        self.assertIn("ocr_failed: boom", unexpected_error_artifact["reason"])
+        self.assertIsNone(invalid_cache)
+        self.assertIn("Google Sheet screenshot reviewed", prompt_section)
+        self.assertIn("Google Sheet screenshot not reviewed", prompt_section)
+        self.assertEqual(
+            _build_google_sheet_screenshot_prompt_section(
+                {"artifacts": [{"status": "skipped", "reason": "not_google_sheet_screenshot"}]}
+            ),
+            "",
+        )
+        self.assertIn("formula_cells=2", metadata_text)
+        self.assertEqual(_format_template_metadata_for_prompt({}), "- Metadata unavailable.")
+
+    def test_prd_reviewer_screenshot_cache_and_linked_spreadsheet_failure_tail_boundaries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir) / "sheetshot-cache"
+            url = "https://example.com/sheet.png"
+            content_hash = "hash-1"
+            key = _google_sheet_screenshot_cache_key(url=url, content_hash=content_hash)
+            cache_dir.mkdir()
+            cache_path = cache_dir / f"{key}.json"
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "version": "old",
+                        "url": url,
+                        "content_hash": content_hash,
+                        "extracted": {"status": "ok"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stale_cache = _load_cached_google_sheet_screenshot_evidence(
+                url=url,
+                content_hash=content_hash,
+                cache_dir=cache_dir,
+            )
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "version": reviewer.PRD_GOOGLE_SHEET_SCREENSHOT_EVIDENCE_CACHE_VERSION,
+                        "url": "https://example.com/other.png",
+                        "content_hash": content_hash,
+                        "extracted": {"status": "ok"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            mismatched_cache = _load_cached_google_sheet_screenshot_evidence(
+                url=url,
+                content_hash=content_hash,
+                cache_dir=cache_dir,
+            )
+            with patch.object(Path, "write_text", side_effect=OSError("disk full")):
+                _store_cached_google_sheet_screenshot_evidence(
+                    url=url,
+                    content_hash=content_hash,
+                    cache_dir=cache_dir,
+                    extracted={"status": "ok"},
+                )
+
+            artifact_empty = {
+                "url": "https://example.atlassian.net/download/attachments/123/Template.xlsx",
+                "filename": "Template.xlsx",
+            }
+            reviewer._resolve_one_linked_spreadsheet(
+                confluence=FakeAttachmentConnector(self.service.confluence.page, b""),
+                artifact=artifact_empty,
+                google_credentials=None,
+                remaining_text_chars=100,
+            )
+            artifact_tool_error = {
+                "url": "https://example.atlassian.net/download/attachments/123/Template.xlsx",
+                "filename": "Template.xlsx",
+            }
+            with patch("prd_briefing.reviewer._extract_workbook_text", side_effect=ToolError("empty_workbook")):
+                reviewer._resolve_one_linked_spreadsheet(
+                    confluence=FakeAttachmentConnector(self.service.confluence.page, b"xlsx"),
+                    artifact=artifact_tool_error,
+                    google_credentials=None,
+                    remaining_text_chars=100,
+                )
+            artifact_generic_error = {
+                "url": "https://example.atlassian.net/download/attachments/123/Template.xlsx",
+                "filename": "Template.xlsx",
+            }
+            with patch("prd_briefing.reviewer._extract_workbook_text", side_effect=ValueError("bad workbook")):
+                reviewer._resolve_one_linked_spreadsheet(
+                    confluence=FakeAttachmentConnector(self.service.confluence.page, b"xlsx"),
+                    artifact=artifact_generic_error,
+                    google_credentials=None,
+                    remaining_text_chars=100,
+                )
+
+        self.assertIsNone(stale_cache)
+        self.assertIsNone(mismatched_cache)
+        self.assertEqual(artifact_empty["reason"], "empty_download")
+        self.assertEqual(artifact_tool_error["reason"], "empty_workbook")
+        self.assertIn("download_or_parse_failed", artifact_generic_error["reason"])
+
+    def test_prd_reviewer_cache_workbook_and_wrapper_tail_boundaries(self):
+        import builtins
+
+        url = "https://docs.google.com/spreadsheets/d/sheet123/edit#gid=0"
+        credentials = {"token": "x", "scopes": ["https://www.googleapis.com/auth/drive.readonly"]}
+        metadata = reviewer._normalize_drive_metadata(
+            {
+                "id": "sheet123",
+                "name": "MAS Outsourcing Register",
+                "mimeType": "application/vnd.google-apps.spreadsheet",
+                "modifiedTime": "2026-05-12T10:00:00.000Z",
+            }
+        )
+        cache_dir = Path(self.temp_dir.name) / "google-sheet-cache"
+        cache_dir.mkdir()
+        cache_path = cache_dir / f"{reviewer._google_sheet_artifact_cache_key(url=url, drive_metadata=metadata)}.json"
+        drive_service = FakeDriveService(_xlsx_bytes(marker="Cached"), modified_time=metadata["modifiedTime"])
+
+        no_credentials = reviewer._load_cached_google_spreadsheet_artifact(
+            url=url,
+            google_credentials=None,
+            cache_dir=cache_dir,
+            max_chars=10,
+        )
+        no_cache_dir = reviewer._load_cached_google_spreadsheet_artifact(
+            url=url,
+            google_credentials=credentials,
+            cache_dir=None,
+            max_chars=10,
+        )
+        with self.assertRaisesRegex(ToolError, "missing_google_credentials"):
+            reviewer._download_google_spreadsheet(url=url, google_credentials=None)
+        with self.assertRaisesRegex(ToolError, "google_file_id_not_found"):
+            reviewer._download_google_spreadsheet(
+                url="https://drive.google.com/open",
+                google_credentials=credentials,
+            )
+        with self.assertRaisesRegex(ToolError, "google_file_id_not_found"):
+            reviewer._load_cached_google_spreadsheet_artifact(
+                url="https://drive.google.com/open",
+                google_credentials=credentials,
+                cache_dir=cache_dir,
+                max_chars=100,
+            )
+
+        real_import = builtins.__import__
+
+        def missing_google_import(name, *args, **kwargs):
+            if name == "google.oauth2.credentials":
+                raise ImportError("missing google")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=missing_google_import):
+            with self.assertRaisesRegex(ToolError, "google_drive_reader_unavailable"):
+                reviewer._download_google_spreadsheet(url=url, google_credentials=credentials)
+        with patch("builtins.__import__", side_effect=missing_google_import):
+            with self.assertRaisesRegex(ToolError, "google_drive_reader_unavailable"):
+                reviewer._load_cached_google_spreadsheet_artifact(
+                    url=url,
+                    google_credentials=credentials,
+                    cache_dir=cache_dir,
+                    max_chars=100,
+                )
+
+        native_drive_service = FakeDriveService(_xlsx_bytes(marker="Native XLSX"), modified_time=metadata["modifiedTime"])
+        native_drive_service.files_resource.get = lambda **_kwargs: FakeDriveExecute(
+            {
+                "id": "sheet123",
+                "name": "MAS Outsourcing Register.xlsx",
+                "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "modifiedTime": metadata["modifiedTime"],
+            }
+        )
+        with patch("bpmis_jira_tool.gmail_dashboard.build_drive_api_service", return_value=native_drive_service):
+            native_content, native_metadata = reviewer._download_google_spreadsheet(
+                url=url,
+                google_credentials=credentials,
+            )
+        unsupported_drive_service = FakeDriveService(_xlsx_bytes(marker="Unsupported"), modified_time=metadata["modifiedTime"])
+        unsupported_drive_service.files_resource.get = lambda **_kwargs: FakeDriveExecute(
+            {
+                "id": "sheet123",
+                "name": "Unsupported",
+                "mimeType": "application/pdf",
+                "modifiedTime": metadata["modifiedTime"],
+            }
+        )
+        with patch("bpmis_jira_tool.gmail_dashboard.build_drive_api_service", return_value=unsupported_drive_service):
+            with self.assertRaisesRegex(ToolError, "unsupported_google_drive_mime_type"):
+                reviewer._download_google_spreadsheet(url=url, google_credentials=credentials)
+
+        from googleapiclient.errors import HttpError
+
+        class FakeHttpResponse:
+            def __init__(self, status):
+                self.status = status
+                self.reason = "failed"
+
+        class RaisingExecute:
+            def __init__(self, status):
+                self.status = status
+
+            def execute(self):
+                raise HttpError(resp=FakeHttpResponse(self.status), content=b"failed")
+
+        class RaisingDriveFiles:
+            def __init__(self, status):
+                self.status = status
+
+            def get(self, **_kwargs):
+                return RaisingExecute(self.status)
+
+        class RaisingDriveService:
+            def __init__(self, status):
+                self.files_resource = RaisingDriveFiles(status)
+
+            def files(self):
+                return self.files_resource
+
+        with patch("bpmis_jira_tool.gmail_dashboard.build_drive_api_service", return_value=RaisingDriveService(403)):
+            with self.assertRaisesRegex(ToolError, "permission_denied"):
+                reviewer._download_google_spreadsheet(url=url, google_credentials=credentials)
+        with patch("bpmis_jira_tool.gmail_dashboard.build_drive_api_service", return_value=RaisingDriveService(500)):
+            with self.assertRaisesRegex(ToolError, "google_drive_download_failed:500"):
+                reviewer._download_google_spreadsheet(url=url, google_credentials=credentials)
+        with patch("bpmis_jira_tool.gmail_dashboard.build_drive_api_service", return_value=RaisingDriveService(404)):
+            with self.assertRaisesRegex(ToolError, "permission_denied"):
+                reviewer._load_cached_google_spreadsheet_artifact(
+                    url=url,
+                    google_credentials=credentials,
+                    cache_dir=cache_dir,
+                    max_chars=100,
+                )
+        with patch("bpmis_jira_tool.gmail_dashboard.build_drive_api_service", return_value=RaisingDriveService(503)):
+            with self.assertRaisesRegex(ToolError, "google_drive_metadata_failed:503"):
+                reviewer._load_cached_google_spreadsheet_artifact(
+                    url=url,
+                    google_credentials=credentials,
+                    cache_dir=cache_dir,
+                    max_chars=100,
+                )
+        with patch("bpmis_jira_tool.gmail_dashboard.build_drive_api_service", return_value=drive_service):
+            missing_cache = reviewer._load_cached_google_spreadsheet_artifact(
+                url=url,
+                google_credentials=credentials,
+                cache_dir=cache_dir,
+                max_chars=100,
+            )
+            cache_path.write_text("{bad-json", encoding="utf-8")
+            invalid_json_cache = reviewer._load_cached_google_spreadsheet_artifact(
+                url=url,
+                google_credentials=credentials,
+                cache_dir=cache_dir,
+                max_chars=100,
+            )
+            cache_path.write_text(
+                json.dumps({"version": "old", "drive_metadata": metadata, "extracted": {"text": "cached"}}),
+                encoding="utf-8",
+            )
+            stale_version_cache = reviewer._load_cached_google_spreadsheet_artifact(
+                url=url,
+                google_credentials=credentials,
+                cache_dir=cache_dir,
+                max_chars=100,
+            )
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "version": reviewer.PRD_GOOGLE_SHEET_ARTIFACT_CACHE_VERSION,
+                        "drive_metadata": {**metadata, "modifiedTime": "older"},
+                        "extracted": {"text": "cached"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            mismatched_metadata_cache = reviewer._load_cached_google_spreadsheet_artifact(
+                url=url,
+                google_credentials=credentials,
+                cache_dir=cache_dir,
+                max_chars=100,
+            )
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "version": reviewer.PRD_GOOGLE_SHEET_ARTIFACT_CACHE_VERSION,
+                        "drive_metadata": metadata,
+                        "extracted": "bad",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            non_dict_cache = reviewer._load_cached_google_spreadsheet_artifact(
+                url=url,
+                google_credentials=credentials,
+                cache_dir=cache_dir,
+                max_chars=100,
+            )
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "version": reviewer.PRD_GOOGLE_SHEET_ARTIFACT_CACHE_VERSION,
+                        "drive_metadata": metadata,
+                        "extracted": {"text": "cached spreadsheet text"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            ok_cache = reviewer._load_cached_google_spreadsheet_artifact(
+                url=url,
+                google_credentials=credentials,
+                cache_dir=cache_dir,
+                max_chars=6,
+            )
+        reviewer._store_cached_google_spreadsheet_artifact(
+            url=url,
+            drive_metadata={"id": "", "modifiedTime": ""},
+            cache_dir=cache_dir,
+            extracted={"text": "skip"},
+        )
+        reviewer._store_cached_google_spreadsheet_artifact(
+            url=url,
+            drive_metadata=metadata,
+            cache_dir=None,
+            extracted={"text": "skip"},
+        )
+        with patch.object(Path, "write_text", side_effect=OSError("disk full")):
+            reviewer._store_cached_google_spreadsheet_artifact(
+                url=url,
+                drive_metadata=metadata,
+                cache_dir=cache_dir,
+                extracted={"text": "skip"},
+            )
+
+        omitted_workbook = reviewer._extract_workbook_text(_xlsx_bytes(marker="Omitted"), max_chars=0)
+        truncated_workbook = reviewer._extract_workbook_text(_xlsx_bytes(marker="Truncated"), max_chars=20)
+
+        class EmptyWorkbook:
+            worksheets = []
+
+        with patch("openpyxl.load_workbook", return_value=EmptyWorkbook()):
+            with self.assertRaisesRegex(ToolError, "empty_workbook"):
+                reviewer._extract_workbook_text(b"not-read", max_chars=100)
+        with patch("builtins.__import__", side_effect=lambda name, *args, **kwargs: (_ for _ in ()).throw(ImportError("missing openpyxl")) if name == "openpyxl" else real_import(name, *args, **kwargs)):
+            with self.assertRaisesRegex(ToolError, "openpyxl_unavailable"):
+                reviewer._extract_workbook_text(b"not-read", max_chars=100)
+
+        section = ParsedSection(
+            title="Detached",
+            section_path="Detached",
+            content="No placeholder here.",
+            media_refs=["MEDIA_TABLE"],
+        )
+        detached_page = IngestedConfluencePage(
+            page_id="detached",
+            title="AF Detached",
+            source_url="https://example.atlassian.net/wiki/pages/detached",
+            updated_at="2026-05-20T00:00:00Z",
+            language="en",
+            sections=[section],
+            media_dict={"MEDIA_TABLE": {"type": "table", "content": "<table><tr><td>Detached row</td></tr></table>"}},
+        )
+        detached_content = reviewer._build_review_section_content(page=detached_page, section=section)
+        fallback_rows = reviewer._extract_table_media_rows({"content": "<div>Fallback<br>Rows</div>"})
+        too_tiny_table = reviewer._pack_table_rows_for_review(media_id="T3", rows=["x" * 80], section=None, remaining_chars=1)
+        short_identifier_typo = reviewer._is_spurious_identifier_typo_finding(
+            "- **Priority:** P2\n  - **Clarification:** Fix typo ID",
+            source_text="",
+            source_identifier_text="id",
+        )
+        short_only_identifier_typo = reviewer._is_spurious_identifier_typo_finding(
+            "p2 typo id",
+            source_text="",
+            source_identifier_text="id",
+        )
+        with patch("prd_briefing.reviewer._build_prd_source_payload", side_effect=ToolError("empty")):
+            batches = reviewer._split_prd_page_batches(detached_page)
+        blank_coverage = reviewer._build_section_coverage(
+            total_sections=1,
+            selected_indexes=[1],
+            selected_sections=[ParsedSection(title="Blank", section_path="Blank", content="")],
+            selection_hash="blank",
+        )
+        settings_without_data_dir = replace(self._settings(), team_portal_data_dir=None)
+        zh_prompt = build_prd_review_prompt(
+            jira_id="AF-ZH",
+            jira_link="",
+            prd_url=detached_page.source_url,
+            page=detached_page,
+            language="zh",
+            linked_spreadsheet_evidence={"artifacts": [{"status": "ok", "title": "Template.xlsx", "text": "Field\tRule"}]},
+        )
+        with patch(
+            "prd_briefing.reviewer._generate_with_codex",
+            return_value={"result_markdown": "### Generated", "model_id": "codex-cli", "trace": {}},
+        ) as generate:
+            review_generated = reviewer.generate_prd_review_with_codex(
+                prompt="Review",
+                settings=self._settings(),
+                workspace_root=Path(self.temp_dir.name),
+                language="en",
+            )
+            summary_generated = reviewer.generate_prd_summary_with_codex(
+                prompt="Summary",
+                settings=self._settings(),
+                workspace_root=Path(self.temp_dir.name),
+                language="en",
+            )
+
+        class FakeCodexProvider:
+            generated_payload = None
+
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def generate(self, *, payload, primary_model, fallback_model):
+                FakeCodexProvider.generated_payload = payload
+                return type(
+                    "FakeCodexResult",
+                    (),
+                    {"payload": {"text": "provider text", "codex_cli_trace": {"session_id": "provider"}}, "model": primary_model},
+                )()
+
+            def extract_text(self, payload):
+                return payload["text"]
+
+        with patch("prd_briefing.reviewer.CodexCliBridgeSourceCodeQALLMProvider", FakeCodexProvider), patch(
+            "prd_briefing.reviewer.resolve_codex_model", return_value="codex-test"
+        ), patch("prd_briefing.reviewer.resolve_codex_reasoning_effort", return_value="low"):
+            provider_generated = reviewer._generate_with_codex(
+                prompt="Provider prompt",
+                settings=self._settings(),
+                workspace_root=Path(self.temp_dir.name),
+                system_text="System",
+                prompt_mode="mode",
+                image_paths=["/tmp/sheet.png"],
+            )
+
+        self.assertIsNone(no_credentials)
+        self.assertIsNone(no_cache_dir)
+        self.assertGreater(len(native_content), 0)
+        self.assertEqual(native_metadata["mimeType"], "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.assertIsNone(missing_cache)
+        self.assertIsNone(invalid_json_cache)
+        self.assertIsNone(stale_version_cache)
+        self.assertIsNone(mismatched_metadata_cache)
+        self.assertIsNone(non_dict_cache)
+        self.assertEqual(ok_cache["text"], "cached")
+        self.assertIn("omitted", omitted_workbook["text"])
+        self.assertLessEqual(len(truncated_workbook["text"]), 20)
+        self.assertIn("Detached row", detached_content)
+        self.assertEqual(fallback_rows, ["Fallback\nRows"])
+        self.assertEqual(too_tiny_table["rows_included"], 0)
+        self.assertFalse(short_identifier_typo)
+        self.assertFalse(short_only_identifier_typo)
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(blank_coverage["sections_assessed"], 0)
+        self.assertTrue(reviewer._is_anti_fraud_prd(detached_page))
+        self.assertIsNone(reviewer._google_sheet_artifact_cache_dir(settings_without_data_dir))
+        self.assertIsNone(reviewer._google_sheet_screenshot_cache_dir(settings_without_data_dir))
+        self.assertTrue(reviewer._google_sheet_screenshot_cache_dir(self._settings()).name.endswith("google_sheet_screenshot_evidence"))
+        self.assertIsNone(reviewer._parse_json_object(""))
+        self.assertEqual(reviewer._likely_header_row([]), [])
+        self.assertTrue(reviewer._has_multi_level_header_risk([], ["A1:B2"]))
+        self.assertIn("Google Sheet Screenshot Template Assessment", reviewer._google_sheet_screenshot_output_structure_en())
+        self.assertIn("Google Sheet 截图模板评估", reviewer._google_sheet_screenshot_output_structure_zh())
+        self.assertIn("你是一位资深 PRD", zh_prompt)
+        self.assertEqual(review_generated["result_markdown"], "### Generated")
+        self.assertEqual(summary_generated["result_markdown"], "### Generated")
+        self.assertEqual(generate.call_count, 2)
+        self.assertEqual(provider_generated["result_markdown"], "provider text")
+        self.assertEqual(provider_generated["trace"], {"session_id": "provider"})
+        self.assertEqual(FakeCodexProvider.generated_payload["_codex_image_paths"], ["/tmp/sheet.png"])
+
+    def test_prd_reviewer_image_extraction_and_prompt_builder_boundaries(self):
+        page = IngestedConfluencePage(
+            page_id="prompt-prd",
+            title="Prompt PRD",
+            source_url="https://example.atlassian.net/wiki/pages/prompt-prd",
+            updated_at="2026-05-20T00:00:00Z",
+            language="en",
+            sections=[ParsedSection(title="Overview", section_path="Overview", content="Scope and status rules.")],
+        )
+        batch_outputs = [{"batch_index": 1, "section_titles": ["Overview"], "result_markdown": "### Batch Review"}]
+        screenshot_evidence = {
+            "artifacts": [
+                {
+                    "status": "ok",
+                    "is_google_sheet_screenshot": True,
+                    "image_id": "IMG_1",
+                    "source_section_title": "Overview",
+                    "url": "https://example/sheet.png",
+                    "evidence_text": "Header: Field",
+                }
+            ]
+        }
+        linked_evidence = {"artifacts": [{"status": "ok", "title": "Template.xlsx", "text": "Field\tRule"}]}
+
+        with patch(
+            "prd_briefing.reviewer._generate_with_codex",
+            return_value={"result_markdown": "```json\n{\"is_google_sheet_screenshot\":true,\"evidence_text\":\"Visible grid\"}\n```"},
+        ) as generate:
+            extracted = _extract_google_sheet_screenshot_evidence_from_image(
+                image_bytes=b"png",
+                image_url="https://example/sheet.png",
+                image_id="IMG_1",
+                source_section="Overview",
+                settings=self._settings(),
+                workspace_root=Path(self.temp_dir.name),
+            )
+        with patch(
+            "prd_briefing.reviewer._generate_with_codex",
+            return_value={"result_markdown": "not json"},
+        ):
+            with self.assertRaisesRegex(ToolError, "ocr_failed"):
+                _extract_google_sheet_screenshot_evidence_from_image(
+                    image_bytes=b"png",
+                    image_url="https://example/sheet.png",
+                    image_id="IMG_1",
+                    source_section="Overview",
+                    settings=self._settings(),
+                    workspace_root=Path(self.temp_dir.name),
+                )
+
+        summary_batch_en = build_prd_summary_batch_prompt(
+            jira_id="AF-1",
+            jira_link="https://jira/AF-1",
+            prd_url=page.source_url,
+            page=page,
+            language="en",
+            batch_index=1,
+            batch_total=2,
+        )
+        summary_batch_zh = build_prd_summary_batch_prompt(
+            jira_id="AF-1",
+            jira_link="",
+            prd_url=page.source_url,
+            page=page,
+            language="zh",
+            batch_index=1,
+            batch_total=2,
+        )
+        summary_synthesis = build_prd_summary_synthesis_prompt(
+            jira_id="AF-1",
+            jira_link="",
+            prd_url=page.source_url,
+            page=page,
+            language="en",
+            batch_outputs=batch_outputs,
+        )
+        review_batch_en = build_prd_review_batch_prompt(
+            jira_id="AF-1",
+            jira_link="",
+            prd_url=page.source_url,
+            page=page,
+            language="en",
+            batch_index=1,
+            batch_total=2,
+        )
+        review_batch_zh = build_prd_review_batch_prompt(
+            jira_id="AF-1",
+            jira_link="",
+            prd_url=page.source_url,
+            page=page,
+            language="zh",
+            batch_index=1,
+            batch_total=2,
+        )
+        review_synthesis = build_prd_review_synthesis_prompt(
+            jira_id="AF-1",
+            jira_link="",
+            prd_url=page.source_url,
+            page=page,
+            language="en",
+            batch_outputs=batch_outputs,
+            linked_spreadsheet_evidence=linked_evidence,
+            google_sheet_screenshot_evidence=screenshot_evidence,
+        )
+        review_synthesis_zh = build_prd_review_synthesis_prompt(
+            jira_id="AF-1",
+            jira_link="",
+            prd_url=page.source_url,
+            page=page,
+            language="zh",
+            batch_outputs=batch_outputs,
+            linked_spreadsheet_evidence={},
+            google_sheet_screenshot_evidence={},
+        )
+
+        self.assertTrue(extracted["is_google_sheet_screenshot"])
+        self.assertIn("image_paths", generate.call_args.kwargs)
+        self.assertIn("Summarize this PRD section batch", summary_batch_en)
+        self.assertIn("请总结这个 PRD section batch", summary_batch_zh)
+        self.assertIn("Batch 1", summary_synthesis)
+        self.assertIn("Review this PRD section batch", review_batch_en)
+        self.assertIn("请评审这个 PRD section batch", review_batch_zh)
+        self.assertIn("Google Sheet Screenshot Template Assessment", review_synthesis)
+        self.assertIn("Report Generation Feasibility", review_synthesis)
+        self.assertIn("PM Decision Checklist", review_synthesis_zh)
+        self.assertIn("Return only the requested Markdown review in English", build_prd_review_system_text("en"))
+        self.assertIn("Chinese", build_prd_review_system_text("zh"))
+        self.assertTrue(_use_compact_review_prompt(page, {}, {}))
+        self.assertFalse(_use_compact_review_prompt(page, linked_evidence, {}))
+        self.assertFalse(_use_compact_review_prompt(page, {}, screenshot_evidence))
+
     def test_prd_self_assessment_section_char_count_includes_table_media(self):
         page = self.service.confluence.page
         page.sections.append(
@@ -1414,6 +2573,74 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(table_section["title"], "3.1.2 Admin Portal Changes")
         self.assertGreater(table_section["char_count"], len("[MEDIA_ID_1]"))
         self.assertGreaterEqual(table_section["char_count"], len("[MEDIA_ID_1 table content]\nField\nStatus"))
+
+    def test_prd_review_prompt_dry_run_omits_empty_jira_context_without_dropping_prd_source(self):
+        page = self.service.confluence.page
+        source = _build_prd_source_payload(page, max_chars=10_000_000)["source"]
+
+        prompt = build_prd_review_prompt(
+            jira_id="",
+            jira_link="",
+            prd_url=page.source_url,
+            page=page,
+            language="en",
+            linked_spreadsheet_evidence={},
+            google_sheet_screenshot_evidence={},
+        )
+        legacy_prompt = prompt.replace("# Context\n- PRD Title:", "# Context\n- Jira ID: -\n- Jira Link: -\n- PRD Title:", 1)
+        team_dashboard_prompt = build_prd_review_prompt(
+            jira_id="AF-1",
+            jira_link="https://jira.example/browse/AF-1",
+            prd_url=page.source_url,
+            page=page,
+            language="en",
+            linked_spreadsheet_evidence={},
+            google_sheet_screenshot_evidence={},
+        )
+
+        self.assertNotIn("- Jira ID: -", prompt)
+        self.assertNotIn("- Jira Link: -", prompt)
+        self.assertIn(source, prompt)
+        self.assertLess(len(prompt), len(legacy_prompt))
+        self.assertIn("- Jira ID: AF-1", team_dashboard_prompt)
+        self.assertIn("- Jira Link: https://jira.example/browse/AF-1", team_dashboard_prompt)
+
+    def test_prd_review_table_prompt_dry_run_dedupes_repeated_rows_without_dropping_unique_rows(self):
+        page = IngestedConfluencePage(
+            page_id="table-dedup",
+            title="Table Dedup PRD",
+            source_url="https://example.atlassian.net/wiki/pages/table-dedup",
+            updated_at="2026-05-24T00:00:00Z",
+            language="en",
+            sections=[
+                ParsedSection(
+                    title="Rules",
+                    section_path="3. Rules",
+                    content="[MEDIA_ID_1]",
+                    media_refs=["MEDIA_ID_1"],
+                )
+            ],
+            media_dict={
+                "MEDIA_ID_1": {
+                    "type": "table",
+                    "content": (
+                        "<table>"
+                        "<tr><th>Field</th><th>Value</th></tr>"
+                        "<tr><td>DUPLICATE_TOKEN</td><td>same rule</td></tr>"
+                        "<tr><td>DUPLICATE_TOKEN</td><td>same rule</td></tr>"
+                        "<tr><td>UNIQUE_TOKEN</td><td>kept rule</td></tr>"
+                        "</table>"
+                    ),
+                }
+            },
+        )
+
+        source = _build_prd_source_payload(page, max_chars=10_000_000)["source"]
+        legacy_source = source.replace("DUPLICATE_TOKEN | same rule\n", "DUPLICATE_TOKEN | same rule\nDUPLICATE_TOKEN | same rule\n", 1)
+
+        self.assertEqual(source.count("DUPLICATE_TOKEN | same rule"), 1)
+        self.assertIn("UNIQUE_TOKEN | kept rule", source)
+        self.assertLess(len(source), len(legacy_source))
 
     def test_confluence_parser_extracts_spreadsheet_links_by_section(self):
         connector = ConfluenceConnector(base_url="", email="", api_token="", bearer_token="", store=self.store)
@@ -2618,6 +3845,131 @@ class PRDBriefingServiceTests(unittest.TestCase):
             service.review_url(PRDBriefingReviewRequest(owner_key="anon:test", prd_url=empty_page.source_url))
         with self.assertRaisesRegex(ToolError, "readable sections"):
             service.summarize_url(PRDBriefingReviewRequest(owner_key="anon:test", prd_url=empty_page.source_url))
+        with self.assertRaisesRegex(ToolError, "readable sections"):
+            service.review(
+                PRDReviewRequest(owner_key="anon:test", jira_id="AF-1", jira_link="", prd_url=empty_page.source_url)
+            )
+        with self.assertRaisesRegex(ToolError, "readable sections"):
+            service.summarize(
+                PRDReviewRequest(owner_key="anon:test", jira_id="AF-1", jira_link="", prd_url=empty_page.source_url)
+            )
+
+    @patch("prd_briefing.reviewer.generate_prd_summary_with_codex")
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_classic_prd_review_and_summary_cache_success_and_failure_paths(self, mock_review, mock_summary):
+        service = PRDReviewService(
+            store=self.store,
+            confluence=self.service.confluence,
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+        mock_review.return_value = {
+            "result_markdown": "### Classic Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "review-1"},
+        }
+        mock_summary.return_value = {
+            "result_markdown": "### Classic Summary",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "summary-1"},
+        }
+
+        review_request = PRDReviewRequest(
+            owner_key="anon:test",
+            jira_id="AF-CLASSIC",
+            jira_link="https://jira/browse/AF-CLASSIC",
+            prd_url=self.service.confluence.page.source_url,
+        )
+        first_review = service.review(review_request)
+        cached_review = service.review(review_request)
+        summary_request = PRDReviewRequest(
+            owner_key="anon:test",
+            jira_id="AF-SUMMARY",
+            jira_link="https://jira/browse/AF-SUMMARY",
+            prd_url=self.service.confluence.page.source_url,
+        )
+        first_summary = service.summarize(summary_request)
+        cached_summary = service.summarize(summary_request)
+
+        mock_review.side_effect = RuntimeError("review failed")
+        with self.assertRaisesRegex(ToolError, "review failed"):
+            service.review(
+                PRDReviewRequest(
+                    owner_key="anon:test",
+                    jira_id="AF-FAIL",
+                    jira_link="",
+                    prd_url=self.service.confluence.page.source_url,
+                    force_refresh=True,
+                )
+            )
+        failed_review = self.store.get_prd_review_result(
+            owner_key="anon:test",
+            jira_id="AF-FAIL",
+            prd_url=self.service.confluence.page.source_url,
+            prd_updated_at=self.service.confluence.page.updated_at,
+            prompt_version=PRD_REVIEW_PROMPT_VERSION,
+        )
+
+        self.assertFalse(first_review["cached"])
+        self.assertTrue(cached_review["cached"])
+        self.assertEqual(first_review["review"]["result_markdown"], "### Classic Review")
+        self.assertFalse(first_summary["cached"])
+        self.assertTrue(cached_summary["cached"])
+        self.assertEqual(first_summary["summary"]["result_markdown"], "### Classic Summary")
+        self.assertEqual(mock_review.call_count, 2)
+        self.assertEqual(mock_summary.call_count, 1)
+        self.assertEqual(failed_review["status"], "failed")
+        self.assertIn("review failed", failed_review["error"])
+
+    @patch("prd_briefing.reviewer.generate_prd_summary_with_codex")
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_url_prd_review_and_summary_failures_are_saved_for_retry_context(self, mock_review, mock_summary):
+        service = PRDReviewService(
+            store=self.store,
+            confluence=self.service.confluence,
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+        mock_review.side_effect = RuntimeError("url review failed")
+        mock_summary.side_effect = RuntimeError("url summary failed")
+
+        with self.assertRaisesRegex(ToolError, "url review failed"):
+            service.review_url(
+                PRDBriefingReviewRequest(
+                    owner_key="anon:test",
+                    prd_url=self.service.confluence.page.source_url,
+                    language="en",
+                    force_refresh=True,
+                )
+            )
+        with self.assertRaisesRegex(ToolError, "url summary failed"):
+            service.summarize_url(
+                PRDBriefingReviewRequest(
+                    owner_key="anon:test",
+                    prd_url=self.service.confluence.page.source_url,
+                    language="en",
+                    force_refresh=True,
+                )
+            )
+
+        failed_review = self.store.get_prd_review_result(
+            owner_key="anon:test",
+            jira_id=PRD_BRIEFING_REVIEW_CACHE_KEY,
+            prd_url=self.service.confluence.page.source_url,
+            prd_updated_at=self.service.confluence.page.updated_at,
+            prompt_version=prd_briefing_review_prompt_version("en"),
+        )
+        failed_summary = self.store.get_prd_review_result(
+            owner_key="anon:test",
+            jira_id=PRD_URL_SUMMARY_CACHE_KEY,
+            prd_url=self.service.confluence.page.source_url,
+            prd_updated_at=self.service.confluence.page.updated_at,
+            prompt_version=prd_summary_prompt_version("en"),
+        )
+        self.assertEqual(failed_review["status"], "failed")
+        self.assertIn("url review failed", failed_review["error"])
+        self.assertEqual(failed_summary["status"], "failed")
+        self.assertIn("url summary failed", failed_summary["error"])
 
     @patch("prd_briefing.reviewer.generate_prd_summary_with_codex")
     def test_prd_url_summary_cache_varies_by_language_and_updated_at(self, mock_generate):
@@ -3197,25 +4549,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
             "Use spoken PM phrasing that feels normal in a dev sync, for example framing the goal first, then saying what the flow is, "
             "what changes on the page, what gets triggered, what should be validated, and what cases developers need to pay attention to."
         )
-        body = (
-            f"Section: {sections[0]['section_path']}\n\n"
-            f"Presenter summary:\n{sections[0].get('briefing_summary', '')}\n\n"
-            f"Presenter notes:\n- " + "\n- ".join(notes) + "\n\n"
-            f"Source:\n{sections[0]['content']}\n\n"
-        )
-        body += (
-            "Write a natural spoken script of around 5 to 9 sentences in Mandarin. "
-            "The first sentence should explain why this section matters to implementation. "
-            "Then explain the intended flow in order. "
-            "After that, highlight the key engineering takeaways, such as important rules, triggers, state changes, "
-            "input or output expectations, and any edge cases or risks implied by the source. "
-            "If the section is mostly UI fields, summarize the pattern and only name the most important fields. "
-            "Make it sound like live PM speech rather than written prose. "
-            "Natural phrasing is encouraged, such as: "
-            "'这一块主要是...', '开发这里重点看...', '实际 flow 是...', '这里需要注意...', "
-            "'这个字段很多，但本质上是为了...', '异常情况主要是...'. "
-            "Do not force all phrases in every answer, but keep the overall tone close to that style."
-        )
+        body = build_walkthrough_section_user_prompt(section=sections[0], notes=notes, language="zh")
         section_payload = json.dumps(
             {
                 "section_path": sections[0]["section_path"],
@@ -3439,6 +4773,479 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertNotIn("Version", "".join(payload["session_overview"]["developer_focus"]))
         self.assertNotIn("Version Control", "".join(payload["session_overview"]["scope"]))
         self.assertTrue(payload["session_overview"]["overview"])
+
+
+class PRDBriefingServiceCoverageEdgeTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.store = BriefingStore(Path(self.temp_dir.name))
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _voice(self) -> VoiceService:
+        return VoiceService(
+            store=self.store,
+            tts_provider="edge",
+            edge_mandarin_voice="zh-Test",
+            edge_english_voice="en-Test",
+            edge_rate="-10%",
+            edge_mandarin_rate="-8%",
+            edge_english_rate="-4%",
+        )
+
+    def _service(self, *, configured: bool = True) -> PRDBriefingService:
+        text_client = FakeTextClient()
+        text_client.is_configured = lambda: configured
+        page = IngestedConfluencePage(
+            page_id="123",
+            title="Edge PRD",
+            source_url="https://example.test/prd",
+            updated_at="2026-05-01T00:00:00Z",
+            language="en",
+            sections=[
+                ParsedSection(
+                    title="Flow",
+                    section_path="3. Flow",
+                    content="User can click Submit button. Status changes to Pending Review.",
+                    html_content="",
+                )
+            ],
+            version_number="1",
+        )
+        return PRDBriefingService(
+            store=self.store,
+            confluence=FakeConnector(page),
+            text_client=text_client,
+            voice_service=FakeVoiceService(),
+            walkthrough_prewarm_enabled=True,
+        )
+
+    def test_voice_service_synthesize_cache_failure_and_cache_target_edges(self):
+        voice = self._voice()
+        with patch.object(voice, "_synthesize_with_edge_tts", return_value=b"mp3-bytes") as synthesize:
+            first = voice.synthesize(session_id="s1", text="你好 API", language_code="zh", owner_key="owner")
+            second = voice.synthesize(session_id="s1", text="你好 API", language_code="zh", owner_key="owner")
+
+        self.assertTrue(first.endswith(".mp3"))
+        self.assertEqual(second, first)
+        self.assertEqual(synthesize.call_count, 1)
+        self.assertEqual(voice._edge_voice_for_language("en"), "en-Test")
+        self.assertEqual(voice._edge_rate_for_language("en"), "-4%")
+        self.assertIsNotNone(voice.get_cached_audio_for_text(owner_key="owner", text="你好 API", language_code="zh"))
+
+        with patch.object(voice, "_synthesize_with_edge_tts", side_effect=RuntimeError("tts down")):
+            self.assertIsNone(voice.synthesize(session_id="s1", text="new text", language_code="zh", owner_key="owner"))
+
+        voice.tts_provider = "disabled"
+        self.assertIsNone(voice.get_cached_audio_for_text(owner_key="owner", text="new text", language_code="zh"))
+
+    def test_voice_service_presentation_audio_boundaries_and_error_edges(self):
+        voice = self._voice()
+        with self.assertRaisesRegex(ValueError, "Chunk content"):
+            voice.synthesize_presentation_chunk(session_id="s1", owner_key="owner", chunk={}, language_code="zh")
+
+        chunk = {"id": "chunk-1", "title": "标题", "content": "第一句。第二句。", "imageUrls": ["https://example.test/a.png"]}
+        with patch.object(voice, "_synthesize_with_edge_tts_with_boundaries", return_value=(b"mp3", [{"offset": 0, "duration": 20_000_000}])):
+            result = voice.synthesize_presentation_chunk(
+                session_id="s1",
+                owner_key="owner",
+                chunk=chunk,
+                language_code="zh",
+            )
+        self.assertEqual(result["duration"], 2.0)
+        self.assertEqual(result["cacheKey"], "")
+        self.assertTrue(result["audioUrl"].startswith("/prd-briefing/assets/"))
+
+        with patch.object(voice, "_synthesize_with_edge_tts_with_boundaries", return_value=(b"", [])):
+            with self.assertRaisesRegex(RuntimeError, "did not return audio"):
+                voice.synthesize_presentation_chunk(session_id="s1", owner_key="owner", chunk={"content": "No audio"}, language_code="en")
+
+    def test_voice_service_edge_tts_stream_and_running_loop_paths(self):
+        class FakeCommunicate:
+            def __init__(self, text, voice, rate):
+                self.text = text
+                self.voice = voice
+                self.rate = rate
+
+            async def stream(self):
+                yield {"type": "audio", "data": b"a"}
+                yield {"type": "WordBoundary", "offset": 10_000_000, "duration": 5_000_000}
+                yield {"type": "audio", "data": b"b"}
+
+        previous = sys.modules.get("edge_tts")
+        sys.modules["edge_tts"] = types.SimpleNamespace(Communicate=FakeCommunicate)
+        voice = self._voice()
+        try:
+            self.assertEqual(voice._synthesize_with_edge_tts(text="hello", voice_id="en", rate="-4%"), b"ab")
+            sync_audio, sync_boundaries = voice._synthesize_with_edge_tts_with_boundaries(text="hello", voice_id="en", rate="-4%")
+            self.assertEqual(sync_audio, b"ab")
+            self.assertEqual(sync_boundaries[0]["type"], "WordBoundary")
+            self.assertEqual(asyncio.run(voice._edge_tts_bytes(text="hello", voice_id="en", rate="-4%")), b"ab")
+            audio, boundaries = asyncio.run(voice._edge_tts_bytes_and_boundaries(text="hello", voice_id="en", rate="-4%"))
+            self.assertEqual(audio, b"ab")
+            self.assertEqual(boundaries[0]["type"], "WordBoundary")
+
+            async def run_inside_loop():
+                return voice._run_edge_tts_async(voice._edge_tts_bytes(text="hello", voice_id="en", rate="-4%"))
+
+            self.assertEqual(asyncio.run(run_inside_loop()), b"ab")
+
+            async def fail():
+                raise RuntimeError("thread failure")
+
+            async def run_failure_inside_loop():
+                return voice._run_edge_tts_async(fail())
+
+            with self.assertRaisesRegex(RuntimeError, "thread failure"):
+                asyncio.run(run_failure_inside_loop())
+        finally:
+            if previous is None:
+                sys.modules.pop("edge_tts", None)
+            else:
+                sys.modules["edge_tts"] = previous
+
+    def test_create_session_spawns_prewarm_when_enabled(self):
+        service = self._service(configured=True)
+        with patch.object(service, "_spawn_prewarm_walkthrough_scripts") as spawn:
+            payload = service.create_session(owner_key="owner", page_ref="https://example.test/prd", mode="walkthrough", language="en")
+
+        spawn.assert_called_once()
+        self.assertEqual(payload["session"]["audience"], briefing_service.DEVELOPER_AUDIENCE_EN)
+
+    def test_walkthrough_cache_legacy_error_and_prewarm_edges(self):
+        service = self._service(configured=True)
+        section = {
+            "section_path": "3. Flow",
+            "briefing_summary": "Summary",
+            "briefing_notes": ["Note"],
+            "content": "User can click Submit button.",
+        }
+        lookup = service._build_walkthrough_cache_lookup(owner_key="owner", section=section)
+        self.store.cache_script(
+            owner_key="owner",
+            audience=briefing_service.walkthrough_audience("zh"),
+            model_id="legacy-model",
+            prompt_version=WALKTHROUGH_SCRIPT_PROMPT_VERSION,
+            section_payload=lookup["section_payload"],
+            script="legacy script",
+        )
+        script, cached = service._compose_walkthrough_section(owner_key="owner", section=section)
+        self.assertEqual((script, cached), ("legacy script", True))
+
+        block = build_pm_briefing_blocks([section])[0]
+        with patch.object(service.store, "get_cached_script", return_value=None), \
+            patch.object(service.store, "get_cached_script_any_model", return_value="legacy block script"):
+            block_script, block_cached = service._compose_walkthrough_block(owner_key="owner", block=block)
+        self.assertEqual((block_script, block_cached), ("legacy block script", True))
+
+        service.text_client.create_answer = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("llm down"))
+        with self.assertRaisesRegex(RuntimeError, "walkthrough script"):
+            service._compose_walkthrough_section(owner_key="owner", section={**section, "content": "new content"})
+        with self.assertRaisesRegex(RuntimeError, "walkthrough script"):
+            service._compose_walkthrough_block(owner_key="owner", block={**block, "block_id": "new-block"})
+
+        service.text_client.is_configured = lambda: False
+        self.assertIsNone(service._prewarm_walkthrough_scripts(owner_key="owner", sections=[section]))
+        self.assertIsNone(service._spawn_prewarm_walkthrough_scripts(owner_key="owner", sections=[section]))
+
+        service.text_client.is_configured = lambda: True
+        with patch.object(service, "_compose_walkthrough_block", side_effect=RuntimeError("ignore")):
+            self.assertIsNone(service._prewarm_walkthrough_scripts(owner_key="owner", sections=[section]))
+
+        service.text_client.is_configured = lambda: False
+        with self.assertRaisesRegex(RuntimeError, "requires Codex"):
+            service._compose_walkthrough_block(owner_key="owner", block={**block, "block_id": "no-config"})
+
+    def test_spawn_prewarm_starts_daemon_thread_when_configured(self):
+        service = self._service(configured=True)
+        started = []
+
+        class FakeThread:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.daemon = kwargs.get("daemon")
+                self.name = kwargs.get("name")
+
+            def start(self):
+                started.append(self.kwargs)
+
+        with patch("prd_briefing.service.threading.Thread", FakeThread):
+            service._spawn_prewarm_walkthrough_scripts(
+                owner_key="owner",
+                sections=[{"section_path": "S", "briefing_notes": ["n"], "image_refs": ["i"], "content": "body"}],
+                language="en",
+            )
+
+        self.assertEqual(started[0]["name"], "prd-briefing-prewarm")
+        self.assertTrue(started[0]["daemon"])
+
+    def test_annotation_error_and_answer_fallback_edges(self):
+        service = self._service(configured=False)
+        section = {"section_path": "3. Flow", "briefing_summary": "", "briefing_notes": [], "content": "Content"}
+        with patch.object(service, "_build_walkthrough_cache_lookup", side_effect=RuntimeError("cache down")):
+            annotated = service._annotate_section_cache(owner_key="owner", section=section)
+        self.assertFalse(annotated["walkthrough_cached"])
+
+        block = {"block_id": "b1", "title": "Block", "source_refs": [], "section_indexes": []}
+        with patch.object(service, "_build_walkthrough_block_cache_lookup", side_effect=RuntimeError("cache down")):
+            annotated_block = service._annotate_block_cache(owner_key="owner", block=block)
+        self.assertFalse(annotated_block["walkthrough_cached"])
+
+        self.assertIn("没有检索到", service._build_fallback_answer(chunks=[], groundedness="unsupported"))
+        empty_chunk = briefing_service.ChunkRecord(
+            source_id=1,
+            owner_key="owner",
+            session_id="s1",
+            source_type="prd",
+            title="PRD",
+            section_path="Empty",
+            content="",
+            html_content="",
+            image_refs=[],
+            source_url="",
+            updated_at="",
+        )
+        self.assertIn("偏保守的推断", service._build_fallback_answer(chunks=[empty_chunk], groundedness="inference"))
+
+        scored = briefing_service.ChunkRecord(
+            source_id=1,
+            owner_key="owner",
+            session_id="s1",
+            source_type="prd",
+            title="PRD",
+            section_path="Flow",
+            content="alpha beta",
+            html_content="",
+            image_refs=[],
+            source_url="",
+            updated_at="",
+        )
+        self.assertEqual(RetrievalService().rank("", [scored]), [])
+        self.assertEqual(briefing_service.keyword_score("alpha gamma", "alpha beta"), 0.5)
+        scored.score = 0.0
+        self.assertFalse(briefing_service.chunk_has_signal(scored))
+
+        inference_service = self._service(configured=False)
+        inference_service.confluence.page.sections[0].content = "alpha"
+        payload = inference_service.create_session(owner_key="owner", page_ref="https://example.test/prd", mode="walkthrough")
+        answer = inference_service.answer_question(
+            session_id=payload["session"]["session_id"],
+            owner_key="owner",
+            question="alpha beta gamma delta epsilon zeta eta theta iota kappa",
+        )
+        self.assertEqual(answer["groundedness"], "inference")
+
+    def test_overview_and_briefing_helper_edge_branches(self):
+        sections = [
+            {"section_path": "1.1 Version Control", "content": "v1 owner date"},
+            {"section_path": "3. Detail Layout", "content": "User can click Search button. Field display default status must be reviewed carefully."},
+            {"section_path": "4. Report Download", "content": "System download history report for audit."},
+        ]
+        overview = build_heuristic_session_overview("Title", sections)
+        self.assertTrue(overview["scope"])
+        self.assertIn("页面布局和字段交互", infer_impacted_modules(["Detail layout field"]))
+        self.assertTrue(infer_impacted_modules_from_sections(sections))
+        self.assertIn("主流程", build_scope_items([])[0])
+        self.assertIn("PRD《Empty》", build_detail_grounded_overview("Empty", []))
+        self.assertEqual(briefing_service.dedupe_non_empty(["", "A", "a", "B"]), ["A", "B"])
+        self.assertFalse(briefing_service.has_feature_level_signal("metadata only"))
+        self.assertEqual(briefing_service.normalize_overview_list("bad"), [])
+        self.assertTrue(briefing_service.looks_like_metadata_noise("PIC owner@example.com v1.2 24 Nov 2025"))
+
+        self.assertEqual(build_presenter_notes("Title", "Title. - . Valid long presenter note."), ["Valid long presenter note."])
+        self.assertEqual(build_presenter_notes("Title", "--------. Valid long note."), ["Valid long note."])
+        many_notes = build_presenter_notes(
+            "Title",
+            "First valid long note. first valid long note. - . Second valid long note. Third valid long note. Fourth valid long note. Fifth valid long note. Sixth valid long note.",
+        )
+        self.assertEqual(len(many_notes), 5)
+        self.assertNotIn("Title", many_notes)
+        self.assertEqual(build_presenter_notes("Fallback", ""), ["Fallback"])
+        self.assertEqual(build_briefing_summary("Short title", "tiny"), "Short title")
+        self.assertEqual(briefing_service.tokenize("the API and status"), {"api", "status"})
+        self.assertEqual(briefing_service.keyword_score("", "content"), 0.0)
+
+        metadata_only = [{"section_path": "1.1 Version Control", "content": "v1"}]
+        self.assertTrue(build_pm_briefing_blocks(metadata_only))
+        many = [
+            {"section_path": f"3.{idx} Field Rules", "content": "Field display default status must be reviewed carefully.", "html_content": "x" * 10}
+            for idx in range(6)
+        ]
+        blocks = build_pm_briefing_blocks(many, language="en")
+        self.assertTrue(any(block["title"].endswith("1") for block in blocks))
+        self.assertEqual(len(briefing_service.split_briefing_entries([(0, {"content": "x", "html_content": "x" * (briefing_service.MAX_BRIEFING_BLOCK_HTML_CHARS + 1)}, 1), (1, {"content": "y"}, 1)])), 2)
+
+        self.assertIn("Review", build_block_summary("Feature", [{"section_path": "Only Title", "content": ""}], language="en"))
+        self.assertIn("系统已", build_block_summary("功能", [], language="zh"))
+        self.assertEqual(briefing_service.classify_briefing_category("Entry", "User click navigation entry"), "workflow")
+
+    def test_text_normalization_and_script_helper_edge_branches(self):
+        self.assertEqual(briefing_service.extract_candidate_sentences([{"section_path": "1.1 Version", "content": "Owner Date"}], limit=3), [])
+        self.assertEqual(normalize_detail_sentence("abc 123"), "")
+        self.assertEqual(normalize_detail_sentence(""), "")
+        self.assertEqual(briefing_service.to_brief_point("x" * 100), "x" * 89 + "…")
+        self.assertEqual(localize_detail_point_zh(""), "")
+        self.assertIn("用户可点击", localize_detail_point_zh('User can click on "Submit" button to submit assessment.'))
+        self.assertIn("这一段需求说明", describe_section_topic_zh("Title", "plain content"))
+        self.assertIn("主流程", infer_engineering_focus_zh("Title", "plain content")[0])
+        self.assertEqual(briefing_service.derive_source_signals_zh("plain"), [])
+
+        self.assertIn("字段比较多", build_developer_zh_fallback_script("Layout", "field layout search criteria", ["note"]))
+        self.assertIn("交互链路", build_developer_zh_fallback_script("Flow", "click submit expand collapse workflow", []))
+        self.assertIn("核心规则", build_developer_zh_fallback_script("Plain", "plain", []))
+
+        self.assertEqual(briefing_service.split_text_fragments("short. long enough fragment."), ["long enough fragment."])
+        self.assertEqual(build_sections_from_text("", chunk_size=5), [])
+        self.assertTrue(build_sections_from_text("one two three four five", chunk_size=8))
+        long_sections = [ParsedSection(title="T", section_path="S", content="x" * (briefing_service.PRESENTATION_MAX_SOURCE_CHARS + 100), image_refs=["https://x/img.png"])]
+        self.assertLessEqual(len(build_presentation_source_text(long_sections)), briefing_service.PRESENTATION_MAX_SOURCE_CHARS)
+
+        self.assertEqual(briefing_service.infer_focus_items(["Detail table"], ["search field tab"], target="frontend")[-1], "如果页面字段或表格很多，建议先拆清搜索区、结果区和详情区。")
+        self.assertEqual(briefing_service.infer_focus_items(["Report"], ["download approval submit"], target="backend")[-1], "涉及下载、提交、审批或审计记录的逻辑，后端规则要先定清楚。")
+        self.assertIn("校验规则", infer_engineering_focus_zh("Validation", "required must cannot only")[0])
+        self.assertTrue(any("默认值" in item for item in briefing_service.derive_source_signals_zh("By default the field is hidden.")))
+        self.assertIn("哪些字段显示", briefing_service.derive_source_signals_zh("show display visible hidden")[0])
+
+    def test_presentation_parsing_media_and_timing_edges(self):
+        self.assertEqual(extract_json_array_text("prefix [{\"id\":\"1\"}] suffix"), '[{"id":"1"}]')
+        self.assertEqual(extract_json_array_text("```json\n[{\"id\":\"1\"}]\n```"), '[{"id":"1"}]')
+        self.assertEqual(extract_json_array_text("no array"), "no array")
+        self.assertEqual(normalize_image_urls("bad"), [])
+        self.assertEqual(normalize_image_urls(["", "ftp://bad", "https://x/a.png", "https://x/a.png"]), ["https://x/a.png"])
+        self.assertEqual(normalize_presentation_media({"type": "video", "content": "x"}), {"type": "none", "content": ""})
+        self.assertEqual(briefing_service.normalize_media_ref("see MEDIA_ID_42 now"), "MEDIA_ID_42")
+        self.assertEqual(briefing_service.normalize_media_ref("none"), "")
+        self.assertEqual(briefing_service.build_presentation_cache_key("page", ""), "page")
+
+        chunks = attach_presentation_media(
+            [{"content": "body", "mediaRef": "MEDIA_ID_1", "imageUrls": ["https://x/old.png"]}],
+            {"MEDIA_ID_1": {"type": "image", "content": "/prd-briefing/image-proxy?src=x"}},
+        )
+        self.assertEqual(chunks[0]["media_ref"], "MEDIA_ID_1")
+        self.assertEqual(chunks[0]["imageUrls"][0], "/prd-briefing/image-proxy?src=x")
+
+        with self.assertRaisesRegex(ValueError, "usable chunks"):
+            normalize_presentation_chunks([{"content": ""}])
+        normalized = normalize_presentation_chunks([{"content": "中文api测试", "mediaRef": "MEDIA_ID_2"}])
+        self.assertIn("API", normalized[0]["content"])
+        self.assertEqual(normalized[0]["media_ref"], "MEDIA_ID_2")
+
+        self.assertEqual(split_presentation_sentences(""), [])
+        self.assertEqual(estimate_tts_duration_seconds("", language_code="zh"), 1.0)
+        self.assertIsNone(duration_from_edge_boundaries([{"offset": "bad"}]))
+        self.assertEqual(duration_from_edge_boundaries([{"Offset": 10_000_000, "Duration": 5_000_000}]), 1.5)
+        timestamps = build_sentence_timestamps("第一句。第二句。", duration_seconds=4.0)
+        self.assertEqual(timestamps[-1]["end"], 4.0)
+        self.assertEqual(optimize_tts_text("short english", language_code="en"), "short english")
+        long_text = "这是一句很长的话。" * 80
+        self.assertLessEqual(len(optimize_tts_text(long_text, language_code="zh")), 421)
+        no_sentence = "长" * 500
+        self.assertTrue(optimize_tts_text(no_sentence, language_code="zh").endswith("。"))
+
+    def test_prompt_and_json_helpers_cover_english_and_fence_paths(self):
+        section_prompt = build_walkthrough_section_user_prompt(section={"section_path": "S", "briefing_summary": "", "content": "Body"}, notes=[], language="en")
+        self.assertIn("sentences in English", section_prompt)
+        self.assertIn("Source:", section_prompt)
+        self.assertIn("Body", section_prompt)
+        self.assertNotIn("Presenter notes:", section_prompt)
+        self.assertNotIn("Presenter summary:", section_prompt)
+        deduped_notes_prompt = build_walkthrough_section_user_prompt(
+            section={"section_path": "S", "briefing_summary": "", "content": "Body"},
+            notes=["", "Validate maker approval.", "validate maker approval.", None],
+            language="zh",
+        )
+        self.assertEqual(deduped_notes_prompt.count("Validate maker approval."), 1)
+        block_prompt = build_walkthrough_block_user_prompt(block={"title": "B", "briefing_goal": "", "merged_summary": "", "developer_focus": []}, source_lines=[], language="en")
+        self.assertIn("natural spoken script", block_prompt)
+        self.assertNotIn("Developer focus:", block_prompt)
+        self.assertNotIn("Related PRD source sections:", block_prompt)
+        self.assertIn("English briefing outline", build_presentation_system_prompt("en"))
+        self.assertIn("English presentation chunks", build_presentation_user_prompt(source_text="Source", image_urls=[], language="en"))
+        self.assertEqual(briefing_service.strip_code_fences("```json\n{\"a\":1}\n```"), '{"a":1}')
+        parsed = parse_session_overview(
+            """```json
+            {"overview":"O","scope":["S"],"impacted_modules":["M"],"developer_focus":["D"],"frontend_focus":["F"],"backend_focus":["B"],"risks":["R"],"unclear_rules":["U"],"missing_edge_cases":["E"],"unclear_ownership":["O"],"open_questions":["Q"]}
+            ```"""
+        )
+        self.assertEqual(parsed["scope"], ["S"])
+        self.assertEqual(parse_developer_overview_payload("not json")["overview"], "not json")
+        self.assertEqual(parse_developer_overview_payload('{"background_goal":"BG","implementation_overview":"IO"}')["overview"], "BG IO")
+
+    def test_overview_low_signal_and_fallback_detail_branches(self):
+        self.assertTrue(overview_is_low_signal({"overview": "", "scope": [], "developer_focus": []}))
+        self.assertTrue(overview_is_low_signal({"overview": "ok", "scope": [], "developer_focus": ["Date: 24 Nov 2025"]}))
+        self.assertTrue(overview_is_low_signal({"overview": "ok", "scope": ["Version: v1"], "developer_focus": ["field display rule"]}))
+        self.assertTrue(
+            overview_is_low_signal(
+                {
+                    "overview": "ok",
+                    "scope": ["核心业务流程"],
+                    "developer_focus": ["页面动作", "状态变化", "核心业务流程", "规则约束展开"],
+                    "frontend_focus": [],
+                    "backend_focus": [],
+                    "risks": [],
+                    "unclear_rules": [],
+                    "missing_edge_cases": [],
+                    "unclear_ownership": [],
+                    "open_questions": [],
+                }
+            )
+        )
+        self.assertTrue(
+            overview_is_low_signal(
+                {
+                    "overview": "ok",
+                    "scope": [],
+                    "developer_focus": [],
+                    "impacted_modules": ["Version"],
+                    "frontend_focus": ["Date"],
+                    "backend_focus": ["PIC"],
+                    "risks": ["Owner"],
+                }
+            )
+        )
+        self.assertEqual(normalize_overview_list(["", "Version: v1", "Field rule"]), ["Field rule"])
+        self.assertTrue(briefing_service.looks_like_metadata_noise("hello@example.com"))
+        self.assertTrue(briefing_service.looks_like_metadata_noise("release v1.2"))
+        self.assertTrue(briefing_service.looks_like_metadata_noise("24 November 2025"))
+
+        overview = briefing_service.build_chinese_fallback_overview(
+            "Plain",
+            [{"section_path": "Plain", "content": "No special product keywords here."}],
+        )
+        self.assertIn("主要围绕页面操作流程", overview)
+        detailed = briefing_service.build_chinese_fallback_overview(
+            "Detail",
+            [
+                {
+                    "section_path": "Detail",
+                    "content": "assessment id view the assessment detail overview tab withdraw comment review comment submit comment details tab closed verified draft pending review auto populate default required readonly sg regional",
+                }
+            ],
+        )
+        self.assertIn("评估详情", detailed)
+        self.assertIn("comment 区域", detailed)
+        self.assertIn("状态流转", detailed)
+        two_part = briefing_service.build_two_part_fallback_overview(
+            "Report",
+            [{"section_path": "Report", "content": "report download history register closed verified default show display"}],
+        )
+        self.assertIn("报表", two_part["background_goal"])
+        self.assertIn("按钮", two_part["implementation_overview"])
+
+        candidates = briefing_service.extract_candidate_sentences(
+            [{"section_path": "3. Field", "content": "Short. This sentence is long enough for extraction."}],
+            limit=3,
+        )
+        self.assertEqual(candidates, ["This sentence is long enough for extraction."])
+        self.assertEqual(
+            briefing_service.extract_candidate_sentences(
+                [{"section_path": "3. Field", "content": "这是一个中文短句字段. Another sentence is long enough for extraction."}],
+                limit=3,
+            ),
+            ["Another sentence is long enough for extraction."],
+        )
 
 
 if __name__ == "__main__":

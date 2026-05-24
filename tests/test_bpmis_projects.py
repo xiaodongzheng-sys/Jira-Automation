@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from bpmis_jira_tool.bpmis_projects import BPMISProjectStore, PortalJiraCreationService, PortalProjectSyncService
-from bpmis_jira_tool.errors import BPMISError
+from bpmis_jira_tool.errors import BPMISError, ToolError
 from bpmis_jira_tool.models import CreatedTicket
 from bpmis_jira_tool.user_config import WebConfigStore
 
@@ -212,6 +212,87 @@ class BPMISProjectStoreTests(unittest.TestCase):
             self.assertEqual(["225161", "225159", "225160"], [project["bpmis_id"] for project in reordered])
             self.assertEqual(["225161", "225159", "225160"], [project["bpmis_id"] for project in store.list_projects(user_key="google:pm@npt.sg")])
 
+    def test_store_validation_migration_and_ticket_edges(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "team_portal.db"
+            store = BPMISProjectStore(db_path)
+
+            with self.assertRaisesRegex(ToolError, "User identity"):
+                store.list_projects(user_key="")
+            with self.assertRaisesRegex(ToolError, "BPMIS ID"):
+                store.get_project(user_key="google:pm@npt.sg", bpmis_id="")
+            self.assertIsNone(store.get_project(user_key="google:pm@npt.sg", bpmis_id="missing"))
+            self.assertEqual(store.reorder_projects(user_key="google:pm@npt.sg", bpmis_ids=["", "225159", "225159"]), [])
+            self.assertEqual(store.reorder_projects(user_key="google:pm@npt.sg", bpmis_ids=["", None]), [])
+
+            store.upsert_project(
+                user_key="google:pm@npt.sg",
+                bpmis_id="225159",
+                project_name="Fraud Rule",
+                brd_link="",
+                market="SG",
+            )
+            self.assertFalse(store.update_project_comment(user_key="google:pm@npt.sg", bpmis_id="missing", pm_comment="x"))
+            self.assertIsNone(store.upsert_synced_jira_ticket(user_key="google:pm@npt.sg", bpmis_id="225159"))
+
+            ticket = store.upsert_synced_jira_ticket(
+                user_key="google:pm@npt.sg",
+                bpmis_id="225159",
+                ticket_link="https://jira/browse/AF-1",
+                jira_title="Imported",
+                raw_response={"ok": True},
+            )
+            updated = store.upsert_synced_jira_ticket(
+                user_key="google:pm@npt.sg",
+                bpmis_id="225159",
+                ticket_key="AF-1",
+                ticket_link="https://jira/browse/AF-1",
+                market="SG",
+                status="Testing",
+                raw_response={"updated": True},
+            )
+            self.assertEqual(ticket["id"], updated["id"])
+            self.assertEqual(updated["status"], "Testing")
+
+            with self.assertRaisesRegex(ToolError, "Jira task ID"):
+                store.delete_jira_ticket(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id="")
+            with self.assertRaisesRegex(ToolError, "Jira task ID"):
+                store.update_jira_ticket_status(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id="", status="Done")
+            with self.assertRaisesRegex(ToolError, "Jira status"):
+                store.update_jira_ticket_status(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id=updated["id"], status="")
+            with self.assertRaisesRegex(ToolError, "Jira task ID"):
+                store.update_jira_ticket_version(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id="", version_name="v1")
+            with self.assertRaisesRegex(ToolError, "Jira fix version"):
+                store.update_jira_ticket_version(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id=updated["id"], version_name="")
+            self.assertEqual(BPMISProjectStore._loads_json("not-json"), {})
+            self.assertEqual(BPMISProjectStore._loads_json("[]"), {})
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "legacy.db"
+            import sqlite3
+
+            with sqlite3.connect(db_path) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE bpmis_projects (
+                        user_key TEXT NOT NULL,
+                        bpmis_id TEXT NOT NULL,
+                        project_name TEXT NOT NULL DEFAULT '',
+                        brd_link TEXT NOT NULL DEFAULT '',
+                        market TEXT NOT NULL DEFAULT '',
+                        deleted_at TEXT,
+                        synced_at TEXT,
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (user_key, bpmis_id)
+                    )
+                    """
+                )
+                connection.commit()
+            migrated = BPMISProjectStore(db_path)
+            migrated.upsert_project(user_key="u", bpmis_id="1", project_name="p", brd_link="", market="")
+            self.assertIn("pm_comment", migrated.list_projects(user_key="u")[0])
+
     def test_portal_sync_restores_portal_removed_projects_returned_by_bpmis(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = BPMISProjectStore(Path(temp_dir) / "team_portal.db")
@@ -302,6 +383,82 @@ class BPMISProjectStoreTests(unittest.TestCase):
 
             self.assertEqual(["updated", "created"], [result.status for result in results])
             self.assertEqual("Fraud Rule Upgrade", store.get_project(user_key="google:pm@npt.sg", bpmis_id="225159")["project_name"])
+
+    def test_portal_sync_error_and_fallback_edges(self):
+        class MissingIssueClient(FakeBPMISClient):
+            def list_biz_projects_for_pm_email(self, _email):
+                return [{"issue_id": "", "project_name": "Broken", "market": ""}]
+
+        class NoBulkNoSingleClient(FakeBPMISClient):
+            list_jira_tasks_for_projects_created_by_emails = None
+            list_jira_tasks_for_project_created_by_email = None
+
+            def __getattribute__(self, name):
+                if name in {"list_jira_tasks_for_projects_created_by_emails", "list_jira_tasks_for_project_created_by_email"}:
+                    raise AttributeError(name)
+                return super().__getattribute__(name)
+
+        class BrokenBulkClient(FakeBPMISClient):
+            def list_jira_tasks_for_projects_created_by_emails(self, project_issue_ids, emails):
+                raise BPMISError("bulk unavailable")
+
+            def list_jira_tasks_for_project_created_by_email(self, project_issue_id, email):
+                raise BPMISError("single unavailable")
+
+        class WeirdBulkClient(FakeBPMISClient):
+            def list_jira_tasks_for_projects_created_by_emails(self, project_issue_ids, emails):
+                return {"": [{"ticket_key": "skip"}], "225159": ["bad", {"ticket_key": "", "ticket_link": ""}]}
+
+        class NonDictBulkClient(FakeBPMISClient):
+            def list_jira_tasks_for_projects_created_by_emails(self, project_issue_ids, emails):
+                return "bad"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = BPMISProjectStore(Path(temp_dir) / "team_portal.db")
+            service = PortalProjectSyncService(store, MissingIssueClient())
+            progress = []
+            results = service.sync_projects(user_key="google:pm@npt.sg", pm_email="pm@npt.sg", progress_callback=lambda *args: progress.append(args))
+            self.assertEqual(results[0].status, "error")
+            self.assertEqual(progress[0][0], "fetching")
+            self.assertEqual(progress[-1][0], "completed")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = BPMISProjectStore(Path(temp_dir) / "team_portal.db")
+            service = PortalProjectSyncService(store, NoBulkNoSingleClient())
+            self.assertEqual(service._bulk_jira_tasks_by_project(["225159"], "pm@npt.sg"), None)
+            self.assertEqual(service._sync_project_jira_tasks(user_key="u", bpmis_id="225159", pm_email="pm@npt.sg"), 0)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = BPMISProjectStore(Path(temp_dir) / "team_portal.db")
+            service = PortalProjectSyncService(store, BrokenBulkClient())
+            self.assertIsNone(service._bulk_jira_tasks_by_project(["225159"], "pm@npt.sg"))
+            self.assertEqual(service._sync_project_jira_tasks(user_key="u", bpmis_id="225159", pm_email="pm@npt.sg"), 0)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = BPMISProjectStore(Path(temp_dir) / "team_portal.db")
+            service = PortalProjectSyncService(store, WeirdBulkClient())
+            self.assertEqual(service._bulk_jira_tasks_by_project(["225159"], "pm@npt.sg"), {"225159": [{"ticket_key": "", "ticket_link": ""}]})
+            self.assertEqual(
+                service._sync_project_jira_tasks(
+                    user_key="u",
+                    bpmis_id="225159",
+                    pm_email="pm@npt.sg",
+                    preloaded_tasks=[
+                        "bad",
+                        {"prd_links": [" https://docs/prd "], "ticket_key": "AF-1", "summary": "Summary"},
+                    ],
+                ),
+                1,
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = PortalProjectSyncService(BPMISProjectStore(Path(temp_dir) / "team_portal.db"), NonDictBulkClient())
+            self.assertIsNone(service._bulk_jira_tasks_by_project(["225159"], "pm@npt.sg"))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = PortalProjectSyncService(BPMISProjectStore(Path(temp_dir) / "team_portal.db"), FakeBPMISClient())
+            with self.assertRaisesRegex(ToolError, "PM email"):
+                service.sync_projects(user_key="google:pm@npt.sg", pm_email="")
 
     def test_portal_jira_creation_uses_preformatted_title_and_allows_append(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -401,6 +558,196 @@ class BPMISProjectStoreTests(unittest.TestCase):
             self.assertTrue(service.delete_ticket(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id=tickets[0]["id"]))
             self.assertEqual(bpmis_client.delink_calls, [("AF-1", "225159")])
             self.assertEqual(len(service.list_tickets(user_key="google:pm@npt.sg", bpmis_id="225159")), 1)
+
+    def test_portal_jira_creation_error_and_live_detail_edges(self):
+        class NoCapabilityClient(FakeBPMISClient):
+            def __getattribute__(self, name):
+                if name in {
+                    "delink_jira_ticket_from_project",
+                    "update_jira_ticket_status",
+                    "update_jira_ticket_fix_version",
+                    "get_jira_ticket_details",
+                }:
+                    raise AttributeError(name)
+                return super().__getattribute__(name)
+
+        class ErrorClient(FakeBPMISClient):
+            def delink_jira_ticket_from_project(self, ticket_key, project_issue_id):
+                raise BPMISError("delink failed")
+
+            def update_jira_ticket_status(self, ticket_key, status):
+                raise BPMISError("status failed")
+
+            def update_jira_ticket_fix_version(self, ticket_key, version_name, version_id=None):
+                raise BPMISError("version failed")
+
+            def get_jira_ticket_detail(self, ticket_key):
+                raise BPMISError("detail failed")
+
+            def get_jira_ticket_details(self, ticket_keys):
+                raise BPMISError("bulk detail failed")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = BPMISProjectStore(Path(temp_dir) / "team_portal.db")
+            config_store = WebConfigStore(Path(temp_dir))
+            config = config_store._normalize(
+                {
+                    "component_route_rules_text": "AF | SG | DBP-Anti-fraud\nBroken | SG | Broken-System",
+                    "component_default_rules_text": "DBP-Anti-fraud | assignee | dev | qa | Planning_26Q2",
+                    "need_uat_by_market": "bad",
+                }
+            )
+            store.upsert_project(user_key="google:pm@npt.sg", bpmis_id="225159", project_name="Fraud Rule", brd_link="", market="SG")
+            service = PortalJiraCreationService(store=store, bpmis_client=FakeBPMISClient(), config_store=config_store, config_data=config)
+
+            with self.assertRaisesRegex(ToolError, "not found"):
+                service.jira_options(user_key="google:pm@npt.sg", bpmis_id="missing")
+            with self.assertRaisesRegex(ToolError, "not found"):
+                service.create_tickets(user_key="google:pm@npt.sg", bpmis_id="missing", items=[{"component": "x", "market": "SG"}])
+            with self.assertRaisesRegex(ToolError, "At least one"):
+                service.create_tickets(user_key="google:pm@npt.sg", bpmis_id="225159", items=[])
+            self.assertEqual(
+                service.create_tickets(user_key="google:pm@npt.sg", bpmis_id="225159", items=[{"component": "Unknown", "market": "SG"}])[0]["status"],
+                "error",
+            )
+            results = service.create_tickets(
+                user_key="google:pm@npt.sg",
+                bpmis_id="225159",
+                items=[
+                    {"component": "DBP-Anti-fraud", "market": "SG", "jira_title": ""},
+                    {"component": "Broken", "market": "SG", "jira_title": "Broken"},
+                ],
+            )
+            self.assertEqual(results[0]["status"], "created")
+            self.assertEqual(results[1]["status"], "error")
+            self.assertEqual(service.default_jira_title(project_name="Fraud Rule", system=""), "[Feature]Fraud Rule")
+            service.config_data["need_uat_by_market"] = "bad"
+            self.assertEqual(service._need_uat_for_market("SG"), "")
+
+            no_route_store = WebConfigStore(Path(temp_dir) / "no-route")
+            no_route = PortalJiraCreationService(
+                store=store,
+                bpmis_client=FakeBPMISClient(),
+                config_store=no_route_store,
+                config_data=no_route_store._normalize({"component_route_rules_text": ""}),
+            )
+            with self.assertRaisesRegex(ToolError, "routing is required"):
+                no_route.jira_options(user_key="google:pm@npt.sg", bpmis_id="225159")
+
+            config_store._parse_component_route_rules = lambda _text: [
+                {"component": "", "market": "SG", "system": "AF"},
+                {"component": "SkipMarket", "market": "", "system": "AF"},
+                {"component": "Broken", "market": "SG", "system": "AF"},
+            ]
+            config_store._parse_component_default_rules = lambda _text: []
+            broken_route_service = PortalJiraCreationService(
+                store=store,
+                bpmis_client=FakeBPMISClient(),
+                config_store=config_store,
+                config_data=config,
+            )
+            self.assertEqual([item["component"] for item in broken_route_service.jira_options(user_key="google:pm@npt.sg", bpmis_id="225159")["components"]], ["Broken"])
+            self.assertEqual(
+                broken_route_service.create_tickets(
+                    user_key="google:pm@npt.sg",
+                    bpmis_id="225159",
+                    items=[{"component": "Broken", "market": "SG", "jira_title": "Broken"}],
+                )[0]["status"],
+                "error",
+            )
+
+            ticket = store.add_jira_ticket(
+                user_key="google:pm@npt.sg",
+                bpmis_id="225159",
+                component="",
+                market="",
+                system="",
+                jira_title="Stored title",
+                prd_link="",
+                description="",
+                fix_version_name="",
+                ticket_key="",
+                ticket_link="https://jira/browse/AF-LINK",
+                raw_response={"marketId": {"label": "SG"}, "componentId": {"label": "AF"}, "system": "Risk"},
+            )
+            error_service = PortalJiraCreationService(store=store, bpmis_client=ErrorClient(), config_store=config_store, config_data=config)
+            live = error_service.list_tickets(user_key="google:pm@npt.sg", bpmis_id="225159", include_live=True)
+            self.assertTrue(any("live_error" in item for item in live))
+            self.assertEqual(error_service._tickets_with_live_jira_fields([]), [])
+            enriched = error_service._ticket_with_live_jira_fields_from_detail(
+                ticket,
+                {"summary": "Live", "status": {"label": "Done"}, "fixVersions": [{"name": "v1"}], "components": [{"name": "AF"}]},
+            )
+            self.assertEqual(enriched["market"], "SG")
+            self.assertEqual(enriched["component"], "AF")
+            self.assertEqual(enriched["system"], "Risk")
+
+            with self.assertRaisesRegex(ToolError, "not found"):
+                error_service.list_tickets(user_key="google:pm@npt.sg", bpmis_id="missing")
+            fake_ticket_store = type(
+                "FakeTicketStore",
+                (),
+                {"get_project": lambda self, **kwargs: {"jira_tickets": "not-a-list"}},
+            )()
+            fake_ticket_service = PortalJiraCreationService(
+                store=fake_ticket_store,
+                bpmis_client=FakeBPMISClient(),
+                config_store=config_store,
+                config_data=config,
+            )
+            self.assertEqual(fake_ticket_service.list_tickets(user_key="u", bpmis_id="1"), [])
+            with self.assertRaisesRegex(ToolError, "not found"):
+                error_service.delete_ticket(user_key="google:pm@npt.sg", bpmis_id="missing", ticket_id=ticket["id"])
+            with self.assertRaisesRegex(ToolError, "not found"):
+                error_service.delete_ticket(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id="999")
+            no_key = store.add_jira_ticket(
+                user_key="google:pm@npt.sg",
+                bpmis_id="225159",
+                component="",
+                market="",
+                system="",
+                jira_title="No key",
+                prd_link="",
+                description="",
+                fix_version_name="",
+            )
+            with self.assertRaisesRegex(ToolError, "does not have a Jira key"):
+                error_service.delete_ticket(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id=no_key["id"])
+            with self.assertRaisesRegex(ToolError, "delink failed"):
+                error_service.delete_ticket(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id=ticket["id"])
+            no_capability_service = PortalJiraCreationService(store=store, bpmis_client=NoCapabilityClient(), config_store=config_store, config_data=config)
+            with self.assertRaisesRegex(ToolError, "does not support delinking"):
+                no_capability_service.delete_ticket(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id=ticket["id"])
+            with self.assertRaisesRegex(ToolError, "not found"):
+                error_service.update_ticket_status(user_key="google:pm@npt.sg", bpmis_id="missing", ticket_id=ticket["id"], status="Done")
+            with self.assertRaisesRegex(ToolError, "Jira task was not found"):
+                error_service.update_ticket_status(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id="999", status="Done")
+            with self.assertRaisesRegex(ToolError, "does not have a Jira key"):
+                error_service.update_ticket_status(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id=no_key["id"], status="Done")
+            with self.assertRaisesRegex(ToolError, "does not support updating Jira status"):
+                no_capability_service.update_ticket_status(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id=ticket["id"], status="Done")
+            with self.assertRaisesRegex(ToolError, "status failed"):
+                error_service.update_ticket_status(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id=ticket["id"], status="Done")
+            with self.assertRaisesRegex(ToolError, "not found"):
+                error_service.update_ticket_version(user_key="google:pm@npt.sg", bpmis_id="missing", ticket_id=ticket["id"], version_name="v1")
+            with self.assertRaisesRegex(ToolError, "Jira task was not found"):
+                error_service.update_ticket_version(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id="999", version_name="v1")
+            with self.assertRaisesRegex(ToolError, "does not have a Jira key"):
+                error_service.update_ticket_version(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id=no_key["id"], version_name="v1")
+            with self.assertRaisesRegex(ToolError, "fix version is required"):
+                error_service.update_ticket_version(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id=ticket["id"], version_name="")
+            with self.assertRaisesRegex(ToolError, "does not support updating Jira fix version"):
+                no_capability_service.update_ticket_version(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id=ticket["id"], version_name="v1")
+            with self.assertRaisesRegex(ToolError, "version failed"):
+                error_service.update_ticket_version(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id=ticket["id"], version_name="v1")
+
+            self.assertEqual(PortalJiraCreationService._normalize_ticket_key("https://jira/browse/af-1"), "AF-1")
+            self.assertEqual(PortalJiraCreationService._extract_first_value("bad", "summary"), None)
+            self.assertEqual(PortalJiraCreationService._extract_first_text({"fields": {"Summary": "Nested"}}, "summary"), "Nested")
+            self.assertEqual(PortalJiraCreationService._stringify_status({"label": "Done"}), "Done")
+            self.assertEqual(PortalJiraCreationService._stringify_version([{"fullName": "v1"}, {"name": "v2"}]), "v1, v2")
+            self.assertEqual(PortalJiraCreationService._stringify_value({"unknown": "x"}), "")
+            self.assertEqual(PortalJiraCreationService._stringify_value(123), "123")
 
 
 if __name__ == "__main__":

@@ -1493,7 +1493,7 @@ class GmailDashboardService:
                 if attempt == max_attempts - 1:
                     raise ToolError(transient_message) from error
                 self._sleep_before_gmail_retry(attempt)
-        raise ToolError(transient_message)
+        raise ToolError(transient_message)  # pragma: no cover - defensive fallback; loop always returns or raises.
 
     def is_export_noise(self, headers: dict[str, str]) -> bool:
         return _is_export_noise(headers, self.report_intelligence_config)

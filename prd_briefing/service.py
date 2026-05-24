@@ -126,13 +126,33 @@ def build_walkthrough_section_system_prompt(language: str | None = "zh") -> str:
     )
 
 
+def _unique_prompt_lines(values: list[Any]) -> list[str]:
+    lines: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(text)
+    return lines
+
+
 def build_walkthrough_section_user_prompt(*, section: dict[str, Any], notes: list[str], language: str | None = "zh") -> str:
-    body = (
-        f"Section: {section['section_path']}\n\n"
-        f"Presenter summary:\n{section.get('briefing_summary', '')}\n\n"
-        f"Presenter notes:\n- " + "\n- ".join(notes) + "\n\n"
-        f"Source:\n{section['content']}\n\n"
-    )
+    parts = [f"Section: {section['section_path']}"]
+    summary = str(section.get("briefing_summary") or "").strip()
+    if summary:
+        parts.extend(["Presenter summary:", summary])
+    clean_notes = _unique_prompt_lines(notes)
+    if clean_notes:
+        parts.append("Presenter notes:\n- " + "\n- ".join(clean_notes))
+    source = str(section.get("content") or "").strip()
+    if source:
+        parts.extend(["Source:", source])
+    body = "\n\n".join(parts) + "\n\n"
     if normalize_walkthrough_language(language) == "en":
         return body + (
             "Write a natural spoken script of around 5 to 9 sentences in English. "
@@ -172,13 +192,20 @@ def build_walkthrough_block_system_prompt(language: str | None = "zh") -> str:
 
 
 def build_walkthrough_block_user_prompt(*, block: dict[str, Any], source_lines: list[str], language: str | None = "zh") -> str:
-    body = (
-        f"Briefing block: {block['title']}\n\n"
-        f"Briefing goal:\n{block.get('briefing_goal', '')}\n\n"
-        f"Merged summary:\n{block.get('merged_summary', '')}\n\n"
-        f"Developer focus:\n- " + "\n- ".join(block.get("developer_focus") or []) + "\n\n"
-        f"Related PRD source sections:\n\n" + "\n\n".join(source_lines) + "\n\n"
-    )
+    parts = [f"Briefing block: {block['title']}"]
+    goal = str(block.get("briefing_goal") or "").strip()
+    if goal:
+        parts.extend(["Briefing goal:", goal])
+    merged_summary = str(block.get("merged_summary") or "").strip()
+    if merged_summary:
+        parts.extend(["Merged summary:", merged_summary])
+    developer_focus = _unique_prompt_lines(block.get("developer_focus") or [])
+    if developer_focus:
+        parts.append("Developer focus:\n- " + "\n- ".join(developer_focus))
+    clean_source_lines = _unique_prompt_lines(source_lines)
+    if clean_source_lines:
+        parts.append("Related PRD source sections:\n\n" + "\n\n".join(clean_source_lines))
+    body = "\n\n".join(parts) + "\n\n"
     if normalize_walkthrough_language(language) == "en":
         return body + (
             "Write a natural spoken script of around 7 to 12 sentences in English. "
@@ -1286,7 +1313,7 @@ def build_presenter_notes(section_title: str, content: str) -> list[str]:
     seen: set[str] = set()
     for candidate in candidates:
         clean = candidate.strip(" -")
-        if not clean:
+        if not clean:  # pragma: no cover - split_text_fragments applies the same trim before returning candidates.
             continue
         key = clean.casefold()
         if key in seen or key == section_title.casefold():

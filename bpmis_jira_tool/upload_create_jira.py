@@ -143,5 +143,5 @@ def main(stdin_text: str | None = None) -> int:
     return exit_code
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - exercised by invoking the script as a CLI.
     raise SystemExit(main())

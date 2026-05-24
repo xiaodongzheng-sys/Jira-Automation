@@ -1,0 +1,327 @@
+{
+  "version": 1,
+  "description": "Reviewable automation coverage matrix for high-use portal scenarios.",
+  "areas": [
+    {
+      "id": "source_code_qa",
+      "label": "Source Code QA",
+      "scenarios": [
+        {
+          "id": "browser_chat_answer_followup",
+          "description": "Browser smoke covers a normal question, rendered answer, and follow-up context.",
+          "tests": ["tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_source_code_qa_chat_answer_and_followup_context_smoke"]
+        },
+        {
+          "id": "local_agent_unavailable_graceful_degradation",
+          "description": "UI and API degrade cleanly when the local-agent is unavailable.",
+          "tests": [
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_source_code_qa_local_agent_unavailable_graceful_degradation_smoke",
+            "tests.test_team_portal_access.TeamPortalAccessTests.test_source_code_qa_config_reports_local_agent_unavailable_without_500"
+          ]
+        },
+        {
+          "id": "access_and_route_error_boundaries",
+          "description": "Page/API access gates and JSON error boundaries are covered.",
+          "tests": ["tests.test_source_code_qa.SourceCodeQARouteTests.test_source_code_qa_route_access_gate_and_json_error_boundaries"]
+        },
+        {
+          "id": "async_query_queue_and_events",
+          "description": "Async query queueing and event stream behavior are covered.",
+          "tests": ["tests.test_source_code_qa.SourceCodeQARouteTests.test_source_code_qa_route_async_queue_and_event_stream_boundaries"]
+        },
+        {
+          "id": "sessions_attachments_artifacts_sql",
+          "description": "Saved sessions, attachment scoping, generated artifacts, and SQL packages are covered.",
+          "tests": [
+            "tests.test_source_code_qa.SourceCodeQARouteTests.test_source_code_qa_session_api_creates_lists_and_loads_session",
+            "tests.test_source_code_qa.SourceCodeQARouteTests.test_source_code_qa_attachment_upload_is_session_scoped",
+            "tests.test_source_code_qa.SourceCodeQARouteTests.test_source_code_qa_sql_answer_creates_downloadable_package"
+          ]
+        },
+        {
+          "id": "release_gate_eval_coverage",
+          "description": "Release gate requires balanced Source Code QA eval and smoke coverage.",
+          "tests": [
+            "tests.test_source_code_qa.SourceCodeQAServiceTests.test_release_gate_evaluator_requires_team_balanced_coverage",
+            "tests.test_source_code_qa.SourceCodeQAServiceTests.test_release_gate_evaluator_requires_country_segment_coverage"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "meeting_recorder",
+      "label": "Meeting Recorder",
+      "scenarios": [
+        {
+          "id": "browser_calendar_start_stop_archive",
+          "description": "Browser smoke covers upcoming calendar meetings, start, stop, and archive rendering.",
+          "tests": ["tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_meeting_recorder_calendar_start_stop_archive_smoke"]
+        },
+        {
+          "id": "route_access_and_local_errors",
+          "description": "Route access gates and local runtime error boundaries are covered.",
+          "tests": [
+            "tests.test_meeting_recorder.MeetingRecorderRouteTests.test_meeting_recorder_route_access_gates_cover_api_and_page_handlers",
+            "tests.test_meeting_recorder.MeetingRecorderRouteTests.test_local_meeting_recorder_route_error_boundaries"
+          ]
+        },
+        {
+          "id": "local_agent_direct_routes_and_assets",
+          "description": "Local-agent direct recording routes and protected media asset paths are covered.",
+          "tests": [
+            "tests.test_local_agent.LocalAgentServerTests.test_signed_meeting_recorder_direct_routes_delegate_to_runtime_and_processing_service",
+            "tests.test_local_agent.LocalAgentServerTests.test_signed_meeting_recorder_asset_supports_range_streaming",
+            "tests.test_local_agent.LocalAgentServerTests.test_signed_meeting_recorder_asset_rejects_active_recording_media"
+          ]
+        },
+        {
+          "id": "processing_jobs_owner_scope_and_failures",
+          "description": "Async processing jobs are owner scoped and failure paths are sanitized.",
+          "tests": [
+            "tests.test_local_agent.LocalAgentServerTests.test_signed_meeting_recorder_process_async_returns_job_and_completes",
+            "tests.test_local_agent.LocalAgentServerTests.test_signed_meeting_recorder_process_job_is_owner_scoped",
+            "tests.test_local_agent.LocalAgentServerTests.test_signed_meeting_recorder_process_async_email_failure_is_sanitized_and_saved"
+          ]
+        },
+        {
+          "id": "runtime_lifecycle_audio_health",
+          "description": "Recording lifecycle, audio preflight, signal checks, and health summaries are covered.",
+          "tests": [
+            "tests.test_meeting_recorder.MeetingRecorderRuntimeTests.test_calendar_meeting_schedules_auto_stop_twenty_minutes_after_planned_end",
+            "tests.test_meeting_recorder.MeetingRecorderRuntimeTests.test_linked_meeting_recording_uses_screencapturekit_audio_helper",
+            "tests.test_web_core_coverage.WebCoreCoverageTests.test_meeting_recorder_and_monthly_report_job_helper_edges"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "team_dashboard",
+      "label": "Team Dashboard",
+      "scenarios": [
+        {
+          "id": "version_plan_browser_core",
+          "description": "Browser smoke covers version plan rendering, manual row controls, conflict retry, and PM filtering.",
+          "tests": [
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_cloud_home_opens_standalone_version_plan_smoke",
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_team_dashboard_version_plan_manual_row_controls_smoke",
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_team_dashboard_version_plan_conflict_refreshes_and_retries_row_action_smoke",
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_team_dashboard_version_plan_pm_filter_smoke"
+          ]
+        },
+        {
+          "id": "project_status_browser_and_api",
+          "description": "Project status editing updates BPMIS and cached dashboard payloads.",
+          "tests": [
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_team_dashboard_project_status_editing_smoke",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_project_status_updates_bpmis_and_cached_payload"
+          ]
+        },
+        {
+          "id": "tasks_grouping_cache_and_reload",
+          "description": "Task grouping, persisted cache, single-team reload, and actual mandays refresh are covered.",
+          "tests": [
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_tasks_api_groups_under_prd_and_pending_live_by_team",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_tasks_persist_until_explicit_reload",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_tasks_can_load_one_team_at_a_time",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_actual_mandays_are_queued_without_blocking_task_load"
+          ]
+        },
+        {
+          "id": "link_biz_project_workflow",
+          "description": "Biz-project linking suggestions, scoped options, success, failure, and cross-PM rejection are covered.",
+          "tests": [
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_link_biz_project_suggestions_are_scoped_to_jira_pm",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_link_biz_project_links_real_bpmis_without_updating_my_projects",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_link_biz_project_failure_does_not_update_portal_cache",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_link_biz_project_rejects_cross_pm_project"
+          ]
+        },
+        {
+          "id": "prd_summary_review_async",
+          "description": "Team Dashboard PRD summary and review async workflows are covered.",
+          "tests": [
+            "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_team_dashboard_prd_summary_and_review_async_smoke",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_prd_review_can_queue_async_job",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_prd_summary_can_queue_async_job"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "productization_summary",
+      "label": "Productization Summary",
+      "scenarios": [
+        {
+          "id": "page_tab_rendering",
+          "description": "Portal renders the Productization Summary workspace tab and required frontend assets.",
+            "tests": [
+              "tests.test_web_portal_features.WebPortalFeatureTests.test_index_renders_setup_run_and_productization_tabs",
+              "tests.test_team_portal_access.TeamPortalAccessTests.test_non_admin_rendered_pages_have_expected_smoke_contracts"
+          ]
+        },
+        {
+          "id": "version_search",
+          "description": "Version search returns normalized candidate versions and stable JSON on failures.",
+          "tests": [
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_productization_versions_api_returns_normalized_candidates",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_productization_versions_api_returns_json_for_unexpected_errors"
+          ]
+        },
+        {
+          "id": "issue_lookup_and_team_filter",
+          "description": "Issue lookup normalizes rows and applies AF team filtering, with show-all override.",
+          "tests": [
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_productization_issues_api_returns_normalized_rows",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_productization_issues_api_filters_to_anti_fraud_components_for_af_team",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_productization_issues_api_can_show_all_before_team_filtering_for_af_team"
+          ]
+        },
+        {
+          "id": "llm_description_generation",
+          "description": "Description generation works through portal and local-agent paths.",
+          "tests": [
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_productization_llm_descriptions_api_generates_description_separately",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_productization_llm_description_generator_uses_local_agent_when_enabled"
+          ]
+        },
+        {
+          "id": "external_failure_matrix",
+          "description": "External BPMIS/Codex failures return stable sanitized JSON payloads.",
+          "tests": [
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_productization_external_failure_matrix_returns_stable_json",
+            "tests.test_small_module_coverage.SmallModuleCoverageTests.test_productization_route_handlers_cover_tool_and_unexpected_errors"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "daily_brief",
+      "label": "Daily Brief",
+      "scenarios": [
+        {
+          "id": "brief_generation_signal_filtering",
+          "description": "Daily brief generation filters reminders, alerts, duplicate topics, and low-signal items.",
+          "tests": [
+            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_build_daily_briefing_filters_reminders_and_other_updates",
+            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_build_daily_briefing_ignores_bot_alerts_and_reminders",
+            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_build_daily_briefing_suppresses_cross_section_duplicate_topics"
+          ]
+        },
+        {
+          "id": "gmail_and_seatalk_source_mix",
+          "description": "Generation handles Gmail-only, SeaTalk-only, and mixed source evidence.",
+          "tests": [
+            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_build_daily_briefing_includes_gmail_threads_even_without_seatalk_messages",
+            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_build_daily_briefing_uses_gmail_ref_for_project_update_evidence",
+            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_build_daily_briefing_repairs_wrong_source_from_ref_and_normalizes_duplicate_group"
+          ]
+        },
+        {
+          "id": "report_intelligence_injection",
+          "description": "Daily brief injects only matched report intelligence context.",
+          "tests": ["tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_build_daily_briefing_injects_only_matched_report_intelligence"]
+        },
+        {
+          "id": "send_schedule_archive_and_failures",
+          "description": "Scheduled send skips duplicates/weekends, archives sent output, and reports Gmail failures.",
+          "tests": [
+            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_send_daily_email_skips_existing_run_before_work",
+            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_send_daily_email_skips_weekend_before_work",
+            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_send_daily_email_archives_body_and_force_overwrites",
+            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_send_daily_email_reports_gmail_export_timeout"
+          ]
+        },
+        {
+          "id": "portal_archive_and_pdf",
+          "description": "Team Dashboard daily brief routes list archives, download PDF, and local-agent fallback.",
+          "tests": [
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_daily_brief_list_and_download_pdf",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_daily_brief_uses_local_agent_when_enabled",
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_daily_brief_pdf_prefers_html_formatting"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "report_intelligence",
+      "label": "Report Intelligence",
+      "scenarios": [
+        {
+          "id": "config_normalization_and_matching",
+          "description": "VIP, project, and keyword matching is normalized and scoped.",
+          "tests": [
+            "tests.test_report_intelligence.ReportIntelligenceTests.test_daily_summary_only_includes_matched_config_items",
+            "tests.test_report_intelligence.ReportIntelligenceTests.test_noise_helpers_cover_gmail_and_non_seatalk_boundaries"
+          ]
+        },
+        {
+          "id": "storage_load_boundaries",
+          "description": "Configuration loading handles missing, corrupt, and invalid storage payloads.",
+          "tests": ["tests.test_report_intelligence.ReportIntelligenceTests.test_load_report_intelligence_config_handles_storage_boundaries"]
+        },
+        {
+          "id": "team_dashboard_save_access",
+          "description": "Team Dashboard save normalizes config and enforces admin-only writes.",
+          "tests": ["tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_report_intelligence_save_normalizes_and_requires_admin"]
+        },
+        {
+          "id": "monthly_report_uses_intelligence",
+          "description": "Monthly report/daily brief generation uses matched report intelligence context.",
+            "tests": [
+            "tests.test_monthly_report.MonthlyReportTests.test_generate_draft_preserves_highlight_seatalk_topic_matches_outside_product_scope",
+            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_build_daily_briefing_injects_only_matched_report_intelligence"
+          ]
+        },
+        {
+          "id": "seatalk_noise_filtering",
+          "description": "SeaTalk noise filters exclude blacklisted group blocks and non-actionable updates.",
+          "tests": ["tests.test_report_intelligence.ReportIntelligenceTests.test_seatalk_noise_filter_excludes_entire_blacklisted_group_block"]
+        }
+      ]
+    },
+    {
+      "id": "seatalk_name_mapping",
+      "label": "SeaTalk Name Mapping",
+      "scenarios": [
+        {
+          "id": "owner_load_save_refresh",
+          "description": "Owner can load, save, refresh, and see sanitized error responses.",
+          "tests": [
+            "tests.test_gmail_seatalk_demo_routes.GmailSeaTalkDemoRouteTests.test_owner_can_load_and_save_seatalk_name_mappings",
+            "tests.test_gmail_seatalk_demo_routes.GmailSeaTalkDemoRouteTests.test_owner_seatalk_name_mappings_refresh_bypasses_cache",
+            "tests.test_gmail_seatalk_demo_routes.GmailSeaTalkDemoRouteTests.test_owner_seatalk_name_mappings_api_reports_export_error"
+          ]
+        },
+        {
+          "id": "team_dashboard_endpoint_shape",
+          "description": "Team Dashboard report-intelligence endpoint reuses the SeaTalk store and compatible payload shape.",
+          "tests": [
+            "tests.test_gmail_seatalk_demo_routes.GmailSeaTalkDemoRouteTests.test_team_dashboard_name_mapping_uses_existing_seatalk_store_and_payload_shape",
+            "tests.test_web_team_dashboard_routes_edges.WebTeamDashboardRouteEdgeTests.test_seatalk_name_mapping_success_and_errors"
+          ]
+        },
+        {
+          "id": "auto_merge_and_dedupe",
+          "description": "Confident candidates auto-merge and buddy/UID duplicates are deduped.",
+          "tests": [
+            "tests.test_gmail_seatalk_demo_routes.GmailSeaTalkDemoRouteTests.test_team_dashboard_name_mapping_auto_merges_confident_candidates",
+            "tests.test_gmail_seatalk_demo_routes.GmailSeaTalkDemoRouteTests.test_owner_seatalk_name_mappings_dedupes_buddy_and_uid_candidates"
+          ]
+        },
+        {
+          "id": "store_normalization_and_persistence",
+          "description": "Persistent mapping store normalizes identifiers and handles corrupt files.",
+          "tests": ["tests.test_small_module_coverage.SmallModuleCoverageTests.test_seatalk_name_mapping_store_normalization_and_persistence_boundaries"]
+        },
+        {
+          "id": "daily_cache_scoped_by_mapping_version",
+          "description": "SeaTalk dashboard caches are scoped to the name-mapping candidate version.",
+          "tests": [
+            "tests.test_seatalk_dashboard.SeaTalkDashboardServiceTests.test_name_mapping_daily_cache_key_has_candidate_version",
+            "tests.test_seatalk_dashboard.SeaTalkDashboardServiceTests.test_build_insights_daily_cache_is_scoped_to_name_mapping_version"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -141,6 +141,51 @@ def _gcloud_firestore_access_token(*, env: Mapping[str, str], runner: Any = _run
     return token
 
 
+def _prefer_firestore_rest_auth(env: Mapping[str, str]) -> bool:
+    return bool(_env_value("FIRESTORE_ACCESS_TOKEN", env) or _env_value("CLOUD_RUN_DEPLOY_ACCOUNT", env))
+
+
+def _load_version_plan_firestore_payload(
+    *,
+    project: str,
+    document: str,
+    env: Mapping[str, str],
+) -> tuple[dict[str, Any] | None, str]:
+    def _load_via_sdk() -> tuple[dict[str, Any] | None, str]:
+        from google.cloud import firestore  # type: ignore
+
+        snapshot = firestore.Client(project=project or None).collection("portal").document(document).get()
+        if not getattr(snapshot, "exists", False):
+            return None, ""
+        return snapshot.to_dict() or {}, ""
+
+    def _load_via_rest() -> tuple[dict[str, Any] | None, str]:
+        from bpmis_jira_tool.team_dashboard_version_plan_store import _FirestoreRestDocument
+
+        snapshot = _FirestoreRestDocument(
+            project=project,
+            document_id=document,
+            token_provider=lambda: _gcloud_firestore_access_token(env=env),
+        ).get()
+        if not getattr(snapshot, "exists", False):
+            return None, ""
+        return snapshot.to_dict() or {}, ""
+
+    if _prefer_firestore_rest_auth(env):
+        try:
+            return _load_via_rest()
+        except Exception as rest_error:
+            return None, f"REST service-account: {type(rest_error).__name__}"
+
+    try:
+        return _load_via_sdk()
+    except Exception as sdk_error:
+        try:
+            return _load_via_rest()
+        except Exception as rest_error:
+            return None, f"{type(sdk_error).__name__}; REST fallback: {type(rest_error).__name__}"
+
+
 def _is_default_flask_secret(value: str) -> bool:
     return str(value or "").strip() in DEFAULT_SESSION_SECRET_VALUES
 
@@ -192,31 +237,8 @@ def _version_plan_firestore_status(*, env: Mapping[str, str]) -> str:
     document = _env_value("VERSION_PLAN_FIRESTORE_DOCUMENT", env) or f"version_plan_{'uat' if stage == 'uat' else 'live'}"
     if backend not in {"firestore", "cloud_firestore"} and not project:
         return "status=not_configured"
-    def _load_payload() -> tuple[dict[str, Any] | None, str]:
-        try:
-            from google.cloud import firestore  # type: ignore
-
-            snapshot = firestore.Client(project=project or None).collection("portal").document(document).get()
-            if not getattr(snapshot, "exists", False):
-                return None, ""
-            return snapshot.to_dict() or {}, ""
-        except Exception as sdk_error:
-            try:
-                from bpmis_jira_tool.team_dashboard_version_plan_store import _FirestoreRestDocument
-
-                snapshot = _FirestoreRestDocument(
-                    project=project,
-                    document_id=document,
-                    token_provider=lambda: _gcloud_firestore_access_token(env=env),
-                ).get()
-                if not getattr(snapshot, "exists", False):
-                    return None, ""
-                return snapshot.to_dict() or {}, ""
-            except Exception as rest_error:
-                return None, f"{type(sdk_error).__name__}; REST fallback: {type(rest_error).__name__}"
-
     try:
-        payload, error = _load_payload()
+        payload, error = _load_version_plan_firestore_payload(project=project, document=document, env=env)
         if error:
             return f"status=unavailable document=portal/{document} error={error}"
         if payload is None:

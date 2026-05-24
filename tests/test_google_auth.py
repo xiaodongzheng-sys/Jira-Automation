@@ -4,7 +4,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import requests
+
 from bpmis_jira_tool.config import Settings
+from bpmis_jira_tool.errors import AuthenticationError, ConfigError
 from bpmis_jira_tool.google_auth import (
     _allow_localhost_oauth_http,
     _normalize_authorization_response,
@@ -13,8 +16,10 @@ from bpmis_jira_tool.google_auth import (
     GOOGLE_DRIVE_READONLY_SCOPE,
     GOOGLE_SCOPES,
     create_google_authorization_url,
+    build_google_flow,
     fetch_google_profile,
     finish_google_oauth,
+    get_google_credentials,
 )
 
 
@@ -34,8 +39,30 @@ class GoogleAuthTests(unittest.TestCase):
     def test_non_localhost_oauth_http_does_not_set_insecure_transport(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("OAUTHLIB_INSECURE_TRANSPORT", None)
+            _allow_localhost_oauth_http("http://example.com/auth/google/callback")
             _allow_localhost_oauth_http("https://example.com/auth/google/callback")
             self.assertIsNone(os.environ.get("OAUTHLIB_INSECURE_TRANSPORT"))
+
+    def test_build_google_flow_rejects_missing_client_secret_file(self):
+        settings = Settings(
+            flask_secret_key="secret",
+            google_oauth_client_secret_file=Path("missing-client.json"),
+            google_oauth_redirect_uri=None,
+            team_portal_host="127.0.0.1",
+            team_portal_port=5000,
+            team_portal_base_url=None,
+            team_allowed_emails=(),
+            team_allowed_email_domains=(),
+            team_portal_data_dir=Path("."),
+            spreadsheet_id="sheet",
+            common_tab_name="Common",
+            input_tab_name="Input",
+            bpmis_base_url="https://example.com",
+            bpmis_api_access_token=None,
+        )
+
+        with self.assertRaisesRegex(ConfigError, "client secret file"):
+            build_google_flow(settings)
 
     def test_create_authorization_url_allows_localhost_http(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, {}, clear=False):
@@ -119,6 +146,30 @@ class GoogleAuthTests(unittest.TestCase):
             "https://app.bankpmtool.uk/cloud-auth/google/callback",
         )
 
+    def test_resolve_google_redirect_uri_uses_flask_url_for_local_default(self):
+        settings = Settings(
+            flask_secret_key="secret",
+            google_oauth_client_secret_file=Path("client.json"),
+            google_oauth_redirect_uri=None,
+            team_portal_host="127.0.0.1",
+            team_portal_port=5000,
+            team_portal_base_url=None,
+            team_allowed_emails=(),
+            team_allowed_email_domains=("npt.sg",),
+            team_portal_data_dir=Path("."),
+            spreadsheet_id="sheet",
+            common_tab_name="Common",
+            input_tab_name="Projects",
+            bpmis_base_url="https://example.com",
+            bpmis_api_access_token=None,
+        )
+        from flask import Flask
+
+        app = Flask(__name__)
+        app.add_url_rule("/auth/google/callback", "google_callback", lambda: "ok")
+        with app.test_request_context(base_url="http://127.0.0.1:5000"):
+            self.assertEqual(_resolve_google_redirect_uri(settings), "http://127.0.0.1:5000/auth/google/callback")
+
     def test_resolve_google_redirect_uri_prefers_explicit_cloud_redirect_uri(self):
         settings = Settings(
             flask_secret_key="secret",
@@ -172,6 +223,38 @@ class GoogleAuthTests(unittest.TestCase):
         self.assertEqual(payload["email"], "user@npt.sg")
         response.close.assert_called_once()
 
+    def test_fetch_google_profile_closes_response_and_raises_authentication_error_on_request_failure(self):
+        response = Mock()
+        response.raise_for_status.side_effect = requests.RequestException("boom")
+        response.close = Mock()
+        credentials = Mock(token="token")
+
+        with patch("bpmis_jira_tool.google_auth.requests.get", return_value=response):
+            with self.assertRaisesRegex(AuthenticationError, "profile lookup failed"):
+                fetch_google_profile(credentials)
+
+        response.close.assert_called_once()
+
+    def test_get_google_credentials_requires_session_payload(self):
+        with patch("bpmis_jira_tool.google_auth.session", {}):
+            with self.assertRaisesRegex(AuthenticationError, "not connected"):
+                get_google_credentials()
+
+        with patch(
+            "bpmis_jira_tool.google_auth.session",
+            {
+                "google_credentials": {
+                    "token": "token",
+                    "refresh_token": "refresh",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "client_id": "client",
+                    "client_secret": "secret",
+                    "scopes": ["openid"],
+                }
+            },
+        ):
+            self.assertEqual(get_google_credentials().token, "token")
+
     def test_finish_google_oauth_relaxes_partial_scope_warning_only_during_token_fetch(self):
         settings = Settings(
             flask_secret_key="secret",
@@ -218,6 +301,47 @@ class GoogleAuthTests(unittest.TestCase):
 
         self.assertEqual(fake_session["google_profile"]["email"], "user@npt.sg")
         self.assertEqual(fake_session["google_credentials"]["scopes"], ["openid", "https://www.googleapis.com/auth/userinfo.email"])
+
+    def test_finish_google_oauth_requires_state_and_restores_existing_relax_scope(self):
+        settings = Settings(
+            flask_secret_key="secret",
+            google_oauth_client_secret_file=Path("client.json"),
+            google_oauth_redirect_uri="https://jira-tool.example.com/auth/google/callback",
+            team_portal_host="127.0.0.1",
+            team_portal_port=5000,
+            team_portal_base_url=None,
+            team_allowed_emails=(),
+            team_allowed_email_domains=("npt.sg",),
+            team_portal_data_dir=Path("."),
+            spreadsheet_id="sheet",
+            common_tab_name="Common",
+            input_tab_name="Projects",
+            bpmis_base_url="https://example.com",
+            bpmis_api_access_token=None,
+        )
+        with patch("bpmis_jira_tool.google_auth.session", {}):
+            with self.assertRaisesRegex(AuthenticationError, "Missing OAuth state"):
+                finish_google_oauth(settings, "https://jira-tool.example.com/auth/google/callback?state=state")
+
+        flow = Mock()
+        flow.credentials = Mock(
+            token="token",
+            refresh_token="refresh",
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id="client",
+            client_secret="secret",
+            scopes=["openid"],
+        )
+        with patch.dict(os.environ, {"OAUTHLIB_RELAX_TOKEN_SCOPE": "previous"}, clear=False):
+            with patch("bpmis_jira_tool.google_auth.session", {"google_oauth_state": "state"}):
+                with patch("bpmis_jira_tool.google_auth.build_google_flow", return_value=flow):
+                    with patch("bpmis_jira_tool.google_auth.fetch_google_profile", return_value={"email": "user@npt.sg"}):
+                        finish_google_oauth(
+                            settings,
+                            "https://jira-tool.example.com/auth/google/callback?state=state&code=code",
+                        )
+
+            self.assertEqual(os.environ.get("OAUTHLIB_RELAX_TOKEN_SCOPE"), "previous")
 
 
 if __name__ == "__main__":

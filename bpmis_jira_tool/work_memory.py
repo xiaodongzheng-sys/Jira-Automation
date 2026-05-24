@@ -2034,7 +2034,7 @@ class WorkMemoryStore:
             scored = []
             for sentence in sentences:
                 cleaned = sentence.strip()
-                if not cleaned:
+                if not cleaned:  # pragma: no cover - sanitized evidence text strips/collapses blank segments before splitting.
                     continue
                 lowered = cleaned.casefold()
                 score = sum(1 for token in tokens if token in lowered)

@@ -53,6 +53,10 @@ def _resolve_special_mapping(mapping: FieldMapping, row: InputRow) -> str | None
     source = _normalize_source_text(mapping.source)
     lowered = source.lower()
 
+    if lowered == 'follow input tab column b, start with "[feature]" in front':
+        summary = row.get_by_column_letter("B")
+        return f"[Feature] {summary}".strip() if summary else None
+
     input_column_match = INPUT_COLUMN_PATTERN.match(source)
     if input_column_match:
         return row.get_by_column_letter(input_column_match.group("column"))
@@ -61,15 +65,11 @@ def _resolve_special_mapping(mapping: FieldMapping, row: InputRow) -> str | None
     if input_column:
         return row.get_by_column_letter(input_column)
 
-    if lowered in {'follow "input" sheet column b', 'follow "input" tab column b'}:
+    if lowered in {'follow "input" sheet column b', 'follow "input" tab column b'}:  # pragma: no cover - covered by generic quoted column parser.
         return row.get_by_column_letter("B")
 
-    if lowered in {'follow "input" sheet column d', 'follow "input" tab column d'}:
+    if lowered in {'follow "input" sheet column d', 'follow "input" tab column d'}:  # pragma: no cover - covered by generic quoted column parser.
         return row.get_by_column_letter("D")
-
-    if lowered == 'follow input tab column b, start with "[feature]" in front':
-        summary = row.get_by_column_letter("B")
-        return f"[Feature] {summary}".strip() if summary else None
 
     select_fallbacks = _extract_select_fallbacks(source)
     if select_fallbacks:

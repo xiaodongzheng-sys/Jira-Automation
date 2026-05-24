@@ -9,7 +9,7 @@ from cryptography.fernet import Fernet
 
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.user_config import DEFAULT_SHEET_HEADERS, FieldMapping, WebConfigStore
-from bpmis_jira_tool.vpn_manager import CiscoVPNClient, VPNProfileStore
+from bpmis_jira_tool.vpn_manager import CiscoVPNClient, VPNProfileStore, json_response_payload, vpn_payload
 
 
 class UserConfigStoreTests(unittest.TestCase):
@@ -583,6 +583,54 @@ class UserConfigStoreTests(unittest.TestCase):
                     }
                 )
 
+    def test_vpn_profile_store_validation_decrypt_and_payload_boundaries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            key = Fernet.generate_key().decode("utf-8")
+            store = VPNProfileStore(Path(temp_dir) / "team_portal.db", encryption_key=key)
+
+            for payload, message in [
+                ({"vpn_host": "ShopeeVPN", "username": "user", "password": "secret"}, "display name"),
+                ({"display_name": "VPN", "username": "user", "password": "secret"}, "host"),
+                ({"display_name": "VPN", "vpn_host": "ShopeeVPN", "password": "secret"}, "username"),
+                ({"display_name": "VPN", "vpn_host": "ShopeeVPN", "username": "user"}, "password"),
+            ]:
+                with self.subTest(message=message):
+                    with self.assertRaisesRegex(ToolError, message):
+                        store.save_profile(payload)
+
+            saved = store.save_profile(
+                {
+                    "display_name": "Shopee VPN",
+                    "vpn_host": "ShopeeVPN",
+                    "username": "vpn-user",
+                    "password": "vpn-secret",
+                }
+            )
+            self.assertTrue(store.list_profiles()[0]["has_password"])
+            store.record_connected(saved["id"])
+            self.assertIsNotNone(store.get_profile(saved["id"])["last_connected_at"])
+            self.assertEqual(vpn_payload(store.get_profile(saved["id"], include_password=True))["profile"].get("password"), None)
+            self.assertEqual(json_response_payload(profiles=[saved], status={"connected": False}, hosts=["ShopeeVPN"])["hosts"], ["ShopeeVPN"])
+            store.delete_profile(saved["id"])
+            with self.assertRaisesRegex(ToolError, "not found"):
+                store.get_profile(saved["id"])
+
+            with self.assertRaisesRegex(ToolError, "profile id"):
+                store.get_profile("")
+            with self.assertRaisesRegex(ToolError, "invalid"):
+                store.get_profile("bad id")
+
+            no_key_store = VPNProfileStore(Path(temp_dir) / "no_key.db")
+            with self.assertRaisesRegex(ToolError, "not encrypted"):
+                no_key_store._decrypt_secret("plain-secret")
+            with self.assertRaisesRegex(ToolError, "required to read"):
+                no_key_store._decrypt_secret("enc:token")
+
+            encrypted = store._encrypt_secret("vpn-secret")
+            wrong_key_store = VPNProfileStore(Path(temp_dir) / "wrong_key.db", encryption_key=Fernet.generate_key().decode("utf-8"))
+            with self.assertRaisesRegex(ToolError, "Could not decrypt"):
+                wrong_key_store._decrypt_secret(encrypted)
+
     @patch("bpmis_jira_tool.vpn_manager.subprocess.run")
     def test_cisco_vpn_connect_feeds_credentials_on_stdin_not_command_args(self, run_mock):
         vpn_bin = "/tmp/fake-cisco-vpn"
@@ -690,6 +738,134 @@ class UserConfigStoreTests(unittest.TestCase):
         self.assertIn("second-secret", stdin_payload)
         self.assertNotIn("second-secret", result["message"])
         self.assertTrue(result["connected"])
+
+    def test_cisco_vpn_status_hosts_disconnect_and_command_boundaries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vpn_bin = str(Path(temp_dir) / "fake-cisco-vpn")
+            Path(vpn_bin).write_text("", encoding="utf-8")
+            calls = []
+
+            def fake_run(args, **kwargs):
+                calls.append(args)
+                command = args[-1]
+                if command == "state":
+                    return subprocess.CompletedProcess(args=args, returncode=0, stdout="state: Connected", stderr="")
+                if command == "hosts":
+                    return subprocess.CompletedProcess(args=args, returncode=0, stdout="  ignored\n> ShopeeVPN\n>   \n> GalaxisVPN", stderr="")
+                if command == "disconnect":
+                    return subprocess.CompletedProcess(args=args, returncode=0, stdout="state: Disconnected", stderr="")
+                return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+            client = CiscoVPNClient(vpn_bin=vpn_bin, process_runner=fake_run)
+            self.assertTrue(client.status()["connected"])
+            self.assertEqual(client.hosts(), ["ShopeeVPN", "GalaxisVPN"])
+            self.assertEqual(client.disconnect()["state"], "Disconnected")
+
+            error_client = CiscoVPNClient(
+                vpn_bin=vpn_bin,
+                process_runner=lambda args, **kwargs: subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="boom"),
+            )
+            with self.assertRaisesRegex(ToolError, "boom"):
+                error_client.hosts()
+            with self.assertRaisesRegex(ToolError, "boom"):
+                error_client.disconnect()
+
+            for kwargs, message in [
+                ({"host": "", "username": "u", "password": "p"}, "host"),
+                ({"host": "h", "username": "", "password": "p"}, "username"),
+                ({"host": "h", "username": "u", "password": ""}, "password"),
+            ]:
+                with self.subTest(message=message):
+                    with self.assertRaisesRegex(ToolError, message):
+                        client.connect(**kwargs)
+
+            missing_client = CiscoVPNClient(vpn_bin=str(Path(temp_dir) / "missing"))
+            with self.assertRaisesRegex(ToolError, "not found"):
+                missing_client.status()
+
+            timeout_client = CiscoVPNClient(
+                vpn_bin=vpn_bin,
+                process_runner=lambda args, **kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired(args, 1)),
+            )
+            with self.assertRaisesRegex(ToolError, "timed out"):
+                timeout_client.status()
+
+            oserror_client = CiscoVPNClient(
+                vpn_bin=vpn_bin,
+                process_runner=lambda args, **kwargs: (_ for _ in ()).throw(OSError("permission denied")),
+            )
+            with self.assertRaisesRegex(ToolError, "permission denied"):
+                oserror_client.status()
+
+    def test_cisco_vpn_connect_failure_restart_wait_and_message_boundaries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vpn_bin = str(Path(temp_dir) / "fake-cisco-vpn")
+            Path(vpn_bin).write_text("", encoding="utf-8")
+            calls = []
+            restarts = []
+
+            def fake_run(args, **kwargs):
+                calls.append(args)
+                if args[1:4] == ["-s", "connect", "ShopeeVPN"]:
+                    return subprocess.CompletedProcess(args=args, returncode=0, stdout="state: Connecting", stderr="vpn-user vpn-secret")
+                return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+            client = CiscoVPNClient(
+                vpn_bin=vpn_bin,
+                process_runner=fake_run,
+                app_restarter=lambda: restarts.append("restart"),
+                sleeper=lambda _seconds: None,
+                connect_verify_timeout_seconds=0.1,
+            )
+            wait_results = iter(
+                [
+                    {"connected": False, "state": "Disconnected", "message": "Connect capability is unavailable"},
+                    {"connected": False, "state": "Disconnected", "message": "state: Disconnected"},
+                ]
+            )
+            client._wait_for_connected = lambda **kwargs: next(wait_results)
+
+            with self.assertRaisesRegex(ToolError, "restarted once"):
+                client.connect(host="ShopeeVPN", username="vpn-user", password="vpn-secret")
+            self.assertEqual(restarts, ["restart"])
+
+            fail_client = CiscoVPNClient(
+                vpn_bin=vpn_bin,
+                process_runner=lambda args, **kwargs: subprocess.CompletedProcess(args=args, returncode=1, stdout="state: Disconnected", stderr="vpn-secret"),
+            )
+            with self.assertRaisesRegex(ToolError, "did not reach Connected"):
+                fail_client.connect(host="ShopeeVPN", username="vpn-user", password="vpn-secret")
+            self.assertNotIn("vpn-secret", fail_client._sanitize_output("vpn-secret", secrets=["vpn-secret"]))
+            self.assertEqual(fail_client._connection_failure_message(""), "Cisco Secure Client did not reach Connected state. Last state: Unknown.")
+
+            empty_status_client = CiscoVPNClient(
+                vpn_bin=vpn_bin,
+                process_runner=lambda args, **kwargs: subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr=""),
+                sleeper=lambda _seconds: None,
+                connect_verify_timeout_seconds=0.001,
+                poll_interval_seconds=0.001,
+            )
+            self.assertIn(
+                "did not report",
+                empty_status_client._wait_for_connected(secrets=[], previous_output="")["message"],
+            )
+
+    @patch("bpmis_jira_tool.vpn_manager.subprocess.run")
+    def test_cisco_vpn_default_gui_restart_and_wait_helpers_are_bounded(self, run_mock):
+        client = CiscoVPNClient(vpn_bin="/tmp/fake-cisco-vpn", sleeper=lambda _seconds: None)
+        with patch.object(client, "_wait_for_cisco_gui_exit", side_effect=[False, True]) as wait_mock:
+            client._restart_cisco_gui()
+
+        self.assertEqual(run_mock.call_args_list[0].args[0][0], "osascript")
+        self.assertEqual(run_mock.call_args_list[1].args[0][0], "pkill")
+        self.assertEqual(wait_mock.call_count, 2)
+
+        run_mock.reset_mock()
+        run_mock.return_value = subprocess.CompletedProcess(args=["pgrep"], returncode=1, stdout="", stderr="")
+        self.assertTrue(client._wait_for_cisco_gui_exit(timeout_seconds=0.1))
+
+        run_mock.return_value = subprocess.CompletedProcess(args=["pgrep"], returncode=0, stdout="123", stderr="")
+        self.assertFalse(client._wait_for_cisco_gui_exit(timeout_seconds=0.1))
 
 
 if __name__ == "__main__":

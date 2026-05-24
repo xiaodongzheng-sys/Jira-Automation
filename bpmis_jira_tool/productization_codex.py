@@ -93,7 +93,7 @@ def parse_codex_json_object(text: str) -> dict[str, Any]:
 
 def clean_codex_productization_detailed_feature(value: str) -> str:
     text = format_productization_description_text(value)
-    if not text:
+    if not text:  # pragma: no cover - format_productization_description_text returns "-" for empty input.
         return "-"
     text = re.sub(r"```(?:json)?|```", "", text, flags=re.I).strip()
     return text or "-"

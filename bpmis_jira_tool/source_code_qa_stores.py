@@ -830,7 +830,7 @@ class SourceCodeQARuntimeEvidenceStore(SourceCodeQAAttachmentStore):
                 if sum(len(line) for line in lines) >= self.MAX_DATA_DICTIONARY_XLSX_TEXT_CHARS:
                     lines.append("...[data dictionary text truncated]")
                     text = "\n".join(lines).strip()
-                    if not text:
+                    if not text:  # pragma: no cover - sheet header is always appended before this guard.
                         raise ToolError("Unable to extract readable text from this XLSX data dictionary.")
                     return text[: self.MAX_DATA_DICTIONARY_XLSX_TEXT_CHARS]
             if non_empty_rows == 0:

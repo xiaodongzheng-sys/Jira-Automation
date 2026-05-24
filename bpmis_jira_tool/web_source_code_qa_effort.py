@@ -1124,7 +1124,7 @@ def _source_code_qa_effort_code_change_points(
     points: list[dict[str, str]] = []
 
     def add(area: str, change: str, technical_surface: str, impact: str) -> None:
-        if not change.strip():
+        if not change.strip():  # pragma: no cover - defensive guard for future internal call sites.
             return
         points.append(
             {

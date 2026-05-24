@@ -1018,7 +1018,7 @@ class ConfluenceConnector:
         if not text:
             return False
         text = re.sub(r"[\s\u00a0]+", "", text)
-        if not text:
+        if not text:  # pragma: no cover - _clean_text strips whitespace-only values before this guard.
             return False
         if re.fullmatch(r"(?:[0-9]+[.)、]?)+", text):
             return False

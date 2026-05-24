@@ -3,7 +3,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from prd_briefing.confluence import ConfluenceConnector
+import requests
+from bs4 import BeautifulSoup
+
+from prd_briefing.confluence import ConfluenceConnector, ParsedSection, ResolvedPageRef, SpreadsheetLink
 from prd_briefing.storage import BriefingStore
 
 
@@ -462,6 +465,577 @@ class ConfluenceConnectorTests(unittest.TestCase):
 
         self.assertIn("/prd-briefing/image-proxy?src=", sections[0].html_content)
         self.assertIn("https%3A%2F%2Fconfluence.shopee.io%2Fdownload%2Fattachments%2F123%2Ftest.png", sections[0].html_content)
+
+    def test_resolve_page_supports_raw_ids_path_ids_and_rejects_unknown_urls(self):
+        resolved = self.connector._resolve_page("12345")
+
+        self.assertEqual(resolved.page_id, "12345")
+        self.assertEqual(resolved.source_url, "https://confluence.shopee.io/pages/viewpage.action?pageId=12345")
+
+        path_resolved = self.connector._resolve_page("https://confluence.shopee.io/pages/67890")
+        self.assertEqual(path_resolved.page_id, "67890")
+
+        no_base_connector = ConfluenceConnector(
+            base_url=None,
+            email=None,
+            api_token=None,
+            bearer_token=None,
+            store=self.store,
+        )
+        with self.assertRaisesRegex(ValueError, "raw Confluence page ID"):
+            no_base_connector._resolve_page("12345")
+        with self.assertRaisesRegex(ValueError, "supported Confluence page reference"):
+            self.connector._resolve_page("https://confluence.shopee.io/not/a/page")
+
+    @patch("prd_briefing.confluence.requests.get")
+    def test_resolve_short_link_rejects_unresolved_redirect(self, mock_get):
+        response = Mock()
+        response.status_code = 200
+        response.url = "https://confluence.shopee.io/x/tUdvuw"
+        response.raise_for_status.return_value = None
+        mock_get.return_value = response
+
+        with self.assertRaisesRegex(ValueError, "short link"):
+            self.connector._resolve_page("https://confluence.shopee.io/x/tUdvuw")
+
+    def test_fetch_page_payload_reports_page_id_and_display_failures(self):
+        by_id = ResolvedPageRef(
+            base_url="https://confluence.shopee.io",
+            source_url="https://confluence.shopee.io/pages/viewpage.action?pageId=404",
+            page_id="404",
+        )
+        with patch.object(self.connector, "_request", side_effect=RuntimeError("boom")):
+            with self.assertRaisesRegex(RuntimeError, "Could not fetch Confluence page by ID"):
+                self.connector._fetch_page_payload(by_id)
+
+        by_title = ResolvedPageRef(
+            base_url="https://confluence.shopee.io",
+            source_url="https://confluence.shopee.io/display/SPDB/Missing",
+            space_key="SPDB",
+            title_hint="Missing",
+        )
+        empty = Mock()
+        empty.json.return_value = {"results": []}
+        with patch.object(self.connector, "_request", return_value=empty), \
+            patch.object(self.connector, "_resolve_renamed_display_page", return_value=None), \
+            patch.object(self.connector, "_search_similar_display_page", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "Could not resolve Confluence display URL"):
+                self.connector._fetch_page_payload(by_title)
+
+    def test_extract_ancestor_titles_and_rest_candidates_handle_edges(self):
+        titles = self.connector._extract_ancestor_titles(
+            {
+                "ancestors": [
+                    {"title": "Root"},
+                    {"title": "Root"},
+                    "bad",
+                    {"title": "Child"},
+                    {"title": " "},
+                ]
+            }
+        )
+
+        self.assertEqual(titles, ["Root", "Child"])
+        self.assertEqual(self.connector._extract_ancestor_titles({"ancestors": "bad"}), [])
+        self.assertEqual(self.connector._extract_ancestor_titles(None), [])
+        self.assertEqual(
+            self.connector._rest_api_candidates("https://example.atlassian.net/wiki"),
+            ["https://example.atlassian.net/wiki/rest/api", "https://example.atlassian.net/wiki/wiki/rest/api"],
+        )
+
+    def test_resolve_renamed_display_page_ignores_bad_hints(self):
+        resolved = ResolvedPageRef(
+            base_url="https://confluence.shopee.io",
+            source_url="https://confluence.shopee.io/display/SPDB/Old",
+            space_key="SPDB",
+            title_hint="Old",
+        )
+
+        with patch.object(self.connector, "_request", side_effect=RuntimeError("offline")):
+            self.assertIsNone(self.connector._resolve_renamed_display_page(resolved))
+
+        html = """
+        <a href="">No href</a>
+        <a href="/display/SPDB/Old">Old</a>
+        <a href="/bad/path">New Page</a>
+        <a href="/pages/viewpage.action?pageId=987">Useful Page</a>
+        """
+        response = Mock(text=html)
+        with patch.object(self.connector, "_request", return_value=response):
+            renamed = self.connector._resolve_renamed_display_page(resolved)
+
+        self.assertEqual(renamed.page_id, "987")
+
+    def test_search_similar_display_page_handles_malformed_results(self):
+        missing_title = ResolvedPageRef(
+            base_url="https://confluence.shopee.io",
+            source_url="https://confluence.shopee.io/display/SPDB/Missing",
+            space_key="SPDB",
+            title_hint=None,
+        )
+        self.assertIsNone(self.connector._search_similar_display_page(missing_title))
+
+        payload = Mock()
+        payload.json.return_value = {
+            "results": [
+                "bad",
+                {"content": "bad"},
+                {"content": {}},
+                {"link": "/display/SPDB/Fallback", "content": {"title": "Fallback Title"}},
+            ]
+        }
+        resolved = ResolvedPageRef(
+            base_url="https://confluence.shopee.io",
+            source_url="https://confluence.shopee.io/display/SPDB/Missing",
+            space_key="SPDB",
+            title_hint="Missing Page",
+        )
+        with patch.object(self.connector, "_request", side_effect=[RuntimeError("search down"), payload]):
+            similar = self.connector._search_similar_display_page(resolved)
+
+        self.assertEqual(similar.title_hint, "Fallback Title")
+        self.assertEqual(similar.space_key, "SPDB")
+
+        empty_payload = Mock()
+        empty_payload.json.return_value = {"results": [{"content": {}}]}
+        with patch.object(self.connector, "_request", return_value=empty_payload):
+            self.assertIsNone(self.connector._search_similar_display_page(resolved))
+
+    def test_spreadsheet_links_include_regular_google_and_attachment_links(self):
+        soup = BeautifulSoup(
+            """
+            <div>
+              <a href="/download/report.xlsx">Report Sheet</a>
+              <a href="https://docs.google.com/spreadsheets/d/abc">Google Sheet</a>
+              <ri:attachment ri:filename="evidence.xlsm"></ri:attachment>
+              <ri:attachment ri:filename="notes.pdf"></ri:attachment>
+            </div>
+            """,
+            "html.parser",
+        )
+
+        links = self.connector._extract_spreadsheet_links(
+            soup.div,
+            base_url="https://confluence.shopee.io",
+            page_id="12345",
+            section_path="Evidence",
+        )
+
+        self.assertEqual([link.kind for link in links], ["link", "link", "confluence_attachment"])
+        self.assertEqual(links[0].filename, "report.xlsx")
+        self.assertEqual(links[1].filename, "Google Sheet")
+        self.assertIn("/download/attachments/12345/evidence.xlsm", links[2].url)
+
+    def test_dedupes_spreadsheet_links_and_filename_fallbacks(self):
+        links = self.connector._dedupe_spreadsheet_links(
+            [
+                SpreadsheetLink(title="", url="", source_section="S", filename=""),
+                SpreadsheetLink(title="B", url="https://x/report.xls", source_section="S", filename=""),
+                SpreadsheetLink(title="C", url="https://x/report.xls", source_section="S", filename=""),
+                SpreadsheetLink(title="D", url="", source_section="S", filename="manual.xlsx"),
+            ]
+        )
+
+        self.assertEqual([link.title for link in links], ["B", "D"])
+        self.assertEqual(self.connector._filename_from_url_or_title("https://x/download?id=1", "fallback.xls"), "fallback.xls")
+        self.assertEqual(self.connector._filename_from_url_or_title("", "Plain title"), "Plain title")
+
+    def test_media_registration_and_confluence_image_resolution_edges(self):
+        media = {}
+        soup = BeautifulSoup(
+            """
+            <div>
+              <img />
+              <img src="/$icon.png" width="640" height="360" />
+              <img src="/download/full.png" width="640" height="360" />
+              <ac:image ac:width="640"><ri:url ri:value="/download/external.png"></ri:url></ac:image>
+              <ac:image><ri:attachment ri:filename="diagram.png"></ri:attachment></ac:image>
+              <ac:image><ri:attachment></ri:attachment></ac:image>
+            </div>
+            """,
+            "html.parser",
+        )
+
+        images = soup.find_all("img")
+        self.assertIsNone(self.connector._register_image_media(images[0], base_url="https://confluence.shopee.io", media_dict=media, section_path="S"))
+        self.assertIsNone(self.connector._register_image_media(images[1], base_url="https://confluence.shopee.io", media_dict=media, section_path="S"))
+        self.assertEqual(
+            self.connector._register_image_media(images[2], base_url="https://confluence.shopee.io", media_dict=media, section_path="S"),
+            "MEDIA_ID_1",
+        )
+        self.assertIsNone(self.connector._register_confluence_image_media(soup.find("ac:image"), image_ref="/x.png", media_dict=None, section_path="S"))
+        confluence_images = soup.find_all(self.connector._is_confluence_image_tag)
+        self.assertEqual(
+            self.connector._resolve_confluence_image_ref(confluence_images[0], base_url="https://confluence.shopee.io", page_id="123"),
+            "https://confluence.shopee.io/download/external.png",
+        )
+        self.assertIn(
+            "/download/attachments/123/diagram.png",
+            self.connector._resolve_confluence_image_ref(confluence_images[1], base_url="https://confluence.shopee.io", page_id="123"),
+        )
+        self.assertEqual(
+            self.connector._resolve_confluence_image_ref(confluence_images[2], base_url="https://confluence.shopee.io", page_id=""),
+            "",
+        )
+
+    def test_noise_image_table_and_sanitizer_fallback_branches(self):
+        soup = BeautifulSoup(
+            """
+            <div>
+              <img src="/download/full.png" style="width: 24px; height: 24px" />
+              <ac:image ac:height="24"><ri:url ri:value="/download/full.png"></ri:url></ac:image>
+              <table><tr><td>Short</td><td>Pair</td></tr></table>
+              <table><tr><th>Name</th><th>Rule</th></tr><tr><td>Status</td><td>Must be reviewed carefully</td></tr></table>
+            </div>
+            """,
+            "html.parser",
+        )
+
+        self.assertTrue(self.connector._is_noise_image(soup.find("img")))
+        self.assertTrue(self.connector._is_noise_confluence_image(soup.find(self.connector._is_confluence_image_tag), "/download/full.png"))
+        self.assertTrue(self.connector._is_noise_confluence_image(soup.find(self.connector._is_confluence_image_tag), "/images/icons/comment_16.png"))
+        tables = soup.find_all("table")
+        self.assertFalse(self.connector._is_presentation_table(tables[0]))
+        self.assertTrue(self.connector._is_presentation_table(tables[1]))
+        self.assertIsNone(self.connector._register_table_media(tables[1], base_url="https://confluence.shopee.io", media_dict=None, section_path="S"))
+        with patch.object(self.connector, "_sanitize_table_html", return_value=""):
+            self.assertIsNone(self.connector._register_table_media(tables[1], base_url="https://confluence.shopee.io", media_dict={}, section_path="S"))
+
+        with patch("prd_briefing.confluence.bleach", None):
+            sanitized = self.connector._sanitize_table_html(tables[1], base_url="https://confluence.shopee.io")
+        self.assertIn("<table>", sanitized)
+        self.assertNotIn("onclick", sanitized)
+        self.assertIsNone(self.connector._dimension_px("auto"))
+
+        long_pair = BeautifulSoup(
+            "<table><tr><td>Long enough left cell</td><td>Long enough right cell</td></tr></table>",
+            "html.parser",
+        ).table
+        self.assertFalse(self.connector._is_presentation_table(long_pair))
+
+        table_with_noise = BeautifulSoup(
+            "<table><tr><th>Name</th><th>Image</th></tr><tr><td>Status</td><td><img src='/images/icons/comment_16.png' /></td></tr></table>",
+            "html.parser",
+        ).table
+        self.assertNotIn("comment_16", self.connector._sanitize_table_html(table_with_noise, base_url="https://confluence.shopee.io"))
+
+        table_with_span = BeautifulSoup(
+            "<table><tr><th>Name</th><th>Rule</th></tr><tr><td><span>Status</span></td><td><div>Must be reviewed carefully</div></td></tr></table>",
+            "html.parser",
+        ).table
+        with patch("prd_briefing.confluence.bleach", None):
+            fallback = self.connector._sanitize_table_html(table_with_span, base_url="https://confluence.shopee.io")
+        self.assertIn("Status", fallback)
+        self.assertNotIn("<span", fallback)
+        self.assertNotIn("<div", fallback)
+
+    def test_extract_block_content_covers_confluence_lists_tables_text_and_recursion(self):
+        media = {}
+        base_url = "https://confluence.shopee.io"
+
+        struck = BeautifulSoup('<p style="text-decoration: line-through;">Old</p>', "html.parser").p
+        self.assertEqual(self.connector._extract_block_content(struck, base_url=base_url), ([], [], [], []))
+
+        confluence_image = BeautifulSoup(
+            '<ac:image><ri:attachment ri:filename="diagram.png"></ri:attachment></ac:image>',
+            "html.parser",
+        ).find(self.connector._is_confluence_image_tag)
+        lines, blocks, images, refs = self.connector._extract_block_content(
+            confluence_image,
+            base_url=base_url,
+            page_id="123",
+            media_dict=media,
+            section_path="S",
+        )
+        self.assertEqual(lines, ["[MEDIA_ID_1]"])
+        self.assertEqual(blocks, [])
+        self.assertIn("/download/attachments/123/diagram.png", images[0])
+        self.assertEqual(refs, ["MEDIA_ID_1"])
+
+        confluence_noise = BeautifulSoup(
+            '<ac:image ac:width="16"><ri:attachment ri:filename="tiny.png"></ri:attachment></ac:image>',
+            "html.parser",
+        ).find(self.connector._is_confluence_image_tag)
+        self.assertEqual(
+            self.connector._extract_block_content(confluence_noise, base_url=base_url, page_id="123", media_dict=media),
+            ([], [], [], []),
+        )
+
+        ul = BeautifulSoup(
+            """
+            <ul>
+              <li>First <img src="/download/list.png" width="300" height="200" /></li>
+              <li><ac:image><ri:attachment ri:filename="nested.png"></ri:attachment></ac:image></li>
+            </ul>
+            """,
+            "html.parser",
+        ).ul
+        lines, blocks, images, refs = self.connector._extract_block_content(
+            ul,
+            base_url=base_url,
+            page_id="123",
+            media_dict=media,
+            section_path="S",
+        )
+        self.assertIn("First", lines)
+        self.assertIn("[MEDIA_ID_2]", lines)
+        self.assertIn("[MEDIA_ID_3]", lines)
+        self.assertTrue(blocks)
+        self.assertEqual(refs[-2:], ["MEDIA_ID_2", "MEDIA_ID_3"])
+
+        table = BeautifulSoup(
+            """
+            <div class="table-wrap"><table>
+              <tr><th>Name</th><th>Rule</th></tr>
+              <tr><td>Missing image src</td><td><img /></td></tr>
+              <tr><td>Image</td><td><img src="/download/cell.png" width="640" height="360" /></td></tr>
+              <tr><td>Noise macro</td><td><ac:image ac:width="16"><ri:attachment ri:filename="tiny.png"></ri:attachment></ac:image></td></tr>
+              <tr><td>Macro</td><td><ac:image><ri:attachment ri:filename="macro.png"></ri:attachment></ac:image></td></tr>
+            </table></div>
+            """,
+            "html.parser",
+        ).div
+        lines, blocks, images, refs = self.connector._extract_block_content(
+            table,
+            base_url=base_url,
+            page_id="123",
+            media_dict=media,
+            section_path="S",
+        )
+        self.assertEqual(lines[0], "[MEDIA_ID_4]")
+        self.assertIn("MEDIA_ID_4", refs)
+        self.assertIn("MEDIA_ID_5", refs)
+        self.assertIn("MEDIA_ID_6", refs)
+
+        table_without_media = BeautifulSoup(
+            """
+            <table>
+              <tr><th>Name</th><th>Rule</th></tr>
+              <tr><td>Macro</td><td><ac:image><ri:attachment ri:filename="macro.png"></ri:attachment></ac:image></td></tr>
+            </table>
+            """,
+            "html.parser",
+        ).table
+        lines, blocks, images, refs = self.connector._extract_block_content(
+            table_without_media,
+            base_url=base_url,
+            page_id="123",
+            media_dict=None,
+            section_path="S",
+        )
+        self.assertEqual(refs, [])
+        self.assertEqual(images, [])
+
+        paragraph = BeautifulSoup(
+            '<p>Keep <img src="/download/p.png" width="300" height="200" /><ac:image><ri:attachment ri:filename="p-macro.png"></ri:attachment></ac:image></p>',
+            "html.parser",
+        ).p
+        lines, blocks, images, refs = self.connector._extract_block_content(
+            paragraph,
+            base_url=base_url,
+            page_id="123",
+            media_dict=media,
+            section_path="S",
+        )
+        self.assertIn("Keep", lines)
+        self.assertIn("[MEDIA_ID_7]", lines)
+        self.assertIn("[MEDIA_ID_8]", lines)
+
+        generic = BeautifulSoup('<div>Loose text<span>Child text</span></div>', "html.parser").div
+        self.assertEqual(
+            self.connector._extract_block_content(generic, base_url=base_url)[0],
+            ["Loose text", "Child text"],
+        )
+
+        generic_with_comment = BeautifulSoup("<div><!-- hidden --><span>Shown</span></div>", "html.parser").div
+        self.assertEqual(
+            self.connector._extract_block_content(generic_with_comment, base_url=base_url)[0],
+            ["hidden", "Shown"],
+        )
+
+        nested_noise = BeautifulSoup(
+            '<div><ac:image ac:width="16"><ri:attachment ri:filename="tiny.png"></ri:attachment></ac:image></div>',
+            "html.parser",
+        ).div
+        self.assertEqual(
+            self.connector._extract_nested_confluence_images(
+                nested_noise,
+                base_url=base_url,
+                page_id="123",
+                media_dict=media,
+                section_path="S",
+            ),
+            ([], [], []),
+        )
+
+    def test_table_line_rendering_and_html_cleanup_edges(self):
+        empty_table = BeautifulSoup("<table><tr><td>1.</td><td>○</td></tr></table>", "html.parser").table
+        self.assertEqual(self.connector._extract_table_lines(empty_table), [])
+
+        image_only_table = BeautifulSoup("<table><tr><td><img src='/x.png' /></td></tr></table>", "html.parser").table
+        self.assertEqual(self.connector._extract_table_lines(image_only_table), [])
+
+        one_row = BeautifulSoup("<table><tr><td>Single</td><td>Row</td></tr></table>", "html.parser").table
+        self.assertEqual(self.connector._extract_table_lines(one_row), ["Single | Row"])
+
+        mismatched = BeautifulSoup(
+            "<table><tr><th>A</th><th>B</th></tr><tr><td>Only A</td></tr></table>",
+            "html.parser",
+        ).table
+        self.assertEqual(self.connector._extract_table_lines(mismatched), ["Only A"])
+        self.assertEqual(self.connector._dedupe_lines([" Alpha ", "alpha", "", "Beta"]), ["Alpha", "Beta"])
+
+        fragment = BeautifulSoup(
+            """
+            <div>
+              <div class="toc-macro">TOC</div>
+              <a href="/display/SPDB/Page">Page</a>
+              <img src="/images/icons/comment_16.png" />
+              <div class="table-wrap"><table><tr><td>○</td></tr></table></div>
+              <p>Visible</p>
+            </div>
+            """,
+            "html.parser",
+        ).div
+        rendered = self.connector._render_html_fragment(fragment, base_url="https://confluence.shopee.io")
+        self.assertIn('href="https://confluence.shopee.io/display/SPDB/Page"', rendered)
+        self.assertIn('target="_blank"', rendered)
+        self.assertNotIn("toc-macro", rendered)
+        self.assertNotIn("comment_16", rendered)
+        self.assertNotIn("<table", rendered)
+
+        plain_empty = BeautifulSoup("<div><table><tr><td>○</td></tr></table></div>", "html.parser").div
+        plain_rendered = self.connector._render_html_fragment(plain_empty, base_url="https://confluence.shopee.io")
+        self.assertNotIn("<table", plain_rendered)
+
+        soup_for_cleanup = BeautifulSoup("<div><p>1.</p><p>Keep this paragraph</p></div>", "html.parser")
+        self.connector._drop_marker_only_blocks(soup_for_cleanup)
+        self.assertNotIn("<p>1.</p>", str(soup_for_cleanup))
+        self.assertIn("Keep this paragraph", str(soup_for_cleanup))
+
+    def test_parse_sections_fallback_and_toc_detection_edges(self):
+        sections = self.connector._parse_sections(
+            html='<h2><span></span></h2><div class="toc-macro">TOC</div>',
+            base_url="https://confluence.shopee.io",
+            source_url="https://confluence.shopee.io/display/SPDB/Test",
+            session_id="session-1",
+        )
+
+        self.assertEqual(sections[0].title, "Overview")
+        self.assertEqual(sections[0].content, "TOC")
+        generated_toc = BeautifulSoup(
+            "<h1>1. Project Management 1.1 Version Control 2. Introduction</h1>",
+            "html.parser",
+        ).h1
+        self.assertTrue(self.connector._is_toc_block(generated_toc))
+
+    def test_parse_sections_and_recursion_ignore_unexpected_non_tag_children(self):
+        class FakeWrapper:
+            children = [object()]
+            contents = []
+
+            def find_all(self, *args, **kwargs):
+                return []
+
+            def get_text(self, *args, **kwargs):
+                return ""
+
+        class FakeSoup:
+            body = FakeWrapper()
+
+        with patch("prd_briefing.confluence.BeautifulSoup", return_value=FakeSoup()):
+            sections = self.connector._parse_sections(
+                html="<ignored />",
+                base_url="https://confluence.shopee.io",
+                source_url="https://confluence.shopee.io/display/SPDB/Test",
+                session_id="session-1",
+            )
+        self.assertEqual(sections[0].title, "Overview")
+
+        generic = BeautifulSoup("<div><span>Shown</span></div>", "html.parser").div
+        generic.contents.insert(0, object())
+        with patch.object(self.connector, "_is_toc_block", return_value=False), \
+            patch.object(self.connector, "_is_struck_node", return_value=False):
+            self.assertEqual(
+                self.connector._extract_block_content(generic, base_url="https://confluence.shopee.io")[0],
+                ["Shown"],
+            )
+
+    def test_cell_text_and_struck_node_helpers(self):
+        self.assertFalse(self.connector._is_meaningful_cell_text(""))
+        self.assertFalse(self.connector._is_meaningful_cell_text("\u2000"))
+        self.assertFalse(self.connector._is_meaningful_cell_text("1."))
+        self.assertFalse(self.connector._is_meaningful_cell_text("A)"))
+        self.assertFalse(self.connector._is_meaningful_cell_text("IV."))
+        self.assertFalse(self.connector._is_meaningful_cell_text("○"))
+        self.assertTrue(self.connector._is_meaningful_cell_text("需要复核"))
+        self.assertFalse(self.connector._is_struck_node("not a tag"))
+
+    @patch("prd_briefing.confluence.requests.get")
+    def test_request_retries_auth_candidates_and_surfaces_errors(self, mock_get):
+        unauthorized = Mock(status_code=401)
+        ok = Mock(status_code=200)
+        ok.raise_for_status.return_value = None
+        mock_get.side_effect = [unauthorized, ok]
+
+        response = self.connector._request("https://confluence.shopee.io/rest/api/content")
+
+        self.assertIs(response, ok)
+        self.assertEqual(mock_get.call_count, 2)
+
+        unauthorized_again = Mock(status_code=401)
+        unauthorized_again.raise_for_status.side_effect = requests.HTTPError("unauthorized")
+        mock_get.side_effect = [unauthorized_again, unauthorized_again, unauthorized_again]
+        with self.assertRaises(requests.HTTPError):
+            self.connector._request("https://confluence.shopee.io/rest/api/content")
+
+        mock_get.side_effect = requests.ConnectionError("down")
+        with self.assertRaises(requests.ConnectionError):
+            self.connector._request("https://confluence.shopee.io/rest/api/content")
+
+        with patch.object(self.connector, "_headers_candidates", return_value=[]):
+            with self.assertRaisesRegex(RuntimeError, "did not return a response"):
+                self.connector._request("https://confluence.shopee.io/rest/api/content")
+
+    def test_header_candidates_support_bearer_basic_and_unauthenticated_modes(self):
+        bearer_connector = ConfluenceConnector(
+            base_url="https://confluence.shopee.io",
+            email="user@example.com",
+            api_token="api-token",
+            bearer_token="bearer-token",
+            store=self.store,
+        )
+        headers = bearer_connector._headers_candidates(accept="text/html")
+        self.assertEqual(headers[0]["Authorization"], "Bearer bearer-token")
+        self.assertEqual(headers[0]["Accept"], "text/html")
+        self.assertEqual(headers[1]["Authorization"], "Bearer api-token")
+        self.assertTrue(headers[2]["Authorization"].startswith("Basic "))
+
+        anonymous = ConfluenceConnector(
+            base_url="https://confluence.shopee.io",
+            email=None,
+            api_token=None,
+            bearer_token=None,
+            store=self.store,
+        )
+        self.assertEqual(anonymous._headers_candidates(), [{"Accept": "application/json"}])
+
+    def test_build_source_text_with_media_limits_and_skips_existing_refs(self):
+        section = ParsedSection(
+            title="T",
+            section_path="Path",
+            content="Body [MEDIA_ID_1]",
+            image_refs=[f"image-{index}" for index in range(8)],
+            media_refs=[f"MEDIA_ID_{index}" for index in range(1, 30)],
+        )
+
+        text = self.connector._build_source_text_with_media([section])
+
+        self.assertIn("[IMAGE] image-5", text)
+        self.assertNotIn("[IMAGE] image-6", text)
+        self.assertNotIn("[MEDIA_ID_1]\n[MEDIA_ID_1]", text)
+        self.assertIn("[MEDIA_ID_24]", text)
+        self.assertNotIn("[MEDIA_ID_25]", text)
 
 
 if __name__ == "__main__":

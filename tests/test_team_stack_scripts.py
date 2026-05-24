@@ -2189,6 +2189,7 @@ fi
         ):
             status = _version_plan_firestore_status(
                 env={
+                    "ENV_FILE": "/dev/null",
                     "VERSION_PLAN_STORE_BACKEND": "firestore",
                     "VERSION_PLAN_FIRESTORE_PROJECT": "risk-pm-tool",
                     "VERSION_PLAN_FIRESTORE_ENVIRONMENT": "uat",
@@ -2228,6 +2229,97 @@ fi
         self.assertIn("deploy@example.iam.gserviceaccount.com", captured[0])
         self.assertIn("--project", captured[0])
         self.assertIn("risk-pm-tool", captured[0])
+
+    def test_release_status_firestore_prefers_service_account_rest(self):
+        from scripts.release_status import _version_plan_firestore_status
+
+        class FakeSnapshot:
+            exists = True
+
+            def to_dict(self):
+                return {
+                    "environment": "live",
+                    "updated_at_sgt": "2026-05-24 09:00:00 SGT",
+                    "source_hash": "abc123",
+                }
+
+        with patch(
+            "google.cloud.firestore.Client",
+            side_effect=AssertionError("SDK ADC should not be used when deploy service account is configured"),
+        ), patch(
+            "bpmis_jira_tool.team_dashboard_version_plan_store._FirestoreRestDocument.get",
+            return_value=FakeSnapshot(),
+        ), patch(
+            "scripts.release_status._gcloud_firestore_access_token",
+            return_value="service-account-token",
+        ):
+            status = _version_plan_firestore_status(
+                env={
+                    "VERSION_PLAN_STORE_BACKEND": "firestore",
+                    "VERSION_PLAN_FIRESTORE_PROJECT": "risk-pm-tool",
+                    "VERSION_PLAN_FIRESTORE_ENVIRONMENT": "live",
+                    "CLOUD_RUN_DEPLOY_ACCOUNT": "deploy@example.iam.gserviceaccount.com",
+                }
+            )
+
+        self.assertIn("status=ok", status)
+        self.assertIn("document=portal/version_plan_live", status)
+        self.assertIn("source_hash=abc123", status)
+
+    def test_release_status_firestore_service_account_failure_skips_adc(self):
+        from scripts.release_status import _version_plan_firestore_status
+
+        with patch(
+            "google.cloud.firestore.Client",
+            side_effect=AssertionError("SDK ADC should not be used when deploy service account is configured"),
+        ), patch(
+            "bpmis_jira_tool.team_dashboard_version_plan_store._FirestoreRestDocument.get",
+            side_effect=RuntimeError("service account denied"),
+        ), patch(
+            "scripts.release_status._gcloud_firestore_access_token",
+            return_value="service-account-token",
+        ):
+            status = _version_plan_firestore_status(
+                env={
+                    "VERSION_PLAN_STORE_BACKEND": "firestore",
+                    "VERSION_PLAN_FIRESTORE_PROJECT": "risk-pm-tool",
+                    "VERSION_PLAN_FIRESTORE_ENVIRONMENT": "live",
+                    "CLOUD_RUN_DEPLOY_ACCOUNT": "deploy@example.iam.gserviceaccount.com",
+                }
+            )
+
+        self.assertIn("status=unavailable", status)
+        self.assertIn("REST service-account: RuntimeError", status)
+        self.assertNotIn("ADC", status)
+
+    def test_portal_doctor_firestore_uses_release_status_loader(self):
+        from scripts import portal_runtime_doctor
+
+        with patch.dict(
+            os.environ,
+            {
+                "VERSION_PLAN_STORE_BACKEND": "firestore",
+                "VERSION_PLAN_FIRESTORE_PROJECT": "risk-pm-tool",
+                "VERSION_PLAN_FIRESTORE_ENVIRONMENT": "live",
+                "CLOUD_RUN_DEPLOY_ACCOUNT": "deploy@example.iam.gserviceaccount.com",
+            },
+        ), patch(
+            "scripts.release_status._load_version_plan_firestore_payload",
+            return_value=(
+                {
+                    "environment": "live",
+                    "updated_at_sgt": "2026-05-24 09:00:00 SGT",
+                    "source_hash": "abc123",
+                },
+                "",
+            ),
+        ) as loader:
+            summary, issues = portal_runtime_doctor._version_plan_firestore_summary()
+
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(summary["source_hash"], "abc123")
+        self.assertEqual(issues, [])
+        loader.assert_called_once()
 
     def test_stack_doctor_exposes_release_status_command(self):
         stack_script = (PROJECT_ROOT / "scripts/run_team_stack.sh").read_text(encoding="utf-8")

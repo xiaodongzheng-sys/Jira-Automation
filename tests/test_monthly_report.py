@@ -981,6 +981,8 @@ class MonthlyReportTests(unittest.TestCase):
 
     def test_go_live_highlight_intent_does_not_promote_generic_progress(self):
         period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
+        self.assertEqual(resolve_monthly_report_period(datetime(2026, 4, 1, 10, tzinfo=SEATALK_INSIGHTS_TIMEZONE)).start.date(), date(2026, 4, 13))
+        self.assertEqual(resolve_monthly_report_period_from_user_range(period_start="", period_end="", fallback=datetime(2026, 5, 1, tzinfo=SEATALK_INSIGHTS_TIMEZONE)).start.date(), date(2026, 4, 13))
         projects = [
             {
                 "bpmis_id": "CCIC",
@@ -2157,6 +2159,601 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertNotIn("Model invented row", result)
         self.assertNotIn("Governance, Risk & Compliance (GRC) - Phase 3", result)
         self.assertTrue(result.endswith("Regards\nXiaodong"))
+
+    def test_monthly_report_private_edge_helpers_cover_boundary_branches(self):
+        from bpmis_jira_tool import monthly_report as mr
+
+        self.assertEqual(
+            normalize_monthly_report_highlight_topic_sources({"Skip": ["gmail"], "AF": ["email"]}, ["AF"]),
+            {"AF": ["gmail"]},
+        )
+        with self.assertRaises(ToolError):
+            normalize_monthly_report_highlight_topic_sources([{"topic": "AF", "sources": []}], ["AF"])
+        style = build_monthly_report_historical_style_guide(
+            [
+                "bad",
+                {"source_type": "other", "content": "Highlights\nIgnore"},
+                {"item_type": "other", "content": "Highlights\nIgnore"},
+                {"summary": "Subject", "content": "Highlights\nAF launch\n\nCredit Risk live"},
+                {"summary": "Subject", "content": "Highlights\nDuplicate"},
+            ]
+        )
+        self.assertEqual(style["report_count"], 1)
+        max_style = build_monthly_report_historical_style_guide(
+            [{"summary": f"Subject {index}", "content": "Highlights\nAF launch"} for index in range(20)]
+        )
+        self.assertEqual(max_style["report_count"], mr.MONTHLY_REPORT_STYLE_GUIDE_MAX_REPORTS)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = _settings(temp_dir)
+            cache_path = mr._monthly_report_style_guide_cache_path(settings, owner_email="owner@npt.sg")
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text("[]", encoding="utf-8")
+            self.assertIsNone(read_monthly_report_historical_style_guide_cache(settings, owner_email="owner@npt.sg"))
+            mr._write_monthly_report_json_cache(cache_path, {"version": -1, "style_guide": style})
+            self.assertIsNone(read_monthly_report_historical_style_guide_cache(settings, owner_email="owner@npt.sg"))
+            mr._write_monthly_report_json_cache(cache_path, {"version": mr.MONTHLY_REPORT_STYLE_GUIDE_CACHE_VERSION, "style_guide": {"report_count": 0}})
+            self.assertIsNone(read_monthly_report_historical_style_guide_cache(settings, owner_email="owner@npt.sg"))
+        excerpt = mr._monthly_report_historical_excerpt("Highlights\n\nAF update\n" + "\n".join(f"line {i}" for i in range(500)))
+        self.assertIn("AF update", excerpt)
+        compacted = mr._compact_monthly_report_style_guide(
+            {
+                "report_count": 10,
+                "observed_subjects": [f"s{i}" for i in range(20)],
+                "style_rules": [f"rule {i}" for i in range(20)],
+                "examples": ["bad", {"subject": "bad", "excerpt": ""}, *[{"subject": f"s{i}", "excerpt": "x" * 3000} for i in range(12)]],
+            }
+        )
+        self.assertLessEqual(len(compacted["examples"]), 3)
+
+        period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
+        self.assertEqual(resolve_monthly_report_period(datetime(2026, 5, 4, 10, tzinfo=SEATALK_INSIGHTS_TIMEZONE)).start.date(), date(2026, 4, 13))
+        with self.assertRaises(ToolError):
+            resolve_monthly_report_period_from_user_range(period_start="", period_end="2026-05-08")
+        with self.assertRaises(ToolError):
+            resolve_monthly_report_period_from_user_range(period_start="bad", period_end="2026-05-08")
+        self.assertEqual(
+            mr._monthly_report_period_from_payload(
+                period_start="2026-04-13T10:00:00+08:00",
+                period_end="2026-05-08",
+                period_end_exclusive="2026-05-09",
+                fallback=datetime(2026, 5, 1, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            ).end.date(),
+            date(2026, 5, 8),
+        )
+        with self.assertRaises(ToolError):
+            mr._monthly_report_period_from_payload(period_start="2026-05-08", period_end="2026-04-13", period_end_exclusive=None, fallback=datetime(2026, 5, 1, tzinfo=SEATALK_INSIGHTS_TIMEZONE))
+        self.assertEqual(mr._parse_monthly_report_datetime(datetime(2026, 5, 1, tzinfo=SEATALK_INSIGHTS_TIMEZONE)).date(), date(2026, 5, 1))
+        with self.assertRaises(ValueError):
+            mr._parse_monthly_report_datetime("bad")
+
+        self.assertEqual(mr._safe_int("bad"), 0)
+        self.assertEqual(mr._safe_int("7"), 7)
+        self.assertEqual(mr._normalize_google_sheet_evidence([{"title": "T", "url": "u", "text": "x" * 5000}, "bad"])[0]["title"], "T")
+        self.assertEqual(mr._normalize_google_sheet_evidence([{}, *[{"title": str(i)} for i in range(5)]])[-1]["title"], "3")
+        self.assertEqual(normalize_monthly_report_highlight_topics({"bad": "type"}), [])
+        self.assertEqual(build_monthly_report_historical_style_guide([{"summary": "s", "content": ""}])["report_count"], 0)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = _settings(temp_dir)
+            write_monthly_report_historical_style_guide_cache(settings, owner_email="owner@npt.sg", style_guide={})
+            self.assertFalse(mr._monthly_report_style_guide_cache_path(settings, owner_email="owner@npt.sg").exists())
+        self.assertEqual(mr._monthly_report_historical_excerpt(""), "")
+        self.assertTrue(build_monthly_highlight_evidence_map(["bad", {"topic": "AF", "seatalk_evidence": ["AF public launch"]}]))
+        self.assertEqual(build_monthly_report_evidence_review(["bad"]), [])
+        self.assertEqual(mr._monthly_report_confidence_counts([{"confidence": "weird"}])["none"], 1)
+        self.assertEqual(mr._monthly_report_target_source_counts(["bad", {"include": False}]), {})
+        with self.assertRaises(ToolError):
+            resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="", fallback=datetime(2026, 5, 1, tzinfo=SEATALK_INSIGHTS_TIMEZONE))
+        with self.assertRaises(ToolError):
+            mr._monthly_report_period_from_payload(period_start="2026-04-13", period_end=None, period_end_exclusive=None, fallback=datetime(2026, 5, 1, tzinfo=SEATALK_INSIGHTS_TIMEZONE))
+        with self.assertRaises(ToolError):
+            mr._monthly_report_period_from_payload(period_start="bad", period_end="2026-05-08", period_end_exclusive="bad", fallback=datetime(2026, 5, 1, tzinfo=SEATALK_INSIGHTS_TIMEZONE))
+        with self.assertRaises(ToolError):
+            mr._monthly_report_period_from_payload(period_start="2026-05-10", period_end="2026-05-08", period_end_exclusive="2026-05-09", fallback=datetime(2026, 5, 1, tzinfo=SEATALK_INSIGHTS_TIMEZONE))
+        with self.assertRaises(ValueError):
+            mr._parse_monthly_report_datetime("")
+        self.assertEqual(mr._parse_monthly_report_datetime("2026-05-01T10:00:00").tzinfo, SEATALK_INSIGHTS_TIMEZONE)
+        self.assertEqual(mr._parse_monthly_report_datetime(date(2026, 5, 1)).date(), date(2026, 5, 1))
+        self.assertEqual(mr._parse_monthly_report_datetime("2026-05-01").date(), date(2026, 5, 1))
+        self.assertIn(
+            "Monthly Report Template",
+            mr.build_monthly_report_prompt(
+                template="# T",
+                generated_at=datetime(2026, 5, 1, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+                seatalk_history_text="",
+                key_projects=[],
+                prd_sources=[],
+                prd_errors=[],
+            ),
+        )
+        self.assertEqual(mr._compact_monthly_project_evidence_for_batch([{"include": False}]), [])
+        self.assertEqual(mr._compact_highlight_deep_evidence_for_prompt(["bad"], include_source_evidence=True), [])
+        self.assertEqual(mr._compact_highlight_project_updates(["bad"]), [])
+        self.assertEqual(mr._compact_highlight_evidence_map({}), {})
+        self.assertEqual(mr._compact_text_list(["", "x"], limit=2, max_chars=5), ["x"])
+        self.assertEqual(mr._monthly_report_table_cell(""), "TBD")
+        self.assertEqual(mr._monthly_report_token_risk(mr.MONTHLY_REPORT_TOKEN_RISK_HIGH), "high")
+        self.assertEqual(mr._monthly_report_token_risk(mr.MONTHLY_REPORT_TOKEN_RISK_WARNING), "warning")
+        self.assertEqual(mr._payload_block("raw"), "raw")
+        sanitized = _sanitize_monthly_report_output("No confirmed source evidence is available.\n## Key Follow-ups\nremove\n## Next\nkeep")
+        self.assertIn("This item remains", sanitized)
+        self.assertNotIn("remove", sanitized)
+        self.assertEqual(mr._monthly_report_project_table_area({"product_area": "ops"}), "Ops Risk")
+        self.assertEqual(mr._monthly_report_project_table_area({"product_area": "credit"}), "Credit Risk")
+        self.assertEqual(mr._monthly_report_project_table_area({"product_area": "anti fraud"}), "Anti-Fraud")
+        self.assertEqual(mr._monthly_report_project_table_area({"project_name": "Neutral"}), "Credit Risk")
+        self.assertIn(
+            "AF Launch",
+            _apply_monthly_report_project_tables(
+                "Intro\n\nRegards\nMe",
+                [{"include": True, "product_area": "anti fraud", "project_name": "AF Launch", "market": "SG", "priority": "SP", "current_status": "UAT", "target_tech_live_date": "2026-05-01"}],
+            ),
+        )
+
+        self.assertEqual(mr._matched_lines_for_project("short\nAF launch will go live", {"AF launch"}, limit=2), ["AF launch will go live"])
+        self.assertEqual(mr._matched_conversation_context_lines_for_project("", {"AF"}, limit=2), [])
+        conversation = "\n".join(
+            [
+                "preamble before marker",
+                "================================================================================",
+                "=== AF Launch Group ===",
+                "github bot: ignore this",
+                "AF launch topic",
+                "Decision: public launch approved",
+                "================================================================================",
+                "=== Credit Group ===",
+                "Credit card topic",
+                "UAT is delayed",
+            ]
+        )
+        self.assertTrue(mr._matched_conversation_context_lines_for_project(conversation, {"AF launch"}, limit=2))
+        self.assertEqual(mr._matched_qualified_conversation_context_lines_for_project("", {"AF"}, qualifier_marker_groups=[("public launch",)], topic_intent="launch", topic="AF", limit=2, context_lines=1), [])
+        self.assertTrue(
+            mr._matched_qualified_conversation_context_lines_for_project(
+                conversation,
+                {"AF launch"},
+                qualifier_marker_groups=[("public launch",)],
+                topic_intent="general_progress",
+                topic="SG AF launch",
+                limit=3,
+                context_lines=1,
+            )
+        )
+        conflicting_conversation = "\n".join(
+            [
+                "=== SG AF Launch ===",
+                "PH AF launch unrelated market line",
+                "SG AF launch public launch approved",
+                "SG AF launch follow-up one",
+                "SG AF launch follow-up two",
+                "SG AF launch follow-up three",
+                "SG AF launch follow-up four",
+                "SG AF launch follow-up five",
+            ]
+        )
+        self.assertTrue(
+            mr._matched_qualified_conversation_context_lines_for_project(
+                conflicting_conversation,
+                {"AF launch"},
+                qualifier_marker_groups=[("public launch",)],
+                topic_intent="general_progress",
+                topic="SG AF launch",
+                limit=3,
+                context_lines=5,
+            )
+        )
+        self.assertFalse(mr._monthly_report_text_has_conflicting_market("SG launch", set()))
+        self.assertTrue(mr._monthly_report_text_has_conflicting_market("PH launch", {"sg"}))
+        self.assertTrue(mr._monthly_report_text_has_unrelated_product_signal("GRC RCSA update", "AF topic"))
+        self.assertTrue(mr._matched_forward_context_lines_for_project(conversation, {"AF launch"}, limit=3, context_lines=2))
+        self.assertTrue(mr._matched_context_lines_for_project("before marker\n" + conversation, {"AF launch"}, limit=3, context_lines=1))
+        self.assertTrue(mr._matched_sections_for_project("\n\nshort\n\nAF launch section has enough detail", {"AF launch"}, limit=1))
+        self.assertEqual(mr._index_prd_summaries_by_jira(["bad", {"jira_id": "AF-1", "url": "u"}])["AF-1"][0]["url"], "u")
+        self.assertEqual(len(mr._matched_prd_summaries_for_project([{"jira_id": "AF-1"}, {"jira_id": "AF-1"}], {"AF-1": [{"jira_id": "AF-1", "url": "u"}]})), 1)
+
+        self.assertEqual(mr._monthly_report_next_quarter_label(date(2026, 12, 1)), "Q1 2027")
+        self.assertEqual(mr._monthly_report_target_tech_live_date([{"release_date": "bad", "version": "v1"}], fallback_reference_date=date(2026, 5, 1))[2], "next_quarter_fallback")
+        requirements_text = "\n".join(
+            [
+                "Market: PH",
+                "Subject: PH_Monthly Requirements Update_260501",
+                "From: Owner <owner@npt.sg>",
+                "",
+                "Date: 2026-05-01",
+                "Planning row should skip",
+                "Project AF Launch",
+                "Phase 2 scope",
+                "Tech go",
+                "live: Jun 2026",
+                "| PH | SP | AF Launch | Tech Live | Jul 2026 |",
+                "| XX | SP | Bad | Tech Live | Jul 2026 |",
+                "| PH | X | Bad | Tech Live | Jul 2026 |",
+            ]
+        )
+        targets = build_monthly_requirements_target_map(requirements_text)
+        self.assertTrue(targets)
+        project = {"project_name": "AF Launch Phase 2", "market": "PH", "priority": "SP", "jira_tickets": [{"jira_title": "Phase 2"}]}
+        self.assertTrue(mr._monthly_requirements_target_tech_live_date(project, targets))
+        self.assertIsNone(mr._monthly_requirements_target_tech_live_date({"priority": "P1"}, targets))
+        self.assertEqual(mr._monthly_requirements_entries_for_project({}, targets), [])
+        self.assertTrue(mr._monthly_requirements_line_matches_project("AF Launch target", {"", "AF Launch"}))
+        self.assertEqual(mr._first_matching_alias("No match", {"", "AF Launch"}), "")
+        self.assertEqual(mr._monthly_requirements_market_from_subject("PH_custom"), "PH")
+        self.assertEqual(mr._monthly_requirements_sender_from_line("From: owner@npt.sg"), "owner@npt.sg")
+        self.assertEqual(mr._monthly_requirements_entry_date({"target_date": date(2026, 5, 1)}), date(2026, 5, 1))
+        self.assertIsNone(mr._monthly_requirements_entry_date({"target_date": "bad"}))
+        self.assertIsNone(mr._monthly_requirements_entry_source_date({"source_date_hint": "bad"}))
+        self.assertIsNone(mr._monthly_requirements_source_date_from_subject("bad_991399"))
+        self.assertIsNone(mr._monthly_requirements_year_from_subject("bad_aa0101"))
+        self.assertIsNone(mr._monthly_requirements_year_from_subject("no year"))
+        self.assertEqual(mr._monthly_requirements_market_for_project({"market": "PH"}), "PH")
+        self.assertEqual(mr._monthly_requirements_market_for_project({"project_name": "SG launch"}), "SG")
+        self.assertTrue(mr._monthly_requirements_ordered_month_candidates("Planning skip\nJun 2026 2026-07-01 260801 bad 991399 0501 late Sep", source_year=2026))
+        self.assertEqual(mr._monthly_requirements_ordered_month_candidates("Jun 0000 0000-07-01 late Sep", source_year="bad"), [])
+        self.assertTrue(mr._monthly_requirements_ordered_month_candidates("Badmonth 2026 2026-99-01 991399 Sep", source_year=2026))
+        self.assertFalse(mr._monthly_requirements_is_target_table_row("| PH | SP | Only three |"))
+        self.assertFalse(mr._monthly_requirements_is_target_table_row("| XX | SP | Bad | Jul 2026 |"))
+        self.assertFalse(mr._monthly_requirements_is_target_table_row("| PH | X | Bad | Jul 2026 |"))
+        self.assertEqual(mr._monthly_requirements_relevant_phase_markers_for_target_line("Phase II tech live Jun 2026"), {"2"})
+        self.assertIsNone(mr._monthly_requirements_year_from_subject("bad_aa0101"))
+        self.assertIsNone(mr._monthly_requirements_year_from_subject("bad 20x6"))
+        self.assertEqual(mr._monthly_report_month_label("nonsense"), "TBD")
+        self.assertEqual(mr._monthly_report_current_status([{"version": "dev"}], report_period=period, material_update_score=1), "Dev")
+        self.assertFalse(mr._release_date_reached({"release_date": "bad"}, period))
+        self.assertEqual(mr._filter_text_by_product_scope("Random\nAnti-Fraud launch\n\nOther")[1], 2)
+        self.assertEqual(mr._filter_text_by_product_scope_or_highlight_aliases("Random\nAF launch\n\nOther", set())[1], 2)
+        self.assertGreaterEqual(mr._filter_text_by_product_scope_or_highlight_aliases(conversation + "\n", {"AF launch"})[2], 1)
+        self.assertGreaterEqual(mr._filter_text_by_product_scope_or_highlight_aliases("=== H ===\nAF launch\n\nNext useful line", {"AF launch"})[2], 1)
+        self.assertEqual(mr._filter_text_by_product_scope_or_highlight_aliases("Random\n\nOther", {"AF launch"})[2], 0)
+        self.assertEqual(mr._filter_text_by_product_scope_or_highlight_aliases("Anti-Fraud launch\n\nRandom", {"Missing"})[0], "Anti-Fraud launch")
+        self.assertEqual(mr._filter_thread_export_by_product_scope("")[1], 0)
+        self.assertIn("No material", mr._filter_thread_export_by_product_scope("Header\n" + "=" * 80 + "\nRandom only")[0])
+        self.assertGreater(len(mr._split_text_for_token_limit("x" * 5000 + "\nshort", 1)), 1)
+        self.assertEqual(mr._split_text_for_token_limit("", 1), [])
+        self.assertGreater(len(mr._split_text_for_token_limit(("line\n" * 1500), 1)), 1)
+        self.assertGreater(len(mr._split_json_items_for_token_limit([{"id": "1", "content": "x" * 5000}, {"id": "2"}], 1)), 1)
+        self.assertGreater(len(mr._split_json_items_for_token_limit([{"id": "1"}, {"id": "2", "content": "x" * 5000}], 1)), 1)
+        self.assertEqual(mr._split_large_json_item({"id": "small"}, 10000), [{"id": "small"}])
+        self.assertGreater(len(mr._split_large_json_item({"bpmis_id": "B1", "content": "x" * 5000}, 1)), 1)
+        fallback_progress: list[tuple[object, ...]] = []
+
+        def legacy_progress(stage, message, current, total):
+            fallback_progress.append((stage, message, current, total))
+
+        mr._emit_monthly_report_progress(legacy_progress, "stage", "message", 1, 1, estimated_prompt_tokens=1)
+        self.assertEqual(fallback_progress[0], ("stage", "message", 1, 1))
+
+        html = monthly_report_markdown_to_html("# Title\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\nnot table\n\n- item\nplain")
+        self.assertIn("<table", html)
+        self.assertIn("<p>not table</p>", html)
+        self.assertIn("<li>item</li>", html)
+        self.assertEqual(mr._monthly_report_table_column_widths(["Other"], 2), ["50.0000%", "50.0000%"])
+        self.assertEqual(mr._equal_widths(2), ["50.0000%", "50.0000%"])
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, {"LOCAL_AGENT_TEAM_PORTAL_DATA_DIR": str(Path(temp_dir) / "agent")}):
+            self.assertEqual(mr._monthly_report_data_root(replace(_settings(temp_dir), team_portal_data_dir=Path("relative"))), Path(temp_dir) / "agent")
+        with tempfile.TemporaryDirectory() as temp_dir, patch("bpmis_jira_tool.monthly_report.os.getenv", return_value=""):
+            self.assertEqual(mr._monthly_report_data_root(replace(_settings(temp_dir), team_portal_data_dir=Path("relative"))), Path("relative"))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache = Path(temp_dir) / "cache.json"
+            cache.write_text('{"ok": true}', encoding="utf-8")
+            os.utime(cache, (0, 0))
+            self.assertIsNone(mr._read_monthly_report_json_cache(cache, max_age_seconds=1))
+            cache.write_text("{bad", encoding="utf-8")
+            self.assertIsNone(mr._read_monthly_report_json_cache(cache))
+            cache.write_text("[]", encoding="utf-8")
+            self.assertIsNone(mr._read_monthly_report_json_cache(cache))
+            with patch.object(Path, "write_text", side_effect=OSError("denied")):
+                mr._write_monthly_report_json_cache(cache, {"ok": True})
+        self.assertEqual(mr._vip_emails({"vip_people": ["bad", {"emails": ["A@NPT.SG"]}]}), ["a@npt.sg"])
+        self.assertEqual(mr._project_product_area({"teams": ["Ops"], "project_name": "Process"}), "Ops Risk")
+        self.assertEqual(mr._monthly_report_read_json_file(Path("/no/such/file.json")), {})
+        self.assertIn("name", mr._monthly_report_collect_terms_from_value([{"name": "name", "term": "term", "aliases": ["alias"], "code_terms": ["code"]}]))
+        self.assertIn("x", mr._monthly_report_collect_terms_from_value("x"))
+        self.assertIn("credit card", mr._monthly_report_highlight_qualifier_marker_groups_from_entries("PH MCC credit card", [] )[1])
+        self.assertIn("bank", mr._monthly_report_highlight_qualifier_marker_groups_from_entries("Bank AF", [] )[-1])
+        self.assertFalse(mr._monthly_report_glossary_term_matches_text("text", "text", ""))
+        self.assertEqual(mr._dedupe_marker_groups([(), ("ph",), ("ph",)]), [("ph",)])
+        self.assertFalse(mr._monthly_report_text_matches_qualifier_marker("text", "text", ""))
+        self.assertTrue(mr._monthly_report_text_matches_qualifier_marker("cc text", "cctext", "cc"))
+        with patch("bpmis_jira_tool.monthly_report._monthly_report_business_glossary", return_value={"entries": ["bad"]}):
+            self.assertTrue(mr._monthly_report_glossary_context_for_marker("mcc")["requires_context_any"])
+        self.assertEqual(mr._filter_monthly_report_texts_by_qualifier_marker_groups(["a"], []), ["a"])
+        self.assertFalse(mr._monthly_report_text_allowed_by_product_area_scope("", "Credit Risk"))
+        self.assertFalse(mr._monthly_report_text_allowed_by_product_area_scope("anti fraud only", "Credit Risk"))
+        self.assertFalse(mr._monthly_report_text_allowed_by_product_area_scope("scam only", "Credit Risk"))
+        self.assertIn("af-1", mr._project_aliases({"jira_tickets": ["bad", {"jira_id": "AF-1"}]}))
+        self.assertEqual(mr._monthly_report_highlight_topic_intent("employee rollout feedback after pilot"), "go_live_outcome")
+        self.assertEqual(mr._monthly_report_highlight_topic_intent("release readiness"), "release_readiness")
+        self.assertEqual(mr._monthly_report_highlight_topic_intent("decision approval"), "decision_needed")
+        self.assertEqual(mr._monthly_report_highlight_intent_focus("release_readiness")["label"], "Release readiness")
+        self.assertEqual(mr._monthly_report_highlight_intent_focus("decision_needed")["label"], "Decision needed")
+        self.assertEqual(mr._monthly_report_intent_signal_count("issue_followup", []), 0)
+        self.assertFalse(mr._monthly_report_intent_term_matches("", "", ""))
+        self.assertFalse(mr._monthly_report_intent_term_matches("product", "product", "prod"))
+        self.assertFalse(mr._highlight_topic_phrase_aliases(["sg", "ph"]))
+        self.assertFalse(mr._highlight_topic_phrase_aliases(["alpha", "", "beta"]))
+        self.assertFalse(mr._highlight_topic_phrase_aliases(["status", "update"]))
+        self.assertFalse(mr._highlight_topic_phrase_aliases(["sg", "ph", "id"]))
+        self.assertFalse(mr._highlight_topic_phrase_aliases(["new", "old"]))
+        self.assertTrue(mr._highlight_topic_phrase_aliases(["recent", "status", "update"]))
+        self.assertFalse(mr._is_useful_seatalk_highlight_alias(""))
+        self.assertFalse(mr._is_useful_seatalk_highlight_alias("123"))
+        self.assertFalse(mr._is_useful_seatalk_highlight_alias("workflow"))
+        self.assertFalse(mr._is_useful_seatalk_highlight_alias("status"))
+        self.assertFalse(mr._highlight_topic_matches_project(set(), {"project_name": "AF"}))
+        self.assertTrue(mr._monthly_report_text_has_conflicting_market("Seabank PH", {"sg"}))
+        self.assertTrue(mr._monthly_report_text_has_conflicting_market("Philippines", {"sg"}))
+        self.assertTrue(mr._matched_conversation_context_lines_for_project(conversation, {"AF launch"}, limit=1))
+        noisy_forward = "AF launch topic\n\nGithub bot: ignored\nNext useful line"
+        self.assertEqual(mr._matched_forward_context_lines_for_project(noisy_forward, {"AF launch"}, limit=1, context_lines=3), ["AF launch topic"])
+        self.assertEqual(mr._matched_forward_context_lines_for_project("github bot: AF launch\nNext useful line", {"AF launch"}, limit=3, context_lines=1), ["Next useful line"])
+        self.assertEqual(mr._matched_context_lines_for_project("AF launch topic\n\nNext", {"AF launch"}, limit=1, context_lines=2), ["AF launch topic"])
+        self.assertEqual(mr._matched_context_lines_for_project("AF launch topic\n\nNext useful line", {"AF launch"}, limit=3, context_lines=1), ["AF launch topic"])
+        self.assertTrue(mr._monthly_report_issue_followup_aliases("risk database qps", {"id", "abc", "db"}))
+        self.assertIsNone(
+            mr._monthly_requirements_target_tech_live_date(
+                {"project_name": "AF Launch", "market": "PH", "priority": "SP"},
+                [{"market": "PH", "matched_line": "AF Launch", "target_date": "bad", "target_label": "tech_live"}],
+            )
+        )
+        self.assertIsNone(
+            mr._monthly_requirements_target_tech_live_date(
+                {"project_name": "AF Launch", "market": "PH", "priority": "SP"},
+                [{"market": "PH", "matched_line": "AF Launch", "target_date": "2026-07-01", "target_label": "date"}],
+            )
+        )
+        self.assertEqual(mr._monthly_requirements_relevant_phase_markers_for_target_line("Tech live Phase II"), {"2"})
+        self.assertTrue(mr._filter_text_by_product_scope_or_highlight_aliases("AF launch\n\nRandom", {"AF launch"})[0].splitlines()[1] == "")
+        self.assertGreater(len(mr._split_json_items_for_token_limit([{"id": "1", "content": "x" * 1200}, {"id": "2", "content": "y" * 1200}], 500)), 1)
+
+    def test_monthly_report_prompt_dry_run_omits_empty_optional_context(self):
+        from bpmis_jira_tool import monthly_report as mr
+
+        generated_at = datetime(2026, 5, 1, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+        period = resolve_monthly_report_period(generated_at)
+        optimized = mr.build_monthly_report_prompt(
+            template="# T",
+            generated_at=generated_at,
+            seatalk_history_text="AF launch approved.",
+            key_projects=[{"project_name": "AF Launch"}],
+            prd_sources=[],
+            prd_errors=[],
+        )
+        legacy_optional = "\n\n# PRD / Confluence Enrichment\n[]\n\n# PRD Enrichment Gaps\n[]"
+        self.assertIn("AF Launch", optimized)
+        self.assertIn("AF launch approved.", optimized)
+        self.assertNotIn("# PRD / Confluence Enrichment", optimized)
+        self.assertNotIn("# PRD Enrichment Gaps", optimized)
+        self.assertLess(len(optimized), len(optimized + legacy_optional))
+
+        batch_prompt = mr.build_monthly_report_batch_prompt(
+            template="# T",
+            generated_at=generated_at,
+            report_period=period,
+            highlight_topics=[],
+            source="seatalk",
+            payload={"fact": "AF launch approved"},
+            prd_errors=[],
+        )
+        self.assertIn("AF launch approved", batch_prompt)
+        self.assertNotIn("# User-Provided Highlight Topics", batch_prompt)
+        self.assertNotIn("# PRD Enrichment Gaps", batch_prompt)
+
+        merge_prompt = mr.build_monthly_report_merge_prompt(
+            generated_at=generated_at,
+            report_period=period,
+            highlight_topics=[],
+            batch_summaries=[{"summary": "AF launch approved"}],
+            prd_errors=[],
+        )
+        self.assertIn("AF launch approved", merge_prompt)
+        self.assertNotIn("# User-Provided Highlight Topics", merge_prompt)
+        self.assertNotIn("# PRD Enrichment Gaps", merge_prompt)
+
+    def test_monthly_report_service_generation_edges_cover_caches_and_limits(self):
+        from bpmis_jira_tool import monthly_report as mr
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = _settings(temp_dir)
+            service = MonthlyReportService(
+                settings=settings,
+                workspace_root=Path(temp_dir),
+                seatalk_service=_FakeSeaTalkService(),
+                gmail_service=_FakeGmailService(),
+                now=datetime(2026, 5, 3, 10, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            )
+            period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
+            calls: list[str] = []
+
+            def fake_guarded_generate(**kwargs):
+                calls.append(kwargs["prompt_mode"])
+                return {"result_markdown": f"generated {kwargs['prompt_mode']}", "model_id": "m", "trace": {"ok": True}}
+
+            with patch.object(service, "_guarded_generate", side_effect=fake_guarded_generate):
+                self.assertEqual(
+                    service._batch_summaries(
+                        template="# T",
+                        generated_at=service.now,
+                        report_period=period,
+                        highlight_topics=[],
+                        monthly_evidence_brief=[],
+                        highlight_deep_evidence=[],
+                        prd_errors=[],
+                        evidence_sidecar=[],
+                        progress_callback=None,
+                    )[0]["source"],
+                    "empty",
+                )
+                payload = [{"bpmis_id": "B1", "project_name": "AF", "content": "x"}]
+                summaries = service._batch_summaries(
+                    template="# T",
+                    generated_at=service.now,
+                    report_period=period,
+                    highlight_topics=["AF"],
+                    monthly_evidence_brief=payload,
+                    highlight_deep_evidence=[],
+                    prd_errors=[],
+                    evidence_sidecar=[],
+                    progress_callback=None,
+                )
+                self.assertFalse(summaries[0]["cache_hit"])
+                cached = service._batch_summaries(
+                    template="# T",
+                    generated_at=service.now,
+                    report_period=period,
+                    highlight_topics=["AF"],
+                    monthly_evidence_brief=payload,
+                    highlight_deep_evidence=[],
+                    prd_errors=[],
+                    evidence_sidecar=[],
+                    progress_callback=None,
+                )
+                self.assertTrue(cached[0]["cache_hit"])
+                with patch("bpmis_jira_tool.monthly_report._estimate_token_count", side_effect=[MONTHLY_REPORT_MERGE_MAX_TOKENS + 1, 1]):
+                    self.assertTrue(
+                        service._merge_batch_summaries(
+                            generated_at=service.now,
+                            report_period=period,
+                            highlight_topics=[],
+                            batch_summaries=[{"source": "x", "index": 1, "summary_markdown": "y" * 7000}],
+                            prd_errors=[],
+                            progress_callback=None,
+                        )
+                    )
+                with patch("bpmis_jira_tool.monthly_report._estimate_token_count", return_value=MONTHLY_REPORT_MERGE_MAX_TOKENS + 1):
+                    with self.assertRaises(ToolError):
+                        service._merge_batch_summaries(generated_at=service.now, report_period=period, highlight_topics=[], batch_summaries=[{"summary_markdown": "x"}], prd_errors=[], progress_callback=None)
+                self.assertTrue(service._compress_evidence_brief(generated_at=service.now, evidence_brief="evidence", progress_callback=None))
+                with patch("bpmis_jira_tool.monthly_report._estimate_token_count", return_value=MONTHLY_REPORT_MERGE_MAX_TOKENS + 1):
+                    with self.assertRaises(ToolError):
+                        service._compress_evidence_brief(generated_at=service.now, evidence_brief="x" * 5000, progress_callback=None)
+                with patch("bpmis_jira_tool.monthly_report._estimate_token_count", return_value=MONTHLY_REPORT_BATCH_MAX_TOKENS + 1):
+                    with self.assertRaises(ToolError):
+                        MonthlyReportService._guarded_generate(service, prompt="x", prompt_mode="too_big", max_tokens=MONTHLY_REPORT_BATCH_MAX_TOKENS, progress_callback=None)
+                self.assertEqual(service._highlight_topic_narratives(generated_at=service.now, report_period=period, highlight_deep_evidence=[], progress_callback=None), [])
+                evidence = [{"topic": "AF", "confidence": "high", "topic_intent": "launch", "evidence": ["x"]}]
+                narratives = service._highlight_topic_narratives(generated_at=service.now, report_period=period, highlight_deep_evidence=evidence, progress_callback=None)
+                self.assertFalse(narratives[0]["cache_hit"])
+                self.assertTrue(service._highlight_topic_narratives(generated_at=service.now, report_period=period, highlight_deep_evidence=evidence, progress_callback=None)[0]["cache_hit"])
+            self.assertTrue(calls)
+
+            with patch("bpmis_jira_tool.monthly_report._estimate_token_count", side_effect=[MONTHLY_REPORT_FINAL_MAX_TOKENS + 1, MONTHLY_REPORT_FINAL_MAX_TOKENS + 1]), patch.object(
+                service,
+                "_batch_summaries",
+                return_value=[],
+            ), patch.object(service, "_merge_batch_summaries", return_value="large evidence"), patch.object(service, "_compress_evidence_brief", return_value="still large"):
+                with self.assertRaises(ToolError):
+                    service.generate_draft(
+                        template="# T",
+                        team_payloads=[],
+                        report_intelligence_config={"vip_people": []},
+                        period_start="2026-04-13",
+                        period_end="2026-05-08",
+                    )
+
+            payloads = [
+                {
+                    "team_key": "AF",
+                    "label": "Anti-Fraud",
+                    "member_emails": ["pm@npt.sg"],
+                    "under_prd": [
+                        {"is_key_project": True, "project_name": "No id"},
+                        {
+                            "is_key_project": True,
+                            "bpmis_id": "B1",
+                            "project_name": "AF Project",
+                            "priority": "SP",
+                            "jira_tickets": [
+                                "bad",
+                                {"jira_id": "AF-1", "pm_email": "other@npt.sg"},
+                                {"jira_id": "AF-2", "pm_email": "pm@npt.sg"},
+                                {"jira_id": "AF-2", "pm_email": "pm@npt.sg"},
+                            ],
+                        },
+                    ],
+                    "pending_live": [],
+                }
+            ]
+            projects = service._key_projects(payloads)
+            self.assertEqual(projects[0]["jira_tickets"][0]["jira_id"], "AF-2")
+            project = {"project_name": "", "market": "", "priority": "", "regional_pm_pic": "", "status": "", "release_date": "", "key_project_source": ""}
+            service._merge_project_fields(project, {"project_name": "Name"})
+            self.assertEqual(project["project_name"], "Name")
+
+            class EmptyConfluence:
+                def ingest_page(self, url, kind):
+                    if "empty" in url:
+                        return SimpleNamespace(title="Empty", source_url=url, updated_at="", sections=[])
+                    if "error" in url:
+                        raise RuntimeError("bad page")
+                    return SimpleNamespace(title="PRD", source_url=url, updated_at="now", sections=[SimpleNamespace(section_path="Overview", content="body")])
+
+            service.confluence = EmptyConfluence()
+            sources, errors = service._prd_sources(
+                [
+                    {"bpmis_id": "skip", "jira_tickets": [{"jira_id": "S", "prd_links": [{"url": "https://skip"}]}]},
+                    {
+                        "bpmis_id": "B1",
+                        "jira_tickets": [
+                            {
+                                "jira_id": "AF-1",
+                                "prd_links": [
+                                    {},
+                                    {"url": "https://empty"},
+                                    {"url": "https://error"},
+                                    {"url": "https://ok"},
+                                    {"url": "https://ok"},
+                                ],
+                            }
+                        ],
+                    },
+                ],
+                project_ids={"B1"},
+            )
+            self.assertEqual(len(sources), 1)
+            self.assertTrue(errors)
+
+            class FakeCredentialStore:
+                def __init__(self, payload):
+                    self.payload = payload
+
+                def load(self, *, owner_email):
+                    return self.payload
+
+            with self.assertRaises(ToolError):
+                mr.send_monthly_report_email(credential_store=FakeCredentialStore({}), owner_email="owner@npt.sg", recipient="to@npt.sg", subject="S", draft_markdown="")
+            with self.assertRaises(Exception):
+                mr.send_monthly_report_email(credential_store=FakeCredentialStore({}), owner_email="", recipient="to@npt.sg", subject="S", draft_markdown="Body")
+            with self.assertRaises(Exception):
+                mr.send_monthly_report_email(credential_store=FakeCredentialStore({"scopes": []}), owner_email="owner@npt.sg", recipient="to@npt.sg", subject="S", draft_markdown="Body")
+            with patch("bpmis_jira_tool.monthly_report.credentials_from_payload", return_value=object()), patch(
+                "bpmis_jira_tool.monthly_report.send_gmail_message",
+                return_value={"id": "msg-1"},
+            ) as send_message:
+                sent = mr.send_monthly_report_email(
+                    credential_store=FakeCredentialStore({"scopes": ["https://www.googleapis.com/auth/gmail.send"]}),
+                    owner_email="OWNER@NPT.SG",
+                    recipient="",
+                    subject="Subject",
+                    draft_markdown="- Body",
+                )
+            self.assertEqual(sent.message_id, "msg-1")
+            self.assertEqual(send_message.call_args.kwargs["sender"], "owner@npt.sg")
+
+            with patch("bpmis_jira_tool.monthly_report.StoredGoogleCredentials") as credential_cls, patch("bpmis_jira_tool.monthly_report.Credentials", return_value=object()), patch(
+                "bpmis_jira_tool.monthly_report.GmailDashboardService",
+                return_value="gmail-service",
+            ):
+                credential_cls.return_value.load.return_value = {"scopes": []}
+                with self.assertRaises(Exception):
+                    service._build_gmail_service()
+                credential_cls.return_value.load.return_value = {"scopes": ["https://www.googleapis.com/auth/gmail.readonly"]}
+                self.assertEqual(service._build_gmail_service(), "gmail-service")
+
+            mr._monthly_report_business_glossary.cache_clear()
+            with patch("bpmis_jira_tool.monthly_report._monthly_report_read_json_file", side_effect=[None, None, None, {"domains": {"BAD": {}, "AF": {"aliases": ["fraud"]}}}]):
+                glossary = mr._monthly_report_business_glossary()
+            self.assertIn("_derived_source_counts", glossary)
+            mr._monthly_report_business_glossary.cache_clear()
 
 
 if __name__ == "__main__":

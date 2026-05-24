@@ -557,7 +557,7 @@
     if (state === 'running') return versionPlanSyncPausedMessage;
     if (state === 'error') return syncState.error || syncState.message || 'Sync failed.';
     if (syncState.last_synced_date_sgt) return `Last synced: ${syncState.last_synced_date_sgt} SGT`;
-    return 'Cached Version Plan loaded. Jira sync starts when this tab opens.';
+    return 'Cached Version Plan loaded. Click Sync Jira to refresh.';
   };
 
   const readVersionPlanCollapseState = () => {
@@ -921,6 +921,19 @@
     return revision ? { document_revision: revision } : {};
   };
 
+  const commitVersionPlanMetadata = (payload) => {
+    if (!versionPlanState || !payload) return;
+    ['document_revision', 'source_hash', 'store_backend', 'store_environment', 'can_sync', 'sync_queued'].forEach((key) => {
+      if (Object.prototype.hasOwnProperty.call(payload, key)) versionPlanState[key] = payload[key];
+    });
+    if (Object.prototype.hasOwnProperty.call(payload, 'sync_state')) {
+      versionPlanState.sync_state = payload.sync_state || {};
+    }
+    if (versionPlanSyncButton) {
+      versionPlanSyncButton.disabled = !canSyncVersionPlan || isVersionPlanSyncRunning();
+    }
+  };
+
   const refreshVersionPlanRevision = async () => {
     const planUrl = new URL(root.dataset.versionPlanUrl || '/api/team-dashboard/version-plan/af', window.location.origin);
     planUrl.searchParams.set('sync', '0');
@@ -957,14 +970,32 @@
         }),
       });
       const payload = await readJson(response, 'Could not save Version Plan cell.');
-      renderVersionPlan(payload);
+      if (field === 'priority' || field === 'pm') {
+        renderVersionPlan(payload);
+      } else {
+        commitVersionPlanMetadata(payload);
+        const rows = versionPlanRowsForCellPayload(
+          versionPlanState,
+          row.dataset.versionPlanScope || '',
+          row.dataset.versionId || '',
+        );
+        const cachedRow = Array.isArray(rows)
+          ? rows.find((item) => String(item?.row_id || '') === String(row.dataset.versionPlanRowId || ''))
+          : null;
+        if (cachedRow) cachedRow[field] = value;
+      }
       setVersionPlanStatus('Saved.', 'success');
     } catch (error) {
       setVersionPlanStatus(error.message || 'Could not save Version Plan cell.', 'error');
     }
   };
 
-  const updateVersionPlanRows = async (payload, fallbackMessage = 'Could not update Version Plan rows.', retryOnConflict = true) => {
+  const updateVersionPlanRows = async (
+    payload,
+    fallbackMessage = 'Could not update Version Plan rows.',
+    retryOnConflict = true,
+    { renderOnSuccess = true } = {},
+  ) => {
     const response = await fetch(root.dataset.versionPlanRowsUrl || '/api/team-dashboard/version-plan/af/rows', {
       method: 'POST',
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
@@ -977,7 +1008,7 @@
     } catch (error) {
       if (retryOnConflict && error?.payload?.error_category === 'version_plan_conflict') {
         await refreshVersionPlanRevision();
-        return updateVersionPlanRows(payload, fallbackMessage, false);
+        return updateVersionPlanRows(payload, fallbackMessage, false, { renderOnSuccess: true });
       }
       if (error?.payload?.error_category === 'version_plan_sync_running') {
         setVersionPlanStatus(error.message || versionPlanSyncPausedMessage, 'neutral');
@@ -985,7 +1016,8 @@
       }
       throw error;
     }
-    renderVersionPlan(result);
+    if (renderOnSuccess) renderVersionPlan(result);
+    else commitVersionPlanMetadata(result);
     setVersionPlanStatus('Saved.', 'success');
   };
 
@@ -1004,6 +1036,21 @@
       const bundle = (Array.isArray(payload.bundles) ? payload.bundles : [])
         .find((item) => String(item?.version_id || '') === String(versionId || ''));
       return bundle && Array.isArray(bundle.manual_rows) ? bundle.manual_rows : null;
+    }
+    return null;
+  };
+
+  const versionPlanRowsForCellPayload = (payload, scope, versionId = '') => {
+    if (!payload) return null;
+    if (scope === 'pipeline') return Array.isArray(payload.pipeline_rows) ? payload.pipeline_rows : null;
+    if (scope === 'bundle') {
+      const bundle = (Array.isArray(payload.bundles) ? payload.bundles : [])
+        .find((item) => String(item?.version_id || '') === String(versionId || ''));
+      if (!bundle) return null;
+      return [
+        ...(Array.isArray(bundle.synced_rows) ? bundle.synced_rows : []),
+        ...(Array.isArray(bundle.manual_rows) ? bundle.manual_rows : []),
+      ];
     }
     return null;
   };
@@ -1052,6 +1099,30 @@
         : -1;
       targetRows.splice(targetIndex >= 0 ? targetIndex : targetRows.length, 0, movingRow);
       targetRows.forEach((row, index) => { row.sort_order = index; });
+    } else if (action === 'reorder') {
+      const rows = versionPlanManualRowsForPayload(next, change.scope || '', change.version_id || '');
+      const rowIds = Array.isArray(change.row_ids) ? change.row_ids.map((rowId) => String(rowId || '')) : [];
+      if (!rows || !rowIds.length) return null;
+      const rowById = new Map(rows.map((row) => [String(row?.row_id || ''), row]));
+      const reorderedIds = new Set(rowIds);
+      const priority = rowById.get(rowIds[0])?.priority || '';
+      const reordered = rowIds.map((rowId) => rowById.get(rowId)).filter(Boolean);
+      if (!reordered.length) return null;
+      const nextRows = [];
+      let inserted = false;
+      rows.forEach((row) => {
+        if (String(row?.priority || '') !== String(priority || '')) {
+          nextRows.push(row);
+          return;
+        }
+        if (!inserted) {
+          nextRows.push(...reordered);
+          inserted = true;
+        }
+        if (!reorderedIds.has(String(row?.row_id || ''))) nextRows.push(row);
+      });
+      rows.splice(0, rows.length, ...nextRows);
+      rows.forEach((row, index) => { row.sort_order = index; });
     } else {
       return null;
     }
@@ -1102,12 +1173,19 @@
       .filter((row) => (row.dataset.versionPlanPriority || '') === (dropRow.dataset.versionPlanPriority || ''))
       .map((row) => row.dataset.versionPlanRowId || '')
       .filter(Boolean);
-    await updateVersionPlanRows({
+    const change = {
       action: 'reorder',
       scope: dropRow.dataset.versionPlanScope || '',
       version_id: dropRow.dataset.versionId || '',
       row_ids: rowIds,
-    }, 'Could not reorder Version Plan rows.');
+    };
+    const previousState = applyOptimisticVersionPlanRows(change);
+    try {
+      await updateVersionPlanRows(change, 'Could not reorder Version Plan rows.', true, { renderOnSuccess: false });
+    } catch (error) {
+      rollbackVersionPlanRows(previousState);
+      throw error;
+    }
   };
 
   const moveVersionPlanRowToSheet = async (targetSheet, dropRow = null, insertBefore = false) => {
@@ -1131,7 +1209,7 @@
     };
     const previousState = applyOptimisticVersionPlanRows(change);
     try {
-      await updateVersionPlanRows(change, 'Could not move Version Plan row.');
+      await updateVersionPlanRows(change, 'Could not move Version Plan row.', true, { renderOnSuccess: false });
     } catch (error) {
       rollbackVersionPlanRows(previousState);
       throw error;
@@ -3123,7 +3201,7 @@
         };
         const previousState = applyOptimisticVersionPlanRows(change);
         try {
-          await updateVersionPlanRows(change, 'Could not add Version Plan row.');
+          await updateVersionPlanRows(change, 'Could not add Version Plan row.', true, { renderOnSuccess: false });
         } catch (error) {
           rollbackVersionPlanRows(previousState);
           throw error;
@@ -3139,7 +3217,7 @@
         };
         const previousState = applyOptimisticVersionPlanRows(change);
         try {
-          await updateVersionPlanRows(change, 'Could not delete Version Plan row.');
+          await updateVersionPlanRows(change, 'Could not delete Version Plan row.', true, { renderOnSuccess: false });
         } catch (error) {
           rollbackVersionPlanRows(previousState);
           throw error;

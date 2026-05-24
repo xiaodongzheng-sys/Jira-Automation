@@ -1356,7 +1356,7 @@ def _daily_brief_user_prompt(
     evidence_context_block = (
         "## Deterministic Daily Brief Evidence Bundle\n"
         f"{evidence_context}\n"
-        "Treat this bundle as the first-pass source of truth for follow-up candidates, source-size diagnostics, and evidence refs. "
+        "Treat this bundle as the first-pass source of truth for evidence refs. "
         "Use the source excerpts below only to verify nuance and extract additional high-signal project updates or Xiaodong actions.\n\n"
         if str(evidence_context or "").strip()
         else ""
@@ -1492,9 +1492,14 @@ def _build_daily_brief_evidence_context(
         ][:MAX_UNANSWERED_SEATALK_QUESTION_HINTS],
         "candidate_followups": _compact_daily_followup_candidates(team_member_reminder_candidates),
         "evidence_refs": evidence_refs or [],
-        "token_ledger": source_token_ledger,
     }
-    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+    cap_flags = {
+        "seatalk_prompt_hit_cap": bool(source_token_ledger.get("seatalk_prompt_hit_cap")),
+        "gmail_prompt_hit_cap": bool(source_token_ledger.get("gmail_prompt_hit_cap")),
+    }
+    if any(cap_flags.values()):
+        payload["source_caps"] = cap_flags
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def _compact_daily_followup_candidates(candidates: list[dict[str, str]] | None) -> list[dict[str, str]]:
@@ -2086,7 +2091,7 @@ def _sanitize_seatalk_evidence(value: Any, *, name_mappings: dict[str, str] | No
     cleaned = re.sub(r"\b(SeaTalk contact)(?:\s*[,;/]\s*\1)+\b", r"\1", cleaned)
     cleaned = " ".join(cleaned.split())
     if not cleaned or RAW_SEATALK_ID_PATTERN.fullmatch(text):
-        if saw_unmapped_group and saw_unmapped_contact:
+        if saw_unmapped_group and saw_unmapped_contact:  # pragma: no cover - a single raw ID cannot be both group and contact.
             return "SeaTalk conversation"
         if saw_unmapped_group:
             return "SeaTalk group"
@@ -2831,7 +2836,7 @@ def _private_chat_required_name_tokens(text: Any) -> set[str]:
             tokens.update(_evidence_match_tokens(canonical))
     for match in re.findall(r"\b[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,}){0,2}\b", raw):
         words = [word.casefold() for word in re.findall(r"[A-Za-z]{3,}", match)]
-        if not words:
+        if not words:  # pragma: no cover - regex only returns alphabetic name tokens.
             continue
         if words[0] in {"arrange", "confirm", "follow", "check", "source", "private", "seatalk"}:
             words = words[1:]
@@ -2853,7 +2858,7 @@ def _drop_domain_mismatched_evidence_items(
             if quality_metrics is not None:
                 quality_metrics["dropped_invalid_evidence_count"] = quality_metrics.get("dropped_invalid_evidence_count", 0) + 1
                 quality_metrics["dropped_domain_mismatch_count"] = quality_metrics.get("dropped_domain_mismatch_count", 0) + 1
-    items[:] = [item for item in items if not item.pop("_drop_domain_mismatch", False)]
+    items[:] = [item for item in items if not isinstance(item, dict) or not item.pop("_drop_domain_mismatch", False)]
 
 
 def _drop_generic_seatalk_evidence_items(
@@ -2869,7 +2874,7 @@ def _drop_generic_seatalk_evidence_items(
             if quality_metrics is not None:
                 quality_metrics["dropped_invalid_evidence_count"] = quality_metrics.get("dropped_invalid_evidence_count", 0) + 1
                 quality_metrics["dropped_generic_evidence_count"] = quality_metrics.get("dropped_generic_evidence_count", 0) + 1
-    items[:] = [item for item in items if not item.pop("_drop_generic_seatalk_evidence", False)]
+    items[:] = [item for item in items if not isinstance(item, dict) or not item.pop("_drop_generic_seatalk_evidence", False)]
 
 
 def _needs_seatalk_evidence_repair(item: dict[str, Any]) -> bool:

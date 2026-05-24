@@ -298,7 +298,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
                     ),
                 )
 
-            page.route("**/api/team-dashboard/version-plan/af", version_plan)
+            page.route(re.compile(r".*/api/team-dashboard/version-plan/af(?:\?.*)?$"), version_plan)
             page.goto("/", wait_until="domcontentloaded")
             self.assertIn("Risk PM Workspace", page.locator("body").inner_text(timeout=5000))
             page.get_by_role("link", name="Open Version Plan").click()
@@ -399,7 +399,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
                 ),
             )
 
-        teammate.route("**/api/team-dashboard/version-plan/af", teammate_version_plan)
+        teammate.route(re.compile(r".*/api/team-dashboard/version-plan/af(?:\?.*)?$"), teammate_version_plan)
         teammate.goto("/team-dashboard", wait_until="domcontentloaded")
         teammate.locator('[data-team-dashboard-tab="version-plan"]').wait_for(timeout=5000)
         self.assertEqual(teammate.locator('[data-team-dashboard-tab="tasks"]').count(), 0)
@@ -894,7 +894,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
             route.fulfill(**json_response(version_plan_payload))
 
         page.route("**/api/team-dashboard/config", config)
-        page.route("**/api/team-dashboard/version-plan/af", version_plan)
+        page.route(re.compile(r".*/api/team-dashboard/version-plan/af(?:\?.*)?$"), version_plan)
         page.route("**/api/team-dashboard/version-plan/af/cell", save_cell)
 
         page.goto("/team-dashboard", wait_until="domcontentloaded")
@@ -970,7 +970,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
             if action == "add":
                 version_plan_payload["pipeline_rows"].append(
                     {
-                        "row_id": "pipe-added-1",
+                        "row_id": payload.get("row_id"),
                         "row_type": "manual",
                         "feature": "",
                         "priority": "SP",
@@ -1008,10 +1008,17 @@ class PortalE2ESmokeTest(unittest.TestCase):
         page.locator('[data-version-plan-row-id="pipe-1"]').get_by_text("Existing pipeline row").wait_for(timeout=5000)
 
         page.locator('[data-version-plan-row-action="add"][data-version-plan-scope="pipeline"]').click()
-        added_row = page.locator('[data-version-plan-row-id="pipe-added-1"]')
+        added_row = page.locator('[data-version-plan-row-id^="manual-client-"]').first
         added_row.wait_for(timeout=5000)
+        page.wait_for_function(
+            "() => document.querySelector('[data-version-plan-status]')?.textContent?.includes('Saved.')",
+            timeout=5000,
+        )
+        added_row_id = added_row.get_attribute("data-version-plan-row-id")
+        self.assertTrue(added_row_id)
         self.assertEqual(captured_row_actions[-1]["action"], "add")
         self.assertEqual(captured_row_actions[-1]["scope"], "pipeline")
+        self.assertEqual(captured_row_actions[-1]["row_id"], added_row_id)
 
         feature_input = added_row.locator('[data-version-plan-cell="feature"]')
         feature_input.fill("Manual row from browser smoke")
@@ -1020,7 +1027,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
             "() => document.querySelector('[data-version-plan-status]')?.textContent?.includes('Saved.')",
             timeout=5000,
         )
-        self.assertEqual(captured_cell_updates[-1]["row_id"], "pipe-added-1")
+        self.assertEqual(captured_cell_updates[-1]["row_id"], added_row_id)
         self.assertEqual(captured_cell_updates[-1]["field"], "feature")
         self.assertEqual(captured_cell_updates[-1]["value"], "Manual row from browser smoke")
 
@@ -1028,10 +1035,10 @@ class PortalE2ESmokeTest(unittest.TestCase):
         self.assertEqual(added_row.locator('[data-version-plan-row-action="down"]').count(), 0)
         self.assertEqual(added_row.locator(".team-dashboard-version-plan-drag").count(), 1)
 
-        page.locator('[data-version-plan-row-id="pipe-added-1"] [data-version-plan-row-action="delete"]').click()
-        page.locator('[data-version-plan-row-id="pipe-added-1"]').wait_for(state="detached", timeout=5000)
+        page.locator(f'[data-version-plan-row-id="{added_row_id}"] [data-version-plan-row-action="delete"]').click()
+        page.locator(f'[data-version-plan-row-id="{added_row_id}"]').wait_for(state="detached", timeout=5000)
         self.assertEqual(captured_row_actions[-1]["action"], "delete")
-        self.assertEqual(captured_row_actions[-1]["row_id"], "pipe-added-1")
+        self.assertEqual(captured_row_actions[-1]["row_id"], added_row_id)
 
     def test_team_dashboard_version_plan_conflict_refreshes_and_retries_row_action_smoke(self) -> None:
         page = self._new_admin_page()
@@ -1079,7 +1086,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
         def version_plan(route):
             nonlocal version_plan_gets
             version_plan_gets += 1
-            if "sync=0" in route.request.url:
+            if version_plan_gets > 1 and "sync=0" in route.request.url:
                 version_plan_payload["document_revision"] = "rev-new"
             route.fulfill(**json_response(version_plan_payload))
 
@@ -1098,7 +1105,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
             self.assertEqual(payload.get("document_revision"), "rev-new")
             version_plan_payload["pipeline_rows"].append(
                 {
-                    "row_id": "pipe-conflict-added",
+                    "row_id": payload.get("row_id"),
                     "row_type": "manual",
                     "feature": "Added after conflict refresh",
                     "priority": "SP",
@@ -1119,14 +1126,16 @@ class PortalE2ESmokeTest(unittest.TestCase):
 
         page.locator('[data-version-plan-row-action="add"][data-version-plan-scope="pipeline"]').click()
 
-        page.locator('[data-version-plan-row-id="pipe-conflict-added"]').get_by_text(
-            "Added after conflict refresh"
-        ).wait_for(timeout=5000)
+        added_row = page.locator('[data-version-plan-row-id^="manual-client-"]').first
+        added_row.wait_for(timeout=5000)
         page.wait_for_function(
             "() => document.querySelector('[data-version-plan-status]')?.textContent?.includes('Saved.')",
             timeout=5000,
         )
+        added_row_id = added_row.get_attribute("data-version-plan-row-id")
+        self.assertTrue(added_row_id)
         self.assertEqual([item["document_revision"] for item in captured_row_actions], ["rev-old", "rev-new"])
+        self.assertEqual(captured_row_actions[-1]["row_id"], added_row_id)
         self.assertGreaterEqual(version_plan_gets, 2)
 
     def test_team_dashboard_version_plan_pm_filter_smoke(self) -> None:
@@ -1237,7 +1246,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
             route.fulfill(**json_response(version_plan_payload))
 
         page.route("**/api/team-dashboard/config", config)
-        page.route("**/api/team-dashboard/version-plan/af", version_plan)
+        page.route(re.compile(r".*/api/team-dashboard/version-plan/af(?:\?.*)?$"), version_plan)
 
         page.goto("/team-dashboard", wait_until="domcontentloaded")
         page.locator('[data-team-dashboard-tab="version-plan"]').click()

@@ -2011,13 +2011,9 @@ class MeetingProcessingService:
     def _generate_minutes(self, *, record: dict[str, Any], transcript_text: str, transcript_quality: dict[str, Any] | None = None) -> str:
         quality = transcript_quality or {}
         sender_name = _meeting_minutes_sender_name(record)
+        metadata = _meeting_minutes_prompt_metadata(record=record, transcript_quality=quality, sender_name=sender_name)
         user_prompt = (
-            f"Meeting title: {record.get('title')}\n"
-            f"Platform: {record.get('platform')}\n"
-            f"Scheduled start: {record.get('scheduled_start')}\n"
-            f"Attendees from calendar: {json.dumps(record.get('attendees') or [], ensure_ascii=False)}\n"
-            f"Sender sign-off name: {sender_name}\n"
-            f"Transcript quality: {json.dumps(quality, ensure_ascii=False)}\n\n"
+            f"{metadata}\n\n"
             "# Transcript\n"
             f"{transcript_text or 'No transcript text was produced.'}\n\n"
             "Return English Markdown/plain email text in this exact email-ready format:\n"
@@ -2055,11 +2051,14 @@ class MeetingProcessingService:
         sender_name = _meeting_minutes_sender_name(record)
         chunk_summaries = []
         for index, chunk in enumerate(transcript_chunks, start=1):
+            chunk_metadata = _meeting_minutes_prompt_metadata(
+                record=record,
+                transcript_quality=quality,
+                sender_name="",
+                include_attendees=False,
+            )
             chunk_prompt = (
-                f"Meeting title: {record.get('title')}\n"
-                f"Platform: {record.get('platform')}\n"
-                f"Scheduled start: {record.get('scheduled_start')}\n"
-                f"Transcript quality: {json.dumps(quality, ensure_ascii=False)}\n"
+                f"{chunk_metadata}\n"
                 f"Chunk: {index}/{len(transcript_chunks)}\n\n"
                 "# Transcript Chunk\n"
                 f"{chunk or 'No transcript text was produced.'}\n\n"
@@ -2076,12 +2075,7 @@ class MeetingProcessingService:
             chunk_summaries.append(f"## Chunk {index}\n{summary}")
 
         merge_prompt = (
-            f"Meeting title: {record.get('title')}\n"
-            f"Platform: {record.get('platform')}\n"
-            f"Scheduled start: {record.get('scheduled_start')}\n"
-            f"Attendees from calendar: {json.dumps(record.get('attendees') or [], ensure_ascii=False)}\n"
-            f"Transcript quality: {json.dumps(quality, ensure_ascii=False)}\n"
-            f"Sender sign-off name: {sender_name}\n"
+            f"{_meeting_minutes_prompt_metadata(record=record, transcript_quality=quality, sender_name=sender_name)}\n"
             f"Estimated transcript tokens: {estimated_transcript_tokens}\n"
             f"Transcript chunk count: {len(transcript_chunks)}\n\n"
             "# Chunk Summaries\n"
@@ -2133,6 +2127,30 @@ def _meeting_minutes_sender_name(record: dict[str, Any]) -> str:
     return " ".join(part[:1].upper() + part[1:] for part in parts)
 
 
+def _meeting_minutes_prompt_metadata(
+    *,
+    record: dict[str, Any],
+    transcript_quality: dict[str, Any],
+    sender_name: str,
+    include_attendees: bool = True,
+) -> str:
+    lines = [f"Meeting title: {record.get('title') or 'Untitled meeting'}"]
+    platform = str(record.get("platform") or "").strip()
+    if platform and platform.lower() != "unknown":
+        lines.append(f"Platform: {platform}")
+    scheduled_start = str(record.get("scheduled_start") or "").strip()
+    if scheduled_start:
+        lines.append(f"Scheduled start: {scheduled_start}")
+    attendees = record.get("attendees") or []
+    if include_attendees and attendees:
+        lines.append(f"Attendees from calendar: {json.dumps(attendees, ensure_ascii=False)}")
+    if sender_name:
+        lines.append(f"Sender sign-off name: {sender_name}")
+    if transcript_quality:
+        lines.append(f"Transcript quality: {json.dumps(transcript_quality, ensure_ascii=False)}")
+    return "\n".join(lines)
+
+
 def _meeting_transcript_hash(text: str) -> str:
     return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()
 
@@ -2151,10 +2169,6 @@ def _split_meeting_transcript_chunks(text: str, *, target_tokens: int) -> list[s
     for line in clean_text.splitlines():
         line_text = line.rstrip()
         line_chars = len(line_text) + 1
-        if current_lines and current_chars + line_chars > target_chars:
-            chunks.append("\n".join(current_lines).strip())
-            current_lines = []
-            current_chars = 0
         if line_chars > target_chars:
             if current_lines:
                 chunks.append("\n".join(current_lines).strip())
@@ -2165,6 +2179,10 @@ def _split_meeting_transcript_chunks(text: str, *, target_tokens: int) -> list[s
                 if chunk:
                     chunks.append(chunk)
             continue
+        if current_lines and current_chars + line_chars > target_chars:
+            chunks.append("\n".join(current_lines).strip())
+            current_lines = []
+            current_chars = 0
         current_lines.append(line_text)
         current_chars += line_chars
     if current_lines:

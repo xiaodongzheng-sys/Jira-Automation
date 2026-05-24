@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import bpmis_jira_tool.seatalk_dashboard as seatalk_dashboard
 from bpmis_jira_tool.errors import ConfigError, ToolError
 from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 
@@ -1017,6 +1018,261 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ToolError, "Codex is unavailable"):
                 service.build_insights(now=datetime(2026, 4, 21, 21, 0).astimezone())
+
+    def test_empty_insights_and_cached_project_update_todo_payloads(self):
+        now = datetime(2026, 4, 21, 21, 0).astimezone()
+
+        def empty_history_runner(command: list[str]):
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            daily_cache_dir=Path(self.temp_dir.name) / "cache",
+            command_runner=empty_history_runner,
+        )
+
+        empty = service.build_insights(now=now)
+        self.assertEqual(empty["project_updates"], [])
+        self.assertFalse(empty["cache"]["hit"])
+
+        project_cache = {"project_updates": [{"title": "Cached"}], "cache": {"hit": False}}
+        todo_cache = {"my_todos": [{"task": "Cached todo"}], "cache": {"hit": False}}
+        service._store_daily_cache(kind="project_updates", days=7, now=now, payload=project_cache)
+        service._store_daily_cache(kind="todos_initial", days=7, now=now, payload=todo_cache)
+
+        self.assertTrue(service.build_project_updates(now=now)["cache"]["hit"])
+        self.assertTrue(service.build_todos(now=now)["cache"]["hit"])
+
+    def test_name_mapping_error_boundaries_and_cache_normalization(self):
+        now = datetime(2026, 4, 21, 21, 0).astimezone()
+
+        def service_for(stdout: str = "", stderr: str = "", returncode: int = 0) -> SeaTalkDashboardService:
+            def runner(command: list[str]):
+                return subprocess.CompletedProcess(args=command, returncode=returncode, stdout=stdout, stderr=stderr)
+
+            return SeaTalkDashboardService(
+                owner_email="xiaodong.zheng@npt.sg",
+                seatalk_app_path=str(self.app_dir),
+                seatalk_data_dir=str(self.data_dir),
+                daily_cache_dir=Path(self.temp_dir.name) / f"cache-{returncode}-{len(stdout)}",
+                command_runner=runner,
+            )
+
+        with self.assertRaisesRegex(ToolError, "could not be loaded"):
+            service_for(returncode=1).build_name_mappings(now=now)
+        with self.assertRaisesRegex(ToolError, "invalid response"):
+            service_for(stdout="not-json").build_name_mappings(now=now)
+        with self.assertRaisesRegex(ToolError, "invalid payload"):
+            service_for(stdout="[]").build_name_mappings(now=now)
+
+        service = service_for(
+            stdout=json.dumps(
+                {
+                    "unknown_ids": [
+                        {"id": "buddy-0", "type": "buddy", "count": "5"},
+                        {"id": "buddy-42", "type": "bad", "count": "bad", "example": " hi "},
+                        "bad-row",
+                    ],
+                    "auto_mappings": {"buddy-42": " Alice  Tan ", "UID 0": "Ignored"},
+                    "generated_at": "",
+                    "period_days": "9",
+                }
+            )
+        )
+
+        payload = service.build_name_mappings(now=now)
+        cached = service.build_name_mappings(now=now)
+
+        self.assertEqual(payload["unknown_ids"][0]["id"], "buddy-42")
+        self.assertEqual(payload["unknown_ids"][0]["count"], 0)
+        self.assertEqual(payload["auto_mappings"]["UID 42"], "Alice Tan")
+        self.assertTrue(cached["cache"]["hit"])
+
+    def test_local_environment_payload_and_helper_failure_edges(self):
+        missing_app = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir / "missing"),
+            seatalk_data_dir=str(self.data_dir),
+        )
+        with self.assertRaisesRegex(ConfigError, "desktop app"):
+            missing_app.build_overview()
+
+        config_path = self.data_dir / "config.json"
+        config_path.unlink()
+        missing_config = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+        )
+        with self.assertRaisesRegex(ConfigError, "config"):
+            missing_config.build_overview()
+        config_path.write_text('{"LAST_LOGIN_USER_ID":"14420"}', encoding="utf-8")
+
+        def invalid_json_runner(command: list[str]):
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout="not-json", stderr="")
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            command_runner=invalid_json_runner,
+        )
+        with self.assertRaisesRegex(ToolError, "invalid response"):
+            service.build_overview()
+
+        def list_payload_runner(command: list[str]):
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout="[]", stderr="")
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            command_runner=list_payload_runner,
+        )
+        with self.assertRaisesRegex(ToolError, "invalid payload"):
+            service.build_overview()
+
+        def empty_metrics_error_runner(command: list[str]):
+            return subprocess.CompletedProcess(args=command, returncode=1, stdout="", stderr="")
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            command_runner=empty_metrics_error_runner,
+        )
+        with self.assertRaisesRegex(ToolError, "desktop metrics"):
+            service.build_overview()
+
+        def empty_error_runner(command: list[str]):
+            return subprocess.CompletedProcess(args=command, returncode=1, stdout="", stderr="")
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            command_runner=empty_error_runner,
+        )
+        with self.assertRaisesRegex(ToolError, "chat history"):
+            service.export_history_text()
+
+        def timeout_runner(command: list[str]):
+            raise subprocess.TimeoutExpired(command, timeout=1)
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            command_runner=timeout_runner,
+        )
+        with self.assertRaisesRegex(ToolError, "timeout"):
+            service.export_history_text()
+
+        def os_error_runner(command: list[str]):
+            raise OSError("cannot launch")
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            command_runner=os_error_runner,
+        )
+        with self.assertRaisesRegex(ToolError, "could not be launched"):
+            service.export_history_text()
+
+    def test_daily_cache_and_subprocess_helper_edges(self):
+        now = datetime(2026, 4, 21, 21, 0).astimezone()
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            daily_cache_dir=Path(self.temp_dir.name) / "cache",
+        )
+        path = service._daily_cache_path(kind="project_updates", days=7, now=now)
+        self.assertIsNotNone(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        path.write_text("not-json", encoding="utf-8")
+        self.assertIsNone(service._load_daily_cache(kind="project_updates", days=7, now=now))
+        path.write_text("[]", encoding="utf-8")
+        self.assertIsNone(service._load_daily_cache(kind="project_updates", days=7, now=now))
+        path.write_text(json.dumps({"expires_at": "not-a-date", "payload": {}}), encoding="utf-8")
+        self.assertIsNone(service._load_daily_cache(kind="project_updates", days=7, now=now))
+        path.write_text(json.dumps({"expires_at": "2026-04-20T00:00:00+08:00", "payload": {}}), encoding="utf-8")
+        self.assertIsNone(service._load_daily_cache(kind="project_updates", days=7, now=now))
+
+        with patch("bpmis_jira_tool.seatalk_dashboard.os.replace", side_effect=OSError("readonly")):
+            service._store_daily_cache(kind="project_updates", days=7, now=now, payload={"ok": True})
+
+        with patch("bpmis_jira_tool.seatalk_dashboard.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(args=["cmd"], returncode=0, stdout="ok", stderr="")
+            result = seatalk_dashboard._run_subprocess(["cmd"], env={"ELECTRON_RUN_AS_NODE": "1"}, timeout=5)
+
+        self.assertEqual(result.stdout, "ok")
+        run.assert_called_once()
+
+    def test_parsing_prompt_and_normalizer_edges(self):
+        now = datetime(2026, 4, 21, 21, 0).astimezone()
+        future = SeaTalkDashboardService._parse_todo_since("2026-04-22T00:00:00+08:00", now=now, days=7)
+        direct = SeaTalkDashboardService._parse_todo_since(datetime(2026, 4, 21, 20, 0).astimezone(), now=now, days=7)
+
+        self.assertEqual(future, now)
+        self.assertEqual(direct.hour, 20)
+        self.assertIsNone(SeaTalkDashboardService._parse_todo_since("bad-date", now=now, days=7))
+        self.assertIsNone(SeaTalkDashboardService._parse_todo_since("2026-04-01T00:00:00+08:00", now=now, days=7))
+        self.assertEqual(SeaTalkDashboardService._todo_cache_kind(None), "todos_initial")
+
+        missing_overrides_service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            name_overrides_path=Path(self.temp_dir.name) / "missing-overrides.json",
+        )
+        self.assertIn("missing-overrides.json", missing_overrides_service._name_overrides_cache_token())
+
+        long_history = "\n".join(
+            ["Header"] * 8
+            + ["=== Group ==="]
+            + [f"[2026-04-21 10:{index:02d}] Alice: please follow up issue {index}" for index in range(40)]
+            + ["recent filler"] * 40
+        )
+        compacted = SeaTalkDashboardService._compact_history_for_insights(
+            long_history,
+            max_chars=800,
+            signal_max_chars=120,
+            recent_max_chars=80,
+        )
+        self.assertIn("[Most recent lines]", compacted)
+
+        self.assertFalse(SeaTalkDashboardService._is_system_generated_history_line("[bad line"))
+        self.assertFalse(SeaTalkDashboardService._is_system_generated_history_line("[2026: 04] missing sender"))
+        self.assertTrue(SeaTalkDashboardService._is_system_generated_history_line("[2026] Alert Bot: scheduled reminder"))
+        self.assertTrue(SeaTalkDashboardService._is_system_generated_history_line("[2026] Product Alert: automated reminder"))
+        self.assertFalse(SeaTalkDashboardService._is_system_generated_history_line("[2026] Product Alert: human follow-up"))
+        self.assertEqual(SeaTalkDashboardService._extract_json_text("```json\n{\"ok\": true}\n```"), '{"ok": true}')
+        self.assertEqual(SeaTalkDashboardService._extract_json_text("prefix {\"ok\": true} suffix"), '{"ok": true}')
+
+        with self.assertRaisesRegex(ToolError, "invalid SeaTalk insights payload"):
+            SeaTalkDashboardService._parse_insights_response("[]")
+
+        parsed = SeaTalkDashboardService._parse_insights_response(
+            json.dumps(
+                {
+                    "project_updates": ["bad", {"domain": "ops risk", "title": "", "status": "bad"}],
+                    "my_todos": ["bad", {"task": "", "domain": "cr", "priority": "bad", "due": ""}],
+                    "team_member_reminders": ["bad", {"domain": "af", "person": "", "reminder": ""}],
+                }
+            )
+        )
+
+        self.assertEqual(parsed["project_updates"][0]["status"], "unknown")
+        self.assertEqual(parsed["my_todos"][0]["task"], "Untitled task")
+        self.assertEqual(parsed["team_member_reminders"][0]["person"], "Unknown")
+        self.assertEqual(SeaTalkDashboardService._normalize_auto_mappings([]), {})
+        self.assertEqual(SeaTalkDashboardService._person_mapping_aliases("buddy-"), set())
+        self.assertEqual(SeaTalkDashboardService._person_mapping_aliases("UID "), set())
 
 
 if __name__ == "__main__":
