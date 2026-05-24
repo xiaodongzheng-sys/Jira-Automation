@@ -136,6 +136,9 @@ class PortalRuntimeDoctorTests(unittest.TestCase):
         self.assertEqual(report["jobs"]["states"]["failed"], 1)
         self.assertEqual(report["jobs"]["stores"]["jobs.json"], 2)
         self.assertEqual(report["jobs"]["stores"]["team_dashboard_jobs.json"], 1)
+        self.assertEqual(report["jobs"]["recent_problem_count"], 1)
+        self.assertEqual(report["jobs"]["historical_problem_count"], 0)
+        self.assertEqual(report["jobs"]["completed_with_stale_error_count"], 0)
         self.assertEqual(report["meeting_records"]["statuses"]["failed"], 1)
         issue_codes = {issue["code"] for issue in report["issues"]}
         self.assertIn("llm_unknown_flow", issue_codes)
@@ -185,6 +188,63 @@ class PortalRuntimeDoctorTests(unittest.TestCase):
         issue_codes = {issue["code"] for issue in report["issues"]}
         self.assertNotIn("llm_errors", issue_codes)
         self.assertNotIn("llm_slow_calls", issue_codes)
+
+    def test_format_report_labels_historical_jobs_as_info(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_root = Path(temp_dir)
+            old_epoch = int(datetime(2026, 5, 1, tzinfo=portal_runtime_doctor.SGT).timestamp())
+            (data_root / "run").mkdir()
+            (data_root / "run" / "jobs.json").write_text(
+                json.dumps(
+                    {
+                        "jobs": {
+                            "old-failed": {
+                                "job_id": "old-failed",
+                                "action": "source-code-qa-query",
+                                "state": "failed",
+                                "stage": "failed",
+                                "updated_at": old_epoch,
+                                "message": "Historical timeout.",
+                            },
+                            "stale-complete": {
+                                "job_id": "stale-complete",
+                                "action": "team-dashboard-monthly-report-draft",
+                                "state": "completed",
+                                "stage": "completed",
+                                "updated_at": old_epoch,
+                                "error": "Old error field.",
+                                "message": "Finished.",
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                portal_runtime_doctor,
+                "_source_code_qa_summary",
+                return_value=(["telemetry_window=0", "ops_summary_status=pass"], []),
+            ), patch.object(
+                portal_runtime_doctor,
+                "_mac_portal_runtime_summary",
+                return_value=({"status": "online", "details": "status=online"}, []),
+            ), patch.object(
+                portal_runtime_doctor,
+                "_shared_session_summary",
+                return_value=({"status": "ok", "details": "status=ok"}, []),
+            ):
+                report = portal_runtime_doctor.build_report(data_root, limit=10)
+
+        self.assertEqual(report["jobs"]["recent_problem_count"], 0)
+        self.assertEqual(report["jobs"]["historical_problem_count"], 1)
+        self.assertEqual(report["jobs"]["completed_with_stale_error_count"], 1)
+        output = "\n".join(portal_runtime_doctor.format_report(report))
+        self.assertIn("job_current_problem_count=0 active_count=0 historical_problem_count=1 stale_completed_error_count=1", output)
+        self.assertIn("job_historical_problem_info=", output)
+        self.assertIn("job_stale_completed_error_info=", output)
+        self.assertNotIn("job_historical_problem=", output)
+        self.assertNotIn("job_completed_with_stale_error=", output)
 
     def test_build_report_treats_quality_preserving_seatalk_prompt_as_explained(self):
         with tempfile.TemporaryDirectory() as temp_dir:

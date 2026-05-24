@@ -21,7 +21,7 @@ import threading
 import time
 from typing import Any
 from types import SimpleNamespace
-from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qs, parse_qsl, urlparse, urlsplit
 import uuid
 import zipfile
 
@@ -242,6 +242,11 @@ from bpmis_jira_tool.web_team_dashboard_routes import build_team_dashboard_handl
 from bpmis_jira_tool.web_runtime_status import current_release_revision as _runtime_current_release_revision
 from bpmis_jira_tool.web_runtime_status import default_flask_session_secret as _default_flask_session_secret
 from bpmis_jira_tool.web_health import build_health_payload
+from bpmis_jira_tool.web_redirects import (
+    portal_health_url as _portal_health_url,
+    safe_relative_redirect_target as _safe_relative_redirect_target,
+    url_with_query_value as _url_with_query_value,
+)
 from bpmis_jira_tool.work_memory import (
     WorkMemoryStore,
     gmail_attachment_memory_item,
@@ -2600,23 +2605,6 @@ def _google_session_is_connected() -> bool:
     return "google_credentials" in session and bool(_current_google_email())
 
 
-def _safe_relative_redirect_target(value: Any) -> str:
-    target = str(value or "").strip()
-    if not target or not target.startswith("/") or target.startswith("//"):
-        return ""
-    parsed = urlparse(target)
-    if parsed.scheme or parsed.netloc:  # pragma: no cover - defensive after requiring a single-slash relative path.
-        return ""
-    return target
-
-
-def _url_with_query_value(url: str, key: str, value: str) -> str:
-    parsed = urlsplit(str(url or "").strip())
-    query_items = [(item_key, item_value) for item_key, item_value in parse_qsl(parsed.query, keep_blank_values=True) if item_key != key]
-    query_items.append((key, value))
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query_items), parsed.fragment))
-
-
 def _bpmis_run_portal_url(settings: Settings, fallback_url: str) -> str:
     base_url = str(settings.mac_full_portal_url or "").strip() if settings.cloud_home_enabled else ""
     return _url_with_query_value(base_url or fallback_url, "workspace", "run")
@@ -2631,9 +2619,9 @@ def _mac_full_portal_health_url(settings: Settings, full_portal_url: str) -> str
     target_url = str(settings.mac_full_portal_url or full_portal_url or "").strip()
     if not target_url:
         return ""
-    parsed = urlsplit(target_url)
-    if parsed.scheme and parsed.netloc:
-        return urlunsplit((parsed.scheme, parsed.netloc, "/healthz", "", ""))
+    health_url = _portal_health_url(target_url)
+    if health_url:
+        return health_url
     if target_url.startswith("/"):
         return url_for("healthz", _external=True)
     return ""

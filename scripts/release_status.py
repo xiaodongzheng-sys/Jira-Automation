@@ -362,9 +362,16 @@ def build_status_report(*, env: Mapping[str, str] | None = None, runner: Any = _
 
     lines.append(f"Cloud Run role: {cloud_role}")
     lines.append(f"Cloud Run service: {service} region={region}")
+
+    def cloud_run_readiness_or_info(code: str, message: str) -> None:
+        if _cloud_run_is_release_gate(cloud_role):
+            issues.append(_issue("warn", code, message))
+        else:
+            lines.append(f"Cloud Run standby info: {code} {message}")
+
     if not gcloud_bin or not Path(gcloud_bin).exists():
         lines.append("Cloud Run status: unavailable (gcloud not found)")
-        issues.append(_issue("warn", "cloud_run_status_unavailable", "gcloud was not found; Cloud Run revision readiness is unverified."))
+        cloud_run_readiness_or_info("cloud_run_status_unavailable", "gcloud was not found; Cloud Run revision readiness is unverified.")
     else:
         service_payload, service_error = _json_command(
             [
@@ -384,7 +391,10 @@ def build_status_report(*, env: Mapping[str, str] | None = None, runner: Any = _
         )
         if service_payload is None:
             lines.append(f"Cloud Run status: unavailable ({service_error})")
-            issues.append(_issue("warn", "cloud_run_status_unavailable", f"Cloud Run service status unavailable: {_sanitize_error_text(service_error)}"))
+            cloud_run_readiness_or_info(
+                "cloud_run_status_unavailable",
+                f"Cloud Run service status unavailable: {_sanitize_error_text(service_error)}",
+            )
         else:
             traffic = service_payload.get("status", {}).get("traffic", [])
             uat_matches = [item for item in traffic if item.get("tag") == uat_tag]
@@ -410,19 +420,13 @@ def build_status_report(*, env: Mapping[str, str] | None = None, runner: Any = _
                         cloud_role,
                         f"Cloud Run UAT tag serves {uat_release}, expected {expected_revision}.",
                     )
-                    if _cloud_run_is_release_gate(cloud_role):
-                        issues.append(_issue("warn", "cloud_run_uat_revision_mismatch", message))
-                    else:
-                        lines.append(f"Cloud Run note: cloud_run_uat_revision_mismatch {message}")
+                    cloud_run_readiness_or_info("cloud_run_uat_revision_mismatch", message)
                 elif expected_revision and not uat_release:
                     message = "Cloud Run UAT revision did not expose TEAM_PORTAL_RELEASE_REVISION."
-                    if _cloud_run_is_release_gate(cloud_role):
-                        issues.append(_issue("warn", "cloud_run_uat_revision_unknown", message))
-                    else:
-                        lines.append(f"Cloud Run note: cloud_run_uat_revision_unknown {message}")
+                    cloud_run_readiness_or_info("cloud_run_uat_revision_unknown", message)
             else:
                 lines.append(f"Cloud Run UAT tag: tag={uat_tag} revision=<missing>")
-                issues.append(_issue("warn", "cloud_run_uat_tag_missing", f"Cloud Run UAT tag is missing: {uat_tag}."))
+                cloud_run_readiness_or_info("cloud_run_uat_tag_missing", f"Cloud Run UAT tag is missing: {uat_tag}.")
 
             live_traffic = [item for item in traffic if item.get("percent")]
             if live_traffic:
@@ -448,19 +452,13 @@ def build_status_report(*, env: Mapping[str, str] | None = None, runner: Any = _
                             cloud_role,
                             f"Cloud Run live traffic serves {release_revision}, expected {expected_revision}.",
                         )
-                        if _cloud_run_is_release_gate(cloud_role):
-                            issues.append(_issue("warn", "cloud_run_live_revision_mismatch", message))
-                        else:
-                            lines.append(f"Cloud Run note: cloud_run_live_revision_mismatch {message}")
+                        cloud_run_readiness_or_info("cloud_run_live_revision_mismatch", message)
                     elif expected_revision and not release_revision:
                         message = "Cloud Run live traffic did not expose TEAM_PORTAL_RELEASE_REVISION."
-                        if _cloud_run_is_release_gate(cloud_role):
-                            issues.append(_issue("warn", "cloud_run_live_revision_unknown", message))
-                        else:
-                            lines.append(f"Cloud Run note: cloud_run_live_revision_unknown {message}")
+                        cloud_run_readiness_or_info("cloud_run_live_revision_unknown", message)
             else:
                 lines.append("Cloud Run service live traffic: <none>")
-                issues.append(_issue("warn", "cloud_run_live_traffic_missing", "Cloud Run service has no live traffic allocation."))
+                cloud_run_readiness_or_info("cloud_run_live_traffic_missing", "Cloud Run service has no live traffic allocation.")
 
     local_port = _env_value("TEAM_PORTAL_PORT", env) or "5000"
     public_url = (_env_value("TEAM_PORTAL_BASE_URL", env) or "").rstrip("/")

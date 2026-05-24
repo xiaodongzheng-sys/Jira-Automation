@@ -1986,6 +1986,38 @@ current_release_revision
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
         self.assertRegex(completed.stdout.strip(), r"^(?:[0-9a-f]{40}(?:-dirty-[0-9a-f]{12})?|unknown)$")
 
+    def test_team_env_write_release_manifest_records_clean_restart_inputs(self):
+        helper_path = PROJECT_ROOT / "scripts/lib/team_env.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_root = Path(temp_dir)
+            command = f'''
+source "{helper_path}"
+manifest_id="$(write_release_manifest "{data_root}" "mac_public_live")"
+manifest_path="$(release_manifest_path "{data_root}")"
+printf '%s\\n%s\\n' "$manifest_id" "$manifest_path"
+'''
+            completed = subprocess.run(
+                ["bash", "-lc", command],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "ROOT_DIR": str(PROJECT_ROOT),
+                    "PYTHON_BIN": sys.executable,
+                },
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            manifest_id, manifest_path_text = completed.stdout.strip().splitlines()
+            manifest_path = Path(manifest_path_text)
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest_id, payload["manifest_id"])
+        self.assertEqual(payload["surface"], "mac_public_live")
+        self.assertEqual(payload["project_root"], str(PROJECT_ROOT))
+        self.assertIn("release_revision", payload)
+
     def test_team_env_helper_reports_recommended_host_root(self):
         helper_path = PROJECT_ROOT / "scripts/lib/team_env.sh"
         command = f'''
@@ -2160,7 +2192,7 @@ fi
         self.assertIn("git_revision=d8fb5fb59c743dadfce1f8a106a7846c8ebe2fbc", output)
         self.assertIn("Cloud Run service live traffic: revision=team-portal-00200-n7q percent=100", output)
         self.assertIn("(Cloud Run traffic, not Mac public Live)", output)
-        self.assertIn("Cloud Run note: cloud_run_live_revision_mismatch", output)
+        self.assertIn("Cloud Run standby info: cloud_run_live_revision_mismatch", output)
         self.assertTrue(gcloud_commands)
         for command in gcloud_commands:
             self.assertIn("--account", command)
@@ -2175,6 +2207,51 @@ fi
         self.assertIn("Version Plan Firestore:", output)
         self.assertIn("Release manifest:", output)
         self.assertIn("Readiness: status=", output)
+
+    def test_release_status_treats_cloud_run_standby_mismatch_as_info(self):
+        from scripts.release_status import build_status_report
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            gcloud_path = Path(temp_dir) / "gcloud"
+            gcloud_path.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+
+            def fake_run(command, *, env):
+                joined = " ".join(command)
+                if command[0] == "git":
+                    return subprocess.CompletedProcess(command, 0, stdout="expected-sha\n", stderr="")
+                if command[0] == str(gcloud_path) and "run services describe" in joined:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout=json.dumps({"status": {"traffic": [{"revisionName": "team-portal-live", "percent": 100}]}}),
+                        stderr="",
+                    )
+                if command[0] == str(gcloud_path) and "run revisions describe" in joined:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout=json.dumps({"spec": {"containers": [{"env": [{"name": "TEAM_PORTAL_RELEASE_REVISION", "value": "old-sha"}]}]}}),
+                        stderr="",
+                    )
+                if command[0] == "curl":
+                    return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"status": "ok", "revision": "expected-sha"}), stderr="")
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="unexpected command")
+
+            report = build_status_report(
+                env={
+                    "GCLOUD_BIN": str(gcloud_path),
+                    "TEAM_PORTAL_CLOUD_RUN_ROLE": "standby",
+                    "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                    "TEAM_PORTAL_RELEASE_MANIFEST_PATH": "/tmp/missing-manifest.json",
+                    "FLASK_SECRET_KEY": "shared-secret",
+                },
+                runner=fake_run,
+            )
+
+        output = "\n".join(report["lines"])
+        self.assertIn("Cloud Run standby info: cloud_run_live_revision_mismatch", output)
+        issue_codes = {issue["code"] for issue in report["issues"]}
+        self.assertNotIn("cloud_run_live_revision_mismatch", issue_codes)
 
     def test_release_manifest_status_validates_expected_revision(self):
         from scripts.release_status import _release_manifest_status

@@ -375,6 +375,10 @@ def _summarize_jobs(data_root: Path, limit: int, *, recent_hours: float) -> tupl
             "states": _counter_dict(state_counts),
             "stages": _counter_dict(stage_counts),
             "actions": _counter_dict(action_counts),
+            "recent_problem_count": len(recent_failed),
+            "historical_problem_count": len(historical_failed),
+            "completed_with_stale_error_count": len(completed_with_stale_error),
+            "active_count": len(active),
             "recent_problem_jobs": [compact(row) for row in recent_failed[:8]],
             "historical_problem_jobs": [compact(row) for row in historical_failed[:8]],
             "completed_with_stale_error": [compact(row) for row in completed_with_stale_error[:8]],
@@ -691,6 +695,12 @@ def format_report(report: dict[str, Any]) -> list[str]:
     lines.append(f"job_states={_counter_text(jobs['states'])}")
     lines.append(f"job_stages={_counter_text(jobs['stages'])}")
     lines.append(f"job_actions={_counter_text(jobs['actions'])}")
+    lines.append(
+        "job_current_problem_count="
+        f"{jobs['recent_problem_count']} active_count={jobs['active_count']} "
+        f"historical_problem_count={jobs['historical_problem_count']} "
+        f"stale_completed_error_count={jobs['completed_with_stale_error_count']}"
+    )
     for row in jobs["recent_problem_jobs"]:
         lines.append(
             "job_problem="
@@ -699,13 +709,13 @@ def format_report(report: dict[str, Any]) -> list[str]:
         )
     for row in jobs["historical_problem_jobs"]:
         lines.append(
-            "job_historical_problem="
+            "job_historical_problem_info="
             f"{row['updated_at_sgt']} store={row['store']} action={row['action']} "
             f"state={row['state']} stage={row['stage']} retryable={row['retryable']} message={row['message']}"
         )
     for row in jobs["completed_with_stale_error"]:
         lines.append(
-            "job_completed_with_stale_error="
+            "job_stale_completed_error_info="
             f"{row['updated_at_sgt']} store={row['store']} action={row['action']} message={row['message']}"
         )
     for row in jobs["active_jobs"]:

@@ -8005,6 +8005,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(payload["deadline_fallback_reason"], "answer_generation_exceeded_deadline")
         self.assertEqual(payload["llm_finish_reason"], "deadline_fallback")
         self.assertIn("Top evidence", payload["llm_answer"])
+        self.assertTrue(any(item[0] == "deadline_fallback" for item in reports))
 
     def test_chinese_business_intent_detection(self):
         intent = self.service._question_intent("IssueService 改了会影响哪些下游，测试有没有覆盖，事务缓存边界是什么")

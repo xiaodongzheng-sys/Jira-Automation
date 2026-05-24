@@ -87,6 +87,7 @@ from bpmis_jira_tool.team_dashboard_config import (
     normalize_team_dashboard_emails,
 )
 from bpmis_jira_tool.web_health import build_health_payload
+from bpmis_jira_tool.web_redirects import portal_health_url, safe_relative_redirect_target, url_with_query_value
 
 
 def _settings(**overrides):
@@ -338,6 +339,15 @@ class SmallModuleCoverageTests(unittest.TestCase):
         self.assertFalse(changed)
         job_store.fail.assert_not_called()
 
+    def test_job_lifecycle_fails_active_when_snapshot_is_unavailable(self):
+        job_store = Mock()
+        job_store.snapshot.side_effect = RuntimeError("store down")
+
+        changed = JobLifecycle(job_store).fail_if_active("job-1", "boom")
+
+        self.assertTrue(changed)
+        job_store.fail.assert_called_once()
+
     def test_health_payload_includes_release_manifest_when_present(self):
         payload = build_health_payload(
             lambda: "rev-1",
@@ -361,6 +371,16 @@ class SmallModuleCoverageTests(unittest.TestCase):
         payload = build_health_payload(lambda: "rev-2", environ={"TEAM_PORTAL_RELEASE_MANIFEST_ID": "  "})
 
         self.assertEqual(payload, {"status": "ok", "revision": "rev-2", "live_surface": "mac_public_live"})
+
+    def test_web_redirect_helpers_reject_external_targets_and_rewrite_query(self):
+        self.assertEqual(safe_relative_redirect_target("https://example.com/x"), "")
+        self.assertEqual(safe_relative_redirect_target("//example.com/x"), "")
+        self.assertEqual(safe_relative_redirect_target("/safe?x=1"), "/safe?x=1")
+        self.assertEqual(
+            url_with_query_value("https://app.example/portal-home?workspace=bpmis&x=1", "workspace", "run"),
+            "https://app.example/portal-home?x=1&workspace=run",
+        )
+        self.assertEqual(portal_health_url("https://app.example/portal-home?workspace=run"), "https://app.example/healthz")
 
     def test_source_code_qa_answer_generation_reports_unavailable_llm(self):
         service = Mock()
