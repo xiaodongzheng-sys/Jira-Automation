@@ -4,7 +4,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime, timezone
 import difflib
-from email.utils import getaddresses
 import hashlib
 import inspect
 import io
@@ -21,17 +20,12 @@ import threading
 import time
 from typing import Any
 from types import SimpleNamespace
-from urllib.parse import parse_qs, parse_qsl, urlparse, urlsplit
+from urllib.parse import parse_qsl, urlsplit
 import uuid
 import zipfile
 
 from flask import Flask, Response, current_app, flash, g, has_app_context, jsonify, redirect, render_template, request, send_file, send_from_directory, session, stream_with_context, url_for
 from dotenv import load_dotenv
-import google_auth_httplib2
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build as build_google_api
-from googleapiclient.errors import HttpError
-import httplib2
 import requests
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -85,14 +79,14 @@ from bpmis_jira_tool.monthly_report import (
     DEFAULT_MONTHLY_REPORT_TEMPLATE,
     MONTHLY_REPORT_PRODUCT_SCOPE,
     MonthlyReportService,
+    build_monthly_report_historical_style_guide,
     monthly_report_subject,
     normalize_monthly_report_template,
     resolve_monthly_report_period,
     send_monthly_report_email,
+    write_monthly_report_historical_style_guide_cache,
 )
-from bpmis_jira_tool.report_intelligence import (
-    normalize_report_intelligence_config,
-)
+from bpmis_jira_tool.monthly_report_history import scan_sent_monthly_reports_from_gmail
 from bpmis_jira_tool.codex_model_router import CODEX_ROUTE_DEEP, resolve_codex_model
 from bpmis_jira_tool.productization_codex import (
     clean_codex_productization_detailed_feature as _clean_codex_productization_detailed_feature,
@@ -135,7 +129,6 @@ from bpmis_jira_tool.source_code_qa_sql_artifacts import (
 from bpmis_jira_tool.web_source_code_qa_runtime import (
     bind_source_code_qa_runtime_helpers,
     _source_code_qa_codex_session_lock,
-    _record_source_code_qa_work_memory,
     _get_source_code_qa_session_store,
     _get_source_code_qa_attachment_store,
     _get_source_code_qa_generated_artifact_store,
@@ -295,16 +288,6 @@ from bpmis_jira_tool.web_redirects import (
     safe_relative_redirect_target as _safe_relative_redirect_target,
     url_with_query_value as _url_with_query_value,
 )
-from bpmis_jira_tool.work_memory import (
-    WorkMemoryStore,
-    gmail_attachment_memory_item,
-    gmail_drive_link_memory_item,
-    gmail_message_memory_item,
-    meeting_record_memory_items,
-    sent_monthly_report_memory_item_from_gmail_record,
-    source_code_qa_memory_item,
-    team_dashboard_memory_items,
-)
 from prd_briefing import create_prd_briefing_blueprint
 from prd_briefing.confluence import ConfluenceConnector
 from prd_briefing.reviewer import PRDBriefingReviewRequest, PRDReviewRequest, PRDReviewService
@@ -333,14 +316,7 @@ GMAIL_SEATALK_BUILTIN_OWNER_EMAILS = {PORTAL_ADMIN_EMAIL}
 TEAM_DASHBOARD_ACCESS_EMAILS = {PORTAL_ADMIN_EMAIL}
 MEETING_RECORDER_PROCESS_ACTION = "meeting-recorder-process"
 MEETING_RECORDER_UPCOMING_DISPLAY_LIMIT = 3
-WORK_MEMORY_GMAIL_BACKFILL_ACTION = "work-memory-gmail-backfill"
 GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
-GMAIL_WORK_MEMORY_MAX_ATTACHMENT_BYTES = 12 * 1024 * 1024
-GMAIL_WORK_MEMORY_MAX_VIP_ATTACHMENTS_PER_MESSAGE = 5
-GMAIL_WORK_MEMORY_CONTENT_CHARS = 16000
-GMAIL_WORK_MEMORY_FETCH_BATCH_SIZE = 25
-GMAIL_WORK_MEMORY_FETCH_WORKERS = 4
-GOOGLE_DRIVE_HTTP_TIMEOUT_SECONDS = 20
 TEAM_DASHBOARD_LINK_BIZ_EXCLUDED_TITLE_PHRASES = (
     "sync af productization",
     "productisation upgrade",
@@ -672,7 +648,6 @@ def create_app() -> Flask:
     app.config["CONFIG_STORE"] = config_store
     app.config["BPMIS_PROJECT_STORE"] = BPMISProjectStore(config_store.db_path)
     app.config["TEAM_DASHBOARD_CONFIG_STORE"] = TeamDashboardConfigStore(config_store.db_path)
-    app.config["WORK_MEMORY_STORE"] = WorkMemoryStore(data_root / "work_memory" / "memory.db")
     app.config["JOB_STORE"] = JobStore(data_root / "run" / "jobs.json")
     app.config["SOURCE_CODE_QA_QUERY_SCHEDULER"] = SourceCodeQAQueryScheduler(
         job_store=app.config["JOB_STORE"],
@@ -1541,7 +1516,6 @@ def create_app() -> Flask:
                 _dedupe_seatalk_name_mapping_candidates=lambda *args, **kwargs: _dedupe_seatalk_name_mapping_candidates(*args, **kwargs),
                 _classify_portal_error=lambda *args, **kwargs: _classify_portal_error(*args, **kwargs),
                 _load_team_dashboard_tasks_for_all_teams_merged=lambda *args, **kwargs: _load_team_dashboard_tasks_for_all_teams_merged(*args, **kwargs),
-                _record_team_dashboard_work_memory=lambda *args, **kwargs: _record_team_dashboard_work_memory(*args, **kwargs),
                 _current_google_email=lambda *args, **kwargs: _current_google_email(*args, **kwargs),
                 _team_dashboard_new_timing=lambda *args, **kwargs: _team_dashboard_new_timing(*args, **kwargs),
                 _team_dashboard_add_timing=lambda *args, **kwargs: _team_dashboard_add_timing(*args, **kwargs),
@@ -1569,9 +1543,7 @@ def create_app() -> Flask:
                 _remote_bpmis_config_enabled=lambda *args, **kwargs: _remote_bpmis_config_enabled(*args, **kwargs),
                 _run_team_dashboard_monthly_report_draft_job=lambda *args, **kwargs: _run_team_dashboard_monthly_report_draft_job(*args, **kwargs),
                 _google_credentials_have_scopes=lambda *args, **kwargs: _google_credentials_have_scopes(*args, **kwargs),
-                _ingest_sent_monthly_reports_from_gmail=lambda *args, **kwargs: _ingest_sent_monthly_reports_from_gmail(*args, **kwargs),
-                _local_agent_work_memory_enabled=lambda *args, **kwargs: _local_agent_work_memory_enabled(*args, **kwargs),
-                _get_work_memory_store=lambda *args, **kwargs: _get_work_memory_store(*args, **kwargs),
+                _refresh_monthly_report_history_from_gmail=lambda *args, **kwargs: _refresh_monthly_report_history_from_gmail(*args, **kwargs),
                 _local_agent_source_code_qa_enabled=lambda *args, **kwargs: _local_agent_source_code_qa_enabled(*args, **kwargs),
                 _build_prd_review_service=lambda *args, **kwargs: _build_prd_review_service(*args, **kwargs),
                 _queue_prd_generation_job=lambda *args, **kwargs: _queue_prd_generation_job(*args, **kwargs),
@@ -1690,711 +1662,25 @@ def _get_meeting_translation_runtime() -> MeetingTranslationRuntime:
     return current_app.config["MEETING_TRANSLATION_RUNTIME"]
 
 
-def _get_work_memory_store() -> WorkMemoryStore:
-    return current_app.config["WORK_MEMORY_STORE"]
-
-
 def _meeting_translation_sse_events(events: Any):
     for event in events:
         yield f"data: {json.dumps(event, ensure_ascii=False, separators=(',', ':'))}\n\n"
 
 
-def _record_work_memory_items(items: list[dict[str, Any]], *, event: str, owner_email: str = "", write_ledger: bool = True) -> dict[str, int]:
-    recorded = 0
-    failed = 0
-    duplicate = 0
-    if not items:
-        if write_ledger:
-            try:
-                _get_work_memory_store().record_ingestion_run(
-                    source_type=event,
-                    owner_email=owner_email or _current_google_email(),
-                    status="ok",
-                    recorded_count=0,
-                    failed_count=0,
-                )
-            except Exception:
-                current_app.logger.debug("Work Memory empty ingestion ledger write failed for %s.", event, exc_info=True)
-        return {"recorded": 0, "failed": 0, "duplicate": 0}
-    store = _get_work_memory_store()
-    for item in items:
-        try:
-            source_type = str(item.get("source_type") or "").strip()
-            source_id = str(item.get("source_id") or "").strip()
-            item_type = str(item.get("item_type") or "").strip()
-            owner_email = str(item.get("owner_email") or "").strip().lower()
-            existing_id = None
-            if source_type and source_id and item_type and owner_email:
-                existing_id = hashlib.sha256("\x1f".join([source_type, source_id, item_type, owner_email]).encode("utf-8")).hexdigest()[:32]
-                if store.get_item(existing_id):
-                    duplicate += 1
-            store.record_memory_item(**item)
-            recorded += 1
-        except Exception:  # noqa: BLE001 - memory ingestion must not break the primary tool flow.
-            failed += 1
-            current_app.logger.exception("Work Memory ingestion failed for %s.", event)
-    if write_ledger:
-        try:
-            store.record_ingestion_run(
-                source_type=event,
-                owner_email=owner_email or _current_google_email(),
-                status="ok" if failed == 0 else "partial_error",
-                scanned_count=len(items),
-                matched_count=len(items),
-                recorded_count=recorded,
-                duplicate_count=duplicate,
-                failed_count=failed,
-            )
-        except Exception:
-            current_app.logger.debug("Work Memory ingestion ledger write failed for %s.", event, exc_info=True)
-    return {"recorded": recorded, "failed": failed, "duplicate": duplicate}
-
-
-def _record_team_dashboard_work_memory(team_payloads: list[dict[str, Any]], *, owner_email: str) -> dict[str, int]:
-    items: list[dict[str, Any]] = []
-    for team_payload in team_payloads or []:
-        if isinstance(team_payload, dict) and not team_payload.get("error"):
-            items.extend(team_dashboard_memory_items(team_payload, owner_email=owner_email))
-    return _record_work_memory_items(items, event="team_dashboard")
-
-
-def _record_meeting_work_memory(record: dict[str, Any]) -> dict[str, int]:
-    return _record_work_memory_items(meeting_record_memory_items(record), event="meeting_recorder")
-
-
-
-
-SENT_MONTHLY_REPORT_SUBJECT_PATTERN = re.compile(
-    r"^\[Banking\]\s+Product\s+Update\s+\("
-    r"\d{1,2}\s+[A-Za-z]{3}\s*-\s*\d{1,2}\s+[A-Za-z]{3}"
-    r"\)\s+-\s+Anti-Fraud,\s+Credit\s+Risk\s+&\s+Ops\s+Risk$",
-    re.IGNORECASE,
-)
-
-
-def _is_sent_monthly_report_subject(subject: str) -> bool:
-    return bool(SENT_MONTHLY_REPORT_SUBJECT_PATTERN.match(str(subject or "").strip()))
-
-
-def _ingest_existing_work_memory_sources(settings: Settings, *, date_range: str = "90d", sources: list[str] | None = None) -> dict[str, Any]:
-    owner_email = _current_google_email()
-    items: list[dict[str, Any]] = []
-    source_counts = {"meeting_records": 0, "team_dashboard_cache": 0}
-    source_filter = {str(source or "").strip() for source in sources or [] if str(source or "").strip()}
-
-    if not source_filter or "meeting_recorder" in source_filter:
-        try:
-            if _local_agent_meeting_recorder_enabled(settings):
-                records = _build_local_agent_client(settings).meeting_recorder_records(owner_email=owner_email)
-            else:
-                records = _get_meeting_record_store().list_records(owner_email=owner_email)
-            for record in records:
-                if str(record.get("status") or "").strip().lower() != "completed":
-                    continue
-                record_items = meeting_record_memory_items(record)
-                if record_items:
-                    source_counts["meeting_records"] += 1
-                    items.extend(record_items)
-        except Exception:
-            current_app.logger.exception("Work Memory meeting backfill failed.")
-
-    if not source_filter or "team_dashboard" in source_filter:
-        try:
-            config = _get_team_dashboard_config_store().load()
-            task_cache = config.get("task_cache") if isinstance(config.get("task_cache"), dict) else {}
-            cached_teams = task_cache.get("teams") if isinstance(task_cache.get("teams"), dict) else {}
-            for team_key, cached_team in cached_teams.items():
-                if not isinstance(cached_team, dict):
-                    continue
-                team_payload = {
-                    **cached_team,
-                    "team_key": str(cached_team.get("team_key") or team_key),
-                    "member_emails": _normalize_team_dashboard_emails(cached_team.get("member_emails") or []),
-                    "loading": False,
-                    "loaded": True,
-                    "error": "",
-                    "progress_text": "",
-                    "cache_source": "backfill",
-                }
-                team_items = team_dashboard_memory_items(team_payload, owner_email=owner_email)
-                if team_items:
-                    source_counts["team_dashboard_cache"] += 1
-                    items.extend(team_items)
-        except Exception:
-            current_app.logger.exception("Work Memory Team Dashboard cache backfill failed.")
-
-    result = _record_work_memory_items(items, event="work_memory_existing_backfill")
-    return {**result, **source_counts, "date_range": date_range, "sources": sorted(source_filter)}
-
-
-def _ingest_sent_monthly_reports_from_gmail(settings: Settings) -> dict[str, Any]:
-    del settings
+def _refresh_monthly_report_history_from_gmail(settings: Settings) -> dict[str, Any]:
     if not _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
         raise ConfigError("Gmail read permission is missing. Reconnect Google once to grant gmail.readonly.")
     service = _build_gmail_dashboard_service()
     owner_email = _current_google_email()
-    queries = [
-        'in:sent newer_than:365d from:me subject:"[Banking] Product Update"',
-        'in:sent newer_than:365d from:me subject:"Anti-Fraud, Credit Risk & Ops Risk"',
-        'in:sent newer_than:365d from:me "[Banking] Product Update" "Anti-Fraud, Credit Risk & Ops Risk"',
-    ]
-    seen_ids: set[str] = set()
-    records = []
-    for query in queries:
-        for message_id in service._list_message_ids(query=query, max_messages=50):
-            if message_id in seen_ids:
-                continue
-            seen_ids.add(message_id)
-            records.append(service._fetch_message_full(message_id))
-    items = []
-    for record in records:
-        headers = getattr(record, "headers", {}) or {}
-        sender_text = str(headers.get("from") or "").casefold()
-        if owner_email and owner_email not in sender_text:
-            continue
-        if not _is_sent_monthly_report_subject(str(headers.get("subject") or "")):
-            continue
-        items.append(sent_monthly_report_memory_item_from_gmail_record(owner_email=owner_email, record=record))
-    result = _record_work_memory_items(items, event="gmail_sent_monthly_report_scan")
-    return {"scanned": len(records), "matched": len(items), **result}
-
-
-def _run_incremental_memory_ingestion(settings: Settings, *, window: str = "7d", reconciliation: bool = False) -> dict[str, Any]:
-    effective_window = "90d" if reconciliation else (str(window or "7d").strip() or "7d")
-    sources = ["meeting_recorder", "team_dashboard"]
-    result: dict[str, Any] = {
-        "window": effective_window,
-        "reconciliation": bool(reconciliation),
-        "sources": {},
-        "recorded": 0,
-        "failed": 0,
-        "duplicate": 0,
-    }
-    existing = _ingest_existing_work_memory_sources(settings, date_range=effective_window, sources=sources)
-    result["sources"]["existing"] = existing
-    for key in ("recorded", "failed", "duplicate"):
-        result[key] += int(existing.get(key) or 0)
-    if _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
-        try:
-            sent_reports = _ingest_sent_monthly_reports_from_gmail(settings)
-            result["sources"]["gmail_sent_monthly_report"] = sent_reports
-            for key in ("recorded", "failed", "duplicate"):
-                result[key] += int(sent_reports.get(key) or 0)
-        except Exception as error:  # noqa: BLE001 - incremental ingestion should keep partial source results.
-            current_app.logger.exception("Work Memory incremental Gmail sent report ingestion failed.")
-            result["sources"]["gmail_sent_monthly_report"] = {"status": "error", "message": str(error)}
-            result["failed"] += 1
-            _get_work_memory_store().record_ingestion_run(
-                source_type="gmail_sent_monthly_report_incremental",
-                owner_email=_current_google_email(),
-                cursor=effective_window,
-                status="error",
-                failed_count=1,
-                error=str(error),
-            )
-    else:
-        result["sources"]["gmail_sent_monthly_report"] = {
-            "status": "skipped",
-            "message": "Gmail readonly scope is missing.",
-        }
-    distilled = _get_work_memory_store().distill_work_memory(owner_email=_current_google_email(), date_range=effective_window)
-    result["sources"]["distill"] = distilled
-    _get_work_memory_store().record_ingestion_run(
-        source_type="work_memory_incremental",
-        owner_email=_current_google_email(),
-        cursor=effective_window,
-        status="ok" if result["failed"] == 0 else "partial_error",
-        scanned_count=sum(int((source_result or {}).get("scanned") or (source_result or {}).get("meeting_records") or 0) for source_result in result["sources"].values() if isinstance(source_result, dict)),
-        matched_count=result["recorded"],
-        recorded_count=result["recorded"],
-        duplicate_count=result["duplicate"],
-        failed_count=result["failed"],
-        metadata={"sources": sources, "reconciliation": bool(reconciliation)},
-    )
-    return result
-
-
-def _run_work_memory_gmail_backfill_job(app: Flask, job_id: str, payload: dict[str, Any]) -> None:
-    with app.app_context():
-        job_store: JobStore = current_app.config["JOB_STORE"]
-        owner_email = str(payload.get("owner_email") or "").strip().lower()
-        try:
-            job_store.update(job_id, state="running", stage="starting", message="Starting Gmail Work Memory backfill.")
-            result = _backfill_gmail_work_memory(
-                owner_email=owner_email,
-                credentials_payload=payload.get("credentials") if isinstance(payload.get("credentials"), dict) else {},
-                report_intelligence_config=payload.get("report_intelligence_config") if isinstance(payload.get("report_intelligence_config"), dict) else {},
-                days=int(payload.get("days") or 90),
-                max_messages=payload.get("max_messages") if payload.get("max_messages") is not None else None,
-                drive_read_enabled=bool(payload.get("drive_read_enabled")),
-                job_id=job_id,
-            )
-            job_store.complete(
-                job_id,
-                results=[result],
-                notice={"level": "success" if int(result.get("failed") or 0) == 0 else "warning", "message": "Gmail Work Memory backfill completed."},
-            )
-        except Exception as error:  # noqa: BLE001 - keep background job failures visible in the job store.
-            current_app.logger.exception("Gmail Work Memory backfill failed.")
-            _get_work_memory_store().record_ingestion_run(
-                source_type="gmail_backfill",
-                owner_email=owner_email,
-                status="error",
-                failed_count=1,
-                error=str(error),
-            )
-            error_details = _classify_portal_error(error)
-            job_store.fail(
-                job_id,
-                str(error),
-                error_category=str(error_details.get("error_category") or ""),
-                error_code=str(error_details.get("error_code") or ""),
-                error_retryable=bool(error_details.get("error_retryable")),
-            )
-
-
-def _backfill_gmail_work_memory(
-    *,
-    owner_email: str,
-    credentials_payload: dict[str, Any],
-    report_intelligence_config: dict[str, Any],
-    days: int,
-    max_messages: int | None,
-    drive_read_enabled: bool,
-    job_id: str,
-) -> dict[str, Any]:
-    if not credentials_payload:
-        raise ConfigError("Google credentials are missing for Gmail backfill. Reconnect Google and retry.")
-    credentials = Credentials(**credentials_payload)
-    service = GmailDashboardService(
-        credentials=credentials,
-        cache_key=owner_email,
-        report_intelligence_config=report_intelligence_config,
-    )
-    job_store: JobStore = current_app.config["JOB_STORE"]
-    started_at = datetime.now(timezone.utc).isoformat()
-    refs = service.list_work_memory_message_refs(days=days, max_messages=max_messages)
-    unique_message_ids: list[str] = []
-    seen_message_ids: set[str] = set()
-    for ref in refs:
-        message_id = str(ref.get("id") or "").strip()
-        if message_id and message_id not in seen_message_ids:
-            seen_message_ids.add(message_id)
-            unique_message_ids.append(message_id)
-    original_total = len(unique_message_ids)
-    work_memory_store = _get_work_memory_store()
-    existing_message_ids = work_memory_store.existing_source_ids(
-        source_type="gmail",
-        owner_email=owner_email,
-        source_ids=unique_message_ids,
-    )
-    processed_message_ids = work_memory_store.processed_source_ids(
-        source_type="gmail",
-        owner_email=owner_email,
-        source_ids=unique_message_ids,
-    )
-    existing_message_ids.update(processed_message_ids)
-    pending_message_ids = [message_id for message_id in unique_message_ids if message_id not in existing_message_ids]
-    skipped_existing = original_total - len(pending_message_ids)
-    total = len(pending_message_ids)
-    skip_suffix = f" Skipping {skipped_existing} already recorded." if skipped_existing else ""
-    job_store.update(job_id, stage="scanning", message=f"Scanning {total}/{original_total} Gmail message(s).{skip_suffix}", current=0, total=total)
-    vip_people = _gmail_work_memory_vip_people(report_intelligence_config)
-    key_projects = _gmail_work_memory_key_projects()
-    scanned = 0
-    matched = 0
-    recorded = 0
-    duplicate = 0
-    failed = 0
-    attachment_processed = 0
-    drive_links_processed = 0
-    last_error = ""
-    for batch_start in range(0, total, GMAIL_WORK_MEMORY_FETCH_BATCH_SIZE):
-        batch_ids = pending_message_ids[batch_start:batch_start + GMAIL_WORK_MEMORY_FETCH_BATCH_SIZE]
-        batch_items: list[dict[str, Any]] = []
-        processed_batch_ids: list[str] = []
-        scanned += len(batch_ids)
-        if scanned == len(batch_ids) or scanned % 100 == 0 or scanned == total:
-            job_store.update(job_id, stage="fetching", message=f"Fetching {scanned}/{total} Gmail message(s); skipped {skipped_existing}.", current=scanned, total=total)
-        records, fetch_failures, fetch_error = _fetch_gmail_work_memory_records(
-            credentials_payload=credentials_payload,
-            owner_email=owner_email,
-            report_intelligence_config=report_intelligence_config,
-            message_ids=batch_ids,
-        )
-        failed += fetch_failures
-        if fetch_error:
-            last_error = fetch_error
-        for record in records:
-            try:
-                message_id = str(getattr(record, "message_id", "") or "").strip()
-                if not message_id:
-                    continue
-                headers = getattr(record, "headers", {}) or {}
-                if service.is_export_noise(headers):
-                    processed_batch_ids.append(message_id)
-                    continue
-                matched_vips, vip_roles = _gmail_work_memory_matched_vips(headers, vip_people)
-                body_text = str(getattr(record, "body_text", "") or "")
-                match_text = "\n".join(
-                    [
-                        str(headers.get("subject") or ""),
-                        str(headers.get("from") or ""),
-                        str(headers.get("to") or ""),
-                        str(headers.get("cc") or ""),
-                        body_text,
-                    ]
-                )
-                report_matches = _gmail_work_memory_report_matches(match_text, report_intelligence_config, key_projects)
-                batch_items.append(
-                    gmail_message_memory_item(
-                        owner_email=owner_email,
-                        record=record,
-                        matched_vips=matched_vips,
-                        vip_email_roles=vip_roles,
-                        report_matches=report_matches,
-                    )
-                )
-                matched += 1
-                if matched_vips:
-                    attachment_items, attachment_failures = _gmail_work_memory_vip_attachment_items(
-                        service=service,
-                        owner_email=owner_email,
-                        record=record,
-                        matched_vips=matched_vips,
-                    )
-                    batch_items.extend(attachment_items)
-                    attachment_processed += len(attachment_items)
-                    failed += attachment_failures
-                    drive_items = _gmail_work_memory_vip_drive_items(
-                        credentials=credentials,
-                        owner_email=owner_email,
-                        record=record,
-                        matched_vips=matched_vips,
-                        drive_read_enabled=drive_read_enabled,
-                    )
-                    batch_items.extend(drive_items)
-                    drive_links_processed += len(drive_items)
-                processed_batch_ids.append(message_id)
-            except Exception as error:  # noqa: BLE001 - one bad message must not stop the backfill.
-                failed += 1
-                last_error = str(error)
-                current_app.logger.warning("Gmail Work Memory message backfill skipped message_id=%s: %s", message_id, error)
-        result = _record_work_memory_items(batch_items, event="gmail_backfill", owner_email=owner_email, write_ledger=False)
-        work_memory_store.record_processed_source_ids(
-            source_type="gmail",
-            owner_email=owner_email,
-            source_ids=processed_batch_ids,
-            metadata={"event": "gmail_backfill", "days": days},
-        )
-        recorded += int(result.get("recorded") or 0)
-        duplicate += int(result.get("duplicate") or 0)
-        failed += int(result.get("failed") or 0)
-    status = "ok" if failed == 0 else "partial_error"
-    _get_work_memory_store().record_ingestion_run(
-        source_type="gmail_backfill",
-        owner_email=owner_email,
-        cursor=f"days={days};messages={scanned};skipped={skipped_existing}",
-        status=status,
-        scanned_count=scanned,
-        matched_count=matched,
-        recorded_count=recorded,
-        duplicate_count=duplicate,
-        failed_count=failed,
-        error=last_error,
-        metadata={
-            "days": days,
-            "max_messages": max_messages,
-            "original_message_count": original_total,
-            "skipped_existing_message_count": skipped_existing,
-            "vip_people_count": len(vip_people),
-            "attachment_processed": attachment_processed,
-            "drive_links_processed": drive_links_processed,
-            "drive_read_enabled": drive_read_enabled,
-        },
-        started_at=started_at,
-        completed_at=datetime.now(timezone.utc).isoformat(),
-    )
-    distilled = _get_work_memory_store().distill_work_memory(owner_email=owner_email, date_range=f"{days}d", sources=["gmail", "gmail_attachment", "gmail_drive_link"])
+    result = scan_sent_monthly_reports_from_gmail(service=service, owner_email=owner_email)
+    style_guide = build_monthly_report_historical_style_guide(result.get("items") if isinstance(result.get("items"), list) else [])
+    write_monthly_report_historical_style_guide_cache(settings, owner_email=owner_email, style_guide=style_guide)
     return {
-        "status": status,
-        "days": days,
-        "scanned": scanned,
-        "skipped_existing": skipped_existing,
-        "original_message_count": original_total,
-        "matched": matched,
-        "recorded": recorded,
-        "duplicate": duplicate,
-        "failed": failed,
-        "attachment_processed": attachment_processed,
-        "drive_links_processed": drive_links_processed,
-        "distill": distilled,
+        "scanned": int(result.get("scanned") or 0),
+        "matched": int(result.get("matched") or 0),
+        "report_count": int(style_guide.get("report_count") or 0),
+        "items": result.get("items") if isinstance(result.get("items"), list) else [],
     }
-
-
-def _gmail_work_memory_fetch_workers() -> int:
-    raw_value = str(os.getenv("GMAIL_WORK_MEMORY_FETCH_WORKERS") or "").strip()
-    if not raw_value:
-        return GMAIL_WORK_MEMORY_FETCH_WORKERS
-    try:
-        return max(1, min(int(raw_value), 8))
-    except ValueError:
-        return GMAIL_WORK_MEMORY_FETCH_WORKERS
-
-
-def _fetch_gmail_work_memory_records(
-    *,
-    credentials_payload: dict[str, Any],
-    owner_email: str,
-    report_intelligence_config: dict[str, Any],
-    message_ids: list[str],
-) -> tuple[list[Any], int, str]:
-    if not message_ids:
-        return [], 0, ""
-    workers = min(_gmail_work_memory_fetch_workers(), len(message_ids))
-    records: list[Any] = []
-    failed = 0
-    last_error = ""
-
-    def fetch_one(message_id: str) -> Any:
-        local_service = GmailDashboardService(
-            credentials=Credentials(**credentials_payload),
-            cache_key=owner_email,
-            report_intelligence_config=report_intelligence_config,
-        )
-        return local_service.fetch_work_memory_message(message_id)
-
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(fetch_one, message_id): message_id for message_id in message_ids}
-        for future in as_completed(futures):
-            message_id = futures[future]
-            try:
-                records.append(future.result())
-            except Exception as error:  # noqa: BLE001 - one message failure must not stop the backfill batch.
-                failed += 1
-                last_error = str(error)
-                current_app.logger.warning("Gmail Work Memory full fetch failed message_id=%s: %s", message_id, error)
-    records.sort(key=lambda item: getattr(item, "internal_date", datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
-    return records, failed, last_error
-
-
-def _gmail_work_memory_vip_people(report_intelligence_config: dict[str, Any]) -> list[dict[str, Any]]:
-    normalized = normalize_report_intelligence_config(report_intelligence_config)
-    return [vip for vip in normalized.get("vip_people") or [] if isinstance(vip, dict)]
-
-
-def _gmail_work_memory_key_projects() -> list[dict[str, Any]]:
-    try:
-        config = _get_team_dashboard_config_store().load()
-        task_cache = config.get("task_cache") if isinstance(config.get("task_cache"), dict) else {}
-        teams = task_cache.get("teams") if isinstance(task_cache.get("teams"), dict) else {}
-        projects: list[dict[str, Any]] = []
-        for team in teams.values():
-            if not isinstance(team, dict):
-                continue
-            for section_key in ("under_prd", "pending_live"):
-                projects.extend(project for project in (team.get(section_key) or []) if isinstance(project, dict))
-        return projects
-    except Exception:
-        return []
-
-
-def _gmail_work_memory_matched_vips(headers: dict[str, str], vip_people: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
-    role_addresses = {
-        "from": _gmail_header_addresses(headers.get("from", "")),
-        "to": _gmail_header_addresses(headers.get("to", "")),
-        "cc": _gmail_header_addresses(headers.get("cc", "")),
-    }
-    matched: list[dict[str, Any]] = []
-    roles: dict[str, list[str]] = {}
-    for vip in vip_people:
-        emails = {str(email or "").strip().lower() for email in vip.get("emails") or [] if str(email or "").strip()}
-        if not emails:
-            continue
-        vip_roles = sorted(role for role, addresses in role_addresses.items() if emails.intersection(addresses))
-        if not vip_roles:
-            continue
-        label = str(vip.get("display_name") or sorted(emails)[0]).strip()
-        matched.append({"display_name": label, "role_tags": vip.get("role_tags") or [], "emails": sorted(emails)})
-        roles[label] = vip_roles
-    return matched, roles
-
-
-def _gmail_header_addresses(value: str) -> set[str]:
-    return {str(address or "").strip().lower() for _name, address in getaddresses([value or ""]) if str(address or "").strip()}
-
-
-def _gmail_work_memory_report_matches(text: str, report_intelligence_config: dict[str, Any], key_projects: list[dict[str, Any]]) -> dict[str, Any]:
-    try:
-        from bpmis_jira_tool.report_intelligence import match_report_intelligence
-
-        return match_report_intelligence(text, config=report_intelligence_config, key_projects=key_projects)
-    except Exception:
-        return {"matched_vips": [], "matched_keywords": [], "matched_key_projects": []}
-
-
-def _gmail_work_memory_vip_attachment_items(
-    *,
-    service: GmailDashboardService,
-    owner_email: str,
-    record: Any,
-    matched_vips: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], int]:
-    items: list[dict[str, Any]] = []
-    failed = 0
-    message_id = str(getattr(record, "message_id", "") or "").strip()
-    attachments = [
-        attachment
-        for attachment in (getattr(record, "attachments", []) or [])
-        if _gmail_attachment_is_pdf(attachment)
-    ][:GMAIL_WORK_MEMORY_MAX_VIP_ATTACHMENTS_PER_MESSAGE]
-    for attachment in attachments:
-        try:
-            if int(getattr(attachment, "size", 0) or 0) > GMAIL_WORK_MEMORY_MAX_ATTACHMENT_BYTES:
-                continue
-            content = service.download_attachment(message_id=message_id, attachment_id=str(getattr(attachment, "attachment_id") or ""))
-            if len(content) > GMAIL_WORK_MEMORY_MAX_ATTACHMENT_BYTES:
-                continue
-            text = _extract_pdf_text_for_work_memory(content)
-            sha256 = hashlib.sha256(content).hexdigest()
-            items.append(
-                gmail_attachment_memory_item(
-                    owner_email=owner_email,
-                    record=record,
-                    attachment=attachment,
-                    text=text[:GMAIL_WORK_MEMORY_CONTENT_CHARS],
-                    sha256=sha256,
-                    matched_vips=matched_vips,
-                )
-            )
-        except Exception as error:  # noqa: BLE001 - attachment failures are counted but isolated.
-            failed += 1
-            current_app.logger.info("VIP Gmail PDF attachment skipped: %s", error)
-    return items, failed
-
-
-def _gmail_attachment_is_pdf(attachment: Any) -> bool:
-    filename = str(getattr(attachment, "filename", "") or "").strip().lower()
-    mime_type = str(getattr(attachment, "mime_type", "") or "").strip().lower()
-    return filename.endswith(".pdf") or mime_type == "application/pdf"
-
-
-def _extract_pdf_text_for_work_memory(content: bytes) -> str:
-    try:
-        from pypdf import PdfReader  # type: ignore
-    except ImportError as error:
-        raise ToolError("PDF attachments are supported only when pypdf is installed on the server.") from error
-    reader = PdfReader(io.BytesIO(content))
-    lines: list[str] = []
-    for page in reader.pages[:12]:
-        lines.append(str(page.extract_text() or ""))
-    text = "\n".join(lines).strip()
-    if not text:
-        raise ToolError("Unable to extract readable text from this PDF attachment.")
-    return text[:GMAIL_WORK_MEMORY_CONTENT_CHARS]
-
-
-def _gmail_work_memory_vip_drive_items(
-    *,
-    credentials: Credentials,
-    owner_email: str,
-    record: Any,
-    matched_vips: list[dict[str, Any]],
-    drive_read_enabled: bool,
-) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    links = list(dict.fromkeys(str(link or "").strip() for link in (getattr(record, "drive_links", []) or []) if str(link or "").strip()))
-    for link in links[:GMAIL_WORK_MEMORY_MAX_VIP_ATTACHMENTS_PER_MESSAGE]:
-        title = ""
-        text = ""
-        access_status = "unavailable"
-        if drive_read_enabled:
-            try:
-                title, text = _read_google_drive_link_text(credentials=credentials, url=link)
-                access_status = "ok" if text else "unavailable"
-            except HttpError as error:
-                status = getattr(getattr(error, "resp", None), "status", 0)
-                access_status = "permission_denied" if int(status or 0) in {401, 403, 404} else "unavailable"
-            except Exception:
-                access_status = "unavailable"
-        else:
-            access_status = "missing_drive_scope"
-        items.append(
-            gmail_drive_link_memory_item(
-                owner_email=owner_email,
-                record=record,
-                url=link,
-                title=title,
-                text=text[:GMAIL_WORK_MEMORY_CONTENT_CHARS],
-                access_status=access_status,
-                matched_vips=matched_vips,
-            )
-        )
-    return items
-
-
-def _read_google_drive_link_text(*, credentials: Credentials, url: str) -> tuple[str, str]:
-    file_id = _google_drive_file_id_from_url(url)
-    if not file_id:
-        return "", ""
-    service = _build_google_drive_service(credentials)
-    metadata = service.files().get(fileId=file_id, fields="id,name,mimeType,size").execute()
-    title = str(metadata.get("name") or file_id)
-    mime_type = str(metadata.get("mimeType") or "")
-    if mime_type.startswith("application/vnd.google-apps."):
-        for export_mime in ("text/plain", "text/csv"):
-            try:
-                content = service.files().export_media(fileId=file_id, mimeType=export_mime).execute()
-                return title, _bytes_to_text(content)
-            except HttpError:
-                continue
-        return title, ""
-    if mime_type == "application/pdf":
-        content = service.files().get_media(fileId=file_id).execute()
-        return title, _extract_pdf_text_for_work_memory(content)
-    return title, ""
-
-
-def _google_drive_http_timeout_seconds() -> int:
-    raw_value = str(os.getenv("GOOGLE_DRIVE_HTTP_TIMEOUT_SECONDS") or "").strip()
-    if not raw_value:
-        return GOOGLE_DRIVE_HTTP_TIMEOUT_SECONDS
-    try:
-        return max(5, min(int(raw_value), 120))
-    except ValueError:
-        return GOOGLE_DRIVE_HTTP_TIMEOUT_SECONDS
-
-
-def _build_google_drive_service(credentials: Credentials) -> Any:
-    http = httplib2.Http(timeout=_google_drive_http_timeout_seconds())
-    authed_http = google_auth_httplib2.AuthorizedHttp(credentials, http=http)
-    return build_google_api("drive", "v3", http=authed_http, cache_discovery=False)
-
-
-def _google_drive_file_id_from_url(url: str) -> str:
-    parsed = urlparse(str(url or ""))
-    path_parts = [part for part in parsed.path.split("/") if part]
-    if "d" in path_parts:
-        index = path_parts.index("d")
-        if index + 1 < len(path_parts):
-            return path_parts[index + 1]
-    query = parse_qs(parsed.query)
-    if query.get("id"):
-        return str(query["id"][0] or "").strip()
-    if path_parts and path_parts[0] == "open" and query.get("id"):  # pragma: no cover - query id is handled above.
-        return str(query["id"][0] or "").strip()
-    return ""
-
-
-def _bytes_to_text(value: bytes | str) -> str:
-    if isinstance(value, str):
-        return value.strip()
-    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
-        try:
-            return value.decode(encoding).strip()
-        except UnicodeDecodeError:
-            continue
-    return ""  # pragma: no cover - latin-1 decodes all byte values.
 
 
 def _build_calendar_meeting_service() -> GoogleCalendarMeetingService:
@@ -2932,25 +2218,6 @@ def _local_agent_meeting_recorder_enabled(settings: Settings) -> bool:
         and settings.local_agent_base_url
         and settings.local_agent_hmac_secret
     )
-
-
-def _local_agent_work_memory_enabled(settings: Settings) -> bool:
-    return bool(
-        _local_agent_mode_enabled(settings)
-        and settings.local_agent_base_url
-        and settings.local_agent_hmac_secret
-    )
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -4051,8 +3318,6 @@ def _run_meeting_recorder_process_job(
                 if send_email_on_complete
                 else None
             )
-            completed_record = _get_meeting_record_store().get_record(record_id)
-            _record_meeting_work_memory(completed_record)
             details = [f"Record: {record_id}"]
             if email_payload:
                 if email_payload.get("status") == "sent":
@@ -4061,7 +3326,7 @@ def _run_meeting_recorder_process_job(
                     details.append("Email was not sent automatically.")
             job_store.complete(
                 job_id,
-                results=[{"record": _meeting_record_summary(completed_record), "email": email_payload or {}}],
+                results=[{"record": _meeting_record_summary(record), "email": email_payload or {}}],
                 notice={
                     "title": "Meeting Processing Completed",
                     "tone": "success",

@@ -1498,21 +1498,6 @@ class GmailDashboardService:
     def is_export_noise(self, headers: dict[str, str]) -> bool:
         return _is_export_noise(headers, self.report_intelligence_config)
 
-    def list_work_memory_message_refs(
-        self,
-        *,
-        days: int = 90,
-        now: datetime | None = None,
-        max_messages: int | None = None,
-    ) -> list[dict[str, str]]:
-        now = now or datetime.now().astimezone()
-        period_start = _start_of_local_day(now - timedelta(days=max(1, int(days or 90)) - 1))
-        query = _build_thread_export_query(period_start, now)
-        return self._list_message_refs(query=query, max_messages=max_messages)
-
-    def fetch_work_memory_message(self, message_id: str) -> GmailExportRecord:
-        return self._fetch_message_full(message_id)
-
     def download_attachment(self, *, message_id: str, attachment_id: str) -> bytes:
         users_api = self.service.users().messages().attachments()
         payload = self._execute_gmail_request(

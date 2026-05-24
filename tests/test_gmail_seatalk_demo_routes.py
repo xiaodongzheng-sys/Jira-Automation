@@ -1,7 +1,6 @@
 import os
 import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from bpmis_jira_tool.gmail_dashboard import GMAIL_READONLY_SCOPE
@@ -33,13 +32,6 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         with web_module._gmail_export_active_users_lock:
             web_module._gmail_export_active_users.clear()
         self.temp_dir.cleanup()
-
-    def test_demo_frontend_formats_display_timestamps_in_singapore_time(self):
-        script = Path("static/gmail_seatalk_demo.js").read_text(encoding="utf-8")
-
-        self.assertIn("timeZone: 'Asia/Singapore'", script)
-        self.assertIn("${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} SGT", script)
-        self.assertNotIn("new Intl.DateTimeFormat('en-US', {\n      month: 'short'", script)
 
     @staticmethod
     def _login_owner(client, *, scopes=None):
@@ -821,15 +813,6 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertEqual(payload["mappings"]["UID 456"], "Alice Tan")
         self.assertEqual(payload["mappings"]["buddy-456"], "Alice Tan")
         self.assertEqual([row["id"] for row in payload["unknown_ids"]], ["UID 777"])
-
-    def test_seatalk_name_mapping_script_paginates_candidates(self):
-        source = Path("static/gmail_seatalk_demo.js").read_text(encoding="utf-8")
-
-        self.assertIn("SEATALK_NAME_MAPPING_PAGE_SIZE = 50", source)
-        self.assertIn("data-seatalk-name-mapping-prev", source)
-        self.assertIn("data-seatalk-name-mapping-next", source)
-        self.assertIn("syncVisibleNameMappingInputs(root)", source)
-        self.assertIn("Saved mapping", source)
 
     def test_owner_seatalk_name_mappings_dedupes_buddy_and_uid_candidates(self):
         class FakeSeaTalkService:

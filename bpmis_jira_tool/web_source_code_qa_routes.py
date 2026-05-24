@@ -433,14 +433,6 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
                 if session_payload is not None:
                     result["session"] = session_payload
                     result["session_id"] = session_id
-            _record_source_code_qa_work_memory(
-                owner_email=owner_email,
-                pm_team=pm_team,
-                country=country,
-                question=str(payload.get("question") or ""),
-                result=result,
-                session_id=session_id,
-            )
             return jsonify(result)
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST

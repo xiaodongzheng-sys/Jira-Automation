@@ -166,15 +166,6 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                     str((job_store.snapshot(job_id) or {}).get("stage") or ""),
                     json.dumps(attribution, ensure_ascii=False, sort_keys=True),
                 )
-            _record_source_code_qa_work_memory(
-                owner_email=owner_email,
-                pm_team=pm_team,
-                country=country,
-                question=str(payload.get("question") or ""),
-                result=result,
-                session_id=session_id,
-                job_id=job_id,
-            )
             job_store.complete(
                 job_id,
                 results=[result],

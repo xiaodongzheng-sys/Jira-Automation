@@ -20,7 +20,6 @@ REQUIRED_RECENT_USAGE_AREAS = {
     "report_intelligence_seatalk",
     "productization_summary",
     "vpn_connection",
-    "work_memory",
 }
 
 REQUIRED_EVIDENCE_SOURCES = {
@@ -29,7 +28,6 @@ REQUIRED_EVIDENCE_SOURCES = {
     "host_access_log",
     "cloud_run_logging",
     "host_team_portal_db",
-    "host_work_memory_db",
     "host_meeting_records",
     "seatalk_name_mapping_cache",
     "source_code_qa_release_gate",

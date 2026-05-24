@@ -108,7 +108,6 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
     _dedupe_seatalk_name_mapping_candidates = ctx._dedupe_seatalk_name_mapping_candidates
     _classify_portal_error = ctx._classify_portal_error
     _load_team_dashboard_tasks_for_all_teams_merged = ctx._load_team_dashboard_tasks_for_all_teams_merged
-    _record_team_dashboard_work_memory = ctx._record_team_dashboard_work_memory
     _current_google_email = ctx._current_google_email
     _team_dashboard_new_timing = ctx._team_dashboard_new_timing
     _team_dashboard_add_timing = ctx._team_dashboard_add_timing
@@ -136,9 +135,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
     _remote_bpmis_config_enabled = ctx._remote_bpmis_config_enabled
     _run_team_dashboard_monthly_report_draft_job = ctx._run_team_dashboard_monthly_report_draft_job
     _google_credentials_have_scopes = ctx._google_credentials_have_scopes
-    _ingest_sent_monthly_reports_from_gmail = ctx._ingest_sent_monthly_reports_from_gmail
-    _local_agent_work_memory_enabled = ctx._local_agent_work_memory_enabled
-    _get_work_memory_store = ctx._get_work_memory_store
+    _refresh_monthly_report_history_from_gmail = ctx._refresh_monthly_report_history_from_gmail
     _local_agent_source_code_qa_enabled = ctx._local_agent_source_code_qa_enabled
     _build_prd_review_service = ctx._build_prd_review_service
     _queue_prd_generation_job = ctx._queue_prd_generation_job
@@ -487,42 +484,11 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         owner_email = _current_google_email()
         if not owner_email:
             return build_monthly_report_historical_style_guide([])
-        filters = {"source_type": "gmail_sent_monthly_report", "item_type": "curated_report"}
         items: list[dict[str, Any]] = []
         try:
-            items = _get_work_memory_store().query_work_memory(
-                owner_email=owner_email,
-                visibility_scope="owner",
-                filters=filters,
-                limit=8,
-            )
-            if len(items) < 3 and _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
-                _ingest_sent_monthly_reports_from_gmail(settings)
-                items = _get_work_memory_store().query_work_memory(
-                    owner_email=owner_email,
-                    visibility_scope="owner",
-                    filters=filters,
-                    limit=8,
-                )
-            if _local_agent_work_memory_enabled(settings):
-                local_agent_client = _build_local_agent_client(settings)
-                if hasattr(local_agent_client, "work_memory_recent"):
-                    remote_items = local_agent_client.work_memory_recent(
-                        owner_email=owner_email,
-                        visibility_scope="owner",
-                        filters=filters,
-                        limit=8,
-                    )
-                    seen = {str(item.get("source_id") or item.get("item_id") or "") for item in items if isinstance(item, dict)}
-                    for item in remote_items:
-                        key = str(item.get("source_id") or item.get("item_id") or "")
-                        if key and key in seen:
-                            continue
-                        items.append(item)
-                        if key:
-                            seen.add(key)
-                        if len(items) >= 8:
-                            break
+            if _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
+                result = _refresh_monthly_report_history_from_gmail(settings)
+                items = result.get("items") if isinstance(result.get("items"), list) else []
         except Exception:
             current_app.logger.exception("Monthly Report historical sent-report style lookup failed.")
         style_guide = build_monthly_report_historical_style_guide(items)
@@ -996,7 +962,6 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
                     route_started_at=route_started_at,
                     key_project_overrides=key_project_overrides,
                 )
-                _record_team_dashboard_work_memory(team_payloads, owner_email=_current_google_email())
                 response = jsonify(
                     {
                         "status": "ok",
@@ -1140,7 +1105,6 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
                         "timing_stats": timing_stats,
                     }
                 )
-        _record_team_dashboard_work_memory(team_payloads, owner_email=_current_google_email())
         response = jsonify(
             {
                 "status": "partial" if has_error else "ok",
@@ -1606,15 +1570,16 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
                     extra={"recipient": recipient, "subject": subject, "message_id": str(data.get("message_id") or "")},
                 ),
             )
-            memory_result = {"recorded": 0, "failed": 0}
+            history_result = {"scanned": 0, "matched": 0, "report_count": 0}
             if _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
                 try:
-                    memory_result = _ingest_sent_monthly_reports_from_gmail(settings)
-                except Exception:  # noqa: BLE001 - sent-mail memory ingestion must not block email sending.
-                    current_app.logger.exception("Monthly Report sent-mail Work Memory ingestion failed.")
+                    history_result = _refresh_monthly_report_history_from_gmail(settings)
+                    history_result.pop("items", None)
+                except Exception:  # noqa: BLE001 - sent-mail history refresh must not block email sending.
+                    current_app.logger.exception("Monthly Report sent-mail history refresh failed.")
             else:
-                current_app.logger.info("Skipping Monthly Report sent-mail Work Memory ingestion because gmail.readonly scope is absent.")
-            data["work_memory"] = memory_result
+                current_app.logger.info("Skipping Monthly Report sent-mail history refresh because gmail.readonly scope is absent.")
+            data["monthly_report_history"] = history_result
             return jsonify({"status": "ok", **data})
         except ToolError as error:
             error_details = _classify_portal_error(error)

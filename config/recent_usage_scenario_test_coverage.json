@@ -33,11 +33,6 @@
       "summary": "Live host portal DB showed recent team dashboard config and VPN profile connection state."
     },
     {
-      "id": "host_work_memory_db",
-      "path": "/Users/NPTSG0388/Workspace/jira-creation-stack-host/.team-portal/work_memory/memory.db",
-      "summary": "Live host Work Memory DB showed recent team_dashboard ingestion runs and refreshed items."
-    },
-    {
       "id": "host_meeting_records",
       "path": "/Users/NPTSG0388/Workspace/jira-creation-stack-host/.team-portal/meeting_records/records/*/metadata.json",
       "summary": "Live host meeting record metadata showed 36 recent meeting records with text outputs."
@@ -425,37 +420,6 @@
             "tests.test_web_portal_features.WebPortalFeatureTests.test_vpn_connection_admin_can_save_and_connect_profile",
             "tests.test_web_portal_features.WebPortalFeatureTests.test_vpn_connection_failed_connect_does_not_record_success",
             "tests.test_user_config.UserConfigStoreTests.test_vpn_profile_password_is_encrypted_and_update_can_keep_existing_password"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "work_memory",
-      "label": "Work Memory",
-      "observed_usage": [
-        {"source": "host_work_memory_db", "signal": "work_memory_ingestion_runs source_type=team_dashboard", "count": 159, "last_seen": "2026-05-23"},
-        {"source": "host_work_memory_db", "signal": "work_memory_items updated_at", "count": 3956, "last_seen": "2026-05-23"},
-        {"source": "host_work_memory_db", "signal": "work_memory_entities updated_at", "count": 3034, "last_seen": "2026-05-23"}
-      ],
-      "scenarios": [
-        {
-          "id": "team_dashboard_ingestion_and_entity_refresh",
-          "description": "Observed Work Memory team-dashboard ingestion and item/entity refresh paths are covered.",
-          "tests": [
-            "tests.test_work_memory.WorkMemoryStoreTests.test_ingestion_ledger_is_exposed_in_health",
-            "tests.test_work_memory.WorkMemoryStoreTests.test_team_dashboard_project_items_include_entities",
-            "tests.test_web_core_coverage.WebCoreCoverageTests.test_work_memory_recording_and_ingestion_edges"
-          ]
-        },
-        {
-          "id": "scope_search_superagent_and_meeting_facts",
-          "description": "Observed Work Memory store state is covered for owner/team scoping, search, superagent quality, meeting facts, and monthly report ingestion.",
-          "tests": [
-            "tests.test_work_memory.WorkMemoryStoreTests.test_private_items_are_owner_scoped_and_corrections_win",
-            "tests.test_work_memory.WorkMemoryStoreTests.test_query_filters_before_applying_result_limit",
-            "tests.test_work_memory.WorkMemoryStoreTests.test_superagent_quality_gate_v1_contract_and_pm_brief",
-            "tests.test_work_memory.WorkMemoryStoreTests.test_meeting_minutes_extract_decisions_and_todos",
-            "tests.test_work_memory.WorkMemoryStoreTests.test_sent_monthly_report_record_becomes_curated_report"
           ]
         }
       ]

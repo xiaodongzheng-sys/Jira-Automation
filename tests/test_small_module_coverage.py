@@ -1281,7 +1281,6 @@ class SmallModuleCoverageTests(unittest.TestCase):
                 "_source_code_qa_public_answer_mode": lambda value: str(value or "standard"),
                 "_source_code_qa_public_attachments": lambda attachments: attachments,
                 "_source_code_qa_public_runtime_evidence": lambda evidence: evidence,
-                "_record_source_code_qa_work_memory": lambda **kwargs: None,
                 "_classify_source_code_qa_job_error": lambda message: {"retryable": "unavailable" in message},
             }
         )

@@ -671,7 +671,6 @@ exit 0
         self.assertIn("config/coverage_risk_policy.json", checklist)
         self.assertIn("./.venv/bin/python -m coverage run --rcfile=/dev/null --source=bpmis_jira_tool,prd_briefing -m unittest discover -s tests", checklist)
         self.assertIn("scripts/check_coverage_policy.py --coverage-json .team-portal/run/system_full_coverage.json --policy config/coverage_risk_policy.json --governed-fail-under 100", checklist)
-        self.assertIn("node --check static/gmail_seatalk_demo.js", checklist)
         self.assertIn("./.venv/bin/python scripts/run_source_code_qa_release_gate.py", checklist)
         self.assertIn("read-only", checklist)
         self.assertIn("--uat-url \"$UAT_URL\"", checklist)

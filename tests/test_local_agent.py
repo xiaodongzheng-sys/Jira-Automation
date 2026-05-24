@@ -2483,56 +2483,7 @@ class LocalAgentServerTests(unittest.TestCase):
             manager.__exit__(None, None, None)
         cleanup_path.unlink(missing_ok=True)
 
-    def test_signed_storage_and_memory_contract_routes_return_stable_payloads(self):
-        class FakeWorkMemoryStore:
-            def health(self):
-                return {"status": "ok", "item_count": 1}
-
-            def query_work_memory(self, **kwargs):
-                return [{"summary": kwargs["query"], "owner_email": kwargs["owner_email"]}]
-
-            def review_candidates(self, **kwargs):
-                return [{"item_id": "review-1"}]
-
-            def project_timeline(self, **kwargs):
-                return [{"project_ref": kwargs["project_ref"]}]
-
-            def resolve_work_entity(self, **kwargs):
-                return {"status": "ok", "entities": [{"name": kwargs["query"]}]}
-
-            def record_memory_feedback(self, **kwargs):
-                return {"status": "ok", "item_id": kwargs["item_id"], "action": kwargs["action"]}
-
-            def distill_work_memory(self, **kwargs):
-                return {"distilled": True, "owner_email": kwargs["owner_email"]}
-
-            def record_ingestion_run(self, **kwargs):
-                return {"run_id": "ingest-1", **kwargs}
-
-            def superagent_health(self, **kwargs):
-                return {"status": "ok", "owner_email": kwargs["owner_email"]}
-
-            def query_superagent_context(self, **kwargs):
-                return {"items": [{"summary": kwargs["query"]}]}
-
-            def generate_llm_superagent_answer(self, **kwargs):
-                return {"answer": "Use the cited memory.", "confidence": "high"}
-
-            def record_superagent_audit_log(self, **kwargs):
-                return {"audit_id": "audit-1", "query": kwargs["query"]}
-
-            def explain_superagent_answer(self, **kwargs):
-                return {"status": "ok", "explanation": kwargs["query"]}
-
-            def run_superagent_eval_cases(self, **kwargs):
-                return {"status": "ok", "total": 1, "failed": 0}
-
-            def run_superagent_quality_gate(self, **kwargs):
-                return {"status": "pass", "total": kwargs["min_cases"]}
-
-            def superagent_audit_log(self, **kwargs):
-                return [{"audit_id": "audit-1"}]
-
+    def test_signed_storage_contract_routes_return_stable_payloads(self):
         class FakeSeaTalkService:
             def build_overview(self):
                 return {"messages": 1}
@@ -2581,7 +2532,6 @@ class LocalAgentServerTests(unittest.TestCase):
             def merge_mappings(self, mappings):
                 return {**mappings, "group-1": "Risk PM"}
 
-        self.app.config["WORK_MEMORY_STORE"] = FakeWorkMemoryStore()
         patchers = [
             patch("bpmis_jira_tool.local_agent_server._build_seatalk_service", return_value=FakeSeaTalkService()),
             patch("bpmis_jira_tool.local_agent_server._build_seatalk_todo_store", return_value=FakeTodoStore()),
@@ -2592,21 +2542,6 @@ class LocalAgentServerTests(unittest.TestCase):
             self.addCleanup(patcher.stop)
 
         post_cases = [
-            ("/api/local-agent/work-memory/health", {}),
-            ("/api/local-agent/work-memory/recent", {"owner_email": "Owner@NPT.SG", "query": "risk", "filters": {"source_type": "gmail"}, "limit": 2}),
-            ("/api/local-agent/work-memory/review-candidates", {"owner_email": "owner@npt.sg", "limit": 1}),
-            ("/api/local-agent/work-memory/project-timeline", {"owner_email": "owner@npt.sg", "project_ref": "AF-1"}),
-            ("/api/local-agent/work-memory/entity-resolution", {"owner_email": "owner@npt.sg", "query": "AF-1", "entity_type": "jira"}),
-            ("/api/local-agent/work-memory/feedback", {"owner_email": "owner@npt.sg", "item_id": "item-1", "action": "accept"}),
-            ("/api/local-agent/work-memory/distill", {"owner_email": "owner@npt.sg", "sources": ["gmail"], "project_refs": ["AF-1"]}),
-            ("/api/local-agent/work-memory/backfill-existing", {"owner_email": "owner@npt.sg", "sources": ["meeting_recorder", "team_dashboard"]}),
-            ("/api/local-agent/work-memory/ingest-incremental", {"owner_email": "owner@npt.sg", "reconciliation": True}),
-            ("/api/local-agent/superagent/health", {"owner_email": "owner@npt.sg"}),
-            ("/api/local-agent/superagent/query", {"owner_email": "owner@npt.sg", "user_email": "user@npt.sg", "query": "risk", "task_type": "decision"}),
-            ("/api/local-agent/superagent/explain", {"owner_email": "owner@npt.sg", "query": "risk"}),
-            ("/api/local-agent/superagent/eval", {"owner_email": "owner@npt.sg", "cases": [{"query": "risk"}], "limit": 1}),
-            ("/api/local-agent/superagent/quality-gate", {"owner_email": "owner@npt.sg", "min_cases": 1}),
-            ("/api/local-agent/superagent/audit", {"owner_email": "owner@npt.sg"}),
             ("/api/local-agent/source-code-qa/sessions/list", {"owner_email": "owner@npt.sg"}),
             ("/api/local-agent/source-code-qa/sessions/create", {"owner_email": "owner@npt.sg", "pm_team": "AF", "country": "All", "title": "Question"}),
             ("/api/local-agent/source-code-qa/sessions/get", {"owner_email": "owner@npt.sg", "session_id": "missing"}),
@@ -2747,125 +2682,6 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertIn("PM Team", list_response.get_json()["message"])
         self.assertEqual(resolve_response.status_code, 400)
         self.assertIn("PM Team", resolve_response.get_json()["message"])
-
-    def test_local_work_memory_backfill_records_duplicates_and_partial_failures(self):
-        class FakeMeetingRecordStore:
-            def list_records(self, **kwargs):
-                return [
-                    {"record_id": "rec-1", "owner_email": kwargs["owner_email"], "status": "completed"},
-                    {"record_id": "rec-2", "owner_email": kwargs["owner_email"], "status": "recording"},
-                ]
-
-        class FakeTeamDashboardConfigStore:
-            def load(self):
-                return {
-                    "task_cache": {
-                        "teams": {
-                            "AF": {"team_key": "AF", "team_name": "Anti-Fraud"},
-                            "bad": "not-a-dict",
-                        }
-                    }
-                }
-
-        class FakeWorkMemoryStore:
-            def __init__(self):
-                self.recorded_items = []
-                self.ingestion_run = None
-
-            def record_memory_item(self, **kwargs):
-                if kwargs.get("source_id") == "fail":
-                    raise RuntimeError("record failed")
-                self.recorded_items.append(kwargs)
-
-            def record_ingestion_run(self, **kwargs):
-                self.ingestion_run = kwargs
-                return {"run_id": "run-1", **kwargs}
-
-        work_memory_store = FakeWorkMemoryStore()
-        self.app.config["MEETING_RECORD_STORE"] = FakeMeetingRecordStore()
-        self.app.config["WORK_MEMORY_STORE"] = work_memory_store
-        meeting_items = [
-            {"source_type": "meeting_recorder", "source_id": "rec-1", "item_type": "decision", "owner_email": "owner@npt.sg"},
-            {"source_type": "meeting_recorder", "source_id": "rec-1", "item_type": "decision", "owner_email": "owner@npt.sg"},
-        ]
-        dashboard_items = [
-            {"source_type": "team_dashboard", "source_id": "team-af", "item_type": "project", "owner_email": "owner@npt.sg"},
-            {"source_type": "team_dashboard", "source_id": "fail", "item_type": "risk", "owner_email": "owner@npt.sg"},
-        ]
-
-        with self.app.app_context(), patch(
-            "bpmis_jira_tool.local_agent_server.meeting_record_memory_items",
-            return_value=meeting_items,
-        ), patch(
-            "bpmis_jira_tool.local_agent_server.team_dashboard_memory_items",
-            return_value=dashboard_items,
-        ), patch(
-            "bpmis_jira_tool.local_agent_server._build_team_dashboard_config_store",
-            return_value=FakeTeamDashboardConfigStore(),
-        ):
-            result = local_agent_server._backfill_existing_work_memory_on_local_agent(
-                owner_email="owner@npt.sg",
-                date_range="30d",
-                sources=["meeting_recorder", "team_dashboard"],
-            )
-
-        self.assertEqual(result["meeting_records"], 1)
-        self.assertEqual(result["team_dashboard_cache"], 1)
-        self.assertEqual(result["recorded"], 3)
-        self.assertEqual(result["duplicate"], 1)
-        self.assertEqual(result["failed"], 1)
-        self.assertEqual(work_memory_store.ingestion_run["status"], "partial_error")
-        self.assertEqual(work_memory_store.ingestion_run["failed_count"], 1)
-
-    def test_local_work_memory_backfill_tolerates_source_failures(self):
-        class FailingMeetingRecordStore:
-            def list_records(self, **kwargs):
-                raise RuntimeError("meeting store down")
-
-        class FailingTeamDashboardConfigStore:
-            def load(self):
-                raise RuntimeError("team config down")
-
-        class FakeWorkMemoryStore:
-            def record_memory_item(self, **kwargs):
-                raise AssertionError("no items should be recorded")
-
-            def record_ingestion_run(self, **kwargs):
-                self.ingestion_run = kwargs
-                return {"run_id": "run-1", **kwargs}
-
-        work_memory_store = FakeWorkMemoryStore()
-        self.app.config["MEETING_RECORD_STORE"] = FailingMeetingRecordStore()
-        self.app.config["WORK_MEMORY_STORE"] = work_memory_store
-
-        with self.app.app_context(), patch(
-            "bpmis_jira_tool.local_agent_server._build_team_dashboard_config_store",
-            return_value=FailingTeamDashboardConfigStore(),
-        ):
-            result = local_agent_server._backfill_existing_work_memory_on_local_agent(owner_email="owner@npt.sg")
-
-        self.assertEqual(result["recorded"], 0)
-        self.assertEqual(result["failed"], 0)
-        self.assertEqual(result["meeting_records"], 0)
-        self.assertEqual(result["team_dashboard_cache"], 0)
-        self.assertEqual(work_memory_store.ingestion_run["status"], "ok")
-
-    def test_signed_work_memory_feedback_validation_error_is_json(self):
-        class FakeWorkMemoryStore:
-            def record_memory_feedback(self, **kwargs):
-                raise ValueError(f"invalid feedback action: {kwargs['action']}")
-
-        self.app.config["WORK_MEMORY_STORE"] = FakeWorkMemoryStore()
-
-        response = self._post_signed(
-            "/api/local-agent/work-memory/feedback",
-            {"owner_email": "owner@npt.sg", "item_id": "item-1", "action": "invalid"},
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.get_json()["status"], "error")
-        self.assertIn("invalid feedback action", response.get_json()["message"])
-
 
 class LocalAgentClientTests(unittest.TestCase):
     def test_client_validates_required_config_and_clamps_timeouts(self):
@@ -3216,7 +3032,7 @@ class LocalAgentClientTests(unittest.TestCase):
             session=FakeSession(error=requests.RequestException("connection refused")),
         )
         with self.assertRaisesRegex(ToolError, "connection refused"):
-            client.work_memory_health()
+            client.seatalk_overview()
 
         client = LocalAgentClient(
             base_url="https://portal.example",
@@ -3224,7 +3040,7 @@ class LocalAgentClientTests(unittest.TestCase):
             session=FakeSession(response=FakeResponse(400, {"status": "error", "message": "bad request"})),
         )
         with self.assertRaisesRegex(ToolError, "bad request"):
-            client.work_memory_health()
+            client.seatalk_overview()
 
         client = LocalAgentClient(
             base_url="https://portal.example",
@@ -3232,7 +3048,7 @@ class LocalAgentClientTests(unittest.TestCase):
             session=FakeSession(response=FakeResponse(200, {"status": "error", "message": "agent refused"})),
         )
         with self.assertRaisesRegex(ToolError, "agent refused"):
-            client.work_memory_health()
+            client.seatalk_overview()
 
         client = LocalAgentClient(
             base_url="https://portal.example",
@@ -3240,7 +3056,7 @@ class LocalAgentClientTests(unittest.TestCase):
             session=FakeSession(response=FakeResponse(200, ValueError("bad json"), text="<html>bad</html>")),
         )
         with self.assertRaisesRegex(ToolError, "unreadable response"):
-            client.work_memory_health()
+            client.seatalk_overview()
 
     def test_unreadable_response_includes_status_and_preview(self):
         class FakeResponse:
@@ -3357,21 +3173,6 @@ class LocalAgentClientTests(unittest.TestCase):
             self.assertEqual(client.meeting_recorder_delete(record_id="r1", owner_email="owner@npt.sg")["status"], "ok")
             self.assertEqual(client.meeting_translation_start({"owner_email": "owner@npt.sg"})["status"], "ok")
             self.assertEqual(client.meeting_translation_stop(session_id="s1", owner_email="owner@npt.sg")["status"], "ok")
-            self.assertEqual(client.work_memory_health()["status"], "ok")
-            self.assertEqual(client.work_memory_recent(owner_email="owner@npt.sg"), [{"id": "item-1"}])
-            self.assertEqual(client.work_memory_review_candidates(owner_email="owner@npt.sg"), [{"id": "item-1"}])
-            self.assertEqual(client.work_memory_project_timeline(project_ref="AF-1", owner_email="owner@npt.sg"), [{"id": "item-1"}])
-            self.assertEqual(client.work_memory_entity_resolution(query="AF-1", owner_email="owner@npt.sg")["status"], "ok")
-            self.assertEqual(client.work_memory_feedback(item_id="i1", action="accept", owner_email="owner@npt.sg")["status"], "ok")
-            self.assertEqual(client.work_memory_distill(owner_email="owner@npt.sg")["status"], "ok")
-            self.assertEqual(client.work_memory_backfill_existing(owner_email="owner@npt.sg")["status"], "ok")
-            self.assertEqual(client.work_memory_ingest_incremental(owner_email="owner@npt.sg", reconciliation=True)["status"], "ok")
-            self.assertEqual(client.superagent_health(owner_email="owner@npt.sg")["status"], "ok")
-            self.assertEqual(client.superagent_query(owner_email="owner@npt.sg", user_email="owner@npt.sg", query="risk")["status"], "ok")
-            self.assertEqual(client.superagent_explain(owner_email="owner@npt.sg", query="risk")["status"], "ok")
-            self.assertEqual(client.superagent_eval(owner_email="owner@npt.sg")["status"], "ok")
-            self.assertEqual(client.superagent_quality_gate(owner_email="owner@npt.sg")["status"], "ok")
-            self.assertEqual(client.superagent_audit(owner_email="owner@npt.sg"), [{"id": "item-1"}])
             self.assertEqual(client.seatalk_overview()["status"], "ok")
             self.assertEqual(client.seatalk_insights()["status"], "ok")
             self.assertEqual(client.seatalk_project_updates()["status"], "ok")
@@ -3428,7 +3229,6 @@ class LocalAgentClientTests(unittest.TestCase):
         paths = [path for _method, path, _payload, _kwargs in calls]
         self.assertIn("/api/local-agent/source-code-qa/config", paths)
         self.assertIn("/api/local-agent/meeting-recorder/start", paths)
-        self.assertIn("/api/local-agent/work-memory/recent", paths)
         self.assertIn("/api/local-agent/bpmis/config/save", paths)
         self.assertIn("/api/local-agent/source-code-qa/runtime-evidence/save", paths)
 

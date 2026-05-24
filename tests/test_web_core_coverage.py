@@ -13,39 +13,6 @@ from bpmis_jira_tool.errors import ConfigError, ToolError
 from bpmis_jira_tool import web as web_module
 
 
-class _FakeWorkMemoryStore:
-    def __init__(self):
-        self.items = {}
-        self.recorded = []
-        self.ingestion_runs = []
-        self.processed = set()
-        self.distill_calls = []
-
-    def get_item(self, item_id):
-        return self.items.get(item_id)
-
-    def record_memory_item(self, **item):
-        if item.get("source_id") == "fail":
-            raise RuntimeError("record failed")
-        self.recorded.append(item)
-
-    def record_ingestion_run(self, **payload):
-        self.ingestion_runs.append(payload)
-
-    def existing_source_ids(self, **kwargs):
-        return set(kwargs.get("source_ids") or []) & {"existing"}
-
-    def processed_source_ids(self, **kwargs):
-        return set(kwargs.get("source_ids") or []) & self.processed
-
-    def record_processed_source_ids(self, **kwargs):
-        self.processed.update(kwargs.get("source_ids") or [])
-
-    def distill_work_memory(self, **kwargs):
-        self.distill_calls.append(kwargs)
-        return {"status": "ok"}
-
-
 class _FakeJobStore:
     def __init__(self):
         self.updates = []
@@ -126,7 +93,6 @@ class WebCoreCoverageTests(unittest.TestCase):
         app.add_url_rule("/access-denied", "access_denied", lambda: "denied")
         app.add_url_rule("/version-plan", "version_plan_page", lambda: "version")
         app.config["SETTINGS"] = self._settings(temp_dir)
-        app.config["WORK_MEMORY_STORE"] = _FakeWorkMemoryStore()
         app.config["JOB_STORE"] = _FakeJobStore()
         app.config["TEAM_DASHBOARD_CONFIG_STORE"] = SimpleNamespace(load=lambda: {})
         app.config["MEETING_RECORD_STORE"] = SimpleNamespace(list_records=lambda **kwargs: [])
@@ -137,17 +103,10 @@ class WebCoreCoverageTests(unittest.TestCase):
         return app
 
     def test_web_pure_helpers_cover_error_classification_and_normalizers(self):
-        with patch.dict(os.environ, {"BOOL_X": "yes", "BOOL_Y": "0", "GOOGLE_DRIVE_HTTP_TIMEOUT_SECONDS": "bad", "GMAIL_WORK_MEMORY_FETCH_WORKERS": "99"}, clear=False):
+        with patch.dict(os.environ, {"BOOL_X": "yes", "BOOL_Y": "0"}, clear=False):
             self.assertTrue(web_module._bool_env_from_env("BOOL_X"))
             self.assertFalse(web_module._bool_env_from_env("BOOL_Y", True))
             self.assertTrue(web_module._bool_env_from_env("MISSING_BOOL", True))
-            self.assertEqual(web_module._google_drive_http_timeout_seconds(), web_module.GOOGLE_DRIVE_HTTP_TIMEOUT_SECONDS)
-            self.assertEqual(web_module._gmail_work_memory_fetch_workers(), 8)
-        with patch.dict(os.environ, {"GMAIL_WORK_MEMORY_FETCH_WORKERS": "bad", "GOOGLE_DRIVE_HTTP_TIMEOUT_SECONDS": "2"}, clear=False):
-            self.assertEqual(web_module._gmail_work_memory_fetch_workers(), web_module.GMAIL_WORK_MEMORY_FETCH_WORKERS)
-            self.assertEqual(web_module._google_drive_http_timeout_seconds(), 5)
-        with patch.dict(os.environ, {"GOOGLE_DRIVE_HTTP_TIMEOUT_SECONDS": ""}, clear=False):
-            self.assertEqual(web_module._google_drive_http_timeout_seconds(), web_module.GOOGLE_DRIVE_HTTP_TIMEOUT_SECONDS)
 
         rows = [
             "bad",
@@ -189,11 +148,6 @@ class WebCoreCoverageTests(unittest.TestCase):
                 self.assertEqual(web_module._classify_portal_error(ToolError(message))["error_code"], code)
         self.assertTrue(web_module._classify_portal_error("temporary timeout")["error_retryable"])
 
-        self.assertEqual(web_module._google_drive_file_id_from_url("https://drive.google.com/file/d/abc123/view"), "abc123")
-        self.assertEqual(web_module._google_drive_file_id_from_url("https://drive.google.com/open?id=xyz"), "xyz")
-        self.assertEqual(web_module._google_drive_file_id_from_url("https://example.com/nope"), "")
-        self.assertEqual(web_module._bytes_to_text(" text "), "text")
-        self.assertEqual(web_module._bytes_to_text("caf\xe9".encode("latin-1")), "café")
         self.assertEqual(web_module._flatten_productization_component_values(None), [])
         self.assertEqual(web_module._flatten_productization_component_values(" A/B;C|D "), ["A", "B", "C", "D"])
         self.assertEqual(web_module._flatten_productization_component_values({"label": "Core", "id": 7}), ["Core", "7"])
@@ -220,185 +174,6 @@ class WebCoreCoverageTests(unittest.TestCase):
         self.assertEqual(web_module._safe_relative_redirect_target("https://example.com/x"), "")
         self.assertEqual(web_module._safe_relative_redirect_target("//example.com/x"), "")
         self.assertEqual(web_module._safe_relative_redirect_target("/safe"), "/safe")
-
-    def test_work_memory_recording_and_ingestion_edges(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            app = self._app(temp_dir)
-            store: _FakeWorkMemoryStore = app.config["WORK_MEMORY_STORE"]
-            with app.app_context():
-                app.config["SETTINGS"] = replace(app.config["SETTINGS"], team_portal_data_dir=Path("relative-data"))
-                self.assertTrue(str(web_module._team_portal_data_root(app.config["SETTINGS"])).endswith("relative-data"))
-                empty = web_module._record_work_memory_items([], event="empty", owner_email="owner@npt.sg")
-                self.assertEqual(empty, {"recorded": 0, "failed": 0, "duplicate": 0})
-                self.assertEqual(store.ingestion_runs[-1]["source_type"], "empty")
-                duplicate_id = web_module.hashlib.sha256("\x1f".join(["gmail", "m1", "message", "owner@npt.sg"]).encode("utf-8")).hexdigest()[:32]
-                store.items[duplicate_id] = {"id": duplicate_id}
-                result = web_module._record_work_memory_items(
-                    [
-                        {"source_type": "gmail", "source_id": "m1", "item_type": "message", "owner_email": "owner@npt.sg"},
-                        {"source_type": "gmail", "source_id": "fail", "item_type": "message", "owner_email": "owner@npt.sg"},
-                    ],
-                    event="gmail",
-                    owner_email="owner@npt.sg",
-                )
-                self.assertEqual(result["recorded"], 1)
-                self.assertEqual(result["duplicate"], 1)
-                self.assertEqual(result["failed"], 1)
-                self.assertEqual(store.ingestion_runs[-1]["status"], "partial_error")
-
-                original_ledger = store.record_ingestion_run
-                store.record_ingestion_run = lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("ledger down"))
-                result = web_module._record_work_memory_items(
-                    [{"source_type": "gmail", "source_id": "m2", "item_type": "message", "owner_email": "owner@npt.sg"}],
-                    event="ledger_failure",
-                    owner_email="owner@npt.sg",
-                )
-                self.assertEqual(result["recorded"], 1)
-                store.record_ingestion_run = original_ledger
-
-                with patch("bpmis_jira_tool.web._current_google_email", return_value="owner@npt.sg"), patch(
-                    "bpmis_jira_tool.web._local_agent_meeting_recorder_enabled", return_value=False
-                ), patch("bpmis_jira_tool.web.meeting_record_memory_items", return_value=[{"source_type": "meeting", "source_id": "r1", "item_type": "minutes", "owner_email": "owner@npt.sg"}]), patch(
-                    "bpmis_jira_tool.web.team_dashboard_memory_items", return_value=[{"source_type": "team", "source_id": "t1", "item_type": "project", "owner_email": "owner@npt.sg"}]
-                ):
-                    app.config["MEETING_RECORD_STORE"] = SimpleNamespace(list_records=lambda **kwargs: [{"status": "completed"}, {"status": "recording"}])
-                    app.config["TEAM_DASHBOARD_CONFIG_STORE"] = SimpleNamespace(load=lambda: {"task_cache": {"teams": {"AF": {"team_key": "AF", "under_prd": []}}}})
-                    ingested = web_module._ingest_existing_work_memory_sources(app.config["SETTINGS"], date_range="30d")
-                self.assertEqual(ingested["meeting_records"], 1)
-                self.assertEqual(ingested["team_dashboard_cache"], 1)
-                app.config["TEAM_DASHBOARD_CONFIG_STORE"] = SimpleNamespace(
-                    load=lambda: {"task_cache": {"teams": {"AF": {"under_prd": [{"bpmis_id": "B1"}], "pending_live": ["bad"]}, "BAD": "bad"}}}
-                )
-                self.assertEqual(web_module._gmail_work_memory_key_projects()[0]["bpmis_id"], "B1")
-
-                with patch("bpmis_jira_tool.web._current_google_email", return_value="owner@npt.sg"), patch(
-                    "bpmis_jira_tool.web._local_agent_meeting_recorder_enabled", return_value=True
-                ), patch("bpmis_jira_tool.web._build_local_agent_client", side_effect=ToolError("local-agent unavailable")):
-                    ingested = web_module._ingest_existing_work_memory_sources(app.config["SETTINGS"], sources=["meeting_recorder"])
-                self.assertEqual(ingested["meeting_records"], 0)
-                app.config["TEAM_DASHBOARD_CONFIG_STORE"] = SimpleNamespace(load=lambda: (_ for _ in ()).throw(RuntimeError("cache down")))
-                with patch("bpmis_jira_tool.web._current_google_email", return_value="owner@npt.sg"):
-                    ingested = web_module._ingest_existing_work_memory_sources(app.config["SETTINGS"], sources=["team_dashboard"])
-                self.assertEqual(ingested["team_dashboard_cache"], 0)
-
-                with patch("bpmis_jira_tool.web._current_google_email", return_value="owner@npt.sg"), patch(
-                    "bpmis_jira_tool.web._ingest_existing_work_memory_sources", return_value={"recorded": 1, "failed": 0, "duplicate": 0, "scanned": 1}
-                ), patch("bpmis_jira_tool.web._google_credentials_have_scopes", return_value=False):
-                    incremental = web_module._run_incremental_memory_ingestion(app.config["SETTINGS"], reconciliation=True)
-                self.assertEqual(incremental["window"], "90d")
-                self.assertEqual(incremental["sources"]["gmail_sent_monthly_report"]["status"], "skipped")
-                self.assertEqual(store.ingestion_runs[-1]["source_type"], "work_memory_incremental")
-
-    def test_gmail_work_memory_helpers_cover_fetch_attachment_drive_and_jobs(self):
-        record = SimpleNamespace(
-            message_id="m1",
-            headers={"from": "VIP <vip@npt.sg>", "to": "owner@npt.sg", "cc": "cc@npt.sg", "subject": "Project Alpha"},
-            body_text="Alpha body",
-            attachments=[
-                SimpleNamespace(filename="large.pdf", mime_type="application/pdf", size=web_module.GMAIL_WORK_MEMORY_MAX_ATTACHMENT_BYTES + 1, attachment_id="a-large"),
-                SimpleNamespace(filename="ok.pdf", mime_type="application/pdf", size=10, attachment_id="a-ok"),
-                SimpleNamespace(filename="huge.pdf", mime_type="application/pdf", size=10, attachment_id="a-huge"),
-                SimpleNamespace(filename="bad.pdf", mime_type="application/pdf", size=10, attachment_id="a-bad"),
-            ],
-            drive_links=["https://drive.google.com/file/d/doc1/view", "https://drive.google.com/file/d/doc1/view", "https://drive.google.com/open?id=doc2"],
-            internal_date=web_module.datetime.now(web_module.timezone.utc),
-        )
-
-        class FakeGmailService:
-            def download_attachment(self, *, message_id, attachment_id):
-                if attachment_id == "a-bad":
-                    raise RuntimeError("download failed")
-                if attachment_id == "a-huge":
-                    return b"x" * (web_module.GMAIL_WORK_MEMORY_MAX_ATTACHMENT_BYTES + 1)
-                return b"%PDF"
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            app = self._app(temp_dir)
-            with app.app_context(), patch("bpmis_jira_tool.web._extract_pdf_text_for_work_memory", return_value="pdf text"):
-                items, failed = web_module._gmail_work_memory_vip_attachment_items(
-                    service=FakeGmailService(),
-                    owner_email="owner@npt.sg",
-                    record=record,
-                    matched_vips=[{"display_name": "VIP"}],
-                )
-                self.assertEqual(len(items), 1)
-                self.assertEqual(failed, 1)
-
-            matched, roles = web_module._gmail_work_memory_matched_vips(
-                record.headers,
-                [{"display_name": "VIP", "emails": ["vip@npt.sg"], "role_tags": ["risk"]}, {"emails": []}],
-            )
-            self.assertEqual(matched[0]["display_name"], "VIP")
-            self.assertEqual(roles["VIP"], ["from"])
-            unmatched, unmatched_roles = web_module._gmail_work_memory_matched_vips(record.headers, [{"display_name": "Other", "emails": ["other@npt.sg"]}])
-            self.assertEqual(unmatched, [])
-            self.assertEqual(unmatched_roles, {})
-            with patch("bpmis_jira_tool.report_intelligence.match_report_intelligence", side_effect=RuntimeError("bad")):
-                self.assertEqual(web_module._gmail_work_memory_report_matches("x", {}, []), {"matched_vips": [], "matched_keywords": [], "matched_key_projects": []})
-
-            fake_credentials = SimpleNamespace()
-            self.assertEqual(
-                web_module._fetch_gmail_work_memory_records(
-                    credentials_payload={},
-                    owner_email="owner@npt.sg",
-                    report_intelligence_config={},
-                    message_ids=[],
-                ),
-                ([], 0, ""),
-            )
-            app.config["TEAM_DASHBOARD_CONFIG_STORE"] = SimpleNamespace(load=lambda: (_ for _ in ()).throw(RuntimeError("config failed")))
-            with app.app_context():
-                self.assertEqual(web_module._gmail_work_memory_key_projects(), [])
-            with app.app_context(), patch("bpmis_jira_tool.web._read_google_drive_link_text", side_effect=[("Doc", "Text"), RuntimeError("down")]):
-                drive_items = web_module._gmail_work_memory_vip_drive_items(
-                    credentials=fake_credentials,
-                    owner_email="owner@npt.sg",
-                    record=record,
-                    matched_vips=[{"display_name": "VIP"}],
-                    drive_read_enabled=True,
-                )
-                self.assertEqual([item["metadata"]["access_status"] for item in drive_items], ["ok", "unavailable"])
-            with app.app_context():
-                scoped_items = web_module._gmail_work_memory_vip_drive_items(
-                    credentials=fake_credentials,
-                    owner_email="owner@npt.sg",
-                    record=record,
-                    matched_vips=[],
-                    drive_read_enabled=False,
-                )
-                self.assertEqual(scoped_items[0]["metadata"]["access_status"], "missing_drive_scope")
-            response = SimpleNamespace(status=403, reason="denied")
-            denied_error = web_module.HttpError(response, b"denied")
-            with app.app_context(), patch("bpmis_jira_tool.web._read_google_drive_link_text", side_effect=denied_error):
-                denied_items = web_module._gmail_work_memory_vip_drive_items(
-                    credentials=fake_credentials,
-                    owner_email="owner@npt.sg",
-                    record=record,
-                    matched_vips=[],
-                    drive_read_enabled=True,
-                )
-                self.assertEqual(denied_items[0]["metadata"]["access_status"], "permission_denied")
-
-            class AlwaysFailExportFiles:
-                def get(self, **_kwargs):
-                    return SimpleNamespace(execute=lambda: {"name": "Doc", "mimeType": "application/vnd.google-apps.document"})
-
-                def export_media(self, **_kwargs):
-                    return SimpleNamespace(execute=lambda: (_ for _ in ()).throw(web_module.HttpError(SimpleNamespace(status=500, reason="bad"), b"bad")))
-
-            with patch("bpmis_jira_tool.web._build_google_drive_service", return_value=SimpleNamespace(files=lambda: AlwaysFailExportFiles())):
-                self.assertEqual(web_module._read_google_drive_link_text(credentials=fake_credentials, url="https://drive.google.com/open?id=doc3"), ("Doc", ""))
-
-            with app.app_context(), patch("bpmis_jira_tool.web._backfill_gmail_work_memory", return_value={"failed": 0}), patch(
-                "bpmis_jira_tool.web._classify_portal_error", wraps=web_module._classify_portal_error
-            ):
-                web_module._run_work_memory_gmail_backfill_job(app, "job-ok", {"owner_email": "owner@npt.sg", "credentials": {"token": "t"}})
-                self.assertEqual(app.config["JOB_STORE"].completed[-1][0][0], "job-ok")
-            with app.app_context(), patch("bpmis_jira_tool.web._backfill_gmail_work_memory", side_effect=RuntimeError("gmail down")), patch(
-                "bpmis_jira_tool.web._current_google_email", return_value="owner@npt.sg"
-            ):
-                web_module._run_work_memory_gmail_backfill_job(app, "job-fail", {"owner_email": "owner@npt.sg", "credentials": {"token": "t"}})
-                self.assertEqual(app.config["JOB_STORE"].failed[-1][0][0], "job-fail")
 
     def test_access_scope_and_service_builder_helpers(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -507,7 +282,6 @@ class WebCoreCoverageTests(unittest.TestCase):
                     self.assertIsNotNone(web_module._get_bpmis_project_store())
                     app.config["SETTINGS"] = settings
                     self.assertIsNotNone(web_module._get_seatalk_todo_store(remote_settings))
-                    self.assertTrue(web_module._local_agent_work_memory_enabled(remote_settings))
                 with patch("bpmis_jira_tool.web._local_agent_mode_enabled", return_value=True), patch(
                     "bpmis_jira_tool.web._build_local_agent_client", return_value=SimpleNamespace(get_health=lambda: (_ for _ in ()).throw(ToolError("down")))
                 ):
@@ -650,7 +424,7 @@ class WebCoreCoverageTests(unittest.TestCase):
                 fallback_biz_client = SimpleNamespace(list_biz_projects_for_pm_email=lambda email: [{"bpmis_id": "B4", "matched_pm_emails": [email]}])
                 self.assertEqual(web_module._team_dashboard_biz_projects_for_emails(fallback_biz_client, ["", "pm@npt.sg"])[0]["bpmis_id"], "B4")
 
-    def test_sent_monthly_report_ingestion_and_incremental_gmail_edges(self):
+    def test_sent_monthly_report_history_refresh_edges(self):
         class FakeGmailService:
             def __init__(self):
                 self.fetches = []
@@ -679,105 +453,18 @@ class WebCoreCoverageTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             app = self._app(temp_dir)
-            store: _FakeWorkMemoryStore = app.config["WORK_MEMORY_STORE"]
             with app.app_context(), patch("bpmis_jira_tool.web._google_credentials_have_scopes", return_value=False):
                 with self.assertRaises(ConfigError):
-                    web_module._ingest_sent_monthly_reports_from_gmail(app.config["SETTINGS"])
+                    web_module._refresh_monthly_report_history_from_gmail(app.config["SETTINGS"])
 
             with app.app_context(), patch("bpmis_jira_tool.web._google_credentials_have_scopes", return_value=True), patch(
                 "bpmis_jira_tool.web._build_gmail_dashboard_service", return_value=FakeGmailService()
             ), patch("bpmis_jira_tool.web._current_google_email", return_value="owner@npt.sg"):
-                result = web_module._ingest_sent_monthly_reports_from_gmail(app.config["SETTINGS"])
+                result = web_module._refresh_monthly_report_history_from_gmail(app.config["SETTINGS"])
             self.assertEqual(result["scanned"], 3)
             self.assertEqual(result["matched"], 1)
-            self.assertEqual(result["recorded"], 1)
-
-            with app.app_context(), patch(
-                "bpmis_jira_tool.web._ingest_existing_work_memory_sources",
-                return_value={"recorded": 2, "failed": 0, "duplicate": 1, "meeting_records": 2},
-            ), patch("bpmis_jira_tool.web._google_credentials_have_scopes", return_value=True), patch(
-                "bpmis_jira_tool.web._ingest_sent_monthly_reports_from_gmail",
-                side_effect=RuntimeError("gmail scan failed"),
-            ), patch("bpmis_jira_tool.web._current_google_email", return_value="owner@npt.sg"):
-                result = web_module._run_incremental_memory_ingestion(app.config["SETTINGS"], window="14d")
-            self.assertEqual(result["failed"], 1)
-            self.assertEqual(result["sources"]["gmail_sent_monthly_report"]["status"], "error")
-            self.assertEqual(store.ingestion_runs[-1]["status"], "partial_error")
-
-            with app.app_context(), patch(
-                "bpmis_jira_tool.web._ingest_existing_work_memory_sources",
-                return_value={"recorded": 1, "failed": 0, "duplicate": 0, "meeting_records": 1},
-            ), patch("bpmis_jira_tool.web._google_credentials_have_scopes", return_value=True), patch(
-                "bpmis_jira_tool.web._ingest_sent_monthly_reports_from_gmail",
-                return_value={"recorded": 1, "failed": 0, "duplicate": 0, "scanned": 1},
-            ), patch("bpmis_jira_tool.web._current_google_email", return_value="owner@npt.sg"):
-                result = web_module._run_incremental_memory_ingestion(app.config["SETTINGS"], window="14d")
-            self.assertEqual(result["recorded"], 2)
-            self.assertEqual(result["sources"]["distill"], {"status": "ok"})
-
-    def test_google_drive_reader_covers_export_pdf_invalid_and_empty_cases(self):
-        class FakeExecute:
-            def __init__(self, value=None, error=None):
-                self.value = value
-                self.error = error
-
-            def execute(self):
-                if self.error:
-                    raise self.error
-                return self.value
-
-        class FakeFiles:
-            def __init__(self, metadata):
-                self.metadata = metadata
-                self.export_calls = 0
-
-            def get(self, **_kwargs):
-                return FakeExecute(self.metadata)
-
-            def export_media(self, **_kwargs):
-                self.export_calls += 1
-                if self.export_calls == 1:
-                    response = SimpleNamespace(status=500, reason="temporary")
-                    raise_error = web_module.HttpError(response, b"temporary")
-                    return FakeExecute(error=raise_error)
-                return FakeExecute(b"drive text")
-
-            def get_media(self, **_kwargs):
-                return FakeExecute(b"%PDF")
-
-        class FakeDriveService:
-            def __init__(self, metadata):
-                self._files = FakeFiles(metadata)
-
-            def files(self):
-                return self._files
-
-        credentials = SimpleNamespace()
-        self.assertEqual(web_module._read_google_drive_link_text(credentials=credentials, url="https://example.com/no-id"), ("", ""))
-        with patch(
-            "bpmis_jira_tool.web._build_google_drive_service",
-            return_value=FakeDriveService({"name": "Doc", "mimeType": "application/vnd.google-apps.document"}),
-        ):
-            self.assertEqual(
-                web_module._read_google_drive_link_text(credentials=credentials, url="https://drive.google.com/open?id=doc1"),
-                ("Doc", "drive text"),
-            )
-        with patch(
-            "bpmis_jira_tool.web._build_google_drive_service",
-            return_value=FakeDriveService({"name": "Pdf", "mimeType": "application/pdf"}),
-        ), patch("bpmis_jira_tool.web._extract_pdf_text_for_work_memory", return_value="pdf text"):
-            self.assertEqual(
-                web_module._read_google_drive_link_text(credentials=credentials, url="https://drive.google.com/file/d/pdf1/view"),
-                ("Pdf", "pdf text"),
-            )
-        with patch(
-            "bpmis_jira_tool.web._build_google_drive_service",
-            return_value=FakeDriveService({"name": "Image", "mimeType": "image/png"}),
-        ):
-            self.assertEqual(
-                web_module._read_google_drive_link_text(credentials=credentials, url="https://drive.google.com/open?id=img1"),
-                ("Image", ""),
-            )
+            self.assertEqual(result["report_count"], 1)
+            self.assertEqual(len(result["items"]), 1)
 
     def test_team_dashboard_jira_fallback_and_background_job_edges(self):
         class FallbackClient:
@@ -883,133 +570,6 @@ class WebCoreCoverageTests(unittest.TestCase):
             with app.app_context(), patch("bpmis_jira_tool.web._build_portal_project_sync_service", side_effect=RuntimeError("sync crashed")):
                 web_module._run_background_job(app, "job-crash", "sync-bpmis-projects", app.config["SETTINGS"], {})
             self.assertEqual(app.config["JOB_STORE"].failed[-1][0][0], "job-crash")
-
-    def test_pdf_and_gmail_backfill_cover_batch_failure_boundaries(self):
-        class FakePage:
-            def __init__(self, text):
-                self.text = text
-
-            def extract_text(self):
-                return self.text
-
-        class FakeReader:
-            def __init__(self, _stream):
-                self.pages = [FakePage("Alpha"), FakePage("")]
-
-        with patch.dict("sys.modules", {"pypdf": SimpleNamespace(PdfReader=FakeReader)}):
-            self.assertEqual(web_module._extract_pdf_text_for_work_memory(b"%PDF"), "Alpha")
-        with patch.dict("sys.modules", {"pypdf": SimpleNamespace(PdfReader=lambda _stream: SimpleNamespace(pages=[FakePage("")]))}):
-            with self.assertRaises(ToolError):
-                web_module._extract_pdf_text_for_work_memory(b"%PDF")
-        with patch.dict("sys.modules", {"pypdf": None}):
-            with self.assertRaises(ToolError):
-                web_module._extract_pdf_text_for_work_memory(b"%PDF")
-
-        class FakeGmailDashboardService:
-            def __init__(self, **_kwargs):
-                pass
-
-            def list_work_memory_message_refs(self, *, days, max_messages):
-                return [{"id": "existing"}, {"id": "processed"}, {"id": "m1"}, {"id": "m2"}, {"id": ""}, {"id": "m1"}]
-
-            def is_export_noise(self, headers):
-                return headers.get("subject") == "Export noise"
-
-        records = [
-            SimpleNamespace(
-                message_id="m1",
-                headers={"from": "VIP <vip@npt.sg>", "to": "owner@npt.sg", "subject": "Important"},
-                body_text="body",
-                attachments=[],
-                drive_links=[],
-                internal_date=web_module.datetime(2026, 5, 24, tzinfo=web_module.timezone.utc),
-            ),
-            SimpleNamespace(
-                message_id="m2",
-                headers={"from": "owner@npt.sg", "subject": "Export noise"},
-                body_text="noise",
-                attachments=[],
-                drive_links=[],
-                internal_date=web_module.datetime(2026, 5, 23, tzinfo=web_module.timezone.utc),
-            ),
-            SimpleNamespace(message_id="", headers={}, body_text="", attachments=[], drive_links=[]),
-        ]
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            app = self._app(temp_dir)
-            store: _FakeWorkMemoryStore = app.config["WORK_MEMORY_STORE"]
-            store.processed.add("processed")
-            with app.app_context(), patch("bpmis_jira_tool.web.GmailDashboardService", FakeGmailDashboardService), patch(
-                "bpmis_jira_tool.web._fetch_gmail_work_memory_records", return_value=(records, 1, "fetch failed")
-            ), patch(
-                "bpmis_jira_tool.web._gmail_work_memory_vip_people",
-                return_value=[{"display_name": "VIP", "emails": ["vip@npt.sg"]}],
-            ), patch("bpmis_jira_tool.web._gmail_work_memory_key_projects", return_value=[]), patch(
-                "bpmis_jira_tool.web._gmail_work_memory_vip_attachment_items", return_value=([{"source_type": "gmail_attachment", "source_id": "a1", "item_type": "attachment", "owner_email": "owner@npt.sg"}], 0)
-            ), patch(
-                "bpmis_jira_tool.web._gmail_work_memory_vip_drive_items", return_value=[{"source_type": "gmail_drive_link", "source_id": "d1", "item_type": "drive_link", "owner_email": "owner@npt.sg"}]
-            ):
-                result = web_module._backfill_gmail_work_memory(
-                    owner_email="owner@npt.sg",
-                    credentials_payload={"token": "token"},
-                    report_intelligence_config={},
-                    days=7,
-                    max_messages=10,
-                    drive_read_enabled=True,
-                    job_id="gmail-job",
-                )
-            self.assertEqual(result["status"], "partial_error")
-            self.assertEqual(result["skipped_existing"], 2)
-            self.assertEqual(result["matched"], 1)
-            self.assertEqual(result["attachment_processed"], 1)
-            self.assertEqual(result["drive_links_processed"], 1)
-
-            app.config["TEAM_DASHBOARD_CONFIG_STORE"] = SimpleNamespace(load=lambda: {"task_cache": {"teams": {"bad": "not-a-dict"}}})
-            with app.app_context(), patch("bpmis_jira_tool.web._current_google_email", return_value="owner@npt.sg"):
-                self.assertEqual(
-                    web_module._ingest_existing_work_memory_sources(app.config["SETTINGS"], sources=["team_dashboard"])["team_dashboard_cache"],
-                    0,
-                )
-
-            with app.app_context():
-                with self.assertRaises(ConfigError):
-                    web_module._backfill_gmail_work_memory(
-                        owner_email="owner@npt.sg",
-                        credentials_payload={},
-                        report_intelligence_config={},
-                        days=7,
-                        max_messages=None,
-                        drive_read_enabled=False,
-                        job_id="gmail-job",
-                    )
-            store.processed.clear()
-            with app.app_context(), patch("bpmis_jira_tool.web.GmailDashboardService", FakeGmailDashboardService), patch(
-                "bpmis_jira_tool.web._fetch_gmail_work_memory_records",
-                return_value=(
-                    [
-                        SimpleNamespace(
-                            message_id="bad-message",
-                            headers={"from": "vip@npt.sg", "subject": "Important"},
-                            body_text="body",
-                            attachments=[],
-                            drive_links=[],
-                            internal_date=web_module.datetime(2026, 5, 24, tzinfo=web_module.timezone.utc),
-                        )
-                    ],
-                    0,
-                    "",
-                ),
-            ), patch("bpmis_jira_tool.web._gmail_work_memory_matched_vips", side_effect=RuntimeError("message parse failed")):
-                result = web_module._backfill_gmail_work_memory(
-                    owner_email="owner@npt.sg",
-                    credentials_payload={"token": "token"},
-                    report_intelligence_config={},
-                    days=7,
-                    max_messages=10,
-                    drive_read_enabled=False,
-                    job_id="gmail-job",
-                )
-            self.assertEqual(result["failed"], 1)
 
     def test_team_dashboard_payloads_biz_filter_and_manday_cache_edges(self):
         class FakeConfigStore:

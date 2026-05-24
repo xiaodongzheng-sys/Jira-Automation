@@ -22,28 +22,6 @@ def _source_code_qa_codex_session_lock(session_id: str) -> threading.Lock:
         return lock
 
 
-def _record_source_code_qa_work_memory(
-    *,
-    owner_email: str,
-    pm_team: str,
-    country: str,
-    question: str,
-    result: dict[str, Any],
-    session_id: str = "",
-    job_id: str = "",
-) -> dict[str, int]:
-    item = source_code_qa_memory_item(
-        owner_email=owner_email,
-        pm_team=pm_team,
-        country=country,
-        question=question,
-        result=result,
-        session_id=session_id,
-        job_id=job_id,
-    )
-    return _record_work_memory_items([item], event="source_code_qa")
-
-
 def _get_source_code_qa_session_store():
     settings: Settings = current_app.config["SETTINGS"]
     if _local_agent_source_code_qa_enabled(settings):
@@ -556,7 +534,6 @@ def _source_code_qa_job_snapshot_for_current_user(job_id: str) -> dict[str, Any]
 def bind_source_code_qa_runtime_helpers(global_context: dict[str, object]) -> None:
     helpers = [
         _source_code_qa_codex_session_lock,
-        _record_source_code_qa_work_memory,
         _get_source_code_qa_session_store,
         _get_source_code_qa_attachment_store,
         _get_source_code_qa_generated_artifact_store,

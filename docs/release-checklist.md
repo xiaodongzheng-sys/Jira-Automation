@@ -76,7 +76,6 @@ ENV_FILE=/dev/null ./.venv/bin/python -m coverage erase --rcfile=/dev/null
 ENV_FILE=/dev/null ./.venv/bin/python -m coverage run --rcfile=/dev/null --source=bpmis_jira_tool,prd_briefing -m unittest discover -s tests
 ENV_FILE=/dev/null ./.venv/bin/python -m coverage json --rcfile=/dev/null -o .team-portal/run/system_full_coverage.json
 ENV_FILE=/dev/null ./.venv/bin/python scripts/check_coverage_policy.py --coverage-json .team-portal/run/system_full_coverage.json --policy config/coverage_risk_policy.json --governed-fail-under 100
-node --check static/gmail_seatalk_demo.js
 node --check static/productization_upgrade_summary.js
 node --check static/team_dashboard.js
 node --check static/meeting_recorder.js

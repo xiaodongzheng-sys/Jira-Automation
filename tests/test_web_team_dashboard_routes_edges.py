@@ -58,16 +58,6 @@ class _FakeConfigStore:
         return config
 
 
-class _FakeWorkMemoryStore:
-    def __init__(self, items=None):
-        self.items = items if isinstance(items, Exception) else list(items or [])
-
-    def query_work_memory(self, **_kwargs):
-        if isinstance(self.items, Exception):
-            raise self.items
-        return list(self.items)
-
-
 class _FakeMappingStore:
     def __init__(self):
         self.data = {}
@@ -112,9 +102,6 @@ class _FakeLocalAgentClient:
         self.latest_draft = {"status": "ok", "draft_markdown": "Remote draft"}
         self.daily_briefs = [{"brief_id": "b1", "subject": "Daily", "sent_at": "2026"}]
 
-    def work_memory_recent(self, **_kwargs):
-        return [{"source_id": "remote-1", "summary": "Remote monthly report"}]
-
     def team_dashboard_monthly_report_latest_draft(self):
         return self.latest_draft
 
@@ -154,7 +141,6 @@ class WebTeamDashboardRouteEdgeTests(unittest.TestCase):
             "can_manage": overrides.pop("can_manage", True),
             "remote_enabled": overrides.pop("remote_enabled", False),
             "seatalk_enabled": overrides.pop("seatalk_enabled", False),
-            "work_memory_enabled": overrides.pop("work_memory_enabled", False),
             "source_code_qa_enabled": overrides.pop("source_code_qa_enabled", False),
             "has_gmail_scope": overrides.pop("has_gmail_scope", False),
             "current_email": overrides.pop("current_email", "xiaodong.zheng@npt.sg"),
@@ -198,7 +184,6 @@ class WebTeamDashboardRouteEdgeTests(unittest.TestCase):
                 if "all_team_reload_error" in overrides
                 else [{"team_key": "AF", "label": "Anti-Fraud"}]
             ),
-            _record_team_dashboard_work_memory=lambda *_args, **_kwargs: None,
             _current_google_email=lambda: state["current_email"],
             _team_dashboard_new_timing=lambda: {},
             _team_dashboard_add_timing=lambda timings, key, started_at: timings.setdefault(key, 0),
@@ -230,9 +215,11 @@ class WebTeamDashboardRouteEdgeTests(unittest.TestCase):
                 notice={},
             ),
             _google_credentials_have_scopes=lambda *_scopes: state["has_gmail_scope"],
-            _ingest_sent_monthly_reports_from_gmail=lambda _settings: (_ for _ in ()).throw(overrides["gmail_ingest_error"]) if "gmail_ingest_error" in overrides else {"recorded": 1, "failed": 0},
-            _local_agent_work_memory_enabled=lambda _settings: state["work_memory_enabled"],
-            _get_work_memory_store=lambda: overrides.get("work_memory_store", _FakeWorkMemoryStore()),
+            _refresh_monthly_report_history_from_gmail=lambda _settings: (
+                (_ for _ in ()).throw(overrides["history_refresh_error"])
+                if "history_refresh_error" in overrides
+                else overrides.get("history_refresh_result", {"scanned": 1, "matched": 1, "report_count": 1, "items": [{"summary": "Sent report", "content": "Highlights\n- A"}]})
+            ),
             _local_agent_source_code_qa_enabled=lambda _settings: state["source_code_qa_enabled"],
             _build_prd_review_service=lambda _settings: overrides.get("prd_service", SimpleNamespace(review=lambda request: {"status": "ok", "cached": False}, summarize=lambda request: {"status": "ok", "cached": False})),
             _queue_prd_generation_job=lambda *_args, **_kwargs: ({"status": "queued", "job_id": "prd-job"}, 202),
@@ -576,11 +563,8 @@ class WebTeamDashboardRouteEdgeTests(unittest.TestCase):
         self.assertEqual(denied.status_code, 403)
 
     def test_monthly_report_style_latest_daily_and_send_edges(self):
-        work_items = [{"source_id": "local-1", "summary": "Local sent report"}]
         app, _store, _version_store = self._build_app(
-            work_memory_enabled=True,
             has_gmail_scope=True,
-            work_memory_store=_FakeWorkMemoryStore(work_items),
             remote_enabled=True,
             seatalk_enabled=True,
         )
@@ -599,12 +583,9 @@ class WebTeamDashboardRouteEdgeTests(unittest.TestCase):
         self.assertEqual(draft_response.get_json()["job_backend"], "local_agent")
         self.assertEqual(send_response.get_json()["message_id"], "remote-msg")
 
-        duplicate_remote = _FakeLocalAgentClient()
-        duplicate_remote.work_memory_recent = lambda **_kwargs: [{"source_id": f"remote-{index}", "summary": f"Remote {index}"} for index in range(1, 10)] + [{"source_id": "remote-1"}]
         app, _store, _version_store = self._build_app(
-            work_memory_enabled=True,
-            work_memory_store=_FakeWorkMemoryStore([{"source_id": "remote-1", "summary": "Duplicate"}]),
-            local_agent=duplicate_remote,
+            has_gmail_scope=True,
+            history_refresh_result={"scanned": 8, "matched": 8, "report_count": 8, "items": [{"summary": f"Remote {index}", "content": "Highlights\n- A"} for index in range(1, 9)]},
         )
         with app.test_client() as client:
             duplicate_response = client.post("/api/team-dashboard/monthly-report/style-guide/refresh")
@@ -612,9 +593,6 @@ class WebTeamDashboardRouteEdgeTests(unittest.TestCase):
 
         app, _store, _version_store = self._build_app(
             current_email="",
-            work_memory_enabled=True,
-            work_memory_store=_FakeWorkMemoryStore([{"source_id": f"local-{index}", "summary": f"Local {index}"} for index in range(1, 3)]),
-            local_agent=duplicate_remote,
         )
         with app.test_client() as client:
             no_owner_style = client.post("/api/team-dashboard/monthly-report/style-guide/refresh")
@@ -622,7 +600,7 @@ class WebTeamDashboardRouteEdgeTests(unittest.TestCase):
         self.assertEqual(no_owner_style.status_code, 200)
         self.assertEqual(no_owner_draft.status_code, 200)
 
-        app, _store, _version_store = self._build_app(work_memory_store=_FakeWorkMemoryStore(RuntimeError("style lookup failed")))
+        app, _store, _version_store = self._build_app(has_gmail_scope=True, history_refresh_error=RuntimeError("style lookup failed"))
         with app.test_client() as client:
             response = client.post("/api/team-dashboard/monthly-report/style-guide/refresh")
         self.assertEqual(response.status_code, 200)
@@ -655,11 +633,11 @@ class WebTeamDashboardRouteEdgeTests(unittest.TestCase):
             send_calls.append(kwargs)
             return MonthlyReportSendResult(status="ok", recipient=kwargs["recipient"], subject=kwargs["subject"], message_id="local-msg")
 
-        app, _store, _version_store = self._build_app(send_email=send_email, has_gmail_scope=True, gmail_ingest_error=RuntimeError("memory failed"))
+        app, _store, _version_store = self._build_app(send_email=send_email, has_gmail_scope=True, history_refresh_error=RuntimeError("history failed"))
         with app.test_client() as client:
             response = client.post("/api/team-dashboard/monthly-report/send", json={"draft_markdown": "Draft", "subject": "Subject", "recipient": "to@npt.sg"})
         self.assertEqual(response.get_json()["message_id"], "local-msg")
-        self.assertEqual(response.get_json()["work_memory"], {"recorded": 0, "failed": 0})
+        self.assertEqual(response.get_json()["monthly_report_history"], {"scanned": 0, "matched": 0, "report_count": 0})
         self.assertEqual(send_calls[0]["recipient"], "to@npt.sg")
 
         app, _store, _version_store = self._build_app(send_email=lambda **_kwargs: (_ for _ in ()).throw(ToolError("send rejected")))

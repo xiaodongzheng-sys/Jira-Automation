@@ -672,7 +672,7 @@ class GmailDashboardServiceTests(unittest.TestCase):
             1,
         )
 
-    def test_work_memory_wrappers_and_message_ref_pagination_edges(self):
+    def test_message_ref_pagination_and_full_fetch_edges(self):
         now = datetime(2026, 4, 21, 16, 0).astimezone()
 
         class _PagingMessagesApi:
@@ -716,8 +716,8 @@ class GmailDashboardServiceTests(unittest.TestCase):
         gmail_service = _PagingService()
         service = GmailDashboardService(credentials=object(), gmail_service=gmail_service)
 
-        refs = service.list_work_memory_message_refs(days=2, now=now, max_messages=2)
-        record = service.fetch_work_memory_message("m1")
+        refs = service._list_message_refs(query="newer_than:2d", max_messages=2)
+        record = service._fetch_message_full("m1")
 
         self.assertEqual(refs, [{"id": "m1", "threadId": "t1"}, {"id": "m2", "threadId": ""}])
         self.assertEqual(record.message_id, "m1")
