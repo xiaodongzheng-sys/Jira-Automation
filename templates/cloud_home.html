@@ -6,101 +6,44 @@
       <div>
         <h2>Risk PM Workspace</h2>
         <p class="step-copy">
-          {% if can_access_version_plan %}
-            Open AF Version Plan or continue to the full portal.
+          {% if full_portal_available %}
+            Full portal is available.
+          {% elif can_access_version_plan or not signed_in %}
+            Full portal is offline. Use AF Version Plan.
           {% else %}
-            Continue to the full team portal.
+            Full portal is offline. Version Plan is restricted to AF team users.
           {% endif %}
         </p>
       </div>
     </div>
 
-    <div class="dashboard-grid">
-      {% if can_access_version_plan %}
-      <article class="dashboard-card" data-version-plan-card>
-        <h3>Version Plan</h3>
-        <p>AF version planning remains available independently from full portal actions.</p>
-        {% if signed_in %}
-          <a class="button button-primary" href="{{ version_plan_url }}">Open Version Plan</a>
-        {% else %}
-          <a class="button button-primary" href="{{ url_for('cloud_google_login') }}">Sign in with Google</a>
-        {% endif %}
-      </article>
-      {% endif %}
+    <div
+      class="dashboard-grid cloud-home-single-entry"
+      data-cloud-home-ready="true"
+      data-full-portal-available="{{ 'true' if full_portal_available else 'false' }}"
+    >
+      {% if full_portal_available %}
       <article class="dashboard-card" data-full-portal-card>
         <h3>Full Portal</h3>
         <p>BPMIS, Source Code Q&amp;A, reports, and admin tools.</p>
         <a class="button button-secondary" href="{{ full_portal_login_url or full_portal_url }}" data-full-portal-link>Open Full Portal</a>
-        <p class="productization-inline-status" data-cloud-mac-status>Checking Mac portal availability...</p>
       </article>
+      {% elif can_access_version_plan or not signed_in %}
+      <article class="dashboard-card" data-version-plan-card>
+        <h3>Version Plan</h3>
+        <p>AF version planning remains available while the full portal is offline.</p>
+        {% if signed_in %}
+          <a class="button button-primary" href="{{ version_plan_url }}">Open Version Plan</a>
+        {% else %}
+          <a class="button button-primary" href="{{ url_for('cloud_google_login', next=version_plan_url) }}">Sign in with Google</a>
+        {% endif %}
+      </article>
+      {% else %}
+      <article class="dashboard-card" data-cloud-home-unavailable-card>
+        <h3>Version Plan</h3>
+        <p>Version Plan is restricted to AF team users.</p>
+      </article>
+      {% endif %}
     </div>
   </section>
-  <script>
-    (() => {
-      const status = document.querySelector('[data-cloud-mac-status]');
-      const fullPortalLink = document.querySelector('[data-full-portal-link]');
-      const fullPortalCard = document.querySelector('[data-full-portal-card]');
-      const versionPlanCard = document.querySelector('[data-version-plan-card]');
-      if (!status || !fullPortalLink || !fullPortalCard) return;
-      const canAccessVersionPlan = {{ 'true' if can_access_version_plan else 'false' }};
-      const signedIn = {{ 'true' if signed_in else 'false' }};
-      const MAX_FAST_RETRIES = 4;
-      const FAST_RETRY_DELAY_MS = 1500;
-      const POLL_INTERVAL_MS = 10000;
-      let retryCount = 0;
-      let pollHandle = null;
-
-      const setOfflineState = () => {
-        fullPortalLink.hidden = true;
-        status.dataset.tone = 'error';
-        if (canAccessVersionPlan) {
-          status.textContent = signedIn
-            ? 'Mac full portal is offline. Version Plan remains available.'
-            : 'Mac full portal is offline. Sign in to use Version Plan only.';
-          if (versionPlanCard) {
-            versionPlanCard.hidden = false;
-          }
-        } else {
-          status.textContent = signedIn
-            ? 'Full portal is currently offline. AF Version Plan remains available.'
-            : 'Full portal is currently offline. AF Version Plan remains available after Google sign-in.';
-        }
-      };
-
-      const setOnlineState = () => {
-        fullPortalLink.hidden = false;
-        status.textContent = 'Mac full portal is online.';
-        status.dataset.tone = 'success';
-        retryCount = 0;
-      };
-
-      const schedulePoll = () => {
-        if (pollHandle) return;
-        pollHandle = window.setInterval(checkHealth, POLL_INTERVAL_MS);
-      };
-
-      const checkHealth = () => {
-        fetch('/healthz', { headers: { Accept: 'application/json' }, credentials: 'same-origin' })
-          .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
-          .then((payload) => {
-            if (payload?.status === 'ok') {
-              setOnlineState();
-              schedulePoll();
-              return;
-            }
-            throw new Error('bad payload');
-          })
-          .catch(() => {
-            setOfflineState();
-            schedulePoll();
-            if (retryCount < MAX_FAST_RETRIES) {
-              retryCount += 1;
-              window.setTimeout(checkHealth, FAST_RETRY_DELAY_MS);
-            }
-          });
-      };
-
-      checkHealth();
-    })();
-  </script>
 {% endblock %}

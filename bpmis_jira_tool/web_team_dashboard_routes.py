@@ -95,6 +95,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
     _get_team_dashboard_config_store = ctx._get_team_dashboard_config_store
     _can_manage_team_dashboard = ctx._can_manage_team_dashboard
     _can_access_team_dashboard_version_plan = ctx._can_access_team_dashboard_version_plan
+    _full_portal_navigation_available = ctx._full_portal_navigation_available
     _can_access_team_dashboard_monthly_report = ctx._can_access_team_dashboard_monthly_report
     _seatalk_dashboard_is_configured = ctx._seatalk_dashboard_is_configured
     _log_portal_event = ctx._log_portal_event
@@ -452,6 +453,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             seatalk_configured=False,
             version_plan_only=True,
             cloud_auth_mode=True,
+            suppress_site_navigation=not _full_portal_navigation_available(settings),
         )
 
 

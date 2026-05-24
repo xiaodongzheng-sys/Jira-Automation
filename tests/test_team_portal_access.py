@@ -131,7 +131,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self.assertNotIn(b"Report Intelligence", response.data)
                 self.assertNotIn(b"PRD Self-Assessment", response.data)
 
-    def test_cloud_home_renders_without_mac_portal_for_anonymous_user(self):
+    def test_cloud_home_renders_version_plan_login_when_full_portal_offline_for_anonymous_user(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -146,6 +146,9 @@ class TeamPortalAccessTests(unittest.TestCase):
         ), patch(
             "bpmis_jira_tool.web._build_local_agent_client",
             side_effect=AssertionError("cloud home should not call local-agent"),
+        ), patch(
+            "bpmis_jira_tool.web._mac_full_portal_is_available",
+            return_value=False,
         ):
             app = create_app()
             app.testing = True
@@ -155,14 +158,15 @@ class TeamPortalAccessTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertIn(b"Risk PM Workspace", response.data)
-            self.assertNotIn(b"Open Version Plan", response.data)
+            self.assertIn(b"Full portal is offline. Use AF Version Plan.", response.data)
+            self.assertIn(b"Sign in with Google", response.data)
+            self.assertIn(b"/cloud-auth/google/login?next=/version-plan", response.data)
+            self.assertNotIn(b"Open Full Portal", response.data)
             self.assertIn(b"/cloud-static/style.css", response.data)
-            self.assertIn(b"/auth/google/login?next=/portal-home?workspace%3Drun", response.data)
-            self.assertIn(b"Checking Mac portal availability", response.data)
-            self.assertIn(b"AF Version Plan remains available after Google sign-in.", response.data)
-            self.assertIn(b"fetch('/healthz'", response.data)
+            self.assertNotIn(b"Checking Mac portal availability", response.data)
+            self.assertNotIn(b"fetch('/healthz'", response.data)
 
-    def test_cloud_home_hides_version_plan_for_non_af_user(self):
+    def test_cloud_home_shows_only_full_portal_when_full_portal_is_available(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -174,7 +178,39 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "TEAM_PORTAL_MAC_FULL_PORTAL_URL": "https://app.bankpmtool.uk/portal-home",
             },
             clear=False,
-        ):
+        ), patch("bpmis_jira_tool.web._mac_full_portal_is_available", return_value=True):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                self._login_non_admin(client, email="jireh.tanyx@npt.sg")
+                response = client.get("/", follow_redirects=False)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b"Risk PM Workspace", response.data)
+            self.assertIn(b"Full portal is available.", response.data)
+            self.assertIn(b"Open Full Portal", response.data)
+            self.assertIn(b"https://app.bankpmtool.uk/portal-home?workspace=run", response.data)
+            self.assertNotIn(b"https://app.bankpmtool.uk/?workspace=run", response.data)
+            self.assertNotIn(b"Open Version Plan", response.data)
+            self.assertNotIn(b"Version Plan</h3>", response.data)
+            self.assertNotIn(b"Checking Mac portal availability", response.data)
+            self.assertNotIn(b"Cloud Run", response.data)
+            self.assertIn(b"site-switcher", response.data)
+
+    def test_cloud_home_hides_version_plan_for_non_af_user_when_full_portal_offline(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
+                "TEAM_PORTAL_MAC_FULL_PORTAL_URL": "https://app.bankpmtool.uk/portal-home",
+            },
+            clear=False,
+        ), patch("bpmis_jira_tool.web._mac_full_portal_is_available", return_value=False):
             app = create_app()
             app.testing = True
 
@@ -186,17 +222,17 @@ class TeamPortalAccessTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertIn(b"Risk PM Workspace", response.data)
-            self.assertIn(b"Open Full Portal", response.data)
-            self.assertIn(b"https://app.bankpmtool.uk/portal-home?workspace=run", response.data)
-            self.assertNotIn(b"https://app.bankpmtool.uk/?workspace=run", response.data)
+            self.assertIn(b"Full portal is offline. Version Plan is restricted to AF team users.", response.data)
+            self.assertNotIn(b"Open Full Portal", response.data)
             self.assertNotIn(b"Open Version Plan", response.data)
-            self.assertNotIn(b"Version Plan</h3>", response.data)
+            self.assertNotIn(b"data-version-plan-card", response.data)
+            self.assertNotIn(b"site-switcher", response.data)
             self.assertNotIn(b"Cloud Run", response.data)
             self.assertEqual(blocked_plan.status_code, 302)
             self.assertEqual(blocked_plan.headers["Location"], "/access-denied")
             self.assertEqual(blocked_api.status_code, 403)
 
-    def test_cloud_home_shows_version_plan_for_af_user(self):
+    def test_cloud_home_shows_only_version_plan_for_af_user_when_full_portal_offline(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -208,7 +244,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "TEAM_PORTAL_MAC_FULL_PORTAL_URL": "https://app.bankpmtool.uk/portal-home",
             },
             clear=False,
-        ):
+        ), patch("bpmis_jira_tool.web._mac_full_portal_is_available", return_value=False):
             app = create_app()
             app.testing = True
 
@@ -219,10 +255,11 @@ class TeamPortalAccessTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertIn(b"Risk PM Workspace", response.data)
+            self.assertIn(b"Full portal is offline. Use AF Version Plan.", response.data)
             self.assertIn(b"Open Version Plan", response.data)
-            self.assertIn(b"Open Full Portal", response.data)
-            self.assertIn(b"https://app.bankpmtool.uk/portal-home?workspace=run", response.data)
-            self.assertNotIn(b"https://app.bankpmtool.uk/?workspace=run", response.data)
+            self.assertNotIn(b"Open Full Portal", response.data)
+            self.assertNotIn(b"https://app.bankpmtool.uk/portal-home?workspace=run", response.data)
+            self.assertNotIn(b"site-switcher", response.data)
             self.assertNotIn(b'BPMIS Automation Tool</a>', response.data)
             self.assertNotIn(b'site-switcher-subtab is-active" href="/portal-home?workspace=run"', response.data)
             self.assertEqual(dashboard_response.status_code, 200)
@@ -376,6 +413,7 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertIn(b"data-version-plan-content", response.data)
             self.assertIn(b"/cloud-static/team_dashboard.js", response.data)
             self.assertNotIn(b"data-team-dashboard-tab=\"tasks\"", response.data)
+            self.assertNotIn(b"site-switcher", response.data)
 
     def test_cloud_version_plan_page_renders_when_team_dashboard_config_unavailable_for_admin(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

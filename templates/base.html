@@ -38,7 +38,7 @@
           </div>
         </section>
       {% endif %}
-      {% if site_tabs %}
+      {% if site_tabs and not suppress_site_navigation|default(false) %}
         <nav class="site-switcher" aria-label="Primary tools">
           <div class="site-switcher-track">
             {% for tab in site_tabs %}

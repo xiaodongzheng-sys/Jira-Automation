@@ -904,6 +904,7 @@ def create_app() -> Flask:
             user_identity = _get_user_identity(settings)
             full_portal_path = url_for("portal_home", workspace="run")
             full_portal_url = _bpmis_run_portal_url(settings, full_portal_path)
+            full_portal_available = _mac_full_portal_is_available(settings, full_portal_url)
             return render_template(
                 "cloud_home.html",
                 page_title="Risk PM Workspace",
@@ -912,8 +913,10 @@ def create_app() -> Flask:
                 can_access_version_plan=_can_access_team_dashboard_version_plan(user_identity),
                 version_plan_url=url_for("version_plan_page"),
                 full_portal_url=full_portal_url,
+                full_portal_available=full_portal_available,
                 full_portal_login_url=None if _google_session_is_connected() else url_for("google_login", next=full_portal_path),
                 cloud_auth_mode=True,
+                suppress_site_navigation=not full_portal_available,
             )
 
         if _site_requires_google_login(settings) and not _google_session_is_connected():
@@ -1472,6 +1475,7 @@ def create_app() -> Flask:
                 _get_team_dashboard_config_store=lambda *args, **kwargs: _get_team_dashboard_config_store(*args, **kwargs),
                 _can_manage_team_dashboard=lambda *args, **kwargs: _can_manage_team_dashboard(*args, **kwargs),
                 _can_access_team_dashboard_version_plan=lambda *args, **kwargs: _can_access_team_dashboard_version_plan(*args, **kwargs),
+                _full_portal_navigation_available=lambda *args, **kwargs: _full_portal_navigation_available(*args, **kwargs),
                 _can_access_team_dashboard_monthly_report=lambda *args, **kwargs: _can_access_team_dashboard_monthly_report(*args, **kwargs),
                 _seatalk_dashboard_is_configured=lambda *args, **kwargs: _seatalk_dashboard_is_configured(*args, **kwargs),
                 _log_portal_event=lambda *args, **kwargs: _log_portal_event(*args, **kwargs),
@@ -2621,6 +2625,55 @@ def _bpmis_run_portal_url(settings: Settings, fallback_url: str) -> str:
 def _bpmis_admin_portal_url(settings: Settings, fallback_url: str) -> str:
     base_url = str(settings.mac_full_portal_url or "").strip() if settings.cloud_home_enabled else ""
     return _url_with_query_value(base_url or fallback_url, "workspace", "bpmis")
+
+
+def _mac_full_portal_health_url(settings: Settings, full_portal_url: str) -> str:
+    target_url = str(settings.mac_full_portal_url or full_portal_url or "").strip()
+    if not target_url:
+        return ""
+    parsed = urlsplit(target_url)
+    if parsed.scheme and parsed.netloc:
+        return urlunsplit((parsed.scheme, parsed.netloc, "/healthz", "", ""))
+    if target_url.startswith("/"):
+        return url_for("healthz", _external=True)
+    return ""
+
+
+def _mac_full_portal_is_available(settings: Settings, full_portal_url: str) -> bool:
+    if not settings.cloud_home_enabled:
+        return True
+    if not str(settings.mac_full_portal_url or "").strip():
+        return False
+    health_url = _mac_full_portal_health_url(settings, full_portal_url)
+    if not health_url:
+        return False
+
+    response = None
+    try:
+        response = requests.get(
+            health_url,
+            headers={"Accept": "application/json"},
+            timeout=(2, 4),
+            allow_redirects=False,
+        )
+        if response.status_code != HTTPStatus.OK:
+            return False
+        payload = response.json()
+    except (requests.RequestException, ValueError):
+        return False
+    finally:
+        if response is not None:
+            response.close()
+    return payload.get("status") == "ok"
+
+
+def _full_portal_navigation_available(settings: Settings) -> bool:
+    if not settings.cloud_home_enabled:
+        return True
+    return _mac_full_portal_is_available(
+        settings,
+        _bpmis_run_portal_url(settings, url_for("portal_home", workspace="run")),
+    )
 
 
 def _portal_home_source_code_target(settings: Settings) -> str:

@@ -227,7 +227,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
                 **self._env,
                 "TEAM_PORTAL_DATA_DIR": cloud_temp_dir.name,
                 "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
-                "TEAM_PORTAL_MAC_FULL_PORTAL_URL": "https://app.bankpmtool.uk/portal-home",
+                "TEAM_PORTAL_MAC_FULL_PORTAL_URL": "http://127.0.0.1:9/portal-home",
                 "TEAM_PORTAL_BASE_URL": "",
             }
             process = subprocess.Popen(
@@ -301,8 +301,10 @@ class PortalE2ESmokeTest(unittest.TestCase):
             page.route(re.compile(r".*/api/team-dashboard/version-plan/af(?:\?.*)?$"), version_plan)
             page.goto("/", wait_until="domcontentloaded")
             self.assertIn("Risk PM Workspace", page.locator("body").inner_text(timeout=5000))
+            self.assertEqual(page.locator(".site-switcher").count(), 0)
             page.get_by_role("link", name="Open Version Plan").click()
             page.wait_for_url("**/version-plan", timeout=5000)
+            self.assertEqual(page.locator(".site-switcher").count(), 0)
             page.locator('[data-version-plan-row-id="cloud-home-pipe-1"]').get_by_text(
                 "Cloud homepage version plan row"
             ).wait_for(timeout=5000)

@@ -178,6 +178,7 @@ class WebTeamDashboardRouteEdgeTests(unittest.TestCase):
             _get_team_dashboard_config_store=lambda: config_store,
             _can_manage_team_dashboard=lambda _user: state["can_manage"],
             _can_access_team_dashboard_version_plan=lambda _user: True,
+            _full_portal_navigation_available=lambda: True,
             _can_access_team_dashboard_monthly_report=lambda _user: True,
             _seatalk_dashboard_is_configured=lambda _settings: True,
             _log_portal_event=lambda *args, **kwargs: None,
