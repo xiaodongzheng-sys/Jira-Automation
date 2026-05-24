@@ -15,6 +15,7 @@ from typing import Any, Callable
 from flask import current_app, jsonify, render_template, request, send_file, session, url_for
 
 from bpmis_jira_tool.daily_brief_archive import daily_brief_pdf_bytes
+from bpmis_jira_tool.background_jobs import start_durable_job_thread
 from bpmis_jira_tool.errors import BPMISError, ConfigError, ToolError
 from bpmis_jira_tool.gmail_dashboard import GMAIL_READONLY_SCOPE
 from bpmis_jira_tool.monthly_report import (
@@ -1524,12 +1525,15 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             if current_app.testing:
                 _run_team_dashboard_monthly_report_draft_job(app_obj, job.job_id, settings, request_payload, user_identity)
             else:
-                thread = threading.Thread(
+                start_durable_job_thread(
+                    app=app_obj,
+                    job_store=job_store,
+                    job_id=job.job_id,
                     target=_run_team_dashboard_monthly_report_draft_job,
                     args=(app_obj, job.job_id, settings, request_payload, user_identity),
-                    daemon=True,
+                    name="team-dashboard-monthly-report-draft",
+                    error_prefix="Team Dashboard Monthly Report draft job failed unexpectedly",
                 )
-                thread.start()
             _log_portal_event(
                 "team_dashboard_monthly_report_draft_queued",
                 **_build_request_log_context(

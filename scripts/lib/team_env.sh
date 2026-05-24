@@ -45,15 +45,25 @@ except (FileNotFoundError, subprocess.CalledProcessError):
     raise SystemExit(0)
 
 try:
-    diff_text = run_git("diff", "--no-ext-diff", "--binary", "HEAD", "--", ".")
+    diff_text = run_git("diff", "--no-ext-diff", "--full-index", "--binary", "HEAD", "--", ".")
     untracked = run_git("ls-files", "--others", "--exclude-standard")
 except subprocess.CalledProcessError:
     print(head or "unknown")
     raise SystemExit(0)
 
 dirty_material = diff_text
-if untracked.strip():
-    dirty_material += "\n--UNTRACKED--\n" + untracked
+untracked_paths = []
+for raw_line in untracked.splitlines():
+    path = raw_line.strip()
+    if not path:
+        continue
+    first_part = path.split("/", 1)[0]
+    if first_part.startswith((".venv", ".team-portal", ".pytest_cache")):
+        continue
+    untracked_paths.append(path)
+
+if untracked_paths:
+    dirty_material += "\n--UNTRACKED--\n" + "\n".join(untracked_paths) + "\n"
 
 if dirty_material.strip():
     fingerprint = hashlib.sha1(dirty_material.encode("utf-8")).hexdigest()[:12]
@@ -64,6 +74,35 @@ PY
     return 0
   fi
   printf 'unknown\n'
+}
+
+release_manifest_path() {
+  local data_dir="${1:-}"
+  if [[ -n "${TEAM_PORTAL_RELEASE_MANIFEST_PATH:-}" ]]; then
+    printf '%s\n' "$TEAM_PORTAL_RELEASE_MANIFEST_PATH"
+    return 0
+  fi
+  if [[ -z "$data_dir" ]]; then
+    data_dir="$(resolve_team_data_dir "${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}")"
+  fi
+  printf '%s\n' "$data_dir/run/team_portal_release_manifest.json"
+}
+
+write_release_manifest() {
+  local data_dir="${1:-}"
+  local surface="${2:-${TEAM_PORTAL_LIVE_SURFACE:-mac_public_live}}"
+  if [[ -z "$data_dir" ]]; then
+    data_dir="$(resolve_team_data_dir "${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}")"
+  fi
+  local output
+  output="$(release_manifest_path "$data_dir")"
+  mkdir -p "$(dirname "$output")"
+  PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" -m bpmis_jira_tool.release_manifest \
+    --root "$ROOT_DIR" \
+    --host-root "$ROOT_DIR" \
+    --surface "$surface" \
+    --output "$output" \
+    --print-id
 }
 
 fetch_healthz_field() {

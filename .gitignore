@@ -1,5 +1,7 @@
 .venv/
 .venv-*-backup-*/
+.venv.backup-*/
+.venv-python-upgrade/
 __pycache__/
 .pytest_cache/
 .mypy_cache/

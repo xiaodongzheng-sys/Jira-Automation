@@ -6,6 +6,7 @@ from typing import Any, Callable, Optional
 
 from flask import Flask
 
+from bpmis_jira_tool.background_jobs import fail_job_if_active
 from bpmis_jira_tool.job_store import JobStore
 
 
@@ -155,5 +156,21 @@ class SourceCodeQAQueryScheduler:
     ) -> None:
         try:
             (runner or self.default_runner)(app, job_id, payload)
+        except Exception as error:
+            try:
+                fail_job_if_active(
+                    self.job_store,
+                    job_id,
+                    f"Source Code Q&A worker failed unexpectedly: {error}",
+                    error_category="unexpected_internal",
+                    error_code="background_worker_unhandled_exception",
+                    error_retryable=True,
+                )
+            except Exception:  # pragma: no cover - preserve scheduler cleanup even if persistence fails.
+                pass
+            try:
+                app.logger.exception("Source Code Q&A scheduler worker failed unexpectedly.")
+            except Exception:  # pragma: no cover - Flask logger should be available.
+                pass
         finally:
             self.finish(job_id, owner_email)

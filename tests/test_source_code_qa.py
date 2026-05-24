@@ -57,6 +57,8 @@ from scripts.source_code_qa_feedback_to_eval import build_eval_candidates
 class SourceCodeQARouteTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
+        from bpmis_jira_tool.source_code_qa import CODE_INDEX_VERSION
+
         with patch.dict(
             os.environ,
             {
@@ -2832,6 +2834,29 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
         self.assertIn(jobs[3].job_id, started[:3])
         self.assertNotEqual(started[:3], [jobs[0].job_id, jobs[1].job_id, jobs[2].job_id])
+
+    def test_source_code_qa_scheduler_persists_unhandled_worker_exception(self):
+        path = Path(self.temp_dir.name) / "run" / "jobs.json"
+        store = JobStore(path)
+        job = store.create("source-code-qa-query", "job")
+        scheduler = SourceCodeQAQueryScheduler(job_store=store, max_running=1)
+        scheduler._running.add(job.job_id)
+        scheduler._running_users["owner@npt.sg"] = 1
+
+        def broken_runner(_app, _job_id, _payload):
+            store.update(job.job_id, state="running", stage="test", message="running")
+            raise RuntimeError("boom")
+
+        scheduler._run_job(self.app, job.job_id, {}, "owner@npt.sg", broken_runner)
+
+        snapshot = store.snapshot(job.job_id)
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["state"], "failed")
+        self.assertEqual(snapshot["error_category"], "unexpected_internal")
+        self.assertEqual(snapshot["error_code"], "background_worker_unhandled_exception")
+        self.assertIn("boom", snapshot["error"])
+        self.assertEqual(scheduler._running, set())
+        self.assertEqual(scheduler._running_users, {})
 
     def test_feedback_api_saves_user_signal(self):
         with self.app.test_client() as client:
@@ -9091,6 +9116,74 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("active_config_demo_repos=1", summary)
         self.assertIn("ops_summary_status=fail", summary)
         self.assertIn("fixture/demo repositories", summary)
+
+    def test_ops_summary_uses_local_agent_source_code_qa_data_root_when_enabled(self):
+        from scripts.source_code_qa_ops_summary import build_summary
+
+        requested_root = Path(self.temp_dir.name) / "portal-data"
+        requested_source_root = requested_root / "source_code_qa"
+        requested_source_root.mkdir(parents=True)
+        (requested_source_root / "config.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "mappings": {
+                        "CRMS:SG": [
+                            {"display_name": "Fixture", "url": "https://git.example.com/team/fixture.git"}
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        agent_root = Path(self.temp_dir.name) / "agent-data"
+        agent_source_root = agent_root / "source_code_qa"
+        agent_source_root.mkdir(parents=True)
+        (agent_source_root / "config.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "mappings": {
+                        "CRMS:SG": [
+                            {"display_name": "credit-risk", "url": "https://gitlab.npt.seabank.io/team/credit-risk.git"}
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "LOCAL_AGENT_SOURCE_CODE_QA_ENABLED": "true",
+                "LOCAL_AGENT_TEAM_PORTAL_DATA_DIR": str(agent_root),
+            },
+        ), patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.index_health_payload") as health:
+            health.return_value = {
+                "status": "ready",
+                "totals": {"repos": 1, "ready": 1, "stale_or_missing": 0},
+                "keys": {
+                    "CRMS:SG": {
+                        "repos": [
+                            {
+                                "display_name": "credit-risk",
+                                "url": "https://gitlab.npt.seabank.io/team/credit-risk.git",
+                                "index": {"state": "ready", "index_version": CODE_INDEX_VERSION},
+                            }
+                        ]
+                    }
+                },
+            }
+            summary = "\n".join(build_summary(requested_root, limit=20, strict=True, prefer_local_agent=True))
+
+        self.assertIn(f"data_root={agent_root.resolve()}", summary)
+        self.assertIn(f"requested_data_root={requested_root.resolve()}", summary)
+        self.assertIn("data_root_resolution=local_agent_source_code_qa", summary)
+        self.assertIn("active_config_demo_repos=0", summary)
+        self.assertIn("ops_summary_status=pass", summary)
+        self.assertNotIn("fixture/demo repositories", summary)
 
     def test_rebuild_indexes_helper_flags_non_current_ready_indexes(self):
         from scripts.source_code_qa_rebuild_indexes import _verify_health

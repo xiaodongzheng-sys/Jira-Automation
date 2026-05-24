@@ -12,11 +12,13 @@ PORT="${PORT:-5000}"
 PROBE_HOST="${TEAM_PORTAL_PROBE_HOST:-127.0.0.1}"
 DATA_DIR="$(resolve_team_data_dir "${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}")"
 EXPECTED_REVISION="$(current_release_revision)"
+LIVE_SURFACE="${TEAM_PORTAL_LIVE_SURFACE:-mac_public_live}"
 
 mkdir -p "$DATA_DIR" "$DATA_DIR/logs" "$DATA_DIR/run"
 
 PID_FILE="$DATA_DIR/run/team_portal.pid"
 LOG_FILE="$DATA_DIR/logs/team_portal.log"
+MANIFEST_PATH="$(release_manifest_path "$DATA_DIR")"
 
 find_live_pid() {
   lsof -tiTCP:"$PORT" -sTCP:LISTEN -n -P 2>/dev/null | head -n 1
@@ -60,7 +62,14 @@ start() {
   fi
 
   cd "$ROOT_DIR"
-  nohup env "TEAM_PORTAL_RELEASE_REVISION=$EXPECTED_REVISION" "$PYTHON_BIN" -m flask --app app run --host "$HOST" --port "$PORT" >"$LOG_FILE" 2>&1 &
+  local manifest_id
+  manifest_id="$(write_release_manifest "$DATA_DIR" "$LIVE_SURFACE")"
+  nohup env \
+    "TEAM_PORTAL_RELEASE_REVISION=$EXPECTED_REVISION" \
+    "TEAM_PORTAL_RELEASE_MANIFEST_PATH=$MANIFEST_PATH" \
+    "TEAM_PORTAL_RELEASE_MANIFEST_ID=$manifest_id" \
+    "TEAM_PORTAL_LIVE_SURFACE=$LIVE_SURFACE" \
+    "$PYTHON_BIN" -m flask --app app run --host "$HOST" --port "$PORT" >"$LOG_FILE" 2>&1 &
   echo $! >"$PID_FILE"
 
   for _ in {1..20}; do

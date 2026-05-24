@@ -11,6 +11,8 @@ import logging
 import time
 from typing import Any
 
+from bpmis_jira_tool.source_code_qa_llm_pipeline import build_codex_initial_plan
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -71,59 +73,37 @@ def build_codex_llm_answer(
     timing: dict[str, int] = {}
     codex_started_at = time.time()
 
-    candidate_context = service._codex_initial_candidate_context(
+    initial_plan = build_codex_initial_plan(
+        service,
         entries=entries,
         key=key,
-        question=question,
-        matches=matches,
-        selected_matches=selected_matches,
-        followup_context=followup_context,
-    )
-    candidate_matches = candidate_context["candidate_matches"]
-    candidate_paths = candidate_context["candidate_paths"]
-    candidate_path_layers = candidate_context["candidate_path_layers"]
-    scope_roots = candidate_context["scope_roots"]
-    prompt_mode = candidate_context["prompt_mode"]
-    llm_route = {
-        **llm_route,
-        **service._codex_initial_route_fields(
-            selected_model=selected_model,
-            prompt_mode=prompt_mode,
-            candidate_paths=candidate_paths,
-            candidate_path_layers=candidate_path_layers,
-            scope_roots=scope_roots,
-            query_mode=query_mode,
-        ),
-    }
-    if effort_assessment:
-        llm_route["task"] = "effort_assessment"
-    prompt_runtime_evidence = service._runtime_evidence_for_budget(runtime_evidence or [], routed_budget_mode)
-    llm_route = {
-        **llm_route,
-        "runtime_evidence_count": len(runtime_evidence or []),
-        "prompt_runtime_evidence_count": len(prompt_runtime_evidence),
-    }
-    prompt_context = service._codex_initial_prompt_context(
-        prompt_mode=prompt_mode,
         pm_team=pm_team,
         country=country,
         question=question,
-        candidate_paths=candidate_paths,
+        matches=matches,
+        selected_matches=selected_matches,
         evidence_pack=evidence_pack,
         quality_gate=quality_gate,
+        llm_route=llm_route,
+        selected_model=selected_model,
         followup_context=followup_context,
+        query_mode=query_mode,
+        routed_budget_mode=routed_budget_mode,
         attachments=attachments or [],
-        runtime_evidence=prompt_runtime_evidence,
-        scope_roots=scope_roots,
+        runtime_evidence=runtime_evidence or [],
+        effort_assessment=effort_assessment,
     )
-    initial_prompt_stats = service._codex_prompt_stats(prompt_context)
-    llm_route = {
-        **llm_route,
-        "initial_prompt_estimated_tokens": initial_prompt_stats["estimated_prompt_tokens"],
-        "initial_prompt_chars": initial_prompt_stats["prompt_chars"],
-    }
-    candidate_repo_count = len({item.get("repo") for item in candidate_paths})
-    initial_reasoning_effort = service._codex_reasoning_effort_for_route(routed_budget_mode)
+    candidate_matches = initial_plan.candidate_matches
+    candidate_paths = initial_plan.candidate_paths
+    candidate_path_layers = initial_plan.candidate_path_layers
+    scope_roots = initial_plan.scope_roots
+    prompt_mode = initial_plan.prompt_mode
+    prompt_runtime_evidence = initial_plan.prompt_runtime_evidence
+    llm_route = initial_plan.llm_route
+    prompt_context = initial_plan.prompt_context
+    initial_prompt_stats = initial_plan.prompt_stats
+    candidate_repo_count = initial_plan.candidate_repo_count
+    initial_reasoning_effort = initial_plan.reasoning_effort
     service._log_codex_prompt_timing(
         prompt_context=prompt_context,
         prompt_stats=initial_prompt_stats,

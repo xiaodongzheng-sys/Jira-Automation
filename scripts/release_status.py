@@ -5,10 +5,25 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import hashlib
 import shutil
 import subprocess
 import sys
 from typing import Any, Mapping
+
+from scripts.release_probes import (
+    cloud_run_is_release_gate as _cloud_run_is_release_gate,
+    cloud_run_mismatch_message as _cloud_run_mismatch_message,
+    cloud_run_role as _cloud_run_role_value,
+    detail_value as _detail_value,
+    health_probe as _release_health_probe,
+    health_revision as _health_revision,
+    health_status as _health_status,
+    json_command as _release_json_command,
+    manifest_path as _manifest_path,
+    sanitize_error_text as _sanitize_error_text,
+    text_command as _release_text_command,
+)
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -16,6 +31,10 @@ DEFAULT_SESSION_SECRET_VALUES = {"", "dev-secret-key", "local-dev-secret-change-
 TEAM_PORTAL_FLASK_SECRET_GCP_SECRET = "team-portal-flask-secret"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+
+
+def _cloud_run_role(env: Mapping[str, str]) -> str:
+    return _cloud_run_role_value(_env_value("TEAM_PORTAL_CLOUD_RUN_ROLE", env))
 
 
 def _env_value(key: str, env: Mapping[str, str]) -> str:
@@ -45,48 +64,19 @@ def _run(command: list[str], *, env: Mapping[str, str] | None = None) -> subproc
 
 
 def _json_command(command: list[str], *, env: Mapping[str, str], runner: Any = _run) -> tuple[dict[str, Any] | None, str]:
-    completed = runner(command, env=env)
-    if completed.returncode != 0:
-        return None, (completed.stderr or completed.stdout or f"exit {completed.returncode}").strip()
-    try:
-        payload = json.loads(completed.stdout or "{}")
-    except json.JSONDecodeError as error:
-        return None, f"invalid JSON: {error}"
-    if not isinstance(payload, dict):
-        return None, "JSON payload was not an object"
-    return payload, ""
+    return _release_json_command(command, env=env, runner=runner)
 
 
 def _text_command(command: list[str], *, env: Mapping[str, str], runner: Any = _run) -> tuple[str, str]:
-    completed = runner(command, env=env)
-    if completed.returncode != 0:
-        return "", (completed.stderr or completed.stdout or f"exit {completed.returncode}").strip()
-    return (completed.stdout or "").strip(), ""
+    return _release_text_command(command, env=env, runner=runner)
 
 
 def _health_probe(url: str, *, env: Mapping[str, str], runner: Any = _run) -> str:
-    if not url:
-        return "url=<missing> status=missing"
-    payload, error = _json_command(["curl", "-fsS", "--max-time", "10", url], env=env, runner=runner)
-    if payload is None:
-        return f"url={url} status=unavailable error={error}"
-    details = [f"url={url}", f"status={payload.get('status') or 'unknown'}"]
-    if payload.get("revision"):
-        details.append(f"revision={payload.get('revision')}")
-    capabilities = payload.get("capabilities")
-    if isinstance(capabilities, dict):
-        if "source_code_qa" in capabilities:
-            details.append(f"source_code_qa={capabilities.get('source_code_qa')}")
-        if "codex_ready" in capabilities:
-            details.append(f"codex_ready={capabilities.get('codex_ready')}")
-    return " ".join(details)
+    return _release_health_probe(url, env=env, runner=runner)
 
 
-def _sanitize_error_text(value: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    return " ".join(text.split())[:240]
+def _issue(severity: str, code: str, message: str) -> dict[str, str]:
+    return {"severity": severity, "code": code, "message": message}
 
 
 def _gcloud_binary(*, env: Mapping[str, str]) -> str:
@@ -289,24 +279,92 @@ def _revision_release_value(
     return str(values.get("TEAM_PORTAL_RELEASE_REVISION") or "")
 
 
+def _expected_source_revision(*, env: Mapping[str, str], runner: Any = _run) -> tuple[str, str]:
+    from bpmis_jira_tool.web_runtime_status import filtered_untracked_paths
+
+    head, error = _text_command(["git", "-C", str(ROOT_DIR), "rev-parse", "HEAD"], env=env, runner=runner)
+    if not head:
+        return "", error
+    diff_command = ["git", "-C", str(ROOT_DIR), "diff", "--no-ext-diff", "--full-index", "--binary", "HEAD", "--", "."]
+    diff_completed = runner(diff_command, env=env)
+    if diff_completed.returncode != 0:
+        return head, _sanitize_error_text(diff_completed.stderr or diff_completed.stdout or f"exit {diff_completed.returncode}")
+    untracked_command = ["git", "-C", str(ROOT_DIR), "ls-files", "--others", "--exclude-standard"]
+    untracked_completed = runner(untracked_command, env=env)
+    if untracked_completed.returncode != 0:
+        return head, _sanitize_error_text(
+            untracked_completed.stderr or untracked_completed.stdout or f"exit {untracked_completed.returncode}"
+        )
+    diff_text = diff_completed.stdout or ""
+    untracked = untracked_completed.stdout or ""
+    dirty_material = diff_text
+    untracked_paths = filtered_untracked_paths(untracked)
+    if untracked_paths:
+        dirty_material += "\n--UNTRACKED--\n" + "\n".join(untracked_paths) + "\n"
+    if dirty_material.strip():
+        fingerprint = hashlib.sha1(dirty_material.encode("utf-8")).hexdigest()[:12]
+        return f"{head}-dirty-{fingerprint}", ""
+    return head, ""
+
+
+def _release_manifest_path(env: Mapping[str, str]) -> Path:
+    data_dir = _env_value("TEAM_PORTAL_DATA_DIR", env) or str(ROOT_DIR / ".team-portal")
+    return _manifest_path(data_dir, _env_value("TEAM_PORTAL_RELEASE_MANIFEST_PATH", env))
+
+
+def _release_manifest_status(expected_revision: str, *, env: Mapping[str, str]) -> str:
+    from bpmis_jira_tool.release_manifest import load_release_manifest, manifest_file_sha256
+
+    path = _release_manifest_path(env)
+    if not path.exists():
+        return f"status=missing path={path}"
+    payload = load_release_manifest(path)
+    if payload is None:
+        return f"status=unavailable path={path} reason=invalid_json"
+    revision = str(payload.get("release_revision") or "")
+    manifest_id = str(payload.get("manifest_id") or "")
+    surface = str(payload.get("surface") or "")
+    python_version = str(payload.get("python_version") or "")
+    status = "ok"
+    reason = ""
+    if expected_revision and revision != expected_revision:
+        status = "fail"
+        reason = " revision_mismatch"
+    return (
+        f"status={status} path={path} manifest_id={manifest_id or '<missing>'} "
+        f"surface={surface or '<missing>'} release_revision={revision or '<missing>'} "
+        f"python_version={python_version or '<missing>'} file_sha256={manifest_file_sha256(path) or '<missing>'}{reason}"
+    )
+
+
 def build_status_lines(*, env: Mapping[str, str] | None = None, runner: Any = _run) -> list[str]:
+    return build_status_report(env=env, runner=runner)["lines"]
+
+
+def build_status_report(*, env: Mapping[str, str] | None = None, runner: Any = _run) -> dict[str, Any]:
     env = dict(env or os.environ)
     lines = ["== Release Status =="]
+    issues: list[dict[str, str]] = []
 
-    expected_revision, error = _text_command(["git", "-C", str(ROOT_DIR), "rev-parse", "HEAD"], env=env, runner=runner)
+    expected_revision, error = _expected_source_revision(env=env, runner=runner)
     lines.append(f"Expected source revision: {expected_revision or f'unavailable ({error})'}")
+    if not expected_revision:
+        issues.append(_issue("warn", "source_revision_unavailable", f"Could not resolve expected source revision: {_sanitize_error_text(error)}"))
 
     service = _env_value("CLOUD_RUN_SERVICE", env) or "team-portal"
     region = _env_value("CLOUD_RUN_REGION", env) or "asia-southeast1"
     uat_tag = _env_value("CLOUD_RUN_UAT_TAG", env) or "uat"
+    cloud_role = _cloud_run_role(env)
     project = _env_value("GOOGLE_CLOUD_PROJECT", env)
     gcloud_bin = _gcloud_binary(env=env)
     project_args = ["--project", project] if project else []
     account_args = _gcloud_account_args(env=env)
 
+    lines.append(f"Cloud Run role: {cloud_role}")
     lines.append(f"Cloud Run service: {service} region={region}")
     if not gcloud_bin or not Path(gcloud_bin).exists():
         lines.append("Cloud Run status: unavailable (gcloud not found)")
+        issues.append(_issue("warn", "cloud_run_status_unavailable", "gcloud was not found; Cloud Run revision readiness is unverified."))
     else:
         service_payload, service_error = _json_command(
             [
@@ -326,6 +384,7 @@ def build_status_lines(*, env: Mapping[str, str] | None = None, runner: Any = _r
         )
         if service_payload is None:
             lines.append(f"Cloud Run status: unavailable ({service_error})")
+            issues.append(_issue("warn", "cloud_run_status_unavailable", f"Cloud Run service status unavailable: {_sanitize_error_text(service_error)}"))
         else:
             traffic = service_payload.get("status", {}).get("traffic", [])
             uat_matches = [item for item in traffic if item.get("tag") == uat_tag]
@@ -346,8 +405,24 @@ def build_status_lines(*, env: Mapping[str, str] | None = None, runner: Any = _r
                     f"tag={uat_tag} revision={uat_revision or '<missing>'} "
                     f"git_revision={uat_release or '<missing>'} url={uat.get('url') or '<missing>'}"
                 )
+                if expected_revision and uat_release and uat_release != expected_revision:
+                    message = _cloud_run_mismatch_message(
+                        cloud_role,
+                        f"Cloud Run UAT tag serves {uat_release}, expected {expected_revision}.",
+                    )
+                    if _cloud_run_is_release_gate(cloud_role):
+                        issues.append(_issue("warn", "cloud_run_uat_revision_mismatch", message))
+                    else:
+                        lines.append(f"Cloud Run note: cloud_run_uat_revision_mismatch {message}")
+                elif expected_revision and not uat_release:
+                    message = "Cloud Run UAT revision did not expose TEAM_PORTAL_RELEASE_REVISION."
+                    if _cloud_run_is_release_gate(cloud_role):
+                        issues.append(_issue("warn", "cloud_run_uat_revision_unknown", message))
+                    else:
+                        lines.append(f"Cloud Run note: cloud_run_uat_revision_unknown {message}")
             else:
                 lines.append(f"Cloud Run UAT tag: tag={uat_tag} revision=<missing>")
+                issues.append(_issue("warn", "cloud_run_uat_tag_missing", f"Cloud Run UAT tag is missing: {uat_tag}."))
 
             live_traffic = [item for item in traffic if item.get("percent")]
             if live_traffic:
@@ -368,8 +443,24 @@ def build_status_lines(*, env: Mapping[str, str] | None = None, runner: Any = _r
                         f"git_revision={release_revision or '<missing>'} "
                         "(Cloud Run traffic, not Mac public Live)"
                     )
+                    if expected_revision and release_revision and release_revision != expected_revision:
+                        message = _cloud_run_mismatch_message(
+                            cloud_role,
+                            f"Cloud Run live traffic serves {release_revision}, expected {expected_revision}.",
+                        )
+                        if _cloud_run_is_release_gate(cloud_role):
+                            issues.append(_issue("warn", "cloud_run_live_revision_mismatch", message))
+                        else:
+                            lines.append(f"Cloud Run note: cloud_run_live_revision_mismatch {message}")
+                    elif expected_revision and not release_revision:
+                        message = "Cloud Run live traffic did not expose TEAM_PORTAL_RELEASE_REVISION."
+                        if _cloud_run_is_release_gate(cloud_role):
+                            issues.append(_issue("warn", "cloud_run_live_revision_unknown", message))
+                        else:
+                            lines.append(f"Cloud Run note: cloud_run_live_revision_unknown {message}")
             else:
                 lines.append("Cloud Run service live traffic: <none>")
+                issues.append(_issue("warn", "cloud_run_live_traffic_missing", "Cloud Run service has no live traffic allocation."))
 
     local_port = _env_value("TEAM_PORTAL_PORT", env) or "5000"
     public_url = (_env_value("TEAM_PORTAL_BASE_URL", env) or "").rstrip("/")
@@ -379,24 +470,99 @@ def build_status_lines(*, env: Mapping[str, str] | None = None, runner: Any = _r
         local_agent_port = _env_value("LOCAL_AGENT_PORT", env) or "7007"
         local_agent_base = f"http://{local_agent_host}:{local_agent_port}"
 
-    lines.append(f"Mac portal availability: {_mac_portal_availability_status(env=env, runner=runner)}")
-    lines.append(f"Shared session configuration: {_shared_session_status(env=env, runner=runner)}")
-    lines.append(f"Local portal: {_health_probe(f'http://127.0.0.1:{local_port}/healthz', env=env, runner=runner)}")
+    mac_portal = _mac_portal_availability_status(env=env, runner=runner)
+    shared_session = _shared_session_status(env=env, runner=runner)
+    local_portal = _health_probe(f"http://127.0.0.1:{local_port}/healthz", env=env, runner=runner)
+    public_live = _health_probe(f"{public_url}/healthz" if public_url else "", env=env, runner=runner)
+    direct_local_agent = _health_probe(f"{local_agent_base}/healthz", env=env, runner=runner)
+    public_local_agent = _health_probe(f"{public_url}/api/local-agent/healthz" if public_url else "", env=env, runner=runner)
+    version_plan = _version_plan_firestore_status(env=env)
+    release_manifest = _release_manifest_status(expected_revision, env=env)
+
+    lines.append(f"Mac portal availability: {mac_portal}")
+    lines.append(f"Shared session configuration: {shared_session}")
+    lines.append(f"Local portal: {local_portal}")
     lines.append(
         "Public Live URL (Mac/Cloudflare): "
-        f"{_health_probe(f'{public_url}/healthz' if public_url else '', env=env, runner=runner)}"
+        f"{public_live}"
     )
-    lines.append(f"Direct local-agent: {_health_probe(f'{local_agent_base}/healthz', env=env, runner=runner)}")
+    lines.append(f"Direct local-agent: {direct_local_agent}")
     lines.append(
         "Public local-agent proxy: "
-        f"{_health_probe(f'{public_url}/api/local-agent/healthz' if public_url else '', env=env, runner=runner)}"
+        f"{public_local_agent}"
     )
-    lines.append(f"Version Plan Firestore: {_version_plan_firestore_status(env=env)}")
-    return lines
+    lines.append(f"Version Plan Firestore: {version_plan}")
+    lines.append(f"Release manifest: {release_manifest}")
+
+    mac_status = _detail_value(mac_portal, "status")
+    if mac_status == "offline":
+        issues.append(_issue("fail", "mac_portal_offline", "Neither local nor public Mac portal health probes are online."))
+    elif mac_status == "degraded":
+        issues.append(_issue("fail", "mac_portal_degraded", "Only one Mac portal health probe is online; local/public readiness is split."))
+
+    shared_status = _detail_value(shared_session, "status")
+    if shared_status == "fail":
+        issues.append(_issue("fail", "shared_session_misconfigured", shared_session))
+    elif shared_status == "warn":
+        issues.append(_issue("warn", "shared_session_unverified", shared_session))
+
+    for label, details, code in (
+        ("Local portal", local_portal, "local_portal"),
+        ("Public Live URL", public_live, "public_live"),
+    ):
+        if _health_status(details) != "ok":
+            issues.append(_issue("fail", f"{code}_unavailable", f"{label} health probe is not ok: {details}"))
+        elif expected_revision:
+            revision = _health_revision(details)
+            if not revision:
+                issues.append(_issue("fail", f"{code}_revision_missing", f"{label} health probe did not expose revision."))
+            elif revision != expected_revision:
+                issues.append(_issue("fail", f"{code}_revision_mismatch", f"{label} serves {revision}, expected {expected_revision}."))
+
+    for label, details, code in (
+        ("Direct local-agent", direct_local_agent, "direct_local_agent_unavailable"),
+        ("Public local-agent proxy", public_local_agent, "public_local_agent_unavailable"),
+    ):
+        if _health_status(details) != "ok":
+            issues.append(_issue("warn", code, f"{label} health probe is not ok: {details}"))
+
+    version_plan_status = _detail_value(version_plan, "status")
+    if version_plan_status in {"unavailable", "missing"}:
+        issues.append(_issue("warn", f"version_plan_firestore_{version_plan_status}", version_plan))
+
+    release_manifest_status = _detail_value(release_manifest, "status")
+    if release_manifest_status == "fail":
+        issues.append(_issue("fail", "release_manifest_revision_mismatch", release_manifest))
+    elif release_manifest_status in {"missing", "unavailable"}:
+        issues.append(_issue("warn", f"release_manifest_{release_manifest_status}", release_manifest))
+
+    if any(issue["severity"] == "fail" for issue in issues):
+        status = "fail"
+    elif issues:
+        status = "warn"
+    else:
+        status = "pass"
+    lines.append(f"Readiness: status={status}")
+    for issue in issues:
+        lines.append(f"Readiness issue: {issue['severity']}:{issue['code']} {issue['message']}")
+    return {"status": status, "lines": lines, "issues": issues}
 
 
-def main() -> int:
-    print("\n".join(build_status_lines()))
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--json", action="store_true", help="Print machine-readable readiness JSON.")
+    parser.add_argument("--strict", action="store_true", help="Exit non-zero when readiness status is fail.")
+    args = parser.parse_args(argv)
+
+    report = build_status_report()
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print("\n".join(report["lines"]))
+    if args.strict and report["status"] == "fail":
+        return 1
     return 0
 
 

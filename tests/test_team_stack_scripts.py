@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -103,11 +104,16 @@ case "$url" in
   https://example.ngrok.dev)
     ;;
   https://example.ngrok.dev/healthz)
+    printf '{"status":"ok","revision":"%s"}\\n' "${FAKE_HEALTHZ_REVISION:-unknown}"
     ;;
   https://app.bankpmtool.uk/healthz)
     if [[ "${FAKE_PUBLIC_HEALTH_FAIL:-0}" == "1" ]]; then
       exit 22
     fi
+    printf '{"status":"ok","revision":"%s"}\\n' "${FAKE_HEALTHZ_REVISION:-unknown}"
+    ;;
+  http://127.0.0.1:7007/healthz|https://example.ngrok.dev/api/local-agent/healthz|https://app.bankpmtool.uk/api/local-agent/healthz)
+    printf '{"status":"ok","capabilities":{"source_code_qa":true,"codex_ready":true}}\\n'
     ;;
   *)
     exit 1
@@ -2149,10 +2155,12 @@ fi
             )
 
         output = "\n".join(lines)
+        self.assertIn("Cloud Run role: standby", output)
         self.assertIn("Cloud Run UAT tag: tag=uat revision=team-portal-00301-viv", output)
         self.assertIn("git_revision=d8fb5fb59c743dadfce1f8a106a7846c8ebe2fbc", output)
         self.assertIn("Cloud Run service live traffic: revision=team-portal-00200-n7q percent=100", output)
         self.assertIn("(Cloud Run traffic, not Mac public Live)", output)
+        self.assertIn("Cloud Run note: cloud_run_live_revision_mismatch", output)
         self.assertTrue(gcloud_commands)
         for command in gcloud_commands:
             self.assertIn("--account", command)
@@ -2165,6 +2173,113 @@ fi
         self.assertIn("Direct local-agent: url=http://127.0.0.1:7007/healthz status=ok source_code_qa=True codex_ready=True", output)
         self.assertIn("Public local-agent proxy: url=https://app.bankpmtool.uk/api/local-agent/healthz status=ok source_code_qa=True codex_ready=True", output)
         self.assertIn("Version Plan Firestore:", output)
+        self.assertIn("Release manifest:", output)
+        self.assertIn("Readiness: status=", output)
+
+    def test_release_manifest_status_validates_expected_revision(self):
+        from scripts.release_status import _release_manifest_status
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest_path = Path(temp_dir) / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "manifest_id": "manifest-1",
+                        "surface": "mac_public_live",
+                        "release_revision": "expected-sha",
+                        "python_version": "3.12.13",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            ok = _release_manifest_status(
+                "expected-sha",
+                env={"TEAM_PORTAL_RELEASE_MANIFEST_PATH": str(manifest_path)},
+            )
+            mismatch = _release_manifest_status(
+                "other-sha",
+                env={"TEAM_PORTAL_RELEASE_MANIFEST_PATH": str(manifest_path)},
+            )
+
+        self.assertIn("status=ok", ok)
+        self.assertIn("manifest_id=manifest-1", ok)
+        self.assertIn("surface=mac_public_live", ok)
+        self.assertIn("status=fail", mismatch)
+        self.assertIn("revision_mismatch", mismatch)
+
+    def test_release_probes_format_health_and_cloud_run_role(self):
+        from scripts.release_probes import cloud_run_mismatch_message, cloud_run_role, health_probe, manifest_path
+
+        def fake_run(command, *, env):
+            self.assertEqual(command[0], "curl")
+            self.assertEqual(env["TOKEN"], "present")
+            payload = {
+                "status": "ok",
+                "revision": "rev-1",
+                "release_manifest_id": "manifest-1",
+                "live_surface": "mac_public_live",
+                "capabilities": {"source_code_qa": True, "codex_ready": True},
+            }
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+
+        details = health_probe("https://app.bankpmtool.uk/healthz", env={"TOKEN": "present"}, runner=fake_run)
+
+        self.assertIn("status=ok", details)
+        self.assertIn("revision=rev-1", details)
+        self.assertIn("release_manifest_id=manifest-1", details)
+        self.assertIn("live_surface=mac_public_live", details)
+        self.assertIn("source_code_qa=True", details)
+        self.assertEqual(cloud_run_role(""), "standby")
+        self.assertIn(
+            "Mac public Live is authoritative",
+            cloud_run_mismatch_message("standby", "revision mismatch."),
+        )
+        self.assertEqual(
+            manifest_path("/tmp/team-portal").as_posix(),
+            "/tmp/team-portal/run/team_portal_release_manifest.json",
+        )
+
+    def test_release_status_report_flags_mac_live_revision_mismatch_as_failure(self):
+        from scripts.release_status import build_status_report
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            gcloud_path = Path(temp_dir) / "gcloud"
+            gcloud_path.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+
+            def fake_run(command, *, env):
+                joined = " ".join(command)
+                if command[0] == "git":
+                    return subprocess.CompletedProcess(command, 0, stdout="expected-sha\n", stderr="")
+                if command[0] == str(gcloud_path) and "run services describe" in joined:
+                    return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"status": {"traffic": []}}), stderr="")
+                if command[0] == "curl":
+                    url = command[-1]
+                    if url.endswith("/api/local-agent/healthz") or url.endswith(":7007/healthz"):
+                        payload = {"status": "ok", "capabilities": {"source_code_qa": True, "codex_ready": True}}
+                    else:
+                        payload = {"status": "ok", "revision": "served-sha"}
+                    return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="unexpected command")
+
+            report = build_status_report(
+                env={
+                    "GCLOUD_BIN": str(gcloud_path),
+                    "GOOGLE_CLOUD_PROJECT": "risk-pm-tool",
+                    "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                    "TEAM_PORTAL_PORT": "5000",
+                    "LOCAL_AGENT_BASE_URL": "http://127.0.0.1:7007",
+                    "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
+                    "FLASK_SECRET_KEY": "shared-secret",
+                },
+                runner=fake_run,
+            )
+
+        self.assertEqual(report["status"], "fail")
+        issue_codes = {issue["code"] for issue in report["issues"]}
+        self.assertIn("local_portal_revision_mismatch", issue_codes)
+        self.assertIn("public_live_revision_mismatch", issue_codes)
+        self.assertIn("Readiness: status=fail", "\n".join(report["lines"]))
 
     def test_release_status_flags_default_local_secret_for_cloud_home(self):
         from scripts.release_status import _shared_session_status
@@ -2178,6 +2293,49 @@ fi
 
         self.assertIn("status=fail", status)
         self.assertIn("reason=local_flask_secret_default", status)
+
+    def test_release_status_expected_revision_includes_dirty_fingerprint(self):
+        from scripts.release_status import _expected_source_revision
+
+        def fake_run(command, *, env):
+            joined = " ".join(command)
+            if "rev-parse HEAD" in joined:
+                return subprocess.CompletedProcess(command, 0, stdout="abc123\n", stderr="")
+            if "diff --no-ext-diff --full-index --binary HEAD -- ." in joined:
+                return subprocess.CompletedProcess(command, 0, stdout="diff --git a/app.py b/app.py\n", stderr="")
+            if "ls-files --others --exclude-standard" in joined:
+                return subprocess.CompletedProcess(command, 0, stdout="new_file.py\n", stderr="")
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="unexpected command")
+
+        revision, error = _expected_source_revision(env={}, runner=fake_run)
+        expected_material = "diff --git a/app.py b/app.py\n\n--UNTRACKED--\nnew_file.py\n"
+        expected_hash = hashlib.sha1(expected_material.encode("utf-8")).hexdigest()[:12]
+
+        self.assertEqual(error, "")
+        self.assertEqual(revision, f"abc123-dirty-{expected_hash}")
+
+    def test_release_status_expected_revision_ignores_local_runtime_untracked_paths(self):
+        from scripts.release_status import _expected_source_revision
+
+        def fake_run(command, *, env):
+            joined = " ".join(command)
+            if "rev-parse HEAD" in joined:
+                return subprocess.CompletedProcess(command, 0, stdout="abc123\n", stderr="")
+            if "diff --no-ext-diff --full-index --binary HEAD -- ." in joined:
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            if "ls-files --others --exclude-standard" in joined:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=".venv.backup-20260524114830/bin/python\n.team-portal/run/status.json\n",
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="unexpected command")
+
+        revision, error = _expected_source_revision(env={}, runner=fake_run)
+
+        self.assertEqual(error, "")
+        self.assertEqual(revision, "abc123")
 
     def test_release_status_firestore_unavailable_does_not_leak_secret_values(self):
         from scripts.release_status import _version_plan_firestore_status
@@ -2327,6 +2485,7 @@ fi
         self.assertIn("release-status", stack_script)
         self.assertIn("release_status()", stack_script)
         self.assertIn('"$PYTHON_BIN" "$ROOT_DIR/scripts/release_status.py"', stack_script)
+        self.assertIn("release_status --strict", stack_script)
 
     def test_stack_doctor_runs_portal_runtime_doctor(self):
         stack_script = (PROJECT_ROOT / "scripts/run_team_stack.sh").read_text(encoding="utf-8")
@@ -2334,6 +2493,36 @@ fi
         self.assertIn("== Portal Runtime Doctor ==", stack_script)
         self.assertIn("portal_runtime_doctor.py", stack_script)
         self.assertIn('"$PYTHON_BIN" "$ROOT_DIR/scripts/portal_runtime_doctor.py" --strict', stack_script)
+        self.assertIn("Source Code QA data dir resolved via local-agent", stack_script)
+        self.assertIn('LOCAL_AGENT_TEAM_PORTAL_DATA_DIR="$local_agent_data_dir"', stack_script)
+
+    def test_sync_team_stack_host_script_guards_runtime_data_and_dirty_host(self):
+        sync_script = (PROJECT_ROOT / "scripts/sync_team_stack_host.sh").read_text(encoding="utf-8")
+
+        self.assertIn("recommended_team_stack_root", sync_script)
+        self.assertIn("git -C \"$HOST_ROOT\" status --porcelain", sync_script)
+        self.assertIn("--allow-dirty-host", sync_script)
+        self.assertIn("--exclude '.team-portal/'", sync_script)
+        self.assertIn("--exclude '.venv/'", sync_script)
+        self.assertIn("--exclude '.venv.backup-*'", sync_script)
+        self.assertIn("--exclude '.git/'", sync_script)
+        self.assertIn("team_portal_release_manifest.json", sync_script)
+        self.assertIn("bpmis_jira_tool.release_manifest", sync_script)
+        self.assertIn("source_code_qa_ops_summary.py\" --strict", sync_script)
+        self.assertIn("run_team_stack.sh\" restart", sync_script)
+
+    def test_host_python_upgrade_script_builds_python312_candidate(self):
+        upgrade_script = (PROJECT_ROOT / "scripts/upgrade_host_python_runtime.sh").read_text(encoding="utf-8")
+        setup_script = (PROJECT_ROOT / "scripts/setup_team_stack_host_workspace.sh").read_text(encoding="utf-8")
+        foreground_script = (PROJECT_ROOT / "scripts/run_team_portal_foreground.sh").read_text(encoding="utf-8")
+
+        self.assertIn("/opt/homebrew/opt/python@3.12/bin/python3.12", upgrade_script)
+        self.assertIn("Python 3.12+ is required", upgrade_script)
+        self.assertIn("OpenSSL-backed Python is required", upgrade_script)
+        self.assertIn("--apply", upgrade_script)
+        self.assertIn(".venv.backup-", upgrade_script)
+        self.assertIn("/opt/homebrew/opt/python@3.12/bin/python3.12", setup_script)
+        self.assertIn("TEAM_PORTAL_RELEASE_MANIFEST_ID", foreground_script)
 
     def test_stack_doctor_reports_cloudflare_tunnel_provider(self):
         stack_script = PROJECT_ROOT / "scripts/run_team_stack.sh"
@@ -2372,6 +2561,7 @@ fi
                     "TEAM_PORTAL_PORT": "5000",
                     "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
                     "TEAM_PORTAL_TUNNEL_PROVIDER": "cloudflare",
+                    "FLASK_SECRET_KEY": "shared-secret",
                 },
                 cwd=PROJECT_ROOT,
             )
@@ -2414,6 +2604,7 @@ fi
                     "TEAM_PORTAL_PORT": "5000",
                     "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
                     "TEAM_PORTAL_TUNNEL_PROVIDER": "cloudflare",
+                    "FLASK_SECRET_KEY": "shared-secret",
                 },
                 cwd=PROJECT_ROOT,
             )
@@ -2457,6 +2648,7 @@ fi
                     "TEAM_PORTAL_PORT": "5000",
                     "TEAM_PORTAL_BASE_URL": "https://example.ngrok.dev",
                     "TEAM_PORTAL_TUNNEL_PROVIDER": "ngrok",
+                    "FLASK_SECRET_KEY": "shared-secret",
                 },
                 cwd=PROJECT_ROOT,
             )
@@ -2514,6 +2706,7 @@ fi
                     "TEAM_PORTAL_PORT": "5000",
                     "TEAM_PORTAL_BASE_URL": "https://example.ngrok.dev",
                     "TEAM_PORTAL_TUNNEL_PROVIDER": "ngrok",
+                    "FLASK_SECRET_KEY": "shared-secret",
                 },
                 cwd=PROJECT_ROOT,
             )

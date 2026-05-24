@@ -93,6 +93,9 @@ doctor() {
   local expected_revision
   local served_revision=""
   local recommended_root
+  local local_agent_source_code_qa_enabled
+  local local_agent_data_dir
+  local source_code_qa_data_dir
 
   local resolved
   resolved="$(read_env_values TEAM_PORTAL_DATA_DIR TEAM_PORTAL_PORT TEAM_PORTAL_BASE_URL TEAM_PORTAL_TUNNEL_PROVIDER)"
@@ -116,6 +119,12 @@ doctor() {
   recommended_root="$(recommended_team_stack_root)"
   status_file="$data_dir/run/team_stack_status.json"
   alert_file="$data_dir/run/team_stack_alert.json"
+  local_agent_source_code_qa_enabled="${LOCAL_AGENT_SOURCE_CODE_QA_ENABLED:-$(read_env_value LOCAL_AGENT_SOURCE_CODE_QA_ENABLED)}"
+  local_agent_data_dir="${LOCAL_AGENT_TEAM_PORTAL_DATA_DIR:-$(read_env_value LOCAL_AGENT_TEAM_PORTAL_DATA_DIR)}"
+  source_code_qa_data_dir="$data_dir"
+  if [[ "$local_agent_source_code_qa_enabled" =~ ^(1|true|TRUE|yes|YES|on|ON)$ && -n "$local_agent_data_dir" ]]; then
+    source_code_qa_data_dir="$(resolve_team_data_dir "$local_agent_data_dir")"
+  fi
 
   echo "== Doctor =="
   echo "Repo root: $ROOT_DIR"
@@ -212,7 +221,9 @@ doctor() {
   fi
   echo
 
-  release_status
+  if ! release_status --strict; then
+    ok=1
+  fi
   echo
 
   echo "== Status Files =="
@@ -296,7 +307,10 @@ PY
   echo
   echo "== Source Code QA Ops Summary =="
   if [[ -x "$PYTHON_BIN" && -f "$ROOT_DIR/scripts/source_code_qa_ops_summary.py" ]]; then
-    if ! PYTHONPATH="$ROOT_DIR" TEAM_PORTAL_DATA_DIR="$data_dir" "$PYTHON_BIN" "$ROOT_DIR/scripts/source_code_qa_ops_summary.py" --strict; then
+    if [[ "$source_code_qa_data_dir" != "$data_dir" ]]; then
+      echo "Source Code QA data dir resolved via local-agent: $source_code_qa_data_dir"
+    fi
+    if ! PYTHONPATH="$ROOT_DIR" TEAM_PORTAL_DATA_DIR="$source_code_qa_data_dir" "$PYTHON_BIN" "$ROOT_DIR/scripts/source_code_qa_ops_summary.py" --strict; then
       ok=1
     fi
   else
@@ -305,7 +319,7 @@ PY
 
   echo
   if [[ -x "$PYTHON_BIN" && -f "$ROOT_DIR/scripts/portal_runtime_doctor.py" ]]; then
-    if ! PYTHONPATH="$ROOT_DIR" TEAM_PORTAL_DATA_DIR="$data_dir" "$PYTHON_BIN" "$ROOT_DIR/scripts/portal_runtime_doctor.py" --strict; then
+    if ! PYTHONPATH="$ROOT_DIR" TEAM_PORTAL_DATA_DIR="$data_dir" LOCAL_AGENT_SOURCE_CODE_QA_ENABLED="$local_agent_source_code_qa_enabled" LOCAL_AGENT_TEAM_PORTAL_DATA_DIR="$local_agent_data_dir" "$PYTHON_BIN" "$ROOT_DIR/scripts/portal_runtime_doctor.py" --strict; then
       ok=1
     fi
   else
@@ -318,10 +332,11 @@ PY
 
 release_status() {
   if [[ -x "$PYTHON_BIN" && -f "$ROOT_DIR/scripts/release_status.py" ]]; then
-    "$PYTHON_BIN" "$ROOT_DIR/scripts/release_status.py" || true
+    "$PYTHON_BIN" "$ROOT_DIR/scripts/release_status.py" "$@"
   else
     echo "== Release Status =="
     echo "release status unavailable"
+    return 1
   fi
 }
 

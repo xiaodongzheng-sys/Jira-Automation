@@ -804,7 +804,10 @@ class TeamPortalAccessTests(unittest.TestCase):
                 with app.test_client() as client:
                     response = client.get("/healthz")
                     self.assertEqual(response.status_code, 200)
-                    self.assertEqual(response.get_json(), {"status": "ok", "revision": "uat-sha-123"})
+                    payload = response.get_json()
+                    self.assertEqual(payload["status"], "ok")
+                    self.assertEqual(payload["revision"], "uat-sha-123")
+                    self.assertEqual(payload["live_surface"], "mac_public_live")
         finally:
             _current_release_revision.cache_clear()
 
@@ -1398,10 +1401,9 @@ class TeamPortalAccessTests(unittest.TestCase):
             with app.test_client() as client:
                 response = client.get("/healthz")
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(
-                    response.get_json(),
-                    {"status": "ok", "revision": _current_release_revision()},
-                )
+                payload = response.get_json()
+                self.assertEqual(payload["status"], "ok")
+                self.assertEqual(payload["revision"], _current_release_revision())
 
     def test_sync_job_does_not_require_google_connection(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

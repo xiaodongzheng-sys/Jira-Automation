@@ -14,8 +14,10 @@ import json
 from types import SimpleNamespace
 
 from bpmis_jira_tool.bpmis_client import build_bpmis_client
+from bpmis_jira_tool.background_jobs import fail_job_if_active, start_durable_job_thread
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ToolError
+from bpmis_jira_tool.job_lifecycle import JobLifecycle
 from bpmis_jira_tool.job_store import JobState, JobStore
 from bpmis_jira_tool.local_agent_protocol import verify_signature
 from bpmis_jira_tool.models import InputRow
@@ -51,6 +53,7 @@ from bpmis_jira_tool.source_code_qa_codex_answer import (
     _log_source_code_qa_timing as _log_codex_answer_timing,
     build_codex_llm_answer as build_codex_llm_answer_payload,
 )
+from bpmis_jira_tool.source_code_qa_llm_pipeline import build_codex_initial_plan
 from bpmis_jira_tool.source_code_qa_factory import source_code_qa_data_root
 from bpmis_jira_tool.source_code_qa_answer_generation import build_llm_answer
 from bpmis_jira_tool.source_code_qa_jobs import SourceCodeQAQueryScheduler
@@ -83,6 +86,7 @@ from bpmis_jira_tool.team_dashboard_config import (
     TeamDashboardConfigStore,
     normalize_team_dashboard_emails,
 )
+from bpmis_jira_tool.web_health import build_health_payload
 
 
 def _settings(**overrides):
@@ -253,6 +257,104 @@ class SmallModuleCoverageTests(unittest.TestCase):
         queued_messages = [call.kwargs.get("message") for call in job_store.update_queue_metadata.call_args_list]
         self.assertIn("Starting Source Code Q&A job.", queued_messages)
 
+    def test_durable_background_job_thread_marks_unhandled_exception_failed(self):
+        class FakeThread:
+            def __init__(self, *, target, name=None, daemon=True):
+                self.target = target
+                self.name = name
+                self.daemon = daemon
+
+            def start(self):
+                self.target()
+
+        job_store = Mock()
+        job_store.snapshot.return_value = {"job_id": "job-1", "state": "running"}
+        app = Flask(__name__)
+
+        def broken():
+            raise RuntimeError("boom")
+
+        with patch("bpmis_jira_tool.background_jobs.threading.Thread", FakeThread):
+            thread = start_durable_job_thread(
+                app=app,
+                job_store=job_store,
+                job_id="job-1",
+                target=broken,
+                name="durable-test",
+            )
+
+        self.assertEqual(thread.name, "durable-test")
+        job_store.fail.assert_called_once()
+        self.assertEqual(job_store.fail.call_args.args[0], "job-1")
+        self.assertIn("boom", job_store.fail.call_args.args[1])
+        self.assertEqual(job_store.fail.call_args.kwargs["error_code"], "background_worker_unhandled_exception")
+
+    def test_job_lifecycle_start_complete_and_active_failure(self):
+        job_store = Mock()
+        job_store.snapshot.return_value = {"job_id": "job-1", "state": "running"}
+        lifecycle = JobLifecycle(job_store)
+
+        lifecycle.start("job-1", stage="uploading", message="Uploading.", current=2, total=5)
+        failed = lifecycle.fail_if_active(
+            "job-1",
+            "boom",
+            error_category="worker",
+            error_code="worker_failed",
+            error_retryable=False,
+        )
+        lifecycle.complete("job-1", results=[{"ok": True}], notice={"message": "done"})
+
+        self.assertTrue(failed)
+        job_store.update.assert_called_once_with(
+            "job-1",
+            state="running",
+            stage="uploading",
+            message="Uploading.",
+            current=2,
+            total=5,
+        )
+        job_store.fail.assert_called_once_with(
+            "job-1",
+            "boom",
+            error_category="worker",
+            error_code="worker_failed",
+            error_retryable=False,
+        )
+        job_store.complete.assert_called_once_with("job-1", results=[{"ok": True}], notice={"message": "done"})
+
+    def test_fail_job_if_active_skips_terminal_snapshots(self):
+        job_store = Mock()
+        job_store.snapshot.return_value = {"job_id": "job-1", "state": "completed"}
+
+        changed = fail_job_if_active(job_store, "job-1", "boom")
+
+        self.assertFalse(changed)
+        job_store.fail.assert_not_called()
+
+    def test_health_payload_includes_release_manifest_when_present(self):
+        payload = build_health_payload(
+            lambda: "rev-1",
+            environ={
+                "TEAM_PORTAL_LIVE_SURFACE": "mac_public_live",
+                "TEAM_PORTAL_RELEASE_MANIFEST_ID": "manifest-1",
+            },
+        )
+
+        self.assertEqual(
+            payload,
+            {
+                "status": "ok",
+                "revision": "rev-1",
+                "live_surface": "mac_public_live",
+                "release_manifest_id": "manifest-1",
+            },
+        )
+
+    def test_health_payload_defaults_live_surface_and_omits_blank_manifest(self):
+        payload = build_health_payload(lambda: "rev-2", environ={"TEAM_PORTAL_RELEASE_MANIFEST_ID": "  "})
+
+        self.assertEqual(payload, {"status": "ok", "revision": "rev-2", "live_surface": "mac_public_live"})
+
     def test_source_code_qa_answer_generation_reports_unavailable_llm(self):
         service = Mock()
         service.llm_ready.return_value = False
@@ -340,6 +442,73 @@ class SmallModuleCoverageTests(unittest.TestCase):
         self.assertEqual(compact["routed_budget_mode"], "compact_deep")
         self.assertTrue(compact["llm_route"]["token_pressure"])
         self.assertEqual(compact_service.context_limits, [2, 1])
+
+    def test_source_code_qa_llm_pipeline_builds_initial_plan(self):
+        class FakeCodexPlanningService:
+            def _codex_initial_candidate_context(self, **kwargs):
+                return {
+                    "candidate_matches": kwargs["selected_matches"],
+                    "candidate_paths": [{"repo": "risk", "path": "src/RiskService.java"}],
+                    "candidate_path_layers": [{"path": "src/RiskService.java", "layer": "service"}],
+                    "scope_roots": ["src"],
+                    "prompt_mode": "path_focused",
+                }
+
+            def _codex_initial_route_fields(self, **kwargs):
+                return {
+                    "selected_model": kwargs["selected_model"],
+                    "prompt_mode": kwargs["prompt_mode"],
+                    "query_mode": kwargs["query_mode"],
+                    "candidate_path_count": len(kwargs["candidate_paths"]),
+                }
+
+            def _runtime_evidence_for_budget(self, runtime_evidence, routed_budget_mode):
+                self.routed_budget_mode = routed_budget_mode
+                return runtime_evidence[:1]
+
+            def _codex_initial_prompt_context(self, **kwargs):
+                return kwargs
+
+            def _codex_prompt_stats(self, prompt_context):
+                return {"estimated_prompt_tokens": 321, "prompt_chars": 1234}
+
+            def _codex_reasoning_effort_for_route(self, routed_budget_mode):
+                return "high" if routed_budget_mode == "deep" else "medium"
+
+        service = FakeCodexPlanningService()
+
+        plan = build_codex_initial_plan(
+            service,
+            entries=[],
+            key="AF-1",
+            pm_team="AF",
+            country="SG",
+            question="What changed?",
+            matches=[{"path": "src/RiskService.java"}],
+            selected_matches=[{"path": "src/RiskService.java"}],
+            evidence_pack={"items": []},
+            quality_gate={"status": "ok"},
+            llm_route={"provider": "codex"},
+            selected_model="gpt-5-codex",
+            followup_context={"previous": "q"},
+            query_mode="deep",
+            routed_budget_mode="deep",
+            attachments=[{"name": "trace.txt"}],
+            runtime_evidence=[{"kind": "browser"}, {"kind": "log"}],
+            effort_assessment=True,
+        )
+
+        self.assertEqual(plan.candidate_matches, [{"path": "src/RiskService.java"}])
+        self.assertEqual(plan.prompt_runtime_evidence, [{"kind": "browser"}])
+        self.assertEqual(plan.prompt_context["runtime_evidence"], [{"kind": "browser"}])
+        self.assertEqual(plan.llm_route["provider"], "codex")
+        self.assertEqual(plan.llm_route["task"], "effort_assessment")
+        self.assertEqual(plan.llm_route["runtime_evidence_count"], 2)
+        self.assertEqual(plan.llm_route["prompt_runtime_evidence_count"], 1)
+        self.assertEqual(plan.llm_route["initial_prompt_estimated_tokens"], 321)
+        self.assertEqual(plan.llm_route["initial_prompt_chars"], 1234)
+        self.assertEqual(plan.candidate_repo_count, 1)
+        self.assertEqual(plan.reasoning_effort, "high")
 
     def _bind_source_code_qa_effort_test_globals(self, temp_dir, *, service=None, provider_available=True):
         root = Path(temp_dir)

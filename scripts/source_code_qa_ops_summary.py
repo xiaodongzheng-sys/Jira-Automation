@@ -19,10 +19,36 @@ if str(ROOT_DIR) not in sys.path:
 DEMO_REPO_MARKERS = ("git.example.com",)
 
 
+def _env_enabled(name: str) -> bool:
+    return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def effective_source_code_qa_data_root(default_root: Path | None = None) -> Path:
+    local_agent_root = str(os.environ.get("LOCAL_AGENT_TEAM_PORTAL_DATA_DIR") or "").strip()
+    if _env_enabled("LOCAL_AGENT_SOURCE_CODE_QA_ENABLED") and local_agent_root:
+        return Path(local_agent_root).expanduser().resolve()
+    if default_root is not None:
+        return default_root.expanduser().resolve()
+    env_root = str(os.environ.get("TEAM_PORTAL_DATA_DIR") or "").strip()
+    if env_root:
+        return Path(env_root).expanduser().resolve()
+    return (Path.cwd() / "data").resolve()
+
+
 def _resolve_data_root(raw: str | None) -> Path:
     if raw:
         return Path(raw).expanduser().resolve()
-    return (Path.cwd() / "data").resolve()
+    return effective_source_code_qa_data_root()
+
+
+def _data_root_resolution_lines(requested_root: Path, effective_root: Path) -> list[str]:
+    if requested_root == effective_root:
+        return []
+    return [
+        f"requested_data_root={requested_root}",
+        f"effective_data_root={effective_root}",
+        "data_root_resolution=local_agent_source_code_qa",
+    ]
 
 
 def _read_tail_jsonl(path: Path, limit: int) -> list[dict[str, Any]]:
@@ -140,7 +166,9 @@ def _index_health_summary(data_root: Path) -> tuple[list[str], list[str]]:
     return lines, issues
 
 
-def build_summary(data_root: Path, *, limit: int = 200, strict: bool = False) -> list[str]:
+def build_summary(data_root: Path, *, limit: int = 200, strict: bool = False, prefer_local_agent: bool = False) -> list[str]:
+    requested_data_root = data_root.expanduser().resolve()
+    data_root = effective_source_code_qa_data_root(requested_data_root) if prefer_local_agent else requested_data_root
     source_root = data_root / "source_code_qa"
     telemetry_rows = _read_tail_jsonl(source_root / "telemetry.jsonl", limit)
     feedback_rows = _read_tail_jsonl(source_root / "feedback.jsonl", limit)
@@ -149,6 +177,7 @@ def build_summary(data_root: Path, *, limit: int = 200, strict: bool = False) ->
 
     lines: list[str] = []
     lines.append(f"data_root={data_root}")
+    lines.extend(_data_root_resolution_lines(requested_data_root, data_root))
     config_lines, config_issues = _source_config_summary(source_root)
     lines.extend(config_lines)
     issues.extend(config_issues)

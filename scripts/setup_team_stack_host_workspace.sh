@@ -40,7 +40,16 @@ fi
 
 if [[ ! -x "$TARGET_ROOT/.venv/bin/python" ]]; then
   echo "Creating host workspace virtual environment..."
-  python3 -m venv "$TARGET_ROOT/.venv"
+  HOST_PYTHON_BIN="${TEAM_STACK_HOST_TARGET_PYTHON:-}"
+  if [[ -z "$HOST_PYTHON_BIN" ]]; then
+    for candidate in /opt/homebrew/opt/python@3.12/bin/python3.12 /opt/homebrew/bin/python3.12 "$(command -v python3 || true)"; do
+      if [[ -n "$candidate" && -x "$candidate" ]]; then
+        HOST_PYTHON_BIN="$candidate"
+        break
+      fi
+    done
+  fi
+  "${HOST_PYTHON_BIN:-python3}" -m venv "$TARGET_ROOT/.venv"
   "$TARGET_ROOT/.venv/bin/pip" install -r "$TARGET_ROOT/requirements.txt" >/dev/null
 fi
 

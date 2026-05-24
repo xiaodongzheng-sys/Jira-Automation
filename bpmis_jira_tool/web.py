@@ -5,7 +5,6 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import difflib
 from email.utils import getaddresses
-from functools import lru_cache
 import hashlib
 import inspect
 import io
@@ -18,7 +17,6 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
-import subprocess
 import threading
 import time
 from typing import Any
@@ -106,6 +104,7 @@ from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.seatalk_stores import SeaTalkNameMappingStore, SeaTalkTodoStore
 from bpmis_jira_tool.bpmis_client import build_bpmis_client
 from bpmis_jira_tool.bpmis_projects import BPMISProjectStore, PortalJiraCreationService, PortalProjectSyncService
+from bpmis_jira_tool.background_jobs import start_durable_job_thread
 from bpmis_jira_tool.source_code_qa import CRMS_COUNTRIES, ALL_COUNTRY, IDENTIFIER_PATTERN, CodexCliBridgeSourceCodeQALLMProvider, SourceCodeQAService
 from bpmis_jira_tool.source_code_qa_factory import build_source_code_qa_service_from_settings
 from bpmis_jira_tool.source_code_qa_jobs import SourceCodeQAQueryScheduler
@@ -240,6 +239,9 @@ from bpmis_jira_tool.web_prd_self_assessment_routes import build_prd_self_assess
 from bpmis_jira_tool.web_productization_routes import build_productization_handlers, register_productization_routes
 from bpmis_jira_tool.web_source_code_qa_routes import register_source_code_qa_routes
 from bpmis_jira_tool.web_team_dashboard_routes import build_team_dashboard_handlers, register_team_dashboard_routes
+from bpmis_jira_tool.web_runtime_status import current_release_revision as _runtime_current_release_revision
+from bpmis_jira_tool.web_runtime_status import default_flask_session_secret as _default_flask_session_secret
+from bpmis_jira_tool.web_health import build_health_payload
 from bpmis_jira_tool.work_memory import (
     WorkMemoryStore,
     gmail_attachment_memory_item,
@@ -291,7 +293,6 @@ TEAM_DASHBOARD_LINK_BIZ_EXCLUDED_TITLE_PHRASES = (
     "productisation upgrade",
     "deployment of productization",
 )
-DEFAULT_FLASK_SESSION_SECRET_VALUES = {"", "dev-secret-key", "local-dev-secret-change-me"}
 _team_dashboard_actual_mandays_lock = threading.Lock()
 _team_dashboard_actual_mandays_running: set[str] = set()
 _gmail_export_active_users: set[str] = set()
@@ -306,22 +307,11 @@ def _bool_env_from_env(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-@lru_cache(maxsize=1)
 def _current_release_revision() -> str:
-    pinned_revision = str(os.environ.get("TEAM_PORTAL_RELEASE_REVISION") or "").strip()
-    if pinned_revision:
-        return pinned_revision
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(PROJECT_ROOT), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return "unknown"
-    revision = completed.stdout.strip()
-    return revision or "unknown"
+    return _runtime_current_release_revision(PROJECT_ROOT)
+
+
+_current_release_revision.cache_clear = _runtime_current_release_revision.cache_clear  # type: ignore[attr-defined]
 
 
 
@@ -824,7 +814,7 @@ def create_app() -> Flask:
     def enforce_team_access():
         g.request_id = uuid.uuid4().hex[:12]
         if request.path.rstrip("/") == "/healthz":
-            return jsonify({"status": "ok", "revision": _current_release_revision()}), HTTPStatus.OK
+            return jsonify(build_health_payload(_current_release_revision)), HTTPStatus.OK
         if request.path.startswith("/api/local-agent/"):
             return None
         if request.path.startswith("/uat-local-agent/"):
@@ -1421,12 +1411,15 @@ def create_app() -> Flask:
         }.get(action, "Background Job")
         job = job_store.create(action, title=title)
 
-        thread = threading.Thread(
+        start_durable_job_thread(
+            app=app,
+            job_store=job_store,
+            job_id=job.job_id,
             target=_run_background_job,
             args=(app, job.job_id, action, settings, config_data),
-            daemon=True,
+            name=f"portal-background-{action}",
+            error_prefix="Portal background job failed unexpectedly",
         )
-        thread.start()
         _log_portal_event(
             "job_queued",
             **_build_request_log_context(
@@ -2603,10 +2596,6 @@ def _google_session_is_connected() -> bool:
     return "google_credentials" in session and bool(_current_google_email())
 
 
-def _default_flask_session_secret(value: Any) -> bool:
-    return str(value or "").strip() in DEFAULT_FLASK_SESSION_SECRET_VALUES
-
-
 def _safe_relative_redirect_target(value: Any) -> str:
     target = str(value or "").strip()
     if not target or not target.startswith("/") or target.startswith("//"):
@@ -3293,12 +3282,15 @@ def _queue_prd_generation_job(
 ):
     job_store: JobStore = current_app.config["JOB_STORE"]
     job = job_store.create(f"prd-{action.replace('_', '-')}", title=title)
-    thread = threading.Thread(
+    start_durable_job_thread(
+        app=current_app._get_current_object(),
+        job_store=job_store,
+        job_id=job.job_id,
         target=_run_prd_generation_job,
         args=(current_app._get_current_object(), job.job_id, settings, action, dict(request_payload), dict(user_identity)),
-        daemon=True,
+        name=f"prd-generation-{action}",
+        error_prefix="PRD generation job failed unexpectedly",
     )
-    thread.start()
     _log_portal_event(
         "prd_generation_job_queued",
         **_build_request_log_context(
@@ -3869,12 +3861,17 @@ def _queue_meeting_recorder_process_job(
         current=0,
         total=1,
     )
-    thread = threading.Thread(
+    start_durable_job_thread(
+        app=app,
+        job_store=job_store,
+        job_id=job.job_id,
         target=_run_meeting_recorder_process_job,
         args=(app, job.job_id, str(record.get("record_id") or record_id), normalized_owner, bool(send_email_on_complete)),
-        daemon=True,
+        name="meeting-recorder-process",
+        error_prefix="Meeting recorder process job failed unexpectedly",
+        error_category="meeting_processing_failed",
+        error_code="meeting_processing_unexpected_error",
     )
-    thread.start()
     return {
         "status": "queued",
         "state": "queued",

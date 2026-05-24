@@ -88,6 +88,22 @@ class PortalRuntimeDoctorTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            (data_root / "run" / "team_dashboard_jobs.json").write_text(
+                json.dumps(
+                    {
+                        "jobs": {
+                            "job-3": {
+                                "job_id": "job-3",
+                                "action": "team-dashboard-monthly-report-draft",
+                                "state": "completed",
+                                "stage": "completed",
+                                "updated_at": now_epoch,
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
             record_dir = data_root / "meeting_records" / "records" / "rec-1"
             record_dir.mkdir(parents=True)
             (record_dir / "metadata.json").write_text(
@@ -118,6 +134,8 @@ class PortalRuntimeDoctorTests(unittest.TestCase):
         self.assertEqual(report["llm"]["flows"]["unknown"], 1)
         self.assertEqual(report["llm"]["estimated_prompt_tokens"]["max"], 62000)
         self.assertEqual(report["jobs"]["states"]["failed"], 1)
+        self.assertEqual(report["jobs"]["stores"]["jobs.json"], 2)
+        self.assertEqual(report["jobs"]["stores"]["team_dashboard_jobs.json"], 1)
         self.assertEqual(report["meeting_records"]["statuses"]["failed"], 1)
         issue_codes = {issue["code"] for issue in report["issues"]}
         self.assertIn("llm_unknown_flow", issue_codes)

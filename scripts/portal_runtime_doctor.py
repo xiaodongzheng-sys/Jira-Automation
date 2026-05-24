@@ -255,42 +255,18 @@ def _summarize_llm_ledger(data_root: Path, limit: int, *, recent_hours: float) -
 
 
 def _job_stores(data_root: Path) -> list[Path]:
-    return [
-        data_root / "run" / "jobs.json",
-        data_root / "run" / "team_dashboard_jobs.json",
-        data_root / "run" / "meeting_recorder_jobs.json",
-        data_root / "source_code_qa" / "sync_jobs.json",
-    ]
+    from bpmis_jira_tool.job_store_registry import job_store_specs
 
-
-def _extract_jobs(payload: Any, store: Path) -> list[dict[str, Any]]:
-    if not isinstance(payload, dict):
-        return []
-    raw_jobs = payload.get("jobs", payload)
-    if isinstance(raw_jobs, dict):
-        iterable = raw_jobs.values()
-    elif isinstance(raw_jobs, list):
-        iterable = raw_jobs
-    else:
-        return []
-    jobs: list[dict[str, Any]] = []
-    for item in iterable:
-        if isinstance(item, dict):
-            row = dict(item)
-            row["_store"] = store.name
-            jobs.append(row)
-    return jobs
+    return [spec.path for spec in job_store_specs(data_root)]
 
 
 def _summarize_jobs(data_root: Path, limit: int, *, recent_hours: float) -> tuple[dict[str, Any], list[dict[str, str]]]:
-    jobs: list[dict[str, Any]] = []
+    from bpmis_jira_tool.job_store_registry import load_all_job_snapshots
+
+    jobs = load_all_job_snapshots(data_root)
     store_counts: Counter[str] = Counter()
-    for store in _job_stores(data_root):
-        payload = _read_json(store)
-        extracted = _extract_jobs(payload, store)
-        if extracted:
-            jobs.extend(extracted)
-            store_counts[store.name] += len(extracted)
+    for job in jobs:
+        store_counts[str(job.get("_store") or "unknown")] += 1
 
     jobs.sort(key=lambda row: _safe_int(row.get("updated_at") or row.get("completed_at") or row.get("created_at")), reverse=True)
     sampled = jobs[:limit]
@@ -419,7 +395,7 @@ def _source_code_qa_summary(data_root: Path, limit: int) -> tuple[list[str], lis
             _issue("warn", "source_code_qa_ops_unavailable", "Source Code QA ops summary import failed.")
         ]
     try:
-        lines = build_summary(data_root, limit=limit, strict=True)
+        lines = build_summary(data_root, limit=limit, strict=True, prefer_local_agent=True)
     except Exception as error:  # pragma: no cover - defensive ops diagnostics
         return [f"source_code_qa_ops_summary=unavailable error={type(error).__name__}: {error}"], [
             _issue("warn", "source_code_qa_ops_unavailable", "Source Code QA ops summary failed.")

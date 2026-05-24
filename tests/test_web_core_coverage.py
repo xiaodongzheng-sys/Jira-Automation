@@ -212,7 +212,7 @@ class WebCoreCoverageTests(unittest.TestCase):
         web_module._release_gmail_export_lock("owner@npt.sg")
         web_module._release_gmail_export_lock("")
         web_module._current_release_revision.cache_clear()
-        with patch("bpmis_jira_tool.web.subprocess.run", side_effect=FileNotFoundError):
+        with patch("bpmis_jira_tool.web_runtime_status.subprocess.run", side_effect=FileNotFoundError):
             self.assertEqual(web_module._current_release_revision(), "unknown")
         web_module._current_release_revision.cache_clear()
         with patch("bpmis_jira_tool.web.inspect.signature", side_effect=ValueError("bad signature")):
