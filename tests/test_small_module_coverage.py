@@ -25,6 +25,8 @@ from bpmis_jira_tool.seatalk_stores import SeaTalkNameMappingStore, SeaTalkTodoS
 from bpmis_jira_tool import web_source_code_qa_effort as effort_helpers
 from bpmis_jira_tool import web_source_code_qa_jobs
 from bpmis_jira_tool.web_prd_self_assessment_routes import build_prd_self_assessment_handlers
+from bpmis_jira_tool import web_productization_helpers as productization_helpers
+from bpmis_jira_tool import web_team_dashboard_helpers as team_dashboard_helpers
 from bpmis_jira_tool.web_productization_routes import build_productization_handlers, register_productization_routes
 from bpmis_jira_tool.web_gmail_seatalk_routes import build_gmail_seatalk_handlers, register_gmail_seatalk_routes
 from bpmis_jira_tool.web_bpmis_routes import build_bpmis_handlers, register_bpmis_routes
@@ -112,6 +114,71 @@ def _settings(**overrides):
 
 
 class SmallModuleCoverageTests(unittest.TestCase):
+    def test_productization_helpers_normalize_rows_and_team_filter(self):
+        row = {
+            "fields": {
+                "jiraLink": "AF-123",
+                "summary": {"value": "Rule upgrade"},
+                "description": "Details",
+                "component": [{"name": "DBP-Anti-Fraud"}],
+                "prdLinks": "https://confluence/prd, https://confluence/prd",
+            },
+            "row": {"pm": {"emailAddress": "pm@npt.sg"}},
+        }
+
+        normalized = productization_helpers.normalize_productization_issue_row(
+            row,
+            description_formatter=lambda value: f"formatted:{value}",
+        )
+        filtered_rows, metadata = productization_helpers.filter_productization_issue_rows_for_pm_team(
+            [row, {"component": "Other"}],
+            {"pm_team": "AF"},
+        )
+
+        self.assertEqual(normalized["jira_ticket_number"], "AF-123")
+        self.assertEqual(normalized["jira_ticket_url"], "https://jira.shopee.io/browse/AF-123")
+        self.assertEqual(normalized["feature_summary"], "Rule upgrade")
+        self.assertEqual(normalized["detailed_feature"], "formatted:Details")
+        self.assertEqual(normalized["pm"], "pm@npt.sg")
+        self.assertEqual(normalized["prd_links"], [{"label": "https://confluence/prd", "url": "https://confluence/prd"}])
+        self.assertEqual(filtered_rows, [row])
+        self.assertTrue(metadata["team_filter_applied"])
+
+    def test_team_dashboard_helpers_group_projects_and_cache_mandays(self):
+        tasks = [
+            team_dashboard_helpers.normalize_team_dashboard_task(
+                {
+                    "jira_id": "AF-2",
+                    "jira_title": "Second",
+                    "pm_email": "PM@NPT.SG",
+                    "release_date": "2026/06/02",
+                    "parent_project": {"bpmis_id": "B1", "project_name": "Beta", "priority": "SP"},
+                }
+            ),
+            team_dashboard_helpers.normalize_team_dashboard_task(
+                {
+                    "jira_id": "AF-1",
+                    "jira_title": "First",
+                    "pm_email": "pm@npt.sg",
+                    "release_date": "2026-06-01",
+                    "parent_project": {"bpmis_id": "B1", "project_name": "Beta"},
+                }
+            ),
+        ]
+        projects = team_dashboard_helpers.group_team_dashboard_tasks_by_project(tasks, sort_by_release=True)
+        team_dashboard_helpers.apply_team_dashboard_key_project_states(projects, {})
+        pending_ids = team_dashboard_helpers.apply_team_dashboard_actual_mandays_cache(
+            {"actual_mandays_cache": {"projects": {"B1": {"value": "3.0", "cached_at": team_dashboard_helpers.team_dashboard_timestamp()}}}},
+            [{"under_prd": projects, "pending_live": []}],
+        )
+
+        self.assertEqual(projects[0]["bpmis_id"], "B1")
+        self.assertEqual(projects[0]["jira_tickets"][0]["jira_id"], "AF-1")
+        self.assertEqual(projects[0]["release_date"], "2026-06-02")
+        self.assertTrue(projects[0]["is_key_project"])
+        self.assertEqual(projects[0]["actual_mandays"], 3)
+        self.assertEqual(pending_ids, [])
+
     def test_bpmis_client_factory_uses_direct_client_when_local_agent_disabled(self):
         settings = _settings(
             local_agent_base_url="https://agent.example",

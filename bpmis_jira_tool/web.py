@@ -100,6 +100,24 @@ from bpmis_jira_tool.productization_codex import (
     generate_productization_detailed_features_with_local_codex as _generate_productization_detailed_features_with_local_codex,
     parse_codex_json_object as _parse_codex_json_object,
 )
+from bpmis_jira_tool.web_productization_helpers import (
+    coerce_display_text as _coerce_display_text,
+    extract_first_text as _extract_first_text,
+    extract_first_value as _extract_first_value,
+    extract_issue_key_from_text as _extract_issue_key_from_text,
+    extract_link_values as _extract_link_values,
+    extract_person_display as _extract_person_display,
+    extract_productization_issue_components as _extract_productization_issue_components,
+    filter_productization_issue_rows_for_pm_team as _filter_productization_issue_rows_for_pm_team,
+    flatten_links as _flatten_links,
+    flatten_productization_component_values as _flatten_productization_component_values,
+    jira_browse_base_url as _jira_browse_base_url,
+    normalize_productization_issue_row as _normalize_productization_issue_row_base,
+    normalize_productization_ticket_url as _normalize_productization_ticket_url,
+    productization_allowed_components_for_pm_team as _productization_allowed_components_for_pm_team,
+    productization_issue_matches_components as _productization_issue_matches_components,
+    serialize_productization_version_candidate as _serialize_productization_version_candidate,
+)
 from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.seatalk_stores import SeaTalkNameMappingStore, SeaTalkTodoStore
 from bpmis_jira_tool.bpmis_client import build_bpmis_client
@@ -222,6 +240,36 @@ from bpmis_jira_tool.team_dashboard_config import (
     TEAM_DASHBOARD_UNDER_PRD_STATUSES,
     TeamDashboardConfigStore,
     normalize_team_dashboard_emails as _normalize_team_dashboard_emails,
+)
+from bpmis_jira_tool.web_team_dashboard_helpers import (
+    apply_team_dashboard_actual_mandays_cache as _apply_team_dashboard_actual_mandays_cache,
+    apply_team_dashboard_key_project_state as _apply_team_dashboard_key_project_state,
+    apply_team_dashboard_key_project_states as _apply_team_dashboard_key_project_states,
+    apply_team_dashboard_project_release_date as _apply_team_dashboard_project_release_date,
+    format_team_dashboard_release_date as _format_team_dashboard_release_date,
+    group_team_dashboard_tasks_by_project as _group_team_dashboard_tasks_by_project,
+    merge_team_dashboard_biz_projects as _merge_team_dashboard_biz_projects,
+    merge_team_dashboard_project_pm_emails as _merge_team_dashboard_project_pm_emails,
+    normalize_team_dashboard_project as _normalize_team_dashboard_project,
+    normalize_team_dashboard_task as _normalize_team_dashboard_task,
+    parse_team_dashboard_release_date as _parse_team_dashboard_release_date,
+    sort_team_dashboard_under_prd_projects as _sort_team_dashboard_under_prd_projects,
+    split_team_dashboard_biz_projects_by_status as _split_team_dashboard_biz_projects_by_status,
+    team_dashboard_actual_mandays_cache_ttl_seconds as _team_dashboard_actual_mandays_cache_ttl_seconds,
+    team_dashboard_actual_mandays_entry_is_fresh as _team_dashboard_actual_mandays_entry_is_fresh,
+    team_dashboard_actual_mandays_status as _team_dashboard_actual_mandays_status,
+    team_dashboard_jira_max_pages as _team_dashboard_jira_max_pages,
+    team_dashboard_jira_release_after as _team_dashboard_jira_release_after,
+    team_dashboard_link_items as _team_dashboard_link_items,
+    team_dashboard_manday_value as _team_dashboard_manday_value,
+    team_dashboard_monthly_report_jira_release_after as _team_dashboard_monthly_report_jira_release_after,
+    team_dashboard_parse_timestamp as _team_dashboard_parse_timestamp,
+    team_dashboard_project_entries as _team_dashboard_project_entries,
+    team_dashboard_project_name_sort_key as _team_dashboard_project_name_sort_key,
+    team_dashboard_project_release_sort_key as _team_dashboard_project_release_sort_key,
+    team_dashboard_sort_key as _team_dashboard_sort_key,
+    team_dashboard_timestamp as _team_dashboard_timestamp,
+    team_dashboard_under_prd_project_sort_key as _team_dashboard_under_prd_project_sort_key,
 )
 from bpmis_jira_tool.user_config import (
     CONFIGURED_FIELDS,
@@ -4704,107 +4752,6 @@ def _load_team_dashboard_link_biz_project_payloads(settings: Settings, config: d
     return team_payloads
 
 
-def _team_dashboard_actual_mandays_cache_ttl_seconds() -> int:
-    raw_value = str(os.getenv("TEAM_DASHBOARD_ACTUAL_MANDAYS_CACHE_TTL_SECONDS") or "86400").strip()
-    try:
-        return max(0, int(raw_value))
-    except ValueError:
-        return 86400
-
-
-def _team_dashboard_timestamp() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
-def _team_dashboard_parse_timestamp(value: Any) -> float | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.timestamp()
-
-
-def _team_dashboard_manday_value(value: Any) -> float | int | str:
-    try:
-        normalized = float(value)
-    except (TypeError, ValueError):
-        return ""
-    if normalized.is_integer():
-        return int(normalized)
-    return normalized
-
-
-def _team_dashboard_actual_mandays_entry_is_fresh(entry: dict[str, Any], *, now: float | None = None) -> bool:
-    if not isinstance(entry, dict) or entry.get("value") in {None, ""}:
-        return False
-    ttl_seconds = _team_dashboard_actual_mandays_cache_ttl_seconds()
-    if ttl_seconds <= 0:
-        return False
-    cached_at = _team_dashboard_parse_timestamp(entry.get("cached_at"))
-    if cached_at is None:
-        return False
-    return ((now if now is not None else time.time()) - cached_at) <= ttl_seconds
-
-
-def _team_dashboard_project_entries(team_payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    projects: list[dict[str, Any]] = []
-    for team_payload in team_payloads:
-        if not isinstance(team_payload, dict):
-            continue
-        for section_key in ("under_prd", "pending_live"):
-            section_projects = team_payload.get(section_key)
-            if isinstance(section_projects, list):
-                projects.extend(project for project in section_projects if isinstance(project, dict))
-    return projects
-
-
-def _apply_team_dashboard_actual_mandays_cache(config: dict[str, Any], team_payloads: list[dict[str, Any]]) -> list[str]:
-    cache = config.get("actual_mandays_cache") if isinstance(config.get("actual_mandays_cache"), dict) else {}
-    cached_projects = cache.get("projects") if isinstance(cache.get("projects"), dict) else {}
-    now = time.time()
-    pending_project_ids: list[str] = []
-    for project in _team_dashboard_project_entries(team_payloads):
-        bpmis_id = str(project.get("bpmis_id") or "").strip()
-        if not bpmis_id:
-            continue
-        entry = cached_projects.get(bpmis_id) if isinstance(cached_projects.get(bpmis_id), dict) else {}
-        cached_value = _team_dashboard_manday_value(entry.get("value")) if entry else ""
-        is_fresh = _team_dashboard_actual_mandays_entry_is_fresh(entry, now=now)
-        if cached_value != "":
-            project["actual_mandays"] = cached_value
-            project["actual_mandays_cached_at"] = str(entry.get("cached_at") or "")
-            project["actual_mandays_stale"] = not is_fresh
-        elif "actual_mandays" not in project:
-            project["actual_mandays"] = ""
-        if not is_fresh:
-            project["actual_mandays_pending"] = True
-            if bpmis_id not in pending_project_ids:
-                pending_project_ids.append(bpmis_id)
-        else:
-            project["actual_mandays_pending"] = False
-    for team_payload in team_payloads:
-        team_payload["actual_mandays_status"] = _team_dashboard_actual_mandays_status(team_payload)
-    return pending_project_ids
-
-
-def _team_dashboard_actual_mandays_status(team_payload: dict[str, Any]) -> dict[str, Any]:
-    projects = _team_dashboard_project_entries([team_payload])
-    pending_count = sum(1 for project in projects if project.get("actual_mandays_pending"))
-    stale_count = sum(1 for project in projects if project.get("actual_mandays_stale"))
-    cached_count = sum(1 for project in projects if str(project.get("actual_mandays_cached_at") or "").strip())
-    return {
-        "pending_count": pending_count,
-        "stale_count": stale_count,
-        "cached_count": cached_count,
-        "project_count": len([project for project in projects if str(project.get("bpmis_id") or "").strip()]),
-    }
-
-
 def _store_team_dashboard_actual_mandays_results(
     store: TeamDashboardConfigStore | RemoteTeamDashboardConfigStore,
     results: dict[str, Any],
@@ -5774,363 +5721,11 @@ def _team_dashboard_project_fallback_jira_tasks(bpmis_client: Any, project: dict
     return tickets
 
 
-def _team_dashboard_jira_max_pages() -> int:
-    raw_value = str(os.getenv("TEAM_DASHBOARD_JIRA_MAX_PAGES") or "5").strip()
-    try:
-        return max(1, int(raw_value))
-    except ValueError:
-        return 5
-
-
-def _team_dashboard_jira_release_after() -> str:
-    configured = str(os.getenv("TEAM_DASHBOARD_JIRA_RELEASE_AFTER") or "").strip()
-    if configured:
-        return configured
-    return time.strftime("%Y-%m-%d", time.localtime())
-
-
-def _team_dashboard_monthly_report_jira_release_after() -> str:
-    configured = str(os.getenv("TEAM_DASHBOARD_MONTHLY_REPORT_JIRA_RELEASE_AFTER") or "").strip()
-    if configured:
-        return configured
-    return time.strftime("%Y-%m-%d", time.localtime(time.time() - 60 * 60 * 24 * 45))
-
-
-def _normalize_team_dashboard_task(task: dict[str, Any]) -> dict[str, Any]:
-    jira_id = str(task.get("jira_id") or task.get("ticket_key") or "").strip()
-    issue_id = str(task.get("issue_id") or "").strip()
-    jira_link = str(task.get("jira_link") or task.get("ticket_link") or "").strip()
-    if not jira_link and jira_id:
-        jira_link = f"{_jira_browse_base_url()}{jira_id}"
-    raw_prd_links = task.get("prd_links")
-    if not raw_prd_links and task.get("prd_link"):
-        raw_prd_links = str(task.get("prd_link") or "").splitlines()
-    prd_links = _team_dashboard_link_items(raw_prd_links)
-    return {
-        "issue_id": issue_id,
-        "jira_id": jira_id or issue_id,
-        "jira_link": jira_link,
-        "jira_title": str(task.get("jira_title") or "").strip(),
-        "pm_email": str(task.get("pm_email") or "").strip().lower(),
-        "jira_status": str(task.get("jira_status") or task.get("status") or "").strip(),
-        "created_at": str(task.get("created_at") or task.get("created") or "").strip(),
-        "release_date": _format_team_dashboard_release_date(task.get("release_date") or task.get("release")),
-        "version": str(task.get("version") or task.get("fix_version_name") or "").strip(),
-        "description": str(task.get("description") or task.get("desc") or task.get("jiraDescription") or "").strip(),
-        "prd_links": prd_links,
-        "parent_project": _normalize_team_dashboard_project(task.get("parent_project") if isinstance(task.get("parent_project"), dict) else {}),
-    }
-
-
-def _normalize_team_dashboard_project(project: dict[str, Any]) -> dict[str, str]:
-    bpmis_id = str(project.get("bpmis_id") or project.get("issue_id") or "").strip()
-    matched_pm_emails = _normalize_team_dashboard_emails(project.get("matched_pm_emails") or [])
-    normalized: dict[str, Any] = {
-        "bpmis_id": bpmis_id,
-        "project_name": str(project.get("project_name") or "").strip(),
-        "market": str(project.get("market") or "").strip(),
-        "priority": str(project.get("priority") or "").strip(),
-        "regional_pm_pic": str(project.get("regional_pm_pic") or "").strip(),
-        "status": str(project.get("status") or project.get("biz_project_status") or "").strip(),
-        "actual_mandays": project.get("actual_mandays", ""),
-    }
-    if matched_pm_emails:
-        normalized["matched_pm_emails"] = matched_pm_emails
-    return normalized
-
-
-def _split_team_dashboard_biz_projects_by_status(
-    biz_projects: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    under_prd: list[dict[str, Any]] = []
-    pending_live: list[dict[str, Any]] = []
-    for raw_project in biz_projects:
-        project = _normalize_team_dashboard_project(raw_project if isinstance(raw_project, dict) else {})
-        status_key = str(project.get("status") or "").strip().casefold()
-        if status_key in TEAM_DASHBOARD_UNDER_PRD_BIZ_PROJECT_STATUSES:
-            under_prd.append(project)
-        elif status_key in TEAM_DASHBOARD_PENDING_LIVE_BIZ_PROJECT_STATUSES:
-            pending_live.append(project)
-    return under_prd, pending_live
-
-
-def _group_team_dashboard_tasks_by_project(
-    tasks: list[dict[str, Any]],
-    *,
-    sort_by_release: bool = False,
-) -> list[dict[str, Any]]:
-    grouped: dict[str, dict[str, Any]] = {}
-    for task in tasks:
-        project = task.get("parent_project") if isinstance(task.get("parent_project"), dict) else {}
-        project = _normalize_team_dashboard_project(project)
-        key = project.get("bpmis_id") or "unknown"
-        if key not in grouped:
-            if key == "unknown":
-                project = {
-                    "bpmis_id": "",
-                    "project_name": "BPMIS unavailable",
-                    "market": "",
-                    "priority": "",
-                    "regional_pm_pic": "",
-                }
-            grouped[key] = {
-                **project,
-                "jira_tickets": [],
-                "task_count": 0,
-                "release_date": "-",
-                "release_date_sort": "",
-            }
-        grouped[key]["jira_tickets"].append(task)
-        grouped[key]["task_count"] = len(grouped[key]["jira_tickets"])
-
-    projects = list(grouped.values())
-    for project in projects:
-        project["jira_tickets"].sort(key=_team_dashboard_sort_key)
-        _apply_team_dashboard_project_release_date(project)
-    if sort_by_release:
-        projects.sort(key=_team_dashboard_project_release_sort_key)
-    else:
-        projects.sort(key=_team_dashboard_project_name_sort_key)
-    for project in projects:
-        project.pop("release_date_sort", None)
-    return projects
-
-
-def _merge_team_dashboard_biz_projects(
-    projects: list[dict[str, Any]],
-    biz_projects: list[dict[str, Any]],
-    *,
-    sort_by_release: bool = False,
-) -> list[dict[str, Any]]:
-    by_id: dict[str, dict[str, Any]] = {
-        str(project.get("bpmis_id") or "").strip(): project
-        for project in projects
-        if str(project.get("bpmis_id") or "").strip()
-    }
-    merged = list(projects)
-    for raw_project in biz_projects:
-        project = _normalize_team_dashboard_project(raw_project if isinstance(raw_project, dict) else {})
-        bpmis_id = project.get("bpmis_id")
-        if not bpmis_id:
-            continue
-        existing = by_id.get(bpmis_id)
-        if existing:
-            for key in ("project_name", "market", "priority", "regional_pm_pic", "status", "actual_mandays"):
-                if project.get(key) and not existing.get(key):
-                    existing[key] = project[key]
-            _merge_team_dashboard_project_pm_emails(existing, project.get("matched_pm_emails") or [])
-            continue
-        project.update(
-            {
-                "jira_tickets": [],
-                "task_count": 0,
-                "release_date": "-",
-                "release_date_sort": "",
-            }
-        )
-        merged.append(project)
-        by_id[bpmis_id] = project
-    if sort_by_release:
-        merged.sort(key=_team_dashboard_project_release_sort_key)
-    else:
-        merged.sort(key=_team_dashboard_project_name_sort_key)
-    for project in merged:
-        project.pop("release_date_sort", None)
-    return merged
-
-
-def _merge_team_dashboard_project_pm_emails(project: dict[str, Any], emails: list[str]) -> None:
-    existing = _normalize_team_dashboard_emails(project.get("matched_pm_emails") or [])
-    for email in _normalize_team_dashboard_emails(emails):
-        if email not in existing:
-            existing.append(email)
-    if existing:
-        project["matched_pm_emails"] = existing
-
-
-def _apply_team_dashboard_key_project_states(projects: list[dict[str, Any]], overrides: dict[str, Any]) -> None:
-    for project in projects:
-        _apply_team_dashboard_key_project_state(project, overrides)
-
-
-def _apply_team_dashboard_key_project_state(project: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
-    bpmis_id = str(project.get("bpmis_id") or "").strip()
-    override = overrides.get(bpmis_id) if bpmis_id and isinstance(overrides, dict) else None
-    if isinstance(override, dict) and "is_key_project" in override:
-        is_key_project = bool(override.get("is_key_project"))
-        project["is_key_project"] = is_key_project
-        project["key_project_source"] = "manual_on" if is_key_project else "manual_off"
-        project["key_project_override"] = {
-            "is_key_project": is_key_project,
-            "updated_by": str(override.get("updated_by") or "").strip().lower(),
-            "updated_at": str(override.get("updated_at") or "").strip(),
-        }
-        return project
-    priority = str(project.get("priority") or "").strip().casefold()
-    is_priority_default = priority in {"sp", "p0"}
-    project["is_key_project"] = is_priority_default
-    project["key_project_source"] = "priority_default" if is_priority_default else "none"
-    project.pop("key_project_override", None)
-    return project
-
-
-def _apply_team_dashboard_project_release_date(project: dict[str, Any]) -> None:
-    latest = None
-    for task in project.get("jira_tickets") or []:
-        parsed, _text = _parse_team_dashboard_release_date(task.get("release_date"))
-        if parsed and (latest is None or parsed > latest):
-            latest = parsed
-    if latest:
-        project["release_date"] = time.strftime("%Y-%m-%d", latest)
-        project["release_date_sort"] = time.strftime("%Y-%m-%d", latest)
-    else:
-        project["release_date"] = "-"
-        project["release_date_sort"] = ""
-
-
-def _format_team_dashboard_release_date(value: Any) -> str:
-    parsed, text = _parse_team_dashboard_release_date(value)
-    if parsed:
-        return time.strftime("%Y-%m-%d", parsed)
-    return text
-
-
-def _parse_team_dashboard_release_date(value: Any) -> tuple[time.struct_time | None, str]:
-    text = str(value or "").strip()
-    if not text:
-        return None, ""
-    for pattern in ("%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y"):
-        try:
-            return time.strptime(text[:10], pattern), text
-        except ValueError:
-            continue
-    return None, text
-
-
-def _team_dashboard_project_name_sort_key(project: dict[str, Any]) -> tuple[str, str]:
-    return (
-        str(project.get("project_name") or "").casefold(),
-        str(project.get("bpmis_id") or "").casefold(),
-    )
-
-
-def _sort_team_dashboard_under_prd_projects(projects: list[dict[str, Any]]) -> None:
-    projects.sort(key=_team_dashboard_under_prd_project_sort_key)
-
-
-def _team_dashboard_under_prd_project_sort_key(project: dict[str, Any]) -> tuple[int, str, str, str]:
-    release_sort = str(project.get("release_date_sort") or "").strip()
-    if not release_sort:
-        parsed, _text = _parse_team_dashboard_release_date(project.get("release_date"))
-        if parsed:
-            release_sort = time.strftime("%Y-%m-%d", parsed)
-    jira_count = len(project.get("jira_tickets") or [])
-    if release_sort:
-        bucket = 0
-    elif jira_count > 0:
-        bucket = 1
-    else:
-        bucket = 2
-    return (
-        bucket,
-        release_sort,
-        str(project.get("project_name") or "").casefold(),
-        str(project.get("bpmis_id") or "").casefold(),
-    )
-
-
-def _team_dashboard_project_release_sort_key(project: dict[str, Any]) -> tuple[int, str, str, str]:
-    release_sort = str(project.get("release_date_sort") or "").strip()
-    if not release_sort:
-        parsed, _text = _parse_team_dashboard_release_date(project.get("release_date"))
-        if parsed:
-            release_sort = time.strftime("%Y-%m-%d", parsed)
-    return (
-        0 if release_sort else 1,
-        release_sort,
-        str(project.get("project_name") or "").casefold(),
-        str(project.get("bpmis_id") or "").casefold(),
-    )
-
-
-def _team_dashboard_link_items(value: Any) -> list[dict[str, str]]:
-    raw_links: list[str] = []
-    if isinstance(value, list):
-        for item in value:
-            if isinstance(item, dict):
-                raw_links.append(str(item.get("url") or item.get("label") or "").strip())
-            else:
-                raw_links.append(str(item or "").strip())
-    elif isinstance(value, str):
-        raw_links.extend(item.strip() for item in re.split(r"[\n,]+", value) if item.strip())
-    deduped: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for link in raw_links:
-        if not link or link in seen:
-            continue
-        seen.add(link)
-        deduped.append({"label": link, "url": link})
-    return deduped
-
-
-def _team_dashboard_sort_key(task: dict[str, Any]) -> tuple[str, str, str]:
-    return (
-        str(task.get("pm_email") or "").casefold(),
-        str(task.get("version") or "").casefold(),
-        str(task.get("jira_id") or "").casefold(),
-    )
-
-
-def _serialize_productization_version_candidate(row: dict[str, Any]) -> dict[str, str]:
-    version_id = str(row.get("id") or row.get("versionId") or "").strip()
-    version_name = (
-        str(row.get("fullName") or row.get("name") or row.get("versionName") or row.get("label") or "").strip()
-    )
-    market = _coerce_display_text(row.get("marketId") or row.get("market") or row.get("country"))
-    label = version_name
-    if market:
-        label = f"{version_name} · {market}"
-    return {
-        "version_id": version_id,
-        "version_name": version_name,
-        "market": market,
-        "label": label,
-    }
-
-
 def _normalize_productization_issue_row(row: dict[str, Any]) -> dict[str, Any]:
-    ticket_key = _extract_first_text(
+    return _normalize_productization_issue_row_base(
         row,
-        "jiraKey",
-        "ticketKey",
-        "jiraIssueKey",
-        "issueKey",
-        "key",
+        description_formatter=_format_productization_description_text,
     )
-    ticket_link = _normalize_productization_ticket_url(
-        _extract_first_text(row, "jiraLink", "ticketLink", "jiraUrl", "url", "link")
-    )
-    if not ticket_key:
-        ticket_key = _extract_issue_key_from_text(ticket_link)
-    if not ticket_link and ticket_key:
-        ticket_link = f"{_jira_browse_base_url()}{ticket_key}"
-
-    return {
-        "jira_ticket_number": ticket_key or "-",
-        "jira_ticket_url": ticket_link or "",
-        "feature_summary": _extract_first_text(row, "summary", "title", "jiraSummary") or "-",
-        "detailed_feature": _format_productization_description_text(
-            _extract_first_text(row, "desc", "description", "jiraDescription")
-        ),
-        "detailed_feature_source": "jira_description",
-        "pm": _extract_person_display(
-            _extract_first_value(row, "jiraRegionalPmPicId", "regionalPmPic", "productManager", "pm", "regionalPm")
-        )
-        or "-",
-        "prd_links": _extract_link_values(
-            _extract_first_value(row, "jiraPrdLink", "prdLink", "prdLinks", "prd", "brdLink")
-        ),
-    }
 
 
 def _apply_codex_productization_detailed_features(
@@ -6197,178 +5792,6 @@ def _generate_productization_detailed_features_with_codex(
             if isinstance(item, dict)
         ]
     return _generate_productization_detailed_features_with_local_codex(prompt_items, settings=settings)
-
-
-def _filter_productization_issue_rows_for_pm_team(
-    rows: list[dict[str, Any]],
-    config_data: dict[str, Any],
-    *,
-    show_all_before_team_filtering: bool = False,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    allowed_components = _productization_allowed_components_for_pm_team(config_data)
-    if show_all_before_team_filtering:
-        return rows, {"team_filter_applied": False, "show_all_before_team_filtering": True}
-    if not allowed_components:
-        return rows, {"team_filter_applied": False, "show_all_before_team_filtering": False}
-    filtered_rows = [row for row in rows if _productization_issue_matches_components(row, allowed_components)]
-    return filtered_rows, {"team_filter_applied": True, "show_all_before_team_filtering": False}
-
-
-def _productization_allowed_components_for_pm_team(config_data: dict[str, Any]) -> set[str]:
-    pm_team = str(config_data.get("pm_team", "") or "").strip().upper()
-    if pm_team == "AF":
-        return {"dbp-anti-fraud", "anti-fraud"}
-    return set()
-
-
-def _productization_issue_matches_components(row: dict[str, Any], allowed_components: set[str]) -> bool:
-    issue_components = _extract_productization_issue_components(row)
-    return bool(issue_components and issue_components.intersection(allowed_components))
-
-
-def _extract_productization_issue_components(row: dict[str, Any]) -> set[str]:
-    raw_value = _extract_first_value(
-        row,
-        "componentId",
-        "component",
-        "components",
-        "jiraComponent",
-        "jiraComponentId",
-    )
-    flattened = _flatten_productization_component_values(raw_value)
-    return {component.lower() for component in flattened if component}
-
-
-def _flatten_productization_component_values(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return []
-        parts = [part.strip() for part in re.split(r"[;,/|]", text) if part.strip()]
-        return parts or [text]
-    if isinstance(value, dict):
-        parts: list[str] = []
-        for key in ("displayName", "name", "label", "value", "fullName", "id"):
-            text = str(value.get(key) or "").strip()
-            if text:
-                parts.append(text)
-        return parts
-    if isinstance(value, list):
-        parts: list[str] = []
-        for item in value:
-            parts.extend(_flatten_productization_component_values(item))
-        return parts
-    return [str(value).strip()]
-
-
-def _normalize_productization_ticket_url(value: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    if text.startswith(("http://", "https://")):
-        return text
-    issue_key = _extract_issue_key_from_text(text)
-    if issue_key:
-        return f"{_jira_browse_base_url()}{issue_key}"
-    return text
-
-
-def _extract_first_value(row: dict[str, Any], *keys: str) -> Any:
-    containers = [row]
-    for nested_key in ("fields", "mapping", "data", "detail", "row"):
-        nested = row.get(nested_key)
-        if isinstance(nested, dict):
-            containers.append(nested)
-
-    for key in keys:
-        lowered_key = key.lower()
-        for container in containers:
-            for candidate_key, value in container.items():
-                if str(candidate_key).lower() == lowered_key:
-                    return value
-    return None
-
-
-def _extract_first_text(row: dict[str, Any], *keys: str) -> str:
-    value = _extract_first_value(row, *keys)
-    return _coerce_display_text(value)
-
-
-def _coerce_display_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, dict):
-        for key in ("displayName", "name", "emailAddress", "label", "value", "fullName", "id"):
-            text = str(value.get(key) or "").strip()
-            if text:
-                return text
-        return ""
-    if isinstance(value, list):
-        parts = [_coerce_display_text(item) for item in value]
-        parts = [part for part in parts if part]
-        return ", ".join(parts)
-    return str(value).strip()
-
-
-def _extract_person_display(value: Any) -> str:
-    if isinstance(value, list):
-        people = [_extract_person_display(item) for item in value]
-        people = [person for person in people if person]
-        return ", ".join(people)
-    if isinstance(value, dict):
-        for key in ("displayName", "name", "emailAddress", "label", "username", "value"):
-            text = str(value.get(key) or "").strip()
-            if text:
-                return text
-        return ""
-    return _coerce_display_text(value)
-
-
-def _extract_link_values(value: Any) -> list[dict[str, str]]:
-    links = _flatten_links(value)
-    deduped: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for link in links:
-        if link in seen:
-            continue
-        seen.add(link)
-        deduped.append({"label": link, "url": link})
-    return deduped
-
-
-def _flatten_links(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        links: list[str] = []
-        for item in value:
-            links.extend(_flatten_links(item))
-        return links
-    if isinstance(value, dict):
-        links: list[str] = []
-        for key in ("url", "link", "href", "value"):
-            links.extend(_flatten_links(value.get(key)))
-        return links
-    text = str(value).strip()
-    if not text:
-        return []
-    matches = re.findall(r"https?://[^\s,]+", text)
-    if matches:
-        return matches
-    return [text] if text.startswith("http://") or text.startswith("https://") else []
-
-
-def _extract_issue_key_from_text(value: str) -> str:
-    match = re.search(r"\b([A-Z][A-Z0-9]+-\d+)\b", value or "")
-    return match.group(1) if match else ""
-
-
-def _jira_browse_base_url() -> str:
-    return "https://jira.shopee.io/browse/"
 
 
 def _get_user_identity(settings: Settings | None = None) -> dict[str, str | None]:
