@@ -7592,6 +7592,16 @@ class SourceCodeQAService:
         )
         if reasoning_effort:
             payload["_codex_reasoning_effort"] = reasoning_effort
+        estimated_prompt_tokens = int(stats.get("estimated_prompt_tokens") or 0)
+        prompt_budget_threshold = LLM_PROMPT_TIGHT_THRESHOLD_TOKENS
+        payload["_llm_prompt_budget_policy"] = "quality_preserving_soft_budget"
+        payload["_llm_prompt_budget_threshold"] = prompt_budget_threshold
+        payload["_llm_quality_preserving_over_budget"] = estimated_prompt_tokens >= prompt_budget_threshold
+        payload["_llm_prompt_compaction_reason"] = (
+            "source_code_qa_prompt_over_tight_threshold"
+            if estimated_prompt_tokens >= prompt_budget_threshold
+            else "not_needed"
+        )
         answer_timeout_seconds = getattr(self, "_codex_answer_timeout_seconds", None)
         if answer_timeout_seconds:
             payload["_timeout_seconds"] = max(10, int(answer_timeout_seconds))

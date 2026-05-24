@@ -186,6 +186,53 @@ class PortalRuntimeDoctorTests(unittest.TestCase):
         self.assertNotIn("llm_errors", issue_codes)
         self.assertNotIn("llm_slow_calls", issue_codes)
 
+    def test_build_report_treats_quality_preserving_seatalk_prompt_as_explained(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_root = Path(temp_dir)
+            now = datetime.now(portal_runtime_doctor.SGT)
+            now_sgt = now.strftime("%Y-%m-%d %H:%M:%S SGT")
+            self._write_jsonl(
+                data_root / "llm_call_ledger.jsonl",
+                [
+                    {
+                        "timestamp_sgt": now_sgt,
+                        "flow": "seatalk",
+                        "route": "cheap",
+                        "model_id": "gpt-5.5",
+                        "provider": "codex_cli_bridge",
+                        "status": "ok",
+                        "latency_ms": 62000,
+                        "estimated_prompt_tokens": 55000,
+                        "prompt_mode": "seatalk_7_day_insights_v4",
+                        "extra": {
+                            "quality_preserving_over_budget": True,
+                            "prompt_compaction_reason": "seatalk_quality_preserving_context",
+                        },
+                    }
+                ],
+            )
+
+            with patch.object(
+                portal_runtime_doctor,
+                "_source_code_qa_summary",
+                return_value=(["telemetry_window=0", "ops_summary_status=pass"], []),
+            ), patch.object(
+                portal_runtime_doctor,
+                "_mac_portal_runtime_summary",
+                return_value=({"status": "online", "details": "status=online"}, []),
+            ), patch.object(
+                portal_runtime_doctor,
+                "_shared_session_summary",
+                return_value=({"status": "ok", "details": "status=ok"}, []),
+            ):
+                report = portal_runtime_doctor.build_report(data_root, limit=10)
+
+        issue_codes = {issue["code"] for issue in report["issues"]}
+        self.assertNotIn("llm_high_prompt_tokens", issue_codes)
+        self.assertEqual(report["llm"]["quality_preserving_high_prompt_tokens"]["count"], 1)
+        formatted = "\n".join(portal_runtime_doctor.format_report(report))
+        self.assertIn("llm_quality_preserving_high_prompt_tokens=1", formatted)
+
     def test_format_report_exposes_key_sections(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_root = Path(temp_dir)

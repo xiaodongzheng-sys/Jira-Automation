@@ -69,6 +69,7 @@ DAILY_BRIEF_SEATALK_PROMPT_RECENT_CHARS = 18_000
 DAILY_BRIEF_GMAIL_PROMPT_MAX_CHARS = 35_000
 DAILY_BRIEF_GMAIL_PROMPT_RECENT_CHARS = 8_000
 DAILY_BRIEF_TOKEN_CHARS_PER_TOKEN = 4
+DAILY_BRIEF_QUALITY_PROMPT_WARNING_TOKENS = 30_000
 LOW_SIGNAL_EMAIL_SUMMARY = "No clear action, blocker, key project update, or team follow-up was found in this window."
 EMPTY_TODO_SECTION_SUMMARY = "No Xiaodong-owned action or watch/delegate item found."
 ALLOWED_OTHER_UPDATE_SIGNAL_TYPES = {
@@ -660,6 +661,27 @@ def build_daily_briefing(
     )
     source_token_ledger["final_prompt_chars"] = len(prompt)
     source_token_ledger["final_estimated_prompt_tokens"] = _estimate_daily_prompt_tokens(prompt)
+    source_token_ledger["prompt_budget_policy"] = "quality_preserving_soft_budget"
+    source_token_ledger["prompt_budget_threshold_tokens"] = DAILY_BRIEF_QUALITY_PROMPT_WARNING_TOKENS
+    source_token_ledger["quality_preserving_over_budget"] = (
+        source_token_ledger["final_estimated_prompt_tokens"] >= DAILY_BRIEF_QUALITY_PROMPT_WARNING_TOKENS
+    )
+    source_token_ledger["compaction_reason"] = (
+        "quality_preserving_signal_recent_evidence"
+        if (
+            source_token_ledger["seatalk_prompt_hit_cap"]
+            or source_token_ledger["gmail_prompt_hit_cap"]
+            or source_token_ledger["seatalk_raw_chars"] > source_token_ledger["seatalk_prompt_chars"]
+            or source_token_ledger["gmail_raw_chars"] > source_token_ledger["gmail_prompt_chars"]
+            or source_token_ledger["quality_preserving_over_budget"]
+        )
+        else "not_needed"
+    )
+    source_token_ledger["preserved_evidence_ref_count"] = len(evidence_refs)
+    source_token_ledger["preserved_followup_candidate_count"] = len(team_member_reminder_candidates or [])
+    source_token_ledger["preserved_unanswered_hint_count"] = len(
+        [line for line in str(unanswered_question_hints or "").splitlines() if line.strip()]
+    )
     _, parsed = service._run_codex_insights_prompt(
         system_prompt=_daily_brief_system_prompt(),
         prompt=prompt,

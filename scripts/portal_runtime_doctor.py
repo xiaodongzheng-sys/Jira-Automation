@@ -20,6 +20,7 @@ if str(ROOT_DIR) not in sys.path:
 
 SGT = ZoneInfo("Asia/Singapore")
 HIGH_TOKEN_THRESHOLD = 30_000
+SEATALK_QUALITY_TOKEN_THRESHOLD = 60_000
 SLOW_LLM_THRESHOLD_MS = 180_000
 DEFAULT_RECENT_HOURS = 24.0
 
@@ -130,6 +131,7 @@ def _top_rows(rows: list[dict[str, Any]], field: str, *, limit: int = 5) -> list
         value = sort_value(row)
         if value <= 0:
             continue
+        extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
         top.append(
             {
                 "value": value,
@@ -140,9 +142,33 @@ def _top_rows(rows: list[dict[str, Any]], field: str, *, limit: int = 5) -> list
                 "prompt_mode": str(row.get("prompt_mode") or ""),
                 "status": str(row.get("status") or "unknown"),
                 "error_category": str(row.get("error_category") or ""),
+                "trace_id": str(row.get("trace_id") or ""),
+                "codex_phase": str(extra.get("codex_phase") or ""),
+                "repair_issue_count": _safe_int(extra.get("repair_issue_count")),
+                "queue_wait_ms": _safe_int(row.get("queue_wait_ms")),
+                "prompt_compaction_reason": str(extra.get("prompt_compaction_reason") or ""),
+                "quality_preserving_over_budget": bool(extra.get("quality_preserving_over_budget")),
             }
         )
     return top
+
+
+def _quality_preserving_over_budget(row: dict[str, Any]) -> bool:
+    extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+    return bool(row.get("quality_preserving_over_budget") or extra.get("quality_preserving_over_budget"))
+
+
+def _high_token_issue_threshold(row: dict[str, Any]) -> int:
+    if str(row.get("flow") or "").strip().lower() == "seatalk":
+        return SEATALK_QUALITY_TOKEN_THRESHOLD
+    return HIGH_TOKEN_THRESHOLD
+
+
+def _is_high_token_issue_row(row: dict[str, Any]) -> bool:
+    tokens = _safe_int(row.get("estimated_prompt_tokens"))
+    if tokens <= 0:
+        return False
+    return tokens >= _high_token_issue_threshold(row)
 
 
 def _is_test_fixture_llm_row(row: dict[str, Any]) -> bool:
@@ -196,7 +222,14 @@ def _summarize_llm_ledger(data_root: Path, limit: int, *, recent_hours: float) -
     high_token_flow_counts = Counter(
         str(row.get("flow") or "unknown")
         for row in recent_actionable_rows
-        if _safe_int(row.get("estimated_prompt_tokens")) >= HIGH_TOKEN_THRESHOLD
+        if _is_high_token_issue_row(row)
+    )
+    quality_preserving_high_token_flow_counts = Counter(
+        str(row.get("flow") or "unknown")
+        for row in recent_actionable_rows
+        if _quality_preserving_over_budget(row)
+        and _safe_int(row.get("estimated_prompt_tokens")) >= HIGH_TOKEN_THRESHOLD
+        and not _is_high_token_issue_row(row)
     )
     slow_flow_counts = Counter(
         str(row.get("flow") or "unknown")
@@ -206,7 +239,14 @@ def _summarize_llm_ledger(data_root: Path, limit: int, *, recent_hours: float) -
     unknown_flow = sum(1 for row in recent_actionable_rows if str(row.get("flow") or "unknown") == "unknown")
     error_total = sum(value for key, value in recent_status_counts.items() if key not in {"ok", "cached"})
     timeout_total = recent_status_counts.get("timeout", 0)
-    high_token_rows = sum(1 for row in recent_actionable_rows if _safe_int(row.get("estimated_prompt_tokens")) >= HIGH_TOKEN_THRESHOLD)
+    high_token_rows = sum(1 for row in recent_actionable_rows if _is_high_token_issue_row(row))
+    quality_preserving_high_token_rows = sum(
+        1
+        for row in recent_actionable_rows
+        if _quality_preserving_over_budget(row)
+        and _safe_int(row.get("estimated_prompt_tokens")) >= HIGH_TOKEN_THRESHOLD
+        and not _is_high_token_issue_row(row)
+    )
     slow_rows = sum(1 for row in recent_actionable_rows if _safe_int(row.get("latency_ms")) >= SLOW_LLM_THRESHOLD_MS)
 
     if not ledger_path.exists():
@@ -218,7 +258,7 @@ def _summarize_llm_ledger(data_root: Path, limit: int, *, recent_hours: float) -
     if timeout_total:
         issues.append(_issue("warn", "llm_timeouts", f"{timeout_total} LLM calls timed out in the sampled window."))
     if high_token_rows:
-        issues.append(_issue("warn", "llm_high_prompt_tokens", f"{high_token_rows} LLM calls used at least {HIGH_TOKEN_THRESHOLD} estimated prompt tokens by_flow={_counter_text(_counter_dict(high_token_flow_counts))}."))
+        issues.append(_issue("warn", "llm_high_prompt_tokens", f"{high_token_rows} LLM calls exceeded flow-aware prompt token thresholds by_flow={_counter_text(_counter_dict(high_token_flow_counts))}."))
     if slow_rows:
         issues.append(_issue("warn", "llm_slow_calls", f"{slow_rows} LLM calls took at least {SLOW_LLM_THRESHOLD_MS} ms by_flow={_counter_text(_counter_dict(slow_flow_counts))}."))
 
@@ -246,6 +286,12 @@ def _summarize_llm_ledger(data_root: Path, limit: int, *, recent_hours: float) -
                 "p50": int(statistics.median(prompt_tokens)) if prompt_tokens else 0,
                 "p95": _p95(prompt_tokens),
                 "max": max(prompt_tokens) if prompt_tokens else 0,
+            },
+            "quality_preserving_high_prompt_tokens": {
+                "count": quality_preserving_high_token_rows,
+                "flows": _counter_dict(quality_preserving_high_token_flow_counts),
+                "threshold": HIGH_TOKEN_THRESHOLD,
+                "seatalk_issue_threshold": SEATALK_QUALITY_TOKEN_THRESHOLD,
             },
             "top_prompt_tokens": _top_rows(actionable_rows, "estimated_prompt_tokens"),
             "top_latency_ms": _top_rows(actionable_rows, "latency_ms"),
@@ -613,17 +659,28 @@ def format_report(report: dict[str, Any]) -> list[str]:
         f"p95={llm['estimated_prompt_tokens']['p95']} "
         f"max={llm['estimated_prompt_tokens']['max']}"
     )
+    quality_prompt = llm.get("quality_preserving_high_prompt_tokens") or {}
+    if quality_prompt.get("count"):
+        lines.append(
+            "llm_quality_preserving_high_prompt_tokens="
+            f"{quality_prompt['count']} threshold={quality_prompt['threshold']} "
+            f"seatalk_issue_threshold={quality_prompt['seatalk_issue_threshold']} "
+            f"flows={_counter_text(quality_prompt.get('flows') or {})}"
+        )
     for row in llm["top_prompt_tokens"]:
         lines.append(
             "llm_top_prompt_tokens="
             f"{row['value']} flow={row['flow']} route={row['route']} model={row['model_id']} "
-            f"status={row['status']} at={row['timestamp_sgt']} mode={row['prompt_mode']}"
+            f"status={row['status']} at={row['timestamp_sgt']} mode={row['prompt_mode']} "
+            f"quality_preserving={row['quality_preserving_over_budget']} reason={row['prompt_compaction_reason']}"
         )
     for row in llm["top_latency_ms"]:
         lines.append(
             "llm_top_latency_ms="
             f"{row['value']} flow={row['flow']} route={row['route']} model={row['model_id']} "
-            f"status={row['status']} at={row['timestamp_sgt']} mode={row['prompt_mode']}"
+            f"status={row['status']} at={row['timestamp_sgt']} mode={row['prompt_mode']} "
+            f"trace_id={row['trace_id']} phase={row['codex_phase']} repair_issues={row['repair_issue_count']} "
+            f"queue_wait_ms={row['queue_wait_ms']}"
         )
 
     jobs = report["jobs"]

@@ -39,6 +39,7 @@ SEATALK_PROJECT_UPDATES_RECENT_MAX_CHARS = 25_000
 SEATALK_TODO_HISTORY_MAX_CHARS = 70_000
 SEATALK_TODO_SIGNAL_MAX_CHARS = 45_000
 SEATALK_TODO_RECENT_MAX_CHARS = 18_000
+SEATALK_QUALITY_PROMPT_WARNING_TOKENS = 30_000
 UNAVAILABLE_REASON = "Not available from local SeaTalk desktop data for this scope."
 
 
@@ -438,13 +439,23 @@ class SeaTalkDashboardService:
             session_mode="ephemeral",
             codex_binary=self.codex_binary,
         )
+        effective_system_prompt = system_prompt or self._insights_system_prompt()
+        estimated_prompt_tokens = max(1, (len(str(prompt or "")) + len(str(effective_system_prompt or "")) + 3) // 4)
         prompt_payload = {
             "codex_prompt_mode": SEATALK_INSIGHTS_PROMPT_MODE,
-            "systemInstruction": {"parts": [{"text": system_prompt or self._insights_system_prompt()}]},
+            "systemInstruction": {"parts": [{"text": effective_system_prompt}]},
             "contents": [{"parts": [{"text": prompt}]}],
             "_codex_reasoning_effort": resolve_codex_reasoning_effort(CODEX_ROUTE_CHEAP),
             "_llm_ledger_flow": "seatalk",
             "_llm_ledger_route": CODEX_ROUTE_CHEAP,
+            "_llm_prompt_budget_policy": "quality_preserving_soft_budget",
+            "_llm_prompt_budget_threshold": SEATALK_QUALITY_PROMPT_WARNING_TOKENS,
+            "_llm_quality_preserving_over_budget": estimated_prompt_tokens >= SEATALK_QUALITY_PROMPT_WARNING_TOKENS,
+            "_llm_prompt_compaction_reason": (
+                "seatalk_quality_preserving_context"
+                if estimated_prompt_tokens >= SEATALK_QUALITY_PROMPT_WARNING_TOKENS
+                else "not_needed"
+            ),
         }
         result = provider.generate(
             payload=prompt_payload,

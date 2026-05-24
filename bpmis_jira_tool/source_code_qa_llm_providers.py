@@ -437,6 +437,12 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                 "candidate_path_count": int(payload.get("_codex_candidate_path_count") or 0),
                 "candidate_repo_count": int(payload.get("_codex_candidate_repo_count") or 0),
                 "repair_issue_count": int(payload.get("_codex_repair_issue_count") or 0),
+                "prompt_budget_policy": str(payload.get("_llm_prompt_budget_policy") or ""),
+                "prompt_budget_threshold": int(payload.get("_llm_prompt_budget_threshold") or 0),
+                "prompt_compaction_reason": str(payload.get("_llm_prompt_compaction_reason") or ""),
+                "quality_preserving_over_budget": bool(payload.get("_llm_quality_preserving_over_budget")),
+                "preserved_evidence_ref_count": int(payload.get("_llm_preserved_evidence_ref_count") or 0),
+                "preserved_followup_candidate_count": int(payload.get("_llm_preserved_followup_candidate_count") or 0),
             },
         )
 

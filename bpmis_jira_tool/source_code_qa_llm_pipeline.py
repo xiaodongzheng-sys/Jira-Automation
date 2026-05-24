@@ -3,6 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from bpmis_jira_tool.source_code_qa_runtime_policy import (
+    LLM_PROMPT_TIGHT_THRESHOLD_TOKENS,
+    LLM_TOKEN_ESTIMATE_CHARS_PER_TOKEN,
+)
+
 
 @dataclass
 class CodexInitialPlan:
@@ -86,10 +91,24 @@ def build_codex_initial_plan(
         scope_roots=scope_roots,
     )
     prompt_stats = service._codex_prompt_stats(prompt_context)
+    prompt_threshold = LLM_PROMPT_TIGHT_THRESHOLD_TOKENS
+    prompt_over_threshold = int(prompt_stats.get("estimated_prompt_tokens") or 0) >= prompt_threshold
     next_route = {
         **next_route,
         "initial_prompt_estimated_tokens": prompt_stats["estimated_prompt_tokens"],
         "initial_prompt_chars": prompt_stats["prompt_chars"],
+        "prompt_budget": {
+            "policy": "quality_preserving_soft_budget",
+            "threshold_tokens": prompt_threshold,
+            "estimated_prompt_tokens": prompt_stats["estimated_prompt_tokens"],
+            "prompt_chars": prompt_stats["prompt_chars"],
+            "over_threshold": prompt_over_threshold,
+            "candidate_path_count": len(candidate_paths),
+            "runtime_evidence_count": len(runtime_evidence),
+            "prompt_runtime_evidence_count": len(prompt_runtime_evidence),
+            "estimate_chars_per_token": LLM_TOKEN_ESTIMATE_CHARS_PER_TOKEN,
+            "compaction_reason": "compact_route_or_runtime_budget" if prompt_over_threshold else "not_needed",
+        },
     }
     return CodexInitialPlan(
         candidate_matches=candidate_matches,
