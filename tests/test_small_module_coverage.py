@@ -190,8 +190,15 @@ class SmallModuleCoverageTests(unittest.TestCase):
         scheduler = SourceCodeQAQueryScheduler(job_store=job_store, max_running=0)
         app = Flask(__name__)
 
-        with self.assertRaisesRegex(RuntimeError, "requires a default runner"):
-            scheduler._run_job(app, "job-1", {}, "owner@npt.sg", None)
+        scheduler._running = {"job-1"}
+        scheduler._running_users = {"owner@npt.sg": 1}
+        scheduler._run_job(app, "job-1", {}, "owner@npt.sg", None)
+        job_store.fail.assert_called_once()
+        self.assertEqual(job_store.fail.call_args.args[0], "job-1")
+        self.assertIn("requires a default runner", job_store.fail.call_args.args[1])
+        self.assertEqual(job_store.fail.call_args.kwargs["error_code"], "background_worker_unhandled_exception")
+        self.assertNotIn("job-1", scheduler._running)
+        self.assertNotIn("owner@npt.sg", scheduler._running_users)
 
         scheduler._user_order = deque(["empty"])
         scheduler._user_queues = {"empty": deque()}
