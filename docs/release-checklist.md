@@ -332,7 +332,7 @@ CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceac
 CLOUD_RUN_UAT_DRY_RUN=1 ./scripts/deploy_cloud_run_uat.sh
 ```
 
-- If you need to force the UAT host `.env` fallback manually, set `CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env`. The fallback reads the isolated UAT `LOCAL_AGENT_HMAC_SECRET` from the UAT host workspace, rewrites the Cloud Run secret bindings to the base Flask/config/OAuth secrets, and deploys the UAT local-agent HMAC as an environment variable:
+- If you need to force the UAT host `.env` fallback manually, set `CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env`. The fallback reads the isolated UAT `LOCAL_AGENT_HMAC_SECRET` from the UAT host workspace, rewrites the Cloud Run secret bindings to the base Flask/config/OAuth secrets, and deploys the UAT local-agent HMAC as an environment variable. When the current Cloud Run revision still has `LOCAL_AGENT_HMAC_SECRET` mounted from Secret Manager, the deploy script now pre-clears that binding by default with a no-traffic revision before setting the env value; set `CLOUD_RUN_UAT_ENV_FALLBACK_PRECLEAR=0` only for diagnostics.
 
 ```bash
 CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceaccount.com \

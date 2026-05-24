@@ -674,7 +674,7 @@ if [[ "$UAT_LOCAL_AGENT_SECRET_SOURCE" == "env" ]]; then
   ENV_SECRET_PRECLEAR_REQUIRED=1
   echo "Using UAT local-agent HMAC from env fallback because UAT local-agent secret source is env (CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env or automatic fallback)."
 fi
-if [[ "$ENV_SECRET_PRECLEAR_REQUIRED" == "1" && "${CLOUD_RUN_UAT_ENV_FALLBACK_PRECLEAR:-0}" == "1" ]]; then
+if [[ "$ENV_SECRET_PRECLEAR_REQUIRED" == "1" && "${CLOUD_RUN_UAT_ENV_FALLBACK_PRECLEAR:-1}" == "1" ]]; then
   if ! SERVICE_JSON_VALUE="$SERVICE_DESCRIBE_JSON" "$PYTHON_BIN" - <<'PY'
 import json
 import os
