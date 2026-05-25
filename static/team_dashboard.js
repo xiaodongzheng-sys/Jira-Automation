@@ -509,6 +509,30 @@
     return items.length ? items[0] : '-';
   };
 
+  const versionPlanPriorityOrder = ['SP', 'P0', 'P1', 'P2', 'P3'];
+
+  const versionPlanPriorityRank = (priority) => {
+    const normalized = String(priority || '').trim().toUpperCase();
+    const index = versionPlanPriorityOrder.indexOf(normalized);
+    return index >= 0 ? index : versionPlanPriorityOrder.length;
+  };
+
+  const versionPlanSortOrder = (row = {}) => {
+    const value = Number(row.sort_order);
+    return Number.isFinite(value) ? value : 0;
+  };
+
+  const versionPlanManualRowCompare = (a = {}, b = {}) => (
+    versionPlanPriorityRank(a.priority) - versionPlanPriorityRank(b.priority)
+    || versionPlanSortOrder(a) - versionPlanSortOrder(b)
+    || versionPlanPmDisplay(a.pm || []).localeCompare(versionPlanPmDisplay(b.pm || []))
+    || String(a.feature || '').localeCompare(String(b.feature || ''))
+  );
+
+  const sortVersionPlanManualRowsForDisplay = (rows) => (
+    [...(Array.isArray(rows) ? rows : [])].sort(versionPlanManualRowCompare)
+  );
+
   const versionPlanPmFilterOptions = ['All PMs', '-', 'Wang Chang', 'Zoey', 'Jireh', 'Ker Yin', 'Rene', 'Jun Wei'];
 
   const ensureVersionPlanPmFilter = () => {
@@ -777,7 +801,7 @@
 
   const renderVersionPlanBundle = (bundle) => {
     const mapped = bundle.mapped_versions && typeof bundle.mapped_versions === 'object' ? bundle.mapped_versions : {};
-    const manualRows = Array.isArray(bundle.manual_rows) ? bundle.manual_rows : [];
+    const manualRows = sortVersionPlanManualRowsForDisplay(bundle.manual_rows);
     const syncedRows = Array.isArray(bundle.synced_rows) ? bundle.synced_rows : [];
     const filteredRows = filterVersionPlanRowsByPm([...syncedRows, ...manualRows]);
     const collapsed = isVersionPlanBundleCollapsed(bundle);
@@ -810,7 +834,7 @@
     syncVersionPlanPmFilterControl();
     updateVersionPlanSyncControl(payload);
     const bundles = Array.isArray(payload?.bundles) ? payload.bundles : [];
-    const pipelineRows = Array.isArray(payload?.pipeline_rows) ? payload.pipeline_rows : [];
+    const pipelineRows = sortVersionPlanManualRowsForDisplay(payload?.pipeline_rows);
     const archived = Array.isArray(payload?.archived_bundles) ? payload.archived_bundles : [];
     const pipelineCollapsed = Boolean(readVersionPlanCollapseState().pipeline);
     const activeHtml = bundles.length
