@@ -28,7 +28,7 @@ from bpmis_jira_tool.web_prd_self_assessment_routes import build_prd_self_assess
 from bpmis_jira_tool import web_productization_helpers as productization_helpers
 from bpmis_jira_tool import web_team_dashboard_helpers as team_dashboard_helpers
 from bpmis_jira_tool.web_productization_routes import build_productization_handlers, register_productization_routes
-from bpmis_jira_tool.web_gmail_seatalk_routes import build_gmail_seatalk_handlers, register_gmail_seatalk_routes
+from bpmis_jira_tool.web_team_dashboard_seatalk_routes import build_team_dashboard_seatalk_handlers, register_team_dashboard_seatalk_routes
 from bpmis_jira_tool.web_bpmis_routes import build_bpmis_handlers, register_bpmis_routes
 from bpmis_jira_tool.source_code_qa_cache_telemetry import (
     _answer_cache_metadata,
@@ -2231,7 +2231,7 @@ class SmallModuleCoverageTests(unittest.TestCase):
                 )
             self.assertIn("file unreadable", unreadable["reason"])
 
-    def test_gmail_seatalk_split_handlers_cover_access_scope_and_fallback_boundaries(self):
+    def test_team_dashboard_seatalk_handlers_cover_access_and_fallback_boundaries(self):
         app = Flask(__name__)
 
         class FakeTodoStore:
@@ -2268,15 +2268,6 @@ class SmallModuleCoverageTests(unittest.TestCase):
             def __init__(self, mode="ok"):
                 self.mode = mode
 
-            def get_cached_export_history_text(self, batch=1):
-                return None
-
-            def export_history_text(self, batch=1):
-                return ("content", f"gmail-{batch}.txt")
-
-            def prewarm_export_history_text(self, batch=1):
-                return None
-
             def build_insights(self, *, todo_since=""):
                 if self.mode == "broken_insights":
                     raise RuntimeError("token=secret-insights")
@@ -2287,103 +2278,57 @@ class SmallModuleCoverageTests(unittest.TestCase):
                     "team_todos": [{"task": "hidden"}],
                 }
 
-            def build_name_mappings(self, *, force_refresh=False):
-                return {
-                    "auto_mappings": {"UID 123": "Alice"},
-                    "unknown_ids": [{"id": "UID 123"}, {"id": "UID 456"}],
-                }
-
-            def export_history_text(self):
-                return ("seatalk", "seatalk.txt")
-
-        name_store = FakeNameStore()
-        releases = []
-        scope_enabled = True
         gate_enabled = False
 
         ctx = SimpleNamespace(
             settings=SimpleNamespace(gmail_seatalk_demo_owner_email="owner@npt.sg"),
             web_globals={
-                "_build_gmail_dashboard_service": lambda: FakeDashboardService(),
                 "_build_seatalk_dashboard_service": lambda settings: FakeDashboardService(),
             },
-            GMAIL_READONLY_SCOPE=("gmail.readonly",),
-            _require_gmail_seatalk_demo_access=lambda settings, api=False: (("blocked", 403) if gate_enabled else None),
-            _google_credentials_have_scopes=lambda scopes: scope_enabled,
+            _require_seatalk_management_access=lambda settings, api=False: (("blocked", 403) if gate_enabled else None),
             _classify_portal_error=lambda error: {"error_message": str(error)},
             _log_portal_event=lambda *args, **kwargs: None,
             _build_request_log_context=lambda *args, **kwargs: {},
             _get_user_identity=lambda settings: "OWNER@NPT.SG",
-            _safe_email_identity=lambda value: str(value).strip().lower(),
-            _try_acquire_gmail_export_lock=lambda email: True,
-            _release_gmail_export_lock=lambda email: releases.append(email),
             _current_google_email=lambda: "owner@npt.sg",
             _get_seatalk_todo_store=lambda settings: FakeTodoStore(),
-            _get_seatalk_name_mapping_store=lambda settings: name_store,
             _callable_accepts_keyword=lambda func, keyword: keyword in inspect.signature(func).parameters,
-            _dedupe_seatalk_name_mapping_candidates=lambda rows: rows,
         )
-        handlers = build_gmail_seatalk_handlers(ctx)
+        handlers = build_team_dashboard_seatalk_handlers(ctx)
 
-        with app.test_request_context("/api/gmail-sea-talk-demo/network"):
-            scope_enabled = False
-            response, status = handlers.gmail_seatalk_demo_network_api()
-            self.assertEqual(status, 400)
-            self.assertIn("Gmail access", response.get_json()["message"])
-        with app.test_request_context("/api/gmail-sea-talk-demo/gmail/export-manifest"):
-            response, status = handlers.gmail_seatalk_demo_gmail_export_manifest()
-            self.assertEqual(status, 400)
-        with app.test_request_context("/api/gmail-sea-talk-demo/gmail/export-prewarm", method="POST"):
-            response, status = handlers.gmail_seatalk_demo_gmail_export_prewarm()
-            self.assertEqual(status, 400)
-
-        scope_enabled = True
         gate_enabled = True
         for path, method, handler in [
-            ("/api/gmail-sea-talk-demo/gmail/export", "GET", handlers.gmail_seatalk_demo_gmail_export),
-            ("/api/gmail-sea-talk-demo/network", "GET", handlers.gmail_seatalk_demo_network_api),
-            ("/api/gmail-sea-talk-demo/gmail/export-manifest", "GET", handlers.gmail_seatalk_demo_gmail_export_manifest),
-            ("/api/gmail-sea-talk-demo/gmail/export-prewarm", "POST", handlers.gmail_seatalk_demo_gmail_export_prewarm),
-            ("/api/gmail-sea-talk-demo/seatalk", "GET", handlers.gmail_seatalk_demo_seatalk_api),
-            ("/api/gmail-sea-talk-demo/seatalk/insights", "GET", handlers.gmail_seatalk_demo_seatalk_insights_api),
-            ("/api/gmail-sea-talk-demo/seatalk/project-updates", "GET", handlers.gmail_seatalk_demo_seatalk_project_updates_api),
-            ("/api/gmail-sea-talk-demo/seatalk/todos/open", "GET", handlers.gmail_seatalk_demo_seatalk_open_todos_api),
-            ("/api/gmail-sea-talk-demo/seatalk/todos", "GET", handlers.gmail_seatalk_demo_seatalk_todos_api),
-            ("/api/gmail-sea-talk-demo/seatalk/todos/complete", "POST", handlers.gmail_seatalk_demo_seatalk_todo_complete),
-            ("/api/gmail-sea-talk-demo/seatalk/name-mappings", "GET", handlers.gmail_seatalk_demo_seatalk_name_mappings),
-            ("/api/gmail-sea-talk-demo/seatalk/export", "GET", handlers.gmail_seatalk_demo_seatalk_export),
+            ("/api/team-dashboard/seatalk/insights", "GET", handlers.team_dashboard_seatalk_insights_api),
+            ("/api/team-dashboard/seatalk/project-updates", "GET", handlers.team_dashboard_seatalk_project_updates_api),
+            ("/api/team-dashboard/seatalk/todos/open", "GET", handlers.team_dashboard_seatalk_open_todos_api),
+            ("/api/team-dashboard/seatalk/todos", "GET", handlers.team_dashboard_seatalk_todos_api),
+            ("/api/team-dashboard/seatalk/todos/complete", "POST", handlers.team_dashboard_seatalk_todo_complete),
         ]:
             with app.test_request_context(path, method=method):
                 self.assertEqual(handler(), ("blocked", 403))
 
         gate_enabled = False
-        with app.test_request_context("/api/gmail-sea-talk-demo/gmail/export-prewarm?batch=2", method="POST"):
-            response, status = handlers.gmail_seatalk_demo_gmail_export_prewarm()
-            self.assertEqual(status, 200)
-            self.assertTrue(response.get_json()["cached"])
-        self.assertEqual(releases[-1], "owner@npt.sg")
-
-        with app.test_request_context("/api/gmail-sea-talk-demo/seatalk/todos"):
-            response = handlers.gmail_seatalk_demo_seatalk_todos_api()
+        with app.test_request_context("/api/team-dashboard/seatalk/todos"):
+            response = handlers.team_dashboard_seatalk_todos_api()
             self.assertEqual(response.get_json()["my_todos"][0]["task"], "Follow up")
 
         ctx.web_globals["_build_seatalk_dashboard_service"] = lambda settings: FakeDashboardService("broken_insights")
-        with app.test_request_context("/api/gmail-sea-talk-demo/seatalk/insights"):
-            response, status = handlers.gmail_seatalk_demo_seatalk_insights_api()
+        with app.test_request_context("/api/team-dashboard/seatalk/insights"):
+            response, status = handlers.team_dashboard_seatalk_insights_api()
             self.assertEqual(status, 500)
             self.assertNotIn("secret", response.get_json()["message"])
 
-        ctx.web_globals["_build_seatalk_dashboard_service"] = lambda settings: FakeDashboardService()
-        with app.test_request_context("/api/gmail-sea-talk-demo/seatalk/name-mappings?refresh=1"):
-            response = handlers.gmail_seatalk_demo_seatalk_name_mappings()
-            payload = response.get_json()
-            self.assertEqual(payload["mappings"]["UID 123"], "Alice")
-            self.assertEqual([row["id"] for row in payload["unknown_ids"]], ["UID 456"])
-
         registered = []
         fake_app = SimpleNamespace(add_url_rule=lambda *args, **kwargs: registered.append((args, kwargs)))
-        register_gmail_seatalk_routes(fake_app, handlers)
-        self.assertEqual(len(registered), 14)
+        register_team_dashboard_seatalk_routes(fake_app, handlers)
+        self.assertEqual(len(registered), 5)
+        self.assertEqual({args[0] for args, _kwargs in registered}, {
+            "/api/team-dashboard/seatalk/insights",
+            "/api/team-dashboard/seatalk/project-updates",
+            "/api/team-dashboard/seatalk/todos/open",
+            "/api/team-dashboard/seatalk/todos",
+            "/api/team-dashboard/seatalk/todos/complete",
+        })
 
     def test_bpmis_split_handlers_cover_config_admin_and_jira_boundaries(self):
         app = Flask(__name__)

@@ -1945,7 +1945,6 @@ class PortalE2ESmokeTest(unittest.TestCase):
                     "audio_capture_label": "ScreenCaptureKit",
                     "audio_input": "System Audio",
                 },
-                "audio_preflight": {"status": "ok"},
                 "recording_health": {"status": "ok"},
             }
 

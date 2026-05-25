@@ -210,7 +210,7 @@ class WebCoreCoverageTests(unittest.TestCase):
                 ):
                     self.assertEqual(web_module._require_google_login(settings, api=True)[1], web_module.HTTPStatus.UNAUTHORIZED)
                 with patch("bpmis_jira_tool.web._require_google_login", return_value=("login", 401)):
-                    self.assertEqual(web_module._require_gmail_seatalk_demo_access(settings, api=True), ("login", 401))
+                    self.assertEqual(web_module._require_seatalk_management_access(settings, api=True), ("login", 401))
                     self.assertEqual(web_module._require_meeting_recorder_access(settings, api=True), ("login", 401))
                     self.assertEqual(web_module._require_team_dashboard_access(settings, api=True), ("login", 401))
                     self.assertEqual(web_module._require_prd_self_assessment_access(settings, api=True), ("login", 401))
@@ -227,9 +227,9 @@ class WebCoreCoverageTests(unittest.TestCase):
                 ), patch("bpmis_jira_tool.web._can_access_team_dashboard_version_plan", return_value=False):
                     self.assertEqual(web_module._require_team_dashboard_version_plan_access(settings, api=False).status_code, 302)
                 with patch("bpmis_jira_tool.web._require_google_login", return_value=None), patch(
-                    "bpmis_jira_tool.web._can_access_gmail_seatalk_demo", return_value=False
+                    "bpmis_jira_tool.web._can_access_seatalk_management", return_value=False
                 ):
-                    self.assertEqual(web_module._require_gmail_seatalk_demo_access(settings, api=True)[1], web_module.HTTPStatus.FORBIDDEN)
+                    self.assertEqual(web_module._require_seatalk_management_access(settings, api=True)[1], web_module.HTTPStatus.FORBIDDEN)
                 with patch("bpmis_jira_tool.web._require_google_login", return_value=None), patch(
                     "bpmis_jira_tool.web._can_access_meeting_recorder", return_value=False
                 ):

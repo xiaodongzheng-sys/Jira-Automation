@@ -69,7 +69,6 @@ class Settings:
     meeting_translation_openai_api_key: str | None = None
     meeting_translation_model: str = "gpt-realtime-translate"
     meeting_recorder_ffmpeg_bin: str = "ffmpeg"
-    meeting_recorder_audio_input: str = "Meeting Recorder Aggregate"
     meeting_recorder_transcribe_provider: str = "whisper_cpp"
     meeting_recorder_whisper_cpp_bin: str = "whisper-cli"
     meeting_recorder_whisper_model: str = "~/.cache/whisper.cpp/ggml-medium.bin"
@@ -188,7 +187,6 @@ class Settings:
             meeting_translation_openai_api_key=_env_str("MEETING_TRANSLATION_OPENAI_API_KEY", _env_str("OPENAI_API_KEY")),
             meeting_translation_model=_env_str("MEETING_TRANSLATION_MODEL", "gpt-realtime-translate"),
             meeting_recorder_ffmpeg_bin=_env_str("MEETING_RECORDER_FFMPEG_BIN", "ffmpeg"),
-            meeting_recorder_audio_input=_env_str("MEETING_RECORDER_AUDIO_INPUT", "Meeting Recorder Aggregate"),
             meeting_recorder_transcribe_provider=_env_str("MEETING_RECORDER_TRANSCRIBE_PROVIDER", "whisper_cpp"),
             meeting_recorder_whisper_cpp_bin=_env_str("MEETING_RECORDER_WHISPER_CPP_BIN", "whisper-cli"),
             meeting_recorder_whisper_model=_env_str("MEETING_RECORDER_WHISPER_MODEL", "~/.cache/whisper.cpp/ggml-medium.bin"),

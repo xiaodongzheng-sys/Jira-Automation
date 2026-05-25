@@ -681,12 +681,11 @@
     const audioLabel = recordDiagnostics.audio_capture_label || state.diagnostics?.audio_capture_label || '';
     const audioInputLabel = recordDiagnostics.audio_input || '';
     const audioSummary = [audioLabel, audioInputLabel ? `input: ${audioInputLabel}` : ''].filter(Boolean).join(' · ');
-    const audioPreflight = record.audio_preflight || {};
     const recordingHealth = record.recording_health || {};
     const isFailed = record.status === 'failed';
     const canProcess = ['recorded', 'failed', 'completed', 'processing'].includes(record.status);
     const canDownloadAudio = Boolean(recordingUrl) && !isFailed;
-    const warningText = audioPreflight.warning || recordingHealth.warning || '';
+    const warningText = recordingHealth.warning || '';
     const showWarningText = warningText && warningText !== record.error;
     state.selectedRecordId = recordId;
     updateRecordSelection();

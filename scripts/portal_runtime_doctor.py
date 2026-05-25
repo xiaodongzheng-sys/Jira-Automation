@@ -467,7 +467,6 @@ def _permission_matrix() -> list[dict[str, str]]:
         {"surface": "SeaTalk Management", "visibility": "admin only", "note": "dashboard/admin operations are restricted"},
         {"surface": "Monthly Report / Team Dashboard", "visibility": "admin only", "note": "report generation paths are privileged"},
         {"surface": "Meeting Recorder", "visibility": "admin only", "note": "recording and processing require admin access"},
-        {"surface": "Internal memory services", "visibility": "backend only", "note": "shared memory storage remains active behind portal features"},
         {"surface": "VPN Connection", "visibility": "admin only", "note": "network operations are privileged"},
     ]
 

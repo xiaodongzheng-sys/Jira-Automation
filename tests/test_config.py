@@ -104,7 +104,6 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.monthly_report_codex_timeout_seconds, 600)
         self.assertIsNone(settings.prd_briefing_codex_model)
         self.assertEqual(settings.local_agent_connect_timeout_seconds, 10)
-        self.assertEqual(settings.meeting_recorder_audio_input, "Meeting Recorder Aggregate")
         self.assertEqual(settings.meeting_recorder_transcript_segment_workers, 2)
         self.assertEqual(settings.meeting_recorder_background_nice, 10)
         self.assertEqual(settings.meeting_recorder_capture_status_every_buffers, 250)
@@ -197,18 +196,6 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.meeting_recorder_transcript_segment_workers, 2)
         self.assertEqual(settings.local_agent_timeout_seconds, 300)
         self.assertEqual(settings.local_agent_connect_timeout_seconds, 10)
-
-    def test_meeting_recorder_audio_input_from_env(self):
-        env = {
-            "MEETING_RECORDER_AUDIO_INPUT": "MacBook Air Microphone",
-        }
-        with patch.dict(os.environ, env, clear=True), patch(
-            "bpmis_jira_tool.config.find_dotenv",
-            return_value="",
-        ):
-            settings = Settings.from_env()
-
-        self.assertEqual(settings.meeting_recorder_audio_input, "MacBook Air Microphone")
 
     def test_source_code_qa_codex_concurrency_from_env(self):
         with patch.dict(os.environ, {"SOURCE_CODE_QA_CODEX_CONCURRENCY": "2"}, clear=True), patch(

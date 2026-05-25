@@ -21,25 +21,16 @@ from bpmis_jira_tool.meeting_recorder import (
     MeetingRecorderConfig,
     MeetingRecorderRuntime,
     MeetingRecordStore,
-    _audio_capture_status,
     _audio_duration_seconds,
     _audio_volume_metrics,
     _assert_record_owner,
-    _avfoundation_devices,
     _background_command,
     _bounded_int,
-    _build_ffmpeg_audio_post_stop_pad_command,
-    _build_ffmpeg_audio_recording_command,
-    _build_ffmpeg_audio_segment_command,
     _build_ffmpeg_screencapturekit_mix_command,
     _build_ffmpeg_single_audio_convert_command,
-    _effective_audio_input,
-    _effective_recording_audio_input,
     _effective_transcript_segment_workers,
     _effective_whisper_threads,
-    _escape_ffmpeg_concat_path,
     _find_recorder_processes_for_paths,
-    _looks_like_system_audio_device,
     _meeting_minutes_sender_name,
     _meeting_transcript_hash,
     _meeting_minutes_markdown_to_html,
@@ -48,13 +39,11 @@ from bpmis_jira_tool.meeting_recorder import (
     _normalized_background_nice,
     _normalized_startup_silence_grace_seconds,
     _normalized_status_every_buffers,
-    _parse_avfoundation_devices,
     _parse_meeting_datetime,
     _parse_srt_transcript,
     _parse_utc_timestamp,
     _parse_whisper_language,
     _pid_command_contains,
-    _preferred_microphone_input,
     _process_exists,
     _read_json_file,
     _read_tail,
@@ -68,18 +57,14 @@ from bpmis_jira_tool.meeting_recorder import (
     _safe_int,
     _safe_record_id,
     _scheduled_auto_stop_deadline,
-    _SegmentedAudioRecorder,
     _ScreenCaptureKitAudioRecorder,
     _should_retry_transcript_languages,
     _split_meeting_transcript_chunks,
     _srt_timestamp_seconds,
-    _stop_external_audio_monitor,
     _terminate_process_id,
     _terminate_recorder_process,
     _transcript_quality_score,
     _transcript_repetition_metrics,
-    _usable_audio_segments,
-    _wait_for_audio_recorder_ready,
     build_calendar_api_service,
     extract_meeting_links,
     meeting_transcript_whisper_language,
@@ -571,102 +556,6 @@ class MeetingRecorderParsingTests(unittest.TestCase):
             self.assertFalse((artifact_dir / "audio.wav").exists())
             self.assertFalse(nested_dir.exists())
 
-    def test_parse_avfoundation_devices_and_audio_capture_modes(self):
-        output = """
-        [AVFoundation indev @ 0x123] AVFoundation video devices:
-        [AVFoundation indev @ 0x123] [0] MacBook Air Camera
-        [AVFoundation indev @ 0x123] [1] Capture screen 0
-        [AVFoundation indev @ 0x123] AVFoundation audio devices:
-        [AVFoundation indev @ 0x123] [0] MacBook Air Microphone
-        [AVFoundation indev @ 0x123] [1] BlackHole 2ch
-        [AVFoundation indev @ 0x123] [2] Meeting Recorder Aggregate
-        """
-
-        devices = _parse_avfoundation_devices(output)
-
-        self.assertEqual(devices["video_devices"], ["MacBook Air Camera", "Capture screen 0"])
-        self.assertEqual(devices["audio_devices"], ["MacBook Air Microphone", "BlackHole 2ch", "Meeting Recorder Aggregate"])
-        self.assertEqual(_effective_audio_input("default", devices["audio_devices"]), "Meeting Recorder Aggregate")
-        self.assertEqual(_audio_capture_status("MacBook Air Microphone", devices["audio_devices"])["audio_capture_label"], "Microphone only")
-        self.assertEqual(_audio_capture_status("BlackHole 2ch", devices["audio_devices"])["audio_capture_label"], "System audio configured")
-        aggregate_status = _audio_capture_status("Meeting Recorder Aggregate", devices["audio_devices"])
-        self.assertTrue(aggregate_status["system_audio_configured"])
-        self.assertFalse(aggregate_status["audio_signal_verified"])
-        self.assertEqual(
-            _effective_recording_audio_input(
-                "Meeting Recorder Aggregate",
-                devices["audio_devices"],
-                recording_mode="audio_only",
-                meeting_link="",
-            ),
-            "MacBook Air Microphone",
-        )
-        self.assertEqual(
-            _effective_recording_audio_input(
-                "Meeting Recorder Aggregate",
-                devices["audio_devices"],
-                recording_mode="audio_only",
-                meeting_link="https://zoom.us/j/123",
-            ),
-            "Meeting Recorder Aggregate",
-        )
-
-    def test_ffmpeg_audio_recording_command_uses_audio_input_only(self):
-        command = _build_ffmpeg_audio_recording_command(
-            ffmpeg_path="/opt/homebrew/bin/ffmpeg",
-            audio_input="Meeting Recorder Aggregate",
-            audio_path=Path("/tmp/meeting.wav"),
-        )
-
-        self.assertIn("-i", command)
-        self.assertEqual(command[command.index("-i") + 1], ":Meeting Recorder Aggregate")
-        self.assertIn("-nostdin", command)
-        self.assertNotIn("-use_wallclock_as_timestamps", command)
-        self.assertNotIn("aresample=async=1:first_pts=0", command)
-        self.assertNotIn("-af", command)
-        self.assertNotIn("Capture screen 0", command)
-        self.assertNotIn("-framerate", command)
-        self.assertNotIn("-c:v", command)
-        self.assertIn("-acodec", command)
-        self.assertEqual(command[command.index("-acodec") + 1], "pcm_s16le")
-        self.assertEqual(command[-1], "/tmp/meeting.wav")
-
-    def test_ffmpeg_audio_segment_command_mixes_silence_clock(self):
-        command = _build_ffmpeg_audio_segment_command(
-            ffmpeg_path="/opt/homebrew/bin/ffmpeg",
-            audio_input="Meeting Recorder Aggregate",
-            audio_path=Path("/tmp/segment.wav"),
-            duration_seconds=30,
-        )
-
-        self.assertIn("anullsrc=r=48000:cl=stereo", command)
-        filter_complex = command[command.index("-filter_complex") + 1]
-        self.assertIn("[nullrec][mic][zoom]amix=inputs=3:duration=first:dropout_transition=0[rec]", filter_complex)
-        self.assertIn("[nullmonsrc][bhmon]amix=inputs=2:duration=first:dropout_transition=0[monitor]", filter_complex)
-        input_indexes = [index for index, value in enumerate(command) if value == "-i"]
-        self.assertEqual(command[input_indexes[0] + 1], "anullsrc=r=48000:cl=stereo")
-        self.assertEqual(command[input_indexes[1] + 1], ":MacBook Air Microphone")
-        self.assertEqual(command[input_indexes[2] + 1], ":BlackHole 2ch")
-        self.assertIn("[rec]", command)
-        self.assertIn("[monitor]", command)
-        self.assertEqual(command[command.index("-t") + 1], "30")
-        self.assertIn("/tmp/segment.wav", command)
-        self.assertIn("audiotoolbox", command)
-
-    def test_ffmpeg_audio_post_stop_pad_command_pads_after_recording(self):
-        command = _build_ffmpeg_audio_post_stop_pad_command(
-            ffmpeg_path="/opt/homebrew/bin/ffmpeg",
-            source_path=Path("/tmp/meeting.wav"),
-            output_path=Path("/tmp/meeting.padded.wav"),
-            target_duration_seconds=43.2,
-        )
-
-        self.assertEqual(command[command.index("-i") + 1], "/tmp/meeting.wav")
-        self.assertEqual(command[command.index("-af") + 1], "apad=whole_dur=43.200")
-        self.assertEqual(command[command.index("-t") + 1], "43.200")
-        self.assertEqual(command[command.index("-acodec") + 1], "pcm_s16le")
-        self.assertEqual(command[-1], "/tmp/meeting.padded.wav")
-
 class MeetingRecordStoreTests(unittest.TestCase):
     def test_create_list_get_and_delete_record(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -722,18 +611,9 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
             store = MeetingRecordStore(root)
             runtime = MeetingRecorderRuntime(
                 store=store,
-                config=MeetingRecorderConfig(
-                    ffmpeg_bin="/opt/homebrew/bin/ffmpeg",
-                    audio_input="Meeting Recorder Aggregate",
-                ),
+                config=MeetingRecorderConfig(ffmpeg_bin="/opt/homebrew/bin/ffmpeg"),
             )
             with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
-                "bpmis_jira_tool.meeting_recorder._avfoundation_devices",
-                return_value={
-                    "video_devices": ["Capture screen 0"],
-                    "audio_devices": ["MacBook Air Microphone", "Meeting Recorder Aggregate"],
-                },
-            ), patch(
                 "bpmis_jira_tool.meeting_recorder._resolve_screencapturekit_helper",
                 return_value=Path("/tmp/meeting-screencapture-helper"),
             ), patch(
@@ -754,7 +634,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertIn("system_audio_path", record["media"])
         self.assertIn("microphone_audio_path", record["media"])
         self.assertEqual(record["diagnostics_snapshot"]["audio_capture_mode"], "screencapturekit_f2f")
-        self.assertEqual(record["diagnostics_snapshot"]["configured_audio_input"], "Meeting Recorder Aggregate")
         command = runtime._processes[record["record_id"]].command
         self.assertEqual(command[:3], ["nice", "-n", "10"])
         self.assertIn("--system-output", command)
@@ -772,21 +651,12 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
             store = MeetingRecordStore(root)
             runtime = MeetingRecorderRuntime(
                 store=store,
-                config=MeetingRecorderConfig(
-                    ffmpeg_bin="/opt/homebrew/bin/ffmpeg",
-                    audio_input="Meeting Recorder Aggregate",
-                ),
+                config=MeetingRecorderConfig(ffmpeg_bin="/opt/homebrew/bin/ffmpeg"),
             )
             self._FakeTimer.instances = []
             with patch("bpmis_jira_tool.meeting_recorder.threading.Timer", self._FakeTimer), patch(
                 "bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin",
                 return_value="/opt/homebrew/bin/ffmpeg",
-            ), patch(
-                "bpmis_jira_tool.meeting_recorder._avfoundation_devices",
-                return_value={
-                    "video_devices": ["Capture screen 0"],
-                    "audio_devices": ["MacBook Air Microphone", "Meeting Recorder Aggregate"],
-                },
             ), patch(
                 "bpmis_jira_tool.meeting_recorder._resolve_screencapturekit_helper",
                 return_value=Path("/tmp/meeting-screencapture-helper"),
@@ -1012,17 +882,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertEqual(failed_payload["scheduled_auto_stop"]["process_queue_status"], "failed")
         self.assertEqual(failed_payload["scheduled_auto_stop"]["process_queue_error"], "local agent unavailable")
 
-    def test_audio_only_linked_fallback_keeps_aggregate_input(self):
-        self.assertEqual(
-            _effective_recording_audio_input(
-                "Meeting Recorder Aggregate",
-                ["MacBook Air Microphone", "Meeting Recorder Aggregate"],
-                recording_mode="audio_only",
-                meeting_link="https://zoom.us/j/123",
-            ),
-            "Meeting Recorder Aggregate",
-        )
-
     def test_audio_only_recording_health_warns_when_media_duration_is_short(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1094,7 +953,7 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertEqual(health["source_duration_seconds"], 8.554688)
         self.assertEqual(health["elapsed_seconds"], 31.0)
         self.assertIn("captured only 9s of source audio for a 31s recording", health["warning"])
-        self.assertIn("padded with silence", health["warning"])
+        self.assertIn("No silence padding was added", health["warning"])
 
     def test_audio_only_recording_health_warns_for_short_padded_recording(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1154,7 +1013,7 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
                     "recording_started_at": "2026-05-03T07:25:54+00:00",
                     "recording_stopped_at": "2026-05-03T07:26:05+00:00",
                     "media": {
-                        "audio_capture_profile": "segmented_avfoundation_v1",
+                        "audio_capture_profile": "screencapturekit_audio_v1",
                         "audio_segment_failures": [],
                         "recording_mode": "audio_only",
                         "source_audio_path": str(original_path.relative_to(store.root_dir)),
@@ -1340,165 +1199,14 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertNotIn("source_audio_path", finalized["media"])
         run_command.assert_not_called()
 
-    def test_segmented_audio_recording_combines_segments_on_stop(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            store = MeetingRecordStore(root)
-            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
-            record = store.create_record(
-                owner_email="owner@npt.sg",
-                title="Zoom review",
-                platform="zoom",
-                meeting_link="https://zoom.us/j/123",
-            )
-            record_dir = store.record_dir(record["record_id"])
-            segment_dir = record_dir / "audio_segments"
-            segment_dir.mkdir()
-            (segment_dir / "segment-000000.wav").write_bytes(b"0" * 100)
-            (segment_dir / "segment-000001.wav").write_bytes(b"1" * 100)
-            record["media"] = {
-                "recording_mode": "audio_only",
-                "audio_capture_profile": "segmented_avfoundation_v1",
-                "audio_segment_dir": str(segment_dir.relative_to(store.root_dir)),
-                "audio_path": f"records/{record['record_id']}/meeting.wav",
-            }
-
-            def fake_run(command, *_args, **_kwargs):
-                Path(command[-1]).write_bytes(b"combined-audio" * 8)
-                return Mock(stdout="", stderr="")
-
-            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
-                "bpmis_jira_tool.meeting_recorder._run_command",
-                side_effect=fake_run,
-            ), patch("bpmis_jira_tool.meeting_recorder._audio_duration_seconds", return_value=60.0):
-                finalized = runtime._finalize_segmented_audio_recording(record)
-
-        media = finalized["media"]
-        self.assertEqual(media["audio_segment_count"], 2)
-        self.assertEqual(media["audio_path"], f"records/{record['record_id']}/meeting.wav")
-        self.assertEqual(media["audio_url"], f"/meeting-recorder/assets/{record['record_id']}/meeting.wav")
-        self.assertEqual(media["audio_original_duration_seconds"], 60.0)
-        self.assertIn("audio_concat_command", media)
-
-    def test_segmented_audio_finalization_records_warning_boundaries(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            store = MeetingRecordStore(root)
-            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
-
-            missing_dir_record = store.create_record(owner_email="owner@npt.sg", title="Missing Dir", platform="zoom", meeting_link="")
-            missing_dir_record["media"] = {
-                "audio_capture_profile": "segmented_avfoundation_v1",
-                "audio_segment_dir": "records/missing/audio_segments",
-            }
-            missing_dir = runtime._finalize_segmented_audio_recording(missing_dir_record)
-
-            empty_dir_record = store.create_record(owner_email="owner@npt.sg", title="Empty Dir", platform="zoom", meeting_link="")
-            empty_segment_dir = store.record_dir(empty_dir_record["record_id"]) / "audio_segments"
-            empty_segment_dir.mkdir()
-            empty_dir_record["media"] = {
-                "audio_capture_profile": "segmented_avfoundation_v1",
-                "audio_segment_dir": str(empty_segment_dir.relative_to(store.root_dir)),
-            }
-            empty_dir = runtime._finalize_segmented_audio_recording(empty_dir_record)
-
-            no_ffmpeg_record = store.create_record(owner_email="owner@npt.sg", title="No FFMPEG", platform="zoom", meeting_link="")
-            no_ffmpeg_dir = store.record_dir(no_ffmpeg_record["record_id"]) / "audio_segments"
-            no_ffmpeg_dir.mkdir()
-            (no_ffmpeg_dir / "segment-000000.wav").write_bytes(b"0" * 100)
-            no_ffmpeg_record["media"] = {
-                "audio_capture_profile": "segmented_avfoundation_v1",
-                "audio_segment_dir": str(no_ffmpeg_dir.relative_to(store.root_dir)),
-            }
-            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value=""):
-                no_ffmpeg = runtime._finalize_segmented_audio_recording(no_ffmpeg_record)
-
-            single_copy_record = store.create_record(owner_email="owner@npt.sg", title="Single Copy", platform="zoom", meeting_link="")
-            single_copy_dir = store.record_dir(single_copy_record["record_id"]) / "audio_segments"
-            single_copy_dir.mkdir()
-            (single_copy_dir / "segment-000000.wav").write_bytes(b"1" * 100)
-            single_copy_record["media"] = {
-                "audio_capture_profile": "segmented_avfoundation_v1",
-                "audio_segment_dir": str(single_copy_dir.relative_to(store.root_dir)),
-            }
-            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
-                "bpmis_jira_tool.meeting_recorder._run_command",
-                side_effect=ToolError("concat failed"),
-            ), patch("bpmis_jira_tool.meeting_recorder._audio_duration_seconds", return_value=5.0):
-                single_copy = runtime._finalize_segmented_audio_recording(single_copy_record)
-
-            multi_fail_record = store.create_record(owner_email="owner@npt.sg", title="Multi Fail", platform="zoom", meeting_link="")
-            multi_fail_dir = store.record_dir(multi_fail_record["record_id"]) / "audio_segments"
-            multi_fail_dir.mkdir()
-            (multi_fail_dir / "segment-000000.wav").write_bytes(b"1" * 100)
-            (multi_fail_dir / "segment-000001.wav").write_bytes(b"2" * 100)
-            multi_fail_record["media"] = {
-                "audio_capture_profile": "segmented_avfoundation_v1",
-                "audio_segment_dir": str(multi_fail_dir.relative_to(store.root_dir)),
-            }
-            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
-                "bpmis_jira_tool.meeting_recorder._run_command",
-                side_effect=ToolError("concat failed"),
-            ):
-                multi_fail = runtime._finalize_segmented_audio_recording(multi_fail_record)
-
-            empty_output_record = store.create_record(owner_email="owner@npt.sg", title="Empty Output", platform="zoom", meeting_link="")
-            empty_output_dir = store.record_dir(empty_output_record["record_id"]) / "audio_segments"
-            empty_output_dir.mkdir()
-            (empty_output_dir / "segment-000000.wav").write_bytes(b"1" * 100)
-            empty_output_record["media"] = {
-                "audio_capture_profile": "segmented_avfoundation_v1",
-                "audio_segment_dir": str(empty_output_dir.relative_to(store.root_dir)),
-            }
-            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
-                "bpmis_jira_tool.meeting_recorder._run_command",
-                return_value=Mock(stdout="", stderr=""),
-            ):
-                empty_output = runtime._finalize_segmented_audio_recording(empty_output_record)
-
-        self.assertIn("did not produce", missing_dir["media"]["audio_segment_warning"])
-        self.assertIn("no usable", empty_dir["media"]["audio_segment_warning"])
-        self.assertIn("ffmpeg is required", no_ffmpeg["media"]["audio_segment_warning"])
-        self.assertEqual(single_copy["media"]["audio_path"], f"records/{single_copy_record['record_id']}/meeting.wav")
-        self.assertNotIn("audio_segment_warning", single_copy["media"])
-        self.assertIn("concat failed", multi_fail["media"]["audio_segment_warning"])
-        self.assertIn("combined audio file is empty", empty_output["media"]["audio_segment_warning"])
-
-    def test_audio_preflight_reports_unavailable_quiet_and_ok_states(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            store = MeetingRecordStore(Path(temp_dir))
-            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
-
-            with patch("bpmis_jira_tool.meeting_recorder._run_command", side_effect=ToolError("device busy")):
-                unavailable = runtime._audio_preflight(ffmpeg_path="/opt/homebrew/bin/ffmpeg", audio_input="Microphone")
-            with patch("bpmis_jira_tool.meeting_recorder._run_command", return_value=Mock(stdout="", stderr="")), patch(
-                "bpmis_jira_tool.meeting_recorder._audio_volume_metrics",
-                return_value={"mean_volume_db": -70.0, "max_volume_db": -60.0},
-            ):
-                quiet = runtime._audio_preflight(ffmpeg_path="/opt/homebrew/bin/ffmpeg", audio_input="Microphone")
-            with patch("bpmis_jira_tool.meeting_recorder._run_command", return_value=Mock(stdout="", stderr="")), patch(
-                "bpmis_jira_tool.meeting_recorder._audio_volume_metrics",
-                return_value={"mean_volume_db": -25.0, "max_volume_db": -10.0},
-            ):
-                ok = runtime._audio_preflight(ffmpeg_path="/opt/homebrew/bin/ffmpeg", audio_input="Microphone")
-
-        self.assertEqual(unavailable["status"], "unavailable")
-        self.assertIn("device busy", unavailable["warning"])
-        self.assertEqual(quiet["status"], "too_quiet")
-        self.assertEqual(ok["status"], "ok")
-        self.assertEqual(ok["warning"], "")
-
     def test_runtime_diagnostics_and_no_ffmpeg_start_failure(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = MeetingRecordStore(Path(temp_dir))
-            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig(audio_input="default"))
+            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
 
             with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="ffmpeg"), patch(
                 "bpmis_jira_tool.meeting_recorder._resolve_whisper_cpp_bin",
                 return_value="whisper",
-            ), patch(
-                "bpmis_jira_tool.meeting_recorder._avfoundation_devices",
-                return_value={"video_devices": ["Screen"], "audio_devices": ["Meeting Recorder Aggregate"]},
             ), patch(
                 "bpmis_jira_tool.meeting_recorder._resolve_executable",
                 return_value="/usr/bin/xcrun",
@@ -1613,64 +1321,13 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
                 owner_email="xiaodong.zheng@npt.sg",
             )
 
-            segmented = store.create_record(
-                owner_email="xiaodong.zheng@npt.sg",
-                title="Segmented",
-                platform="zoom",
-                meeting_link="https://zoom.us/j/segmented",
-            )
-            segmented["status"] = "recording"
-            segmented["media"] = {"audio_capture_profile": "segmented_avfoundation_v1"}
-            store.save_record(segmented)
-            recorder = _SegmentedAudioRecorder(
-                ffmpeg_path="ffmpeg",
-                audio_input="Microphone",
-                segment_dir=Path(temp_dir) / "segments",
-                log_path=Path(temp_dir) / "recorder.log",
-                segment_seconds=5,
-            )
-            runtime._processes[segmented["record_id"]] = recorder
-            with patch.object(
-                recorder,
-                "signal_snapshot",
-                return_value={"status": "ok", "checked_at": "2026-05-01T00:00:00+00:00"},
-            ):
-                ok_segmented = runtime.check_recording_signal(
-                    record_id=segmented["record_id"],
-                    owner_email="xiaodong.zheng@npt.sg",
-                )
-
         self.assertEqual(non_recording["status"], "recorded")
         self.assertEqual(plain["media"]["audio_capture_profile"], "plain_audio")
-        self.assertEqual(ok_segmented["recording_health"]["status"], "recording")
-        self.assertEqual(ok_segmented["media"]["early_audio_check"]["status"], "ok")
 
     def test_audio_finalization_boundary_warnings_and_persisted_process_fallback(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = MeetingRecordStore(Path(temp_dir))
             runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
-            segmented_missing_relative = {"record_id": "seg-missing", "media": {"audio_capture_profile": "segmented_avfoundation_v1"}}
-            self.assertIs(runtime._finalize_segmented_audio_recording(segmented_missing_relative), segmented_missing_relative)
-
-            record = store.create_record(
-                owner_email="xiaodong.zheng@npt.sg",
-                title="Single",
-                platform="zoom",
-                meeting_link="https://zoom.us/j/single",
-            )
-            segment_dir = store.record_dir(record["record_id"]) / "segments"
-            segment_dir.mkdir()
-            (segment_dir / "segment-000000.wav").write_bytes(b"1" * 100)
-            record["media"] = {
-                "audio_capture_profile": "segmented_avfoundation_v1",
-                "audio_segment_dir": str(segment_dir.relative_to(store.root_dir)),
-            }
-            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="ffmpeg"), patch(
-                "bpmis_jira_tool.meeting_recorder._run_command",
-                side_effect=ToolError("concat failed"),
-            ), patch("bpmis_jira_tool.meeting_recorder.shutil.copy2", side_effect=OSError("copy denied")):
-                copy_failed = runtime._finalize_segmented_audio_recording(record)
-
             sc_no_ffmpeg = {
                 "record_id": "sc-no-ffmpeg",
                 "media": {
@@ -1754,7 +1411,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
             ), patch("bpmis_jira_tool.meeting_recorder._terminate_process_id") as terminate:
                 runtime._terminate_persisted_recorder_process(persisted)
 
-        self.assertIn("concat failed", copy_failed["media"]["audio_segment_warning"])
         self.assertIn("ffmpeg is required", no_ffmpeg["media"]["audio_finalization_warning"])
         self.assertEqual(sc_single_finalized["media"]["audio_format"], "wav")
         self.assertIn("mix failed", sc_mix_failed_warning)
@@ -1771,12 +1427,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
             record_dir.mkdir(parents=True)
             audio_path = record_dir / "meeting.wav"
             audio_path.write_bytes(b"RIFF" + b"0" * 100)
-            segment_dir = record_dir / "segments"
-            segment_dir.mkdir()
-            usable_segment = segment_dir / "segment-000001.wav"
-            tiny_segment = segment_dir / "segment-000000.wav"
-            usable_segment.write_bytes(b"1" * 100)
-            tiny_segment.write_bytes(b"2" * 44)
             json_path = root / "payload.json"
             json_path.write_text('{"status":"ok"}', encoding="utf-8")
             invalid_json_path = root / "invalid.json"
@@ -1790,7 +1440,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
                     "media": {
                         "audio_path": "records/rec-1/meeting.wav",
                         "source_audio_path": "records/rec-1/source.wav",
-                        "audio_segment_dir": "records/rec-1/segments",
                     },
                 },
                 store_root=root,
@@ -1801,7 +1450,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
             invalid_json_payload = _read_json_file(invalid_json_path)
             missing_json_payload = _read_json_file(root / "missing.json")
             tail = _read_tail(tail_path, max_chars=5)
-            usable_names = [path.name for path in _usable_audio_segments(segment_dir)]
             bad_size_path = Mock()
             bad_size_path.exists.return_value = True
             bad_size_path.stat.side_effect = OSError("stat failed")
@@ -1821,9 +1469,7 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertEqual(_read_json_file(bad_json_path), {})
         self.assertEqual(tail, "third")
         self.assertEqual(_read_tail(bad_tail_path), "")
-        self.assertEqual(usable_names, ["segment-000001.wav"])
         self.assertIn(str(audio_path.resolve()), candidates)
-        self.assertEqual(_escape_ffmpeg_concat_path(Path("/tmp/a'b.wav")), "/tmp/a'\\''b.wav")
         self.assertEqual(_safe_int("42"), 42)
         self.assertEqual(_safe_int("bad"), 0)
         self.assertEqual(_safe_float("4.5"), 4.5)
@@ -1868,14 +1514,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
             self.assertTrue(_process_exists(123))
         with patch("bpmis_jira_tool.meeting_recorder.os.kill", side_effect=OSError("missing")):
             self.assertFalse(_process_exists(123))
-        with tempfile.TemporaryDirectory() as temp_dir:
-            store_root = Path(temp_dir) / "store"
-            pid_path = store_root.parent / "run" / "meeting_audio_monitor.pid"
-            pid_path.parent.mkdir()
-            pid_path.write_text("123", encoding="utf-8")
-            with patch("bpmis_jira_tool.meeting_recorder.os.kill") as kill:
-                _stop_external_audio_monitor(store_root)
-        kill.assert_called_once()
 
     def test_process_termination_helpers_cover_group_fallback_and_kill(self):
         class FakeProcess:
@@ -1912,18 +1550,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertGreaterEqual(kill.call_count, 2)
 
     def test_command_and_audio_helper_boundaries(self):
-        aggregate_command = _build_ffmpeg_audio_segment_command(
-            ffmpeg_path="ffmpeg",
-            audio_input="Meeting Recorder Aggregate",
-            audio_path=Path("segment.wav"),
-            duration_seconds=1,
-        )
-        simple_segment_command = _build_ffmpeg_audio_segment_command(
-            ffmpeg_path="ffmpeg",
-            audio_input="Microphone",
-            audio_path=Path("segment.wav"),
-            duration_seconds=1,
-        )
         convert_command = _build_ffmpeg_single_audio_convert_command(
             ffmpeg_path="ffmpeg",
             source_path=Path("source.wav"),
@@ -1936,19 +1562,10 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
             output_path=Path("out.wav"),
         )
 
-        self.assertIn("audiotoolbox", aggregate_command)
-        self.assertIn(":Microphone", simple_segment_command)
-        self.assertEqual(simple_segment_command[simple_segment_command.index("-t") + 1], "5")
         self.assertIn("source.wav", convert_command)
         self.assertIn("[system][mic]amix", " ".join(mix_command))
         self.assertEqual(_bounded_int("bad", default=4, minimum=1, maximum=8), 4)
         self.assertEqual(_bounded_int(20, default=4, minimum=1, maximum=8), 8)
-        self.assertEqual(_preferred_microphone_input(["BlackHole 2ch", "MacBook Air Microphone"]), "MacBook Air Microphone")
-        self.assertEqual(_preferred_microphone_input(["BlackHole 2ch", "USB Audio"]), "USB Audio")
-        self.assertEqual(_preferred_microphone_input(["BlackHole 2ch", "Meeting Recorder Output"]), "")
-        self.assertTrue(_looks_like_system_audio_device("BlackHole 2ch"))
-        self.assertEqual(_effective_audio_input("default", ["Meeting Recorder Aggregate"]), "Meeting Recorder Aggregate")
-        self.assertEqual(_audio_capture_status("Microphone", ["BlackHole 2ch"])["audio_capture_mode"], "microphone_only")
         with tempfile.TemporaryDirectory() as temp_dir:
             configured = Path(temp_dir) / "tool"
             configured.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -1991,7 +1608,7 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
             self.assertEqual(_effective_transcript_segment_workers("bad"), 1)
             self.assertEqual(_effective_whisper_threads(whisper_threads="bad", segment_workers=2), 1)
 
-    def test_datetime_srt_and_audio_input_helpers_cover_tail_boundaries(self):
+    def test_datetime_srt_and_resolve_helpers_cover_tail_boundaries(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             candidate = root / "candidate-tool"
@@ -2007,26 +1624,14 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
             deadline = _scheduled_auto_stop_deadline({"scheduled_end": "not-a-dateTbad"}, grace_seconds=60)
             naive = _parse_utc_timestamp("2026-05-01T00:00:00")
             chunks = _parse_srt_transcript(srt_path)
-            default_input = _effective_audio_input("default", ["MacBook Air Microphone"])
-            custom_recording_input = _effective_recording_audio_input(
-                "USB Interface",
-                ["MacBook Air Microphone"],
-                recording_mode="scheduled_meeting",
-                meeting_link="https://zoom.us/j/123",
-            )
-            custom_status = _audio_capture_status("USB Interface", ["MacBook Air Microphone"])
             resolved_candidate = _resolve_executable("", (str(candidate),))
 
         self.assertIsNone(deadline)
         self.assertEqual(naive.tzinfo, timezone.utc)
         self.assertEqual(chunks, [{"start_seconds": 1.0, "end_seconds": 2.0, "text": "Valid text"}])
-        self.assertEqual(default_input, "default")
-        self.assertEqual(custom_recording_input, "USB Interface")
-        self.assertEqual(custom_status["audio_capture_mode"], "custom_audio")
-        self.assertTrue(custom_status["audio_device_configured"])
         self.assertEqual(resolved_candidate, str(candidate))
 
-    def test_run_command_and_ready_probe_cover_failure_edges(self):
+    def test_run_command_covers_failure_edges(self):
         successful = subprocess.CompletedProcess(["ffmpeg"], 0, stdout="ok", stderr="")
         with patch("bpmis_jira_tool.meeting_recorder.subprocess.run", return_value=successful):
             self.assertIs(_run_command(["ffmpeg"], "Failed:"), successful)
@@ -2039,38 +1644,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ToolError, "stderr detail"):
                 _run_command(["ffmpeg"], "Failed:")
-
-        class FakeProcess:
-            def __init__(self, poll_value):
-                self.poll_value = poll_value
-
-            def poll(self):
-                return self.poll_value
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            log_path = Path(temp_dir) / "ffmpeg.log"
-            log_path.write_text("audio device denied", encoding="utf-8")
-            failed = _wait_for_audio_recorder_ready(
-                process=FakeProcess(1),
-                audio_path=Path(temp_dir) / "missing.wav",
-                log_path=log_path,
-            )
-            fake_audio_path = Mock()
-            fake_audio_path.exists.return_value = True
-            fake_audio_path.stat.side_effect = OSError("stat failed")
-            with patch("bpmis_jira_tool.meeting_recorder.time.monotonic", side_effect=[0, 1, 31, 31]), patch(
-                "bpmis_jira_tool.meeting_recorder.time.sleep"
-            ):
-                ok_after_timeout = _wait_for_audio_recorder_ready(
-                    process=FakeProcess(None),
-                    audio_path=fake_audio_path,
-                    log_path=log_path,
-                )
-
-        self.assertEqual(failed["status"], "failed")
-        self.assertIn("audio device denied", failed["warning"])
-        self.assertEqual(ok_after_timeout["status"], "ok")
-        self.assertEqual(ok_after_timeout["bytes"], 0)
 
     def test_screencapturekit_helper_resolution_uses_current_bundle_and_builds_when_stale(self):
         source_path = Path("tools/meeting_screencapture_helper.swift").resolve()
@@ -2135,7 +1708,7 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
                 with self.assertRaisesRegex(ConfigError, "xcrun"):
                     _resolve_screencapturekit_helper(store_root)
 
-    def test_audio_volume_duration_and_device_listing_helpers(self):
+    def test_audio_volume_duration_helpers(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             audio_path = Path(temp_dir) / "audio.wav"
             audio_path.write_bytes(b"audio")
@@ -2165,29 +1738,12 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
                 side_effect=ToolError("ffprobe failed"),
             ):
                 failed_duration = _audio_duration_seconds(audio_path)
-        with patch("bpmis_jira_tool.meeting_recorder.subprocess.run", side_effect=OSError("ffmpeg missing")):
-            devices = _avfoundation_devices("ffmpeg")
-        no_ffmpeg_devices = _avfoundation_devices(None)
-        with patch(
-            "bpmis_jira_tool.meeting_recorder.subprocess.run",
-            return_value=subprocess.CompletedProcess(
-                ["ffmpeg"],
-                1,
-                stdout="",
-                stderr="[AVFoundation indev @ 0x1] AVFoundation video devices:\n[0] Capture\nAVFoundation audio devices:\n[0] MacBook Microphone\n",
-            ),
-        ):
-            parsed_devices = _avfoundation_devices("ffmpeg")
-
         self.assertEqual(unavailable_volume["status"], "unavailable")
         self.assertEqual(zero_duration, 0.0)
         self.assertEqual(failed_volume["status"], "unavailable")
         self.assertEqual(ok_volume["status"], "ok")
         self.assertEqual(duration, 12.5)
         self.assertEqual(failed_duration, 0.0)
-        self.assertEqual(devices, {"video_devices": [], "audio_devices": []})
-        self.assertEqual(no_ffmpeg_devices, {"video_devices": [], "audio_devices": []})
-        self.assertEqual(parsed_devices["audio_devices"], ["MacBook Microphone"])
 
     def test_transcript_quality_helpers_cover_repetition_and_language_boundaries(self):
         short = _transcript_repetition_metrics([{"text": "hello"}])
@@ -2243,17 +1799,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
     def test_process_detection_and_file_helpers_cover_failure_boundaries(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            store_root = root / "data" / "meeting_recorder"
-            pid_path = store_root.parent / "run" / "meeting_audio_monitor.pid"
-            pid_path.parent.mkdir(parents=True)
-            pid_path.write_text("12345\n", encoding="utf-8")
-            with patch("bpmis_jira_tool.meeting_recorder.os.kill", side_effect=OSError("already stopped")), patch.object(
-                Path,
-                "unlink",
-                side_effect=OSError("unlink failed"),
-            ):
-                _stop_external_audio_monitor(store_root)
-
             with patch("bpmis_jira_tool.meeting_recorder.os.kill", side_effect=OSError("missing")):
                 _terminate_process_id(54321)
             kill_calls = []
@@ -2282,7 +1827,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
                 _terminate_process_id(54323)
 
             missing_tail = _read_tail(root / "missing.log")
-            missing_segments = _usable_audio_segments(root / "missing-segments")
             with patch(
                 "bpmis_jira_tool.meeting_recorder.subprocess.run",
                 return_value=subprocess.CompletedProcess(
@@ -2317,236 +1861,10 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
                 malformed_pid_line = _find_recorder_processes_for_paths(["/tmp/record/meeting.wav"])
 
         self.assertEqual(missing_tail, "")
-        self.assertEqual(missing_segments, [])
         self.assertEqual(kill_calls[0], (54322, signal.SIGTERM))
         self.assertEqual(kill_after_timeout_calls[-1], (54323, signal.SIGKILL))
         self.assertEqual(pids, [200])
         self.assertEqual(malformed_pid_line, [])
-
-    def test_segmented_audio_signal_snapshot_covers_exit_pending_and_ok_boundaries(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            segment_dir = Path(temp_dir) / "segments"
-            segment_dir.mkdir()
-            segment = segment_dir / "segment-000000.wav"
-            segment.write_bytes(b"0" * 100)
-            recorder = _SegmentedAudioRecorder(
-                ffmpeg_path="ffmpeg",
-                audio_input="Microphone",
-                segment_dir=segment_dir,
-                log_path=Path(temp_dir) / "recorder.log",
-                segment_seconds=5,
-            )
-
-            class FakeProcess:
-                pid = 123
-
-                def __init__(self, exit_code=None):
-                    self.exit_code = exit_code
-
-                def poll(self):
-                    return self.exit_code
-
-            recorder._current_process = FakeProcess(exit_code=1)
-            recorder._current_segment = segment
-            with patch("bpmis_jira_tool.meeting_recorder.time.sleep"), patch(
-                "bpmis_jira_tool.meeting_recorder._audio_duration_seconds",
-                return_value=1.0,
-            ):
-                failed = recorder.signal_snapshot(sample_seconds=0)
-
-            recorder._current_process = FakeProcess(exit_code=None)
-            with patch("bpmis_jira_tool.meeting_recorder.time.sleep"), patch(
-                "bpmis_jira_tool.meeting_recorder._safe_file_size",
-                side_effect=[0, 10],
-            ):
-                pending_small = recorder.signal_snapshot(sample_seconds=0)
-            with patch("bpmis_jira_tool.meeting_recorder.time.sleep"), patch(
-                "bpmis_jira_tool.meeting_recorder._safe_file_size",
-                side_effect=[5000, 5001],
-            ):
-                pending_growth = recorder.signal_snapshot(sample_seconds=0)
-            with patch("bpmis_jira_tool.meeting_recorder.time.sleep"), patch(
-                "bpmis_jira_tool.meeting_recorder._safe_file_size",
-                side_effect=[5000, 12000],
-            ):
-                ok = recorder.signal_snapshot(sample_seconds=0)
-
-        self.assertEqual(failed["status"], "failed")
-        self.assertEqual(pending_small["status"], "pending")
-        self.assertIn("waiting for macOS", pending_small["warning"])
-        self.assertIn("has not flushed", pending_growth["warning"])
-        self.assertEqual(ok["status"], "ok")
-
-    def test_segmented_audio_signal_snapshot_covers_restart_failure_state(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            segment_dir = Path(temp_dir) / "segments"
-            segment_dir.mkdir()
-            recorder = _SegmentedAudioRecorder(
-                ffmpeg_path="ffmpeg",
-                audio_input="Microphone",
-                segment_dir=segment_dir,
-                log_path=Path(temp_dir) / "recorder.log",
-                segment_seconds=5,
-            )
-
-            recorder._thread = SimpleNamespace(is_alive=lambda: True)
-            recorder._failures = [{"segment": "segment-000000.wav", "duration_seconds": 1.0}]
-            pending_restart = recorder.signal_snapshot(sample_seconds=0)
-            recorder._thread = SimpleNamespace(is_alive=lambda: False)
-            recorder._current_process = None
-            recorder._current_segment = None
-            one_failure_not_running = recorder.signal_snapshot(sample_seconds=0)
-            recorder._thread = SimpleNamespace(is_alive=lambda: True)
-            recorder._failures.append({"segment": "segment-000001.wav", "duration_seconds": 0.5})
-            failed_restarts = recorder.signal_snapshot(sample_seconds=0)
-            recorder._thread = SimpleNamespace(is_alive=lambda: False)
-            recorder._current_process = None
-            recorder._current_segment = None
-            not_running = recorder.signal_snapshot(sample_seconds=0)
-
-        self.assertEqual(pending_restart["status"], "pending")
-        self.assertIn("waiting for automatic restart", pending_restart["warning"])
-        self.assertEqual(one_failure_not_running["status"], "failed")
-        self.assertIn("process is not running", one_failure_not_running["warning"])
-        self.assertEqual(failed_restarts["status"], "failed")
-        self.assertEqual(failed_restarts["failure_count"], 2)
-        self.assertEqual(not_running["status"], "failed")
-
-    def test_segmented_audio_recorder_start_stop_poll_and_run_boundaries(self):
-        class FakeProcess:
-            pid = 456
-
-            def __init__(self, poll_value=None):
-                self.poll_value = poll_value
-
-            def poll(self):
-                return self.poll_value
-
-        class FakeThread:
-            def __init__(self, target=None, name="", daemon=False):
-                self.target = target
-                self.name = name
-                self.daemon = daemon
-                self.started = False
-                self.joined_timeout = None
-
-            def start(self):
-                self.started = True
-
-            def is_alive(self):
-                return self.started
-
-            def join(self, timeout=None):
-                self.joined_timeout = timeout
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            segment_dir = Path(temp_dir) / "segments"
-            log_path = Path(temp_dir) / "recorder.log"
-            first_process = FakeProcess(poll_value=None)
-            recorder = _SegmentedAudioRecorder(
-                ffmpeg_path="ffmpeg",
-                audio_input="Microphone",
-                segment_dir=segment_dir,
-                log_path=log_path,
-                segment_seconds=5,
-            )
-            with patch("bpmis_jira_tool.meeting_recorder.subprocess.Popen", return_value=first_process) as popen, patch(
-                "bpmis_jira_tool.meeting_recorder._wait_for_audio_recorder_ready",
-                return_value={"status": "ok"},
-            ), patch("bpmis_jira_tool.meeting_recorder.threading.Thread", FakeThread):
-                started = recorder.start()
-            poll_alive = recorder.poll()
-            recorder._thread.started = False
-            recorder._current_process = None
-            poll_no_process = recorder.poll()
-            recorder._current_process = first_process
-            poll_process = recorder.poll()
-            stopped_processes = []
-            with patch("bpmis_jira_tool.meeting_recorder._terminate_recorder_process", side_effect=stopped_processes.append):
-                stopped = recorder.stop()
-
-            failed_process = FakeProcess(poll_value=None)
-            failed_recorder = _SegmentedAudioRecorder(
-                ffmpeg_path="ffmpeg",
-                audio_input="Microphone",
-                segment_dir=Path(temp_dir) / "failed-segments",
-                log_path=Path(temp_dir) / "failed.log",
-                segment_seconds=5,
-            )
-            with patch("bpmis_jira_tool.meeting_recorder.subprocess.Popen", return_value=failed_process), patch(
-                "bpmis_jira_tool.meeting_recorder._wait_for_audio_recorder_ready",
-                return_value={"status": "failed", "warning": "no samples"},
-            ), patch("bpmis_jira_tool.meeting_recorder._terminate_recorder_process") as terminate_failed:
-                failed_start = failed_recorder.start()
-
-            run_recorder = _SegmentedAudioRecorder(
-                ffmpeg_path="ffmpeg",
-                audio_input="Microphone",
-                segment_dir=Path(temp_dir) / "run-segments",
-                log_path=Path(temp_dir) / "run.log",
-                segment_seconds=5,
-            )
-            run_recorder.segment_dir.mkdir()
-            segment = run_recorder.segment_dir / "segment-000000.wav"
-            segment.write_bytes(b"short")
-            run_recorder._current_process = FakeProcess(poll_value=1)
-            run_recorder._current_segment = segment
-
-            sleep_calls = []
-
-            def stop_after_restart_failure(_seconds):
-                sleep_calls.append(_seconds)
-                if len(sleep_calls) >= 2:
-                    run_recorder._stop_event.set()
-
-            with patch("bpmis_jira_tool.meeting_recorder._audio_duration_seconds", return_value=1.0), patch.object(
-                run_recorder,
-                "_start_next_process",
-                side_effect=OSError("spawn failed"),
-            ), patch("bpmis_jira_tool.meeting_recorder.time.sleep", side_effect=stop_after_restart_failure):
-                run_recorder._run()
-
-            stop_during_poll_recorder = _SegmentedAudioRecorder(
-                ffmpeg_path="ffmpeg",
-                audio_input="Microphone",
-                segment_dir=Path(temp_dir) / "stop-during-poll-segments",
-                log_path=Path(temp_dir) / "stop-during-poll.log",
-                segment_seconds=5,
-            )
-            stop_during_poll_recorder.segment_dir.mkdir()
-            stop_segment = stop_during_poll_recorder.segment_dir / "segment-000000.wav"
-            stop_segment.write_bytes(b"long enough")
-            stop_process = FakeProcess(poll_value=None)
-            stop_during_poll_recorder._current_process = stop_process
-            stop_during_poll_recorder._current_segment = stop_segment
-
-            def stop_during_alive_poll(_seconds):
-                stop_during_poll_recorder._stop_event.set()
-
-            with patch("bpmis_jira_tool.meeting_recorder.time.sleep", side_effect=stop_during_alive_poll):
-                stop_during_poll_recorder._run()
-
-            none_recorder = _SegmentedAudioRecorder(
-                ffmpeg_path="ffmpeg",
-                audio_input="Microphone",
-                segment_dir=Path(temp_dir) / "none-segments",
-                log_path=Path(temp_dir) / "none.log",
-                segment_seconds=5,
-            )
-            none_recorder._run()
-
-        self.assertEqual(started["status"], "ok")
-        self.assertEqual(started["pid"], 456)
-        self.assertEqual(poll_alive, None)
-        self.assertEqual(poll_no_process, 0)
-        self.assertIsNone(poll_process)
-        self.assertEqual(popen.call_args.kwargs["cwd"], str(segment_dir.parent))
-        self.assertEqual(stopped["recorder_pid"], 456)
-        self.assertEqual(stopped_processes, [first_process])
-        self.assertEqual(failed_start["warning"], "no samples")
-        terminate_failed.assert_called_once_with(failed_process)
-        self.assertEqual(run_recorder._restart_count, 1)
-        self.assertEqual(run_recorder._failures[-1]["error"], "spawn failed")
 
     def test_screencapturekit_recorder_start_stop_and_signal_boundaries(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2779,12 +2097,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
             )
 
             with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
-                "bpmis_jira_tool.meeting_recorder._avfoundation_devices",
-                return_value={
-                    "video_devices": ["Capture screen 0"],
-                    "audio_devices": ["Meeting Recorder Aggregate"],
-                },
-            ), patch(
                 "bpmis_jira_tool.meeting_recorder._resolve_screencapturekit_helper",
                 return_value=Path("/tmp/meeting-screencapture-helper"),
             ), patch(
@@ -2809,7 +2121,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertIn("--system-output", command)
         self.assertIn("--microphone-output", command)
         self.assertIn("--status-every-buffers", command)
-        self.assertNotIn(":BlackHole 2ch", command)
 
     def test_start_recording_rejects_duplicate_active_recording(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2842,12 +2153,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
             )
 
             with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
-                "bpmis_jira_tool.meeting_recorder._avfoundation_devices",
-                return_value={
-                    "video_devices": ["Capture screen 0"],
-                    "audio_devices": ["Meeting Recorder Aggregate"],
-                },
-            ), patch(
                 "bpmis_jira_tool.meeting_recorder._resolve_screencapturekit_helper",
                 return_value=Path("/tmp/meeting-screencapture-helper"),
             ), patch(
@@ -2878,12 +2183,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
             )
 
             with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
-                "bpmis_jira_tool.meeting_recorder._avfoundation_devices",
-                return_value={
-                    "video_devices": ["Capture screen 0"],
-                    "audio_devices": ["Meeting Recorder Aggregate"],
-                },
-            ), patch(
                 "bpmis_jira_tool.meeting_recorder._resolve_screencapturekit_helper",
                 side_effect=ConfigError("helper missing"),
             ), self.assertRaisesRegex(ToolError, "helper missing"):
@@ -2924,24 +2223,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
             )
             runtime._processes[screen_record["record_id"]] = screen_recorder
 
-            segmented_record = store.create_record(owner_email="owner@npt.sg", title="Segmented", platform="zoom", meeting_link="")
-            segmented_record.update(
-                {
-                    "status": "recording",
-                    "recording_started_at": "2026-05-03T00:00:00+00:00",
-                    "media": {"audio_capture_profile": "segmented_avfoundation_v1"},
-                }
-            )
-            store.save_record(segmented_record)
-            segmented_recorder = _SegmentedAudioRecorder(
-                ffmpeg_path="/opt/homebrew/bin/ffmpeg",
-                audio_input="Meeting Recorder Aggregate",
-                segment_dir=root / "segments",
-                log_path=root / "segmented.log",
-                segment_seconds=30,
-            )
-            runtime._processes[segmented_record["record_id"]] = segmented_recorder
-
             process_record = store.create_record(owner_email="owner@npt.sg", title="Process", platform="zoom", meeting_link="")
             process_record.update({"status": "recording", "recording_started_at": "2026-05-03T00:00:00+00:00"})
             store.save_record(process_record)
@@ -2953,11 +2234,7 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
                 _ScreenCaptureKitAudioRecorder,
                 "stop",
                 return_value={"screencapture_stop_status": "stopped"},
-            ) as screen_stop, patch.object(
-                _SegmentedAudioRecorder,
-                "stop",
-                return_value={"audio_segment_dir": "records/segmented/audio_segments"},
-            ) as segmented_stop, patch(
+            ) as screen_stop, patch(
                 "bpmis_jira_tool.meeting_recorder._terminate_recorder_process",
             ) as terminate_process, patch.object(
                 runtime,
@@ -2965,14 +2242,11 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
                 return_value={"status": "ok", "checked_at": "2026-05-03T00:01:00+00:00", "warning": ""},
             ):
                 stopped_screen = runtime.stop_recording(record_id=screen_record["record_id"], owner_email="owner@npt.sg")
-                stopped_segmented = runtime.stop_recording(record_id=segmented_record["record_id"], owner_email="owner@npt.sg")
                 stopped_process = runtime.stop_recording(record_id=process_record["record_id"], owner_email="owner@npt.sg")
 
         self.assertEqual(stopped_screen["media"]["screencapture_stop_status"], "stopped")
-        self.assertEqual(stopped_segmented["media"]["audio_segment_dir"], "records/segmented/audio_segments")
         self.assertEqual(stopped_process["status"], "recorded")
         screen_stop.assert_called_once()
-        segmented_stop.assert_called_once()
         terminate_process.assert_called_once_with(process)
 
     def test_stop_recording_marks_failed_when_health_fails(self):
@@ -3004,12 +2278,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
             )
 
             with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
-                "bpmis_jira_tool.meeting_recorder._avfoundation_devices",
-                return_value={
-                    "video_devices": ["Capture screen 0"],
-                    "audio_devices": ["Meeting Recorder Aggregate"],
-                },
-            ), patch(
                 "bpmis_jira_tool.meeting_recorder._resolve_screencapturekit_helper",
                 return_value=Path("/tmp/meeting-screencapture-helper"),
             ), patch(
@@ -3038,57 +2306,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertEqual(checked["recording_health"]["status"], "recording")
         self.assertEqual(checked["media"]["early_audio_check"]["status"], "pending")
         self.assertIn("early_audio_check", checked["media"])
-
-    def test_signal_check_waits_for_single_early_segment_restart(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            segment = root / "segment-000000.wav"
-            segment.write_bytes(b"0" * 8192)
-            recorder = _SegmentedAudioRecorder(
-                ffmpeg_path="/opt/homebrew/bin/ffmpeg",
-                audio_input="Meeting Recorder Aggregate",
-                segment_dir=root,
-                log_path=root / "ffmpeg.log",
-                segment_seconds=30,
-            )
-            fake_process = Mock()
-            fake_process.poll.return_value = 255
-            fake_thread = Mock()
-            fake_thread.is_alive.return_value = True
-            recorder._current_process = fake_process
-            recorder._current_segment = segment
-            recorder._thread = fake_thread
-
-            with patch("bpmis_jira_tool.meeting_recorder.time.sleep"), patch(
-                "bpmis_jira_tool.meeting_recorder._audio_duration_seconds",
-                return_value=3.3,
-            ):
-                check = recorder.signal_snapshot(sample_seconds=1.0)
-
-        self.assertEqual(check["status"], "pending")
-        self.assertEqual(check["duration_seconds"], 3.3)
-        self.assertIn("automatic restart", check["warning"])
-
-    def test_signal_check_fails_after_repeated_early_segment_restarts(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            recorder = _SegmentedAudioRecorder(
-                ffmpeg_path="/opt/homebrew/bin/ffmpeg",
-                audio_input="Meeting Recorder Aggregate",
-                segment_dir=root,
-                log_path=root / "ffmpeg.log",
-                segment_seconds=30,
-            )
-            recorder._failures = [
-                {"segment": "segment-000000.wav", "duration_seconds": 3.0},
-                {"segment": "segment-000001.wav", "duration_seconds": 4.0},
-            ]
-
-            check = recorder.signal_snapshot(sample_seconds=1.0)
-
-        self.assertEqual(check["status"], "failed")
-        self.assertEqual(check["failure_count"], 2)
-        self.assertIn("stopped repeatedly", check["warning"])
 
     def test_signal_check_fails_unattached_and_stops_failed_recorders(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3122,32 +2339,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
             )
             runtime._processes[attached_screen["record_id"]] = screen_recorder
 
-            unattached_segmented = store.create_record(owner_email="owner@npt.sg", title="Segmented", platform="zoom", meeting_link="")
-            unattached_segmented.update(
-                {
-                    "status": "recording",
-                    "media": {"audio_capture_profile": "segmented_avfoundation_v1"},
-                }
-            )
-            store.save_record(unattached_segmented)
-
-            attached_segmented = store.create_record(owner_email="owner@npt.sg", title="Attached Segmented", platform="zoom", meeting_link="")
-            attached_segmented.update(
-                {
-                    "status": "recording",
-                    "media": {"audio_capture_profile": "segmented_avfoundation_v1"},
-                }
-            )
-            store.save_record(attached_segmented)
-            segmented_recorder = _SegmentedAudioRecorder(
-                ffmpeg_path="/opt/homebrew/bin/ffmpeg",
-                audio_input="Meeting Recorder Aggregate",
-                segment_dir=root / "segments",
-                log_path=root / "segmented.log",
-                segment_seconds=30,
-            )
-            runtime._processes[attached_segmented["record_id"]] = segmented_recorder
-
             failed_check = {
                 "status": "failed",
                 "checked_at": "2026-05-03T00:00:05+00:00",
@@ -3157,24 +2348,14 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
                 _ScreenCaptureKitAudioRecorder,
                 "stop",
                 return_value={"screen_summary": "stopped"},
-            ), patch.object(_SegmentedAudioRecorder, "signal_snapshot", return_value=failed_check), patch.object(
-                _SegmentedAudioRecorder,
-                "stop",
-                return_value={"segment_summary": "stopped"},
             ):
                 screen_missing = runtime.check_recording_signal(record_id=unattached_screen["record_id"], owner_email="owner@npt.sg")
                 screen_failed = runtime.check_recording_signal(record_id=attached_screen["record_id"], owner_email="owner@npt.sg")
-                segmented_missing = runtime.check_recording_signal(record_id=unattached_segmented["record_id"], owner_email="owner@npt.sg")
-                segmented_failed = runtime.check_recording_signal(record_id=attached_segmented["record_id"], owner_email="owner@npt.sg")
 
         self.assertEqual(screen_missing["status"], "failed")
         self.assertIn("not attached", screen_missing["recording_health"]["warning"])
         self.assertEqual(screen_failed["status"], "failed")
         self.assertEqual(screen_failed["media"]["screen_summary"], "stopped")
-        self.assertEqual(segmented_missing["status"], "failed")
-        self.assertIn("not attached", segmented_missing["recording_health"]["warning"])
-        self.assertEqual(segmented_failed["status"], "failed")
-        self.assertEqual(segmented_failed["media"]["segment_summary"], "stopped")
 
 class FakeTextClient:
     def __init__(self):

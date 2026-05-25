@@ -274,7 +274,7 @@ from bpmis_jira_tool.user_config import (
 )
 from bpmis_jira_tool.vpn_manager import CiscoVPNClient, VPNProfileStore, json_response_payload
 from bpmis_jira_tool.web_bpmis_routes import build_bpmis_handlers, register_bpmis_routes
-from bpmis_jira_tool.web_gmail_seatalk_routes import build_gmail_seatalk_handlers, register_gmail_seatalk_routes
+from bpmis_jira_tool.web_team_dashboard_seatalk_routes import build_team_dashboard_seatalk_handlers, register_team_dashboard_seatalk_routes
 from bpmis_jira_tool.web_meeting_recorder_routes import build_meeting_recorder_handlers, register_meeting_recorder_routes
 from bpmis_jira_tool.web_prd_self_assessment_routes import build_prd_self_assessment_handlers, register_prd_self_assessment_routes
 from bpmis_jira_tool.web_productization_routes import build_productization_handlers, register_productization_routes
@@ -421,7 +421,6 @@ def _meeting_record_summary(record: dict[str, Any]) -> dict[str, Any]:
         "updated_at": record.get("updated_at"),
         "media": record.get("media") or {},
         "diagnostics_snapshot": record.get("diagnostics_snapshot") or {},
-        "audio_preflight": record.get("audio_preflight") or {},
         "recording_health": record.get("recording_health") or {},
         "transcript_status": (record.get("transcript") or {}).get("status"),
         "transcript_quality": (record.get("transcript") or {}).get("quality") or {},
@@ -699,7 +698,6 @@ def create_app() -> Flask:
     app.config["GET_USER_IDENTITY"] = lambda: _get_user_identity(settings)
     app.config["CAN_ACCESS_PRD_BRIEFING"] = lambda: _can_access_prd_briefing(settings)
     app.config["CAN_ACCESS_PRD_SELF_ASSESSMENT"] = lambda: _can_access_prd_self_assessment(settings)
-    app.config["CAN_ACCESS_GMAIL_SEATALK_DEMO"] = lambda: _can_access_gmail_seatalk_demo(settings)
     app.register_blueprint(create_prd_briefing_blueprint())
 
     @app.context_processor
@@ -720,7 +718,6 @@ def create_app() -> Flask:
                 "site_requires_google_login": True,
                 "can_access_prd_briefing": False,
                 "can_access_prd_self_assessment": False,
-                "can_access_gmail_seatalk_demo": False,
                 "can_access_meeting_recorder": False,
                 "can_access_source_code_qa": False,
                 "can_manage_source_code_qa": False,
@@ -830,7 +827,6 @@ def create_app() -> Flask:
             "site_requires_google_login": _site_requires_google_login(settings),
             "can_access_prd_briefing": _can_access_prd_briefing(settings),
             "can_access_prd_self_assessment": _can_access_prd_self_assessment(settings),
-            "can_access_gmail_seatalk_demo": _can_access_gmail_seatalk_demo(settings),
             "can_access_meeting_recorder": _can_access_meeting_recorder(settings),
             "can_access_source_code_qa": _can_access_source_code_qa(settings),
             "can_manage_source_code_qa": _can_manage_source_code_qa(settings),
@@ -1325,29 +1321,21 @@ def create_app() -> Flask:
             redirect_target = _cloud_home_default_post_login_redirect(settings, _get_user_identity(settings))
         return redirect(redirect_target or url_for("index"))
 
-    register_gmail_seatalk_routes(
+    register_team_dashboard_seatalk_routes(
         app,
-        build_gmail_seatalk_handlers(
+        build_team_dashboard_seatalk_handlers(
             SimpleNamespace(
                 web_globals=globals(),
                 settings=settings,
-                GMAIL_READONLY_SCOPE=GMAIL_READONLY_SCOPE,
-                _require_gmail_seatalk_demo_access=_require_gmail_seatalk_demo_access,
-                _google_credentials_have_scopes=_google_credentials_have_scopes,
-                _build_gmail_dashboard_service=_build_gmail_dashboard_service,
+                _require_seatalk_management_access=_require_seatalk_management_access,
                 _build_seatalk_dashboard_service=_build_seatalk_dashboard_service,
                 _classify_portal_error=_classify_portal_error,
                 _log_portal_event=_log_portal_event,
                 _build_request_log_context=_build_request_log_context,
                 _get_user_identity=_get_user_identity,
-                _safe_email_identity=_safe_email_identity,
-                _try_acquire_gmail_export_lock=_try_acquire_gmail_export_lock,
-                _release_gmail_export_lock=_release_gmail_export_lock,
                 _current_google_email=_current_google_email,
                 _get_seatalk_todo_store=_get_seatalk_todo_store,
-                _get_seatalk_name_mapping_store=_get_seatalk_name_mapping_store,
                 _callable_accepts_keyword=_callable_accepts_keyword,
-                _dedupe_seatalk_name_mapping_candidates=_dedupe_seatalk_name_mapping_candidates,
             )
         ),
     )
@@ -1627,7 +1615,6 @@ def _build_gmail_dashboard_service() -> GmailDashboardService:
 def _meeting_recorder_config(settings: Settings) -> MeetingRecorderConfig:
     return MeetingRecorderConfig(
         ffmpeg_bin=settings.meeting_recorder_ffmpeg_bin,
-        audio_input=settings.meeting_recorder_audio_input,
         transcribe_provider=settings.meeting_recorder_transcribe_provider,
         whisper_cpp_bin=settings.meeting_recorder_whisper_cpp_bin,
         whisper_model=settings.meeting_recorder_whisper_model,
@@ -2061,7 +2048,7 @@ def _can_access_prd_self_assessment(settings: Settings) -> bool:
     return _is_portal_user()
 
 
-def _can_access_gmail_seatalk_demo(settings: Settings) -> bool:
+def _can_access_seatalk_management(settings: Settings) -> bool:
     return _is_portal_admin()
 
 
@@ -2464,12 +2451,12 @@ def _require_google_login(settings: Settings, *, api: bool = False):
     return None
 
 
-def _require_gmail_seatalk_demo_access(settings: Settings, *, api: bool = False):
+def _require_seatalk_management_access(settings: Settings, *, api: bool = False):
     login_gate = _require_google_login(settings, api=api)
     if login_gate is not None:
         return login_gate
     message = f"SeaTalk Management is restricted to {PORTAL_ADMIN_EMAIL}."
-    if not _can_access_gmail_seatalk_demo(settings):
+    if not _can_access_seatalk_management(settings):
         if api:
             return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
         flash(message, "error")

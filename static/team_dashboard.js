@@ -120,7 +120,7 @@
   const reportIntelligenceSeatalkBlacklist = root.querySelector('[data-report-intelligence-seatalk-blacklist]');
   const reportIntelligenceGmailSenderBlacklist = root.querySelector('[data-report-intelligence-gmail-sender-blacklist]');
   const reportIntelligenceGmailSubjectHints = root.querySelector('[data-report-intelligence-gmail-subject-hints]');
-  const seatalkNameMappingRoot = root.querySelector('[data-seatalk-demo-root]');
+  const seatalkNameMappingRoot = root.querySelector('[data-seatalk-name-mapping-root]');
   const linkBizProjectStatus = root.querySelector('[data-link-biz-project-status]');
   const linkBizProjectRows = root.querySelector('[data-link-biz-project-rows]');
   const linkBizProjectFindJira = root.querySelector('[data-link-biz-project-find-jira]');

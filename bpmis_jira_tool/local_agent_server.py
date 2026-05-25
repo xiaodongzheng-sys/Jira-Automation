@@ -2352,7 +2352,6 @@ def _build_bpmis_project_store(settings: Settings) -> BPMISProjectStore:
 def _meeting_recorder_config(settings: Settings) -> MeetingRecorderConfig:
     return MeetingRecorderConfig(
         ffmpeg_bin=settings.meeting_recorder_ffmpeg_bin,
-        audio_input=settings.meeting_recorder_audio_input,
         transcribe_provider=settings.meeting_recorder_transcribe_provider,
         whisper_cpp_bin=settings.meeting_recorder_whisper_cpp_bin,
         whisper_model=settings.meeting_recorder_whisper_model,
@@ -2435,7 +2434,6 @@ def _meeting_record_summary(record: dict[str, Any]) -> dict[str, Any]:
         "updated_at": record.get("updated_at"),
         "media": record.get("media") or {},
         "diagnostics_snapshot": record.get("diagnostics_snapshot") or {},
-        "audio_preflight": record.get("audio_preflight") or {},
         "recording_health": record.get("recording_health") or {},
         "transcript_status": (record.get("transcript") or {}).get("status"),
         "minutes_status": (record.get("minutes") or {}).get("status"),
