@@ -2234,6 +2234,35 @@ class WebPortalFeatureTests(unittest.TestCase):
             ["early-1", "late-1", "jira-1", "zero-1"],
         )
 
+    def test_team_dashboard_pending_live_projects_sort_by_live_date(self):
+        projects = [
+            {
+                "bpmis_id": "late-1",
+                "project_name": "Later Live",
+                "release_date": "2026-08-06",
+                "jira_tickets": [{"jira_id": "AF-2"}],
+            },
+            {
+                "bpmis_id": "unknown",
+                "project_name": "BPMIS unavailable",
+                "release_date": "2026-06-18",
+                "jira_tickets": [{"jira_id": "AF-3"}],
+            },
+            {
+                "bpmis_id": "early-1",
+                "project_name": "Earlier Live",
+                "release_date": "2026-05-20",
+                "jira_tickets": [{"jira_id": "AF-1"}],
+            },
+        ]
+
+        web_module._sort_team_dashboard_pending_live_projects(projects)
+
+        self.assertEqual(
+            [project["bpmis_id"] for project in projects],
+            ["early-1", "unknown", "late-1"],
+        )
+
     def test_team_dashboard_tasks_api_groups_under_prd_and_pending_live_by_team(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
@@ -3558,6 +3587,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("filterVersionPlanRowsByPm([...syncedRows, ...manualRows])", script)
         self.assertIn("const pipelineRows = sortVersionPlanManualRowsForDisplay(payload?.pipeline_rows)", script)
         self.assertIn("filterVersionPlanRowsByPm(bundle.synced_rows || [])", script)
+        self.assertIn("sortPendingLiveProjects(filterProjectsByKeyProject(filterProjectsByPm(pendingLive, selectedPm)))", script)
         self.assertIn("32px minmax(320px, 1fr) 76px 116px 118px minmax(150px, 0.45fr)", styles)
         self.assertIn("--version-plan-sheet-grid", styles)
         self.assertIn("grid-template-columns: var(--version-plan-sheet-grid)", styles)

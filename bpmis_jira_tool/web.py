@@ -246,6 +246,7 @@ from bpmis_jira_tool.web_team_dashboard_helpers import (
     normalize_team_dashboard_project as _normalize_team_dashboard_project,
     normalize_team_dashboard_task as _normalize_team_dashboard_task,
     parse_team_dashboard_release_date as _parse_team_dashboard_release_date,
+    sort_team_dashboard_pending_live_projects as _sort_team_dashboard_pending_live_projects,
     sort_team_dashboard_under_prd_projects as _sort_team_dashboard_under_prd_projects,
     split_team_dashboard_biz_projects_by_status as _split_team_dashboard_biz_projects_by_status,
     team_dashboard_actual_mandays_cache_ttl_seconds as _team_dashboard_actual_mandays_cache_ttl_seconds,
@@ -3574,6 +3575,7 @@ def _build_team_dashboard_task_group(
         pending_live_biz_projects,
         sort_by_release=True,
     )
+    _sort_team_dashboard_pending_live_projects(pending_live_projects)
     _apply_team_dashboard_key_project_states(under_prd_projects, key_project_overrides or {})
     _apply_team_dashboard_key_project_states(pending_live_projects, key_project_overrides or {})
     return {
@@ -4748,6 +4750,8 @@ def _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client: Any, team_pa
             projects = team_payload.get(section_key)
             if section_key == "under_prd" and isinstance(projects, list):
                 _sort_team_dashboard_under_prd_projects(projects)
+            elif section_key == "pending_live" and isinstance(projects, list):
+                _sort_team_dashboard_pending_live_projects(projects)
         return
     for section_key in ("under_prd", "pending_live"):
         projects = team_payload.get(section_key)
@@ -4768,6 +4772,8 @@ def _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client: Any, team_pa
             _apply_team_dashboard_project_release_date(project)
         if section_key == "under_prd":
             _sort_team_dashboard_under_prd_projects(projects)
+        elif section_key == "pending_live":
+            _sort_team_dashboard_pending_live_projects(projects)
 
 
 def _backfill_all_team_dashboard_empty_project_jira_tasks(
@@ -4866,6 +4872,9 @@ def _backfill_all_team_dashboard_empty_project_jira_tasks(
         projects = team_payload.get("under_prd")
         if isinstance(projects, list):
             _sort_team_dashboard_under_prd_projects(projects)
+        projects = team_payload.get("pending_live")
+        if isinstance(projects, list):
+            _sort_team_dashboard_pending_live_projects(projects)
 
 
 def _remove_team_dashboard_zero_jira_pending_live_projects(team_payload: dict[str, Any]) -> None:

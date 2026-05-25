@@ -260,6 +260,10 @@ def sort_team_dashboard_under_prd_projects(projects: list[dict[str, Any]]) -> No
     projects.sort(key=team_dashboard_under_prd_project_sort_key)
 
 
+def sort_team_dashboard_pending_live_projects(projects: list[dict[str, Any]]) -> None:
+    projects.sort(key=team_dashboard_project_release_sort_key)
+
+
 def team_dashboard_under_prd_project_sort_key(project: dict[str, Any]) -> tuple[int, str, str, str]:
     release_sort = str(project.get("release_date_sort") or "").strip()
     if not release_sort:

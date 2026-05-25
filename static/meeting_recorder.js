@@ -28,6 +28,12 @@
     detail: root.querySelector('[data-meeting-record-detail]'),
   };
 
+  const setCalendarStatus = (message, { error = false } = {}) => {
+    if (!nodes.calendarStatus) return;
+    nodes.calendarStatus.textContent = message || '';
+    nodes.calendarStatus.classList.toggle('inline-status-error', Boolean(error));
+  };
+
   const escapeHtml = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
@@ -555,11 +561,11 @@
 
   const loadUpcoming = async () => {
     if (!nodes.upcoming) return;
-    nodes.calendarStatus.textContent = 'Loading upcoming calendar meetings…';
+    setCalendarStatus('Loading upcoming calendar meetings…');
     try {
       const payload = await api('/api/meeting-recorder/calendar/upcoming');
       const meetings = (Array.isArray(payload.meetings) ? payload.meetings : []).slice(0, UPCOMING_MEETING_DISPLAY_LIMIT);
-      nodes.calendarStatus.textContent = meetings.length ? `${meetings.length} upcoming meeting(s).` : 'No upcoming calendar meetings found.';
+      setCalendarStatus(meetings.length ? `${meetings.length} upcoming meeting(s).` : 'No upcoming calendar meetings found.');
       const defaultTranscriptLanguage = selectedTranscriptLanguage();
       nodes.upcoming.innerHTML = meetings.map((meeting, index) => `
         <article class="meeting-list-item">
@@ -580,6 +586,7 @@
           const meeting = meetings[Number(button.dataset.meetingStartIndex) || 0];
           const rowLanguage = nodes.upcoming.querySelector(`[data-meeting-row-transcript-language="${button.dataset.meetingStartIndex}"]`)?.value || 'zh';
           button.disabled = true;
+          setCalendarStatus(`Starting ${meeting.title || 'meeting'} recording…`);
           try {
             await startRecording({
               title: meeting.title,
@@ -592,15 +599,16 @@
               scheduled_end: meeting.end,
               attendees: meeting.attendees || [],
             });
+            setCalendarStatus('Recording started.');
           } catch (error) {
-            nodes.calendarStatus.textContent = error.message;
+            setCalendarStatus(error.message, { error: true });
           } finally {
             button.disabled = false;
           }
         });
       });
     } catch (error) {
-      nodes.calendarStatus.textContent = error.message;
+      setCalendarStatus(error.message, { error: true });
       nodes.upcoming.innerHTML = '';
     }
   };

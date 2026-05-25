@@ -1435,6 +1435,8 @@
     return 0;
   });
 
+  const sortPendingLiveProjects = (projects) => sortUnderPrdProjects(projects);
+
   const projectMatchesPm = (project, selectedPm) => {
     if (!selectedPm) return true;
     const normalizedPm = String(selectedPm || '').trim().toLowerCase();
@@ -1766,7 +1768,7 @@
     const teamKey = team.team_key || 'team';
     const selectedPm = String(pmFilterState[teamKey] || '').trim().toLowerCase();
     const filteredUnderPrd = sortUnderPrdProjects(filterProjectsByKeyProject(filterProjectsByPm(underPrd, selectedPm)));
-    const filteredPendingLive = filterProjectsByKeyProject(filterProjectsByPm(pendingLive, selectedPm));
+    const filteredPendingLive = sortPendingLiveProjects(filterProjectsByKeyProject(filterProjectsByPm(pendingLive, selectedPm)));
     const anyTeamLoading = taskTeams.some((item) => item.loading);
     const anyTeamLoadedOrErrored = taskTeams.some((item) => item.loaded || item.error);
     const actionLabel = anyTeamLoadedOrErrored ? 'Reload Jira' : 'Load Jira';
