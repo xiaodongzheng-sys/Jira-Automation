@@ -676,13 +676,13 @@ def create_local_agent_app() -> Flask:
     @app.post("/api/local-agent/meeting-recorder/records")
     def meeting_recorder_records():
         payload = request.get_json(silent=True) or {}
-        records = _get_meeting_record_store().list_records(owner_email=str(payload.get("owner_email") or ""))
+        records = _get_meeting_recorder_runtime().list_records(owner_email=str(payload.get("owner_email") or ""))
         return jsonify({"status": "ok", "records": [_meeting_record_summary(record) for record in records]})
 
     @app.post("/api/local-agent/meeting-recorder/record")
     def meeting_recorder_record():
         payload = request.get_json(silent=True) or {}
-        record = _meeting_record_for_owner(
+        record = _get_meeting_recorder_runtime().get_record(
             record_id=str(payload.get("record_id") or ""),
             owner_email=str(payload.get("owner_email") or ""),
         )

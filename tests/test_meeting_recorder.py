@@ -680,9 +680,10 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertEqual(auto_stop["mode"], "scheduled_end_plus_grace")
         self.assertEqual(auto_stop["grace_seconds"], 1200)
         self.assertEqual(auto_stop["scheduled_for"], "2099-05-04T01:50:00+00:00")
-        self.assertEqual(len(self._FakeTimer.instances), 1)
+        self.assertEqual(len(self._FakeTimer.instances), 2)
         self.assertTrue(self._FakeTimer.instances[0].started)
         self.assertTrue(self._FakeTimer.instances[0].daemon)
+        self.assertEqual(self._FakeTimer.instances[1].delay, 15.0)
 
     def test_scheduled_auto_stop_callback_stops_recording(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2356,6 +2357,99 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertIn("not attached", screen_missing["recording_health"]["warning"])
         self.assertEqual(screen_failed["status"], "failed")
         self.assertEqual(screen_failed["media"]["screen_summary"], "stopped")
+
+    def test_records_reconcile_failed_screencapturekit_helper_without_frontend_poll(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
+            record = store.create_record(owner_email="owner@npt.sg", title="Display lost", platform="google_meet", meeting_link="")
+            record_dir = store.record_dir(record["record_id"])
+            status_path = record_dir / "screencapture-status.json"
+            system_path = record_dir / "screencapture-system.caf"
+            microphone_path = record_dir / "screencapture-microphone.caf"
+            system_path.write_bytes(b"system-audio")
+            microphone_path.write_bytes(b"microphone-audio")
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "status": "failed",
+                        "message": "stream_stopped: Failed to find any displays or windows to capture",
+                        "updated_at": "2026-05-26T02:30:34Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            record.update(
+                {
+                    "status": "recording",
+                    "recording_started_at": "2026-05-26T02:05:10+00:00",
+                    "media": {
+                        "audio_capture_profile": "screencapturekit_audio_v1",
+                        "recorder_pid": 12345,
+                        "system_audio_path": str(system_path.relative_to(root)),
+                        "microphone_audio_path": str(microphone_path.relative_to(root)),
+                        "screencapture_status_path": str(status_path.relative_to(root)),
+                    },
+                }
+            )
+            store.save_record(record)
+
+            with patch.object(runtime, "_terminate_persisted_recorder_process") as terminate:
+                records = runtime.list_records(owner_email="owner@npt.sg")
+                stored_status = store.get_record(records[0]["record_id"])["status"]
+
+            self.assertEqual(records[0]["status"], "failed")
+            self.assertEqual(records[0]["recording_stop_reason"], "screencapturekit_failed")
+            self.assertEqual(records[0]["recording_stopped_at"], "2026-05-26T02:30:34+00:00")
+            self.assertIn("Failed to find any displays", records[0]["error"])
+            self.assertEqual(records[0]["media"]["screencapture_status"]["status"], "failed")
+            self.assertEqual(records[0]["media"]["screencapture_system_bytes"], len(b"system-audio"))
+            self.assertEqual(records[0]["media"]["screencapture_microphone_bytes"], len(b"microphone-audio"))
+            terminate.assert_called_once()
+            self.assertEqual(stored_status, "failed")
+
+    def test_start_recording_reconciles_failed_active_record_before_duplicate_check(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig(ffmpeg_bin="/opt/homebrew/bin/ffmpeg"))
+            stale = store.create_record(owner_email="owner@npt.sg", title="Stale active", platform="zoom", meeting_link="")
+            record_dir = store.record_dir(stale["record_id"])
+            status_path = record_dir / "screencapture-status.json"
+            status_path.write_text(
+                json.dumps({"status": "failed", "message": "stream_stopped: display unavailable"}),
+                encoding="utf-8",
+            )
+            stale.update(
+                {
+                    "status": "recording",
+                    "media": {
+                        "audio_capture_profile": "screencapturekit_audio_v1",
+                        "screencapture_status_path": str(status_path.relative_to(root)),
+                    },
+                }
+            )
+            store.save_record(stale)
+
+            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
+                "bpmis_jira_tool.meeting_recorder._resolve_screencapturekit_helper",
+                return_value=Path("/tmp/meeting-screencapture-helper"),
+            ), patch.object(runtime, "_terminate_persisted_recorder_process"), patch(
+                "bpmis_jira_tool.meeting_recorder._ScreenCaptureKitAudioRecorder.start",
+                return_value={"status": "ok", "latency_seconds": 0.1, "bytes": 4096, "pid": 456},
+            ):
+                new_record = runtime.start_recording(
+                    owner_email="owner@npt.sg",
+                    title="New active",
+                    platform="zoom",
+                    meeting_link="https://zoom.us/j/new",
+                    recording_mode="audio_only",
+                )
+                stale_status = store.get_record(stale["record_id"])["status"]
+
+            self.assertEqual(stale_status, "failed")
+            self.assertEqual(new_record["status"], "recording")
 
 class FakeTextClient:
     def __init__(self):

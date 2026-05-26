@@ -336,9 +336,12 @@ class MeetingRecorderRuntime:
         self._scheduled_auto_stop_callback_after_stop = scheduled_auto_stop_callback
         self._processes: dict[str, Any] = {}
         self._auto_stop_timers: dict[str, threading.Timer] = {}
+        self._recording_monitor_timers: dict[str, threading.Timer] = {}
         self._lock = threading.Lock()
         self._auto_stop_lock = threading.Lock()
+        self._recording_monitor_lock = threading.Lock()
         self._resume_scheduled_auto_stops()
+        self._resume_recording_monitors()
 
     def diagnostics(self) -> dict[str, Any]:
         ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
@@ -391,6 +394,7 @@ class MeetingRecorderRuntime:
         attendees: list[dict[str, Any]] | None = None,
         transcript_language: str = "",
     ) -> dict[str, Any]:
+        self.reconcile_active_recordings(owner_email=owner_email)
         active_record = next(
             (
                 record
@@ -532,13 +536,18 @@ class MeetingRecorderRuntime:
         record["media"] = media
         record = self._schedule_auto_stop_if_needed(record)
         self.store.save_record(record)
+        self._schedule_recording_status_monitor(record)
         return record
 
     def stop_recording(self, *, record_id: str, owner_email: str, stop_reason: str = "manual") -> dict[str, Any]:
         record = self.store.get_record(record_id)
         _assert_record_owner(record, owner_email)
+        record = self._reconcile_recording_if_needed(record)
+        if str(record.get("status") or "").strip().lower() == "failed":
+            return record
         if stop_reason != "scheduled_auto_stop":
             self._cancel_scheduled_auto_stop(record_id=record_id, record=record)
+        self._cancel_recording_status_monitor(record_id)
         with self._lock:
             process = self._processes.pop(record_id, None)
         recorder_summary: dict[str, Any] = {}
@@ -567,10 +576,71 @@ class MeetingRecorderRuntime:
         self.store.save_record(record)
         return record
 
+    def get_record(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
+        record = self.store.get_record(record_id)
+        _assert_record_owner(record, owner_email)
+        return self._reconcile_recording_if_needed(record)
+
+    def list_records(self, *, owner_email: str) -> list[dict[str, Any]]:
+        return [
+            self._reconcile_recording_if_needed(record)
+            for record in self.store.list_records(owner_email=owner_email)
+        ]
+
+    def reconcile_active_recordings(self, *, owner_email: str = "") -> list[dict[str, Any]]:
+        return [
+            self._reconcile_recording_if_needed(record)
+            for record in self.store.list_records(owner_email=owner_email)
+            if str(record.get("status") or "").strip().lower() == "recording"
+        ]
+
     def _resume_scheduled_auto_stops(self) -> None:
         for record in self.store.list_records(owner_email=""):
             if str(record.get("status") or "").strip().lower() == "recording":
                 self._schedule_auto_stop_if_needed(record)
+
+    def _resume_recording_monitors(self) -> None:
+        for record in self.store.list_records(owner_email=""):
+            if str(record.get("status") or "").strip().lower() == "recording":
+                self._schedule_recording_status_monitor(record)
+
+    def _schedule_recording_status_monitor(self, record: dict[str, Any]) -> None:
+        if str(record.get("status") or "").strip().lower() != "recording":
+            return
+        record_id = str(record.get("record_id") or "").strip()
+        owner_email = str(record.get("owner_email") or "").strip().lower()
+        if not record_id or not owner_email:
+            return
+        timer = threading.Timer(
+            15.0,
+            self._recording_status_monitor_callback,
+            kwargs={"record_id": record_id, "owner_email": owner_email},
+        )
+        timer.daemon = True
+        with self._recording_monitor_lock:
+            existing = self._recording_monitor_timers.pop(record_id, None)
+            if existing is not None:
+                existing.cancel()
+            self._recording_monitor_timers[record_id] = timer
+        timer.start()
+
+    def _cancel_recording_status_monitor(self, record_id: str) -> None:
+        with self._recording_monitor_lock:
+            timer = self._recording_monitor_timers.pop(record_id, None)
+        if timer is not None:
+            timer.cancel()
+
+    def _recording_status_monitor_callback(self, *, record_id: str, owner_email: str) -> None:
+        with self._recording_monitor_lock:
+            self._recording_monitor_timers.pop(record_id, None)
+        try:
+            record = self.store.get_record(record_id)
+            _assert_record_owner(record, owner_email)
+            reconciled = self._reconcile_recording_if_needed(record)
+            if str(reconciled.get("status") or "").strip().lower() == "recording":
+                self._schedule_recording_status_monitor(reconciled)
+        except Exception:
+            return
 
     def _schedule_auto_stop_if_needed(self, record: dict[str, Any]) -> dict[str, Any]:
         if str(record.get("status") or "").strip().lower() != "recording":
@@ -683,6 +753,7 @@ class MeetingRecorderRuntime:
     def check_recording_signal(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
         record = self.store.get_record(record_id)
         _assert_record_owner(record, owner_email)
+        record = self._reconcile_recording_if_needed(record)
         if str(record.get("status") or "") != "recording":
             return record
         media = record.get("media") if isinstance(record.get("media"), dict) else {}
@@ -726,6 +797,88 @@ class MeetingRecorderRuntime:
             self.store.save_record(record)
             return record
         return record
+
+    def _reconcile_recording_if_needed(self, record: dict[str, Any]) -> dict[str, Any]:
+        if str(record.get("status") or "").strip().lower() != "recording":
+            return record
+        media = record.get("media") if isinstance(record.get("media"), dict) else {}
+        if str(media.get("audio_capture_profile") or "") != MEETING_SCREENCAPTUREKIT_AUDIO_PROFILE:
+            return record
+        capture_status = self._read_screencapture_status(record)
+        capture_state = str(capture_status.get("status") or "").strip().lower()
+        capture_message = str(capture_status.get("message") or "").strip()
+        if capture_state == "failed":
+            warning = capture_message or "ScreenCaptureKit helper stopped unexpectedly."
+            return self._mark_screencapture_recording_failed(
+                record=record,
+                warning=warning,
+                capture_status=capture_status,
+                stopped_at=str(capture_status.get("updated_at") or ""),
+            )
+        if capture_state in {"starting", "recording", "warning"}:
+            return record
+        pid = _safe_int(media.get("recorder_pid"))
+        candidates = _recorder_process_candidates(record=record, store_root=self.store.root_dir)
+        if pid and not _pid_command_contains(pid, candidates) and not _find_recorder_processes_for_paths(candidates):
+            return self._mark_screencapture_recording_failed(
+                record=record,
+                warning="ScreenCaptureKit helper process stopped before the recording was stopped.",
+                capture_status=capture_status,
+                stopped_at=str(capture_status.get("updated_at") or ""),
+            )
+        return record
+
+    def _mark_screencapture_recording_failed(
+        self,
+        *,
+        record: dict[str, Any],
+        warning: str,
+        capture_status: dict[str, Any],
+        stopped_at: str = "",
+    ) -> dict[str, Any]:
+        record_id = str(record.get("record_id") or "").strip()
+        self._cancel_scheduled_auto_stop(record_id=record_id, record=record)
+        self._cancel_recording_status_monitor(record_id)
+        with self._lock:
+            recorder = self._processes.pop(record_id, None)
+        recorder_summary: dict[str, Any] = {}
+        if isinstance(recorder, _ScreenCaptureKitAudioRecorder):
+            recorder_summary = recorder.stop()
+        elif recorder is not None and recorder.poll() is None:
+            _terminate_recorder_process(recorder)
+        elif recorder is None:
+            self._terminate_persisted_recorder_process(record)
+        media = dict(record.get("media") or {})
+        if recorder_summary:
+            media.update(recorder_summary)
+        media["screencapture_status"] = capture_status or self._read_screencapture_status(record)
+        system_relative = str(media.get("system_audio_path") or "").strip()
+        if system_relative:
+            media["screencapture_system_bytes"] = _safe_file_size((self.store.root_dir / system_relative).resolve())
+        microphone_relative = str(media.get("microphone_audio_path") or "").strip()
+        if microphone_relative:
+            media["screencapture_microphone_bytes"] = _safe_file_size((self.store.root_dir / microphone_relative).resolve())
+        record["media"] = media
+        record["status"] = "failed"
+        record["recording_stop_reason"] = "screencapturekit_failed"
+        parsed_stopped_at = _parse_utc_timestamp(stopped_at)
+        record["recording_stopped_at"] = (parsed_stopped_at.isoformat() if parsed_stopped_at else _utc_now())
+        record["error"] = (
+            f"ScreenCaptureKit helper stopped unexpectedly: {warning}. "
+            "Start a new recording; the partial source audio is kept for download."
+        )
+        record["recording_health"] = {
+            "status": "failed",
+            "checked_at": _utc_now(),
+            "warning": record["error"],
+            "screencapture_status": media.get("screencapture_status") or {},
+        }
+        self.store.save_record(record)
+        return record
+
+    def _read_screencapture_status(self, record: dict[str, Any]) -> dict[str, Any]:
+        path = _screencapture_status_path(record=record, store_root=self.store.root_dir)
+        return _read_json_file(path) if path is not None else {}
 
     def _finalize_screencapturekit_audio_recording(self, record: dict[str, Any]) -> dict[str, Any]:
         media = record.get("media") if isinstance(record.get("media"), dict) else {}
@@ -2411,12 +2564,23 @@ def _process_exists(pid: int) -> bool:
 def _recorder_process_candidates(*, record: dict[str, Any], store_root: Path) -> list[str]:
     media = record.get("media") if isinstance(record.get("media"), dict) else {}
     candidates: list[str] = []
-    for key in ("audio_path", "source_audio_path"):
+    for key in ("audio_path", "source_audio_path", "system_audio_path", "microphone_audio_path", "screencapture_status_path"):
         relative = str(media.get(key) or "").strip()
         if relative:
             candidates.append(str((store_root / relative).resolve()))
             candidates.append(str((store_root / "records" / str(record.get("record_id") or "") / Path(relative).name).resolve()))
     return [candidate for candidate in dict.fromkeys(candidates) if candidate]
+
+
+def _screencapture_status_path(*, record: dict[str, Any], store_root: Path) -> Path | None:
+    media = record.get("media") if isinstance(record.get("media"), dict) else {}
+    relative = str(media.get("screencapture_status_path") or "").strip()
+    if not relative:
+        return None
+    path = Path(relative)
+    if path.is_absolute():
+        return path
+    return (store_root / relative).resolve()
 
 
 def _pid_command_contains(pid: int, candidates: list[str]) -> bool:
@@ -2451,7 +2615,7 @@ def _find_recorder_processes_for_paths(candidates: list[str]) -> list[int]:
         return []
     pids: list[int] = []
     for line in (completed.stdout or "").splitlines():
-        if "ffmpeg" not in line:
+        if "ffmpeg" not in line and "meeting-screencapture-helper" not in line:
             continue
         if not any(candidate in line for candidate in candidates):
             continue

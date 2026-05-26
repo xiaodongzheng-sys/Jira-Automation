@@ -272,7 +272,7 @@ def build_meeting_recorder_handlers(ctx: Any) -> Any:
                 return jsonify({"status": "ok", "records": records})
             except ToolError as error:
                 return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_GATEWAY
-        records = _get_meeting_record_store().list_records(owner_email=_current_google_email())
+        records = _get_meeting_recorder_runtime().list_records(owner_email=_current_google_email())
         return jsonify({"status": "ok", "records": [_meeting_record_summary(record) for record in records]})
 
 
@@ -290,6 +290,8 @@ def build_meeting_recorder_handlers(ctx: Any) -> Any:
             record = _get_meeting_record_store().get_record(record_id)
             if str(record.get("owner_email") or "").strip().lower() != _current_google_email():
                 return jsonify({"status": "error", "message": "Meeting record is not available for this Google account."}), HTTPStatus.FORBIDDEN
+            if str(record.get("status") or "").strip().lower() == "recording":
+                record = _get_meeting_recorder_runtime().get_record(record_id=record_id, owner_email=_current_google_email())
             return jsonify({"status": "ok", "record": record})
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST

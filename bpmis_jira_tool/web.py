@@ -442,7 +442,7 @@ def _meeting_recorder_diagnostics_payload(settings: Settings) -> dict[str, Any]:
 def _meeting_recorder_record_summaries_for_current_user(settings: Settings) -> list[dict[str, Any]]:
     if _local_agent_meeting_recorder_enabled(settings):
         return _build_local_agent_client(settings).meeting_recorder_records(owner_email=_current_google_email())
-    return [_meeting_record_summary(record) for record in _get_meeting_record_store().list_records(owner_email=_current_google_email())]
+    return [_meeting_record_summary(record) for record in _get_meeting_recorder_runtime().list_records(owner_email=_current_google_email())]
 
 
 def _try_acquire_gmail_export_lock(email: str) -> bool:
