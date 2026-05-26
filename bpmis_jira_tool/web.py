@@ -117,6 +117,7 @@ from bpmis_jira_tool.seatalk_stores import SeaTalkNameMappingStore, SeaTalkTodoS
 from bpmis_jira_tool.bpmis_client import build_bpmis_client
 from bpmis_jira_tool.bpmis_projects import BPMISProjectStore, PortalJiraCreationService, PortalProjectSyncService
 from bpmis_jira_tool.background_jobs import start_durable_job_thread
+from bpmis_jira_tool.business_insights import BusinessInsightsStore
 from bpmis_jira_tool.source_code_qa import CRMS_COUNTRIES, ALL_COUNTRY, IDENTIFIER_PATTERN, CodexCliBridgeSourceCodeQALLMProvider, SourceCodeQAService
 from bpmis_jira_tool.source_code_qa_factory import build_source_code_qa_service_from_settings
 from bpmis_jira_tool.source_code_qa_jobs import SourceCodeQAQueryScheduler
@@ -274,6 +275,7 @@ from bpmis_jira_tool.user_config import (
     WebConfigStore,
 )
 from bpmis_jira_tool.vpn_manager import CiscoVPNClient, VPNProfileStore, json_response_payload
+from bpmis_jira_tool.web_business_insights_routes import build_business_insights_handlers, register_business_insights_routes
 from bpmis_jira_tool.web_bpmis_routes import build_bpmis_handlers, register_bpmis_routes
 from bpmis_jira_tool.web_team_dashboard_seatalk_routes import build_team_dashboard_seatalk_handlers, register_team_dashboard_seatalk_routes
 from bpmis_jira_tool.web_meeting_recorder_routes import build_meeting_recorder_handlers, register_meeting_recorder_routes
@@ -699,6 +701,7 @@ def create_app() -> Flask:
         data_root / "source_code_qa" / "runtime_evidence"
     )
     app.config["PRD_BRIEFING_STORE"] = BriefingStore(data_root / "prd_briefing")
+    app.config["BUSINESS_INSIGHTS_STORE"] = BusinessInsightsStore(data_root / "business_insights")
     app.config["SOURCE_CODE_QA_SERVICE"] = build_source_code_qa_service_from_settings(settings)
     app.config["GET_USER_IDENTITY"] = lambda: _get_user_identity(settings)
     app.config["CAN_ACCESS_PRD_BRIEFING"] = lambda: _can_access_prd_briefing(settings)
@@ -813,6 +816,26 @@ def create_app() -> Flask:
             )
         if project_tabs:
             site_tabs.append(_nav_group("Projects", project_tabs[0]["href"], project_tabs))
+        if can_access_reports:
+            active_business_domain = str(request.args.get("domain") or "credit-risk").strip().lower()
+            business_insights_tabs = [
+                {
+                    "label": "Anti-fraud",
+                    "href": url_for("business_insights_page", domain="anti-fraud"),
+                    "active": current_endpoint == "business_insights_page" and active_business_domain == "anti-fraud",
+                },
+                {
+                    "label": "Credit Risk",
+                    "href": url_for("business_insights_page", domain="credit-risk"),
+                    "active": current_endpoint == "business_insights_page" and active_business_domain == "credit-risk",
+                },
+                {
+                    "label": "Ops Risk",
+                    "href": url_for("business_insights_page", domain="ops-risk"),
+                    "active": current_endpoint == "business_insights_page" and active_business_domain == "ops-risk",
+                },
+            ]
+            site_tabs.append(_nav_group("Business Insights", url_for("business_insights_page", domain="credit-risk"), business_insights_tabs))
         if _can_access_vpn_connection(settings):
             site_tabs.append(
                 _nav_group(
@@ -1545,6 +1568,18 @@ def create_app() -> Flask:
             )
         ),
     )
+    register_business_insights_routes(
+        app,
+        build_business_insights_handlers(
+            SimpleNamespace(
+                settings=settings,
+                _require_business_insights_access=lambda *args, **kwargs: _require_business_insights_access(*args, **kwargs),
+                _get_user_identity=lambda *args, **kwargs: _get_user_identity(*args, **kwargs),
+                _get_business_insights_store=lambda *args, **kwargs: _get_business_insights_store(*args, **kwargs),
+                _current_release_revision=lambda *args, **kwargs: _current_release_revision(*args, **kwargs),
+            )
+        ),
+    )
     register_bpmis_routes(
         app,
         build_bpmis_handlers(
@@ -1765,6 +1800,10 @@ def _get_team_dashboard_config_store() -> TeamDashboardConfigStore:
     if _remote_bpmis_config_enabled(settings):
         return RemoteTeamDashboardConfigStore(_build_local_agent_client(settings))
     return current_app.config["TEAM_DASHBOARD_CONFIG_STORE"]
+
+
+def _get_business_insights_store() -> BusinessInsightsStore:
+    return current_app.config["BUSINESS_INSIGHTS_STORE"]
 
 
 def _build_prd_review_service(settings: Settings) -> PRDReviewService:
@@ -2854,6 +2893,10 @@ def _require_team_dashboard_monthly_report_access(settings: Settings, *, api: bo
         return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
     flash(message, "error")
     return redirect(url_for("access_denied"))
+
+
+def _require_business_insights_access(settings: Settings, *, api: bool = False):
+    return _require_team_dashboard_monthly_report_access(settings, api=api)
 
 
 def _validate_config_security(settings: Settings, config_data: dict[str, Any]) -> None:

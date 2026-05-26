@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+
+{% block extra_head %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='business_insights.css', v=asset_revision|default('static')) }}">
+{% endblock %}
+
+{% block body %}
+  <section class="workspace-shell business-insights-page" data-business-insights>
+    <div class="section-heading">
+      <p class="eyebrow">MIS Reports</p>
+      <h2>Business Insights</h2>
+      <p>Generate Credit Risk, Anti-fraud, and Ops Risk report artifacts from approved Data Workbench exports.</p>
+    </div>
+
+    <div class="workspace-tabs business-insights-tabs" role="tablist" aria-label="Business Insights sections" data-business-insights-tabs>
+      {% for domain in domains %}
+        <button
+          class="workspace-tab{% if domain.key == active_domain %} is-active{% endif %}"
+          type="button"
+          role="tab"
+          aria-selected="{{ 'true' if domain.key == active_domain else 'false' }}"
+          data-business-insights-tab="{{ domain.key }}"
+        >{{ domain.label }}</button>
+      {% endfor %}
+    </div>
+
+    {% for domain in domains %}
+      {% set domain_reports = reports_by_domain.get(domain.key, []) %}
+      <section
+        class="workspace-panel business-insights-panel{% if domain.key == active_domain %} is-active{% endif %}"
+        data-business-insights-panel="{{ domain.key }}"
+        {% if domain.key != active_domain %}hidden{% endif %}
+      >
+        <div class="business-insights-panel-heading">
+          <div>
+            <p class="eyebrow">{{ domain.label }}</p>
+            <h3>{{ domain.label }} Reports</h3>
+          </div>
+        </div>
+
+        <div class="table-wrap premium-table-wrap business-insights-table-wrap">
+          <table class="premium-table business-insights-table">
+            <thead>
+              <tr>
+                <th scope="col">Report Name</th>
+                <th scope="col">Link</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% if domain_reports %}
+                {% for report in domain_reports %}
+                  {% set artifact = report.artifact if report.artifact else none %}
+                  <tr data-business-insights-report="{{ report.id }}">
+                    <td>
+                      <strong>{{ report.name }}</strong>
+                    </td>
+                    <td>
+                      <div class="business-insights-link-cell">
+                        {% if artifact and artifact.url %}
+                          <a class="button button-secondary" href="{{ artifact.url }}">Download Excel</a>
+                          <span class="business-insights-meta">{{ artifact.row_count }} rows - {{ artifact.created_at }}</span>
+                        {% elif report.id == underwriting_report_id %}
+                          <span class="business-insights-placeholder">No Excel file generated yet.</span>
+                        {% else %}
+                          <span class="business-insights-placeholder">Not generated yet.</span>
+                        {% endif %}
+
+                        {% if report.id == underwriting_report_id %}
+                          <div class="business-insights-actions">
+                            <button
+                              class="button button-secondary"
+                              type="button"
+                              data-business-insights-sql
+                              data-sql-url="{{ report.sql_url }}"
+                            >Generate SQL</button>
+                            <form class="business-insights-upload-form" method="post" action="{{ report.ingest_url }}" enctype="multipart/form-data" data-business-insights-upload>
+                              <input type="file" name="file" accept=".csv,.xlsx,.xlsm" required>
+                              <button class="button" type="submit">Upload Export</button>
+                            </form>
+                          </div>
+                          <div class="business-insights-sql-panel" data-business-insights-sql-panel hidden>
+                            <div class="business-insights-sql-toolbar">
+                              <span>Data Workbench SQL</span>
+                              <button class="button button-secondary" type="button" data-business-insights-copy-sql>Copy SQL</button>
+                            </div>
+                            <textarea readonly spellcheck="false" data-business-insights-sql-output></textarea>
+                          </div>
+                          <p class="business-insights-status" data-business-insights-status></p>
+                        {% endif %}
+                      </div>
+                    </td>
+                  </tr>
+                {% endfor %}
+              {% else %}
+                <tr>
+                  <td>{{ domain.label }} report selection pending</td>
+                  <td><span class="business-insights-placeholder">Not generated yet.</span></td>
+                </tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    {% endfor %}
+  </section>
+{% endblock %}
+
+{% block extra_scripts %}
+  <script src="{{ url_for('static', filename='business_insights.js', v=asset_revision|default('static')) }}"></script>
+{% endblock %}
