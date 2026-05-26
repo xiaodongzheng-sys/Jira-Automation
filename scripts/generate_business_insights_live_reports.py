@@ -362,6 +362,150 @@ def _bar_chart(title: str, labels: list[Any], values: list[Any], *, value_suffix
     return f'<section class="panel"><h2>{html.escape(title)}</h2>{"".join(rows)}</section>'
 
 
+def _group_sum(headers: list[str], rows: list[list[Any]], label_column: str, value_column: str) -> list[tuple[str, float]]:
+    index = _sheet_index(headers)
+    if label_column not in index or value_column not in index:
+        return []
+    grouped: dict[str, float] = {}
+    label_offset = index[label_column]
+    value_offset = index[value_column]
+    for row in rows:
+        label = str(row[label_offset] if label_offset < len(row) and row[label_offset] not in (None, "") else "UNKNOWN")
+        value = _number(row[value_offset] if value_offset < len(row) else None)
+        grouped[label] = grouped.get(label, 0.0) + value
+    return sorted(grouped.items(), key=lambda item: item[1], reverse=True)
+
+
+def _donut_chart(title: str, values: list[tuple[str, float, str]]) -> str:
+    filtered = [(label, value, color) for label, value, color in values if value > 0]
+    total = sum(value for _label, value, _color in filtered)
+    if total <= 0:
+        return ""
+    start = 0.0
+    segments = []
+    legend = []
+    for label, value, color in filtered:
+        end = start + value / total * 100.0
+        segments.append(f"{color} {start:.2f}% {end:.2f}%")
+        legend.append(
+            '<div class="legend-row">'
+            f'<span class="legend-dot" style="background:{html.escape(color)}"></span>'
+            f"<span>{html.escape(label)}</span><b>{html.escape(_format_number(value))}</b>"
+            "</div>"
+        )
+        start = end
+    return (
+        f'<section class="panel"><h2>{html.escape(title)}</h2>'
+        '<div class="donut-layout">'
+        f'<div class="donut" style="background:conic-gradient({",".join(segments)})"><span>{html.escape(_format_number(total))}</span></div>'
+        f'<div class="legend">{"".join(legend)}</div>'
+        "</div></section>"
+    )
+
+
+def _stacked_bar_chart(
+    title: str,
+    labels: list[str],
+    series: list[tuple[str, list[float], str]],
+    *,
+    value_suffix: str = "",
+) -> str:
+    if not labels or not series:
+        return ""
+    rows = []
+    for row_index, label in enumerate(labels[:12]):
+        total = sum(values[row_index] for _name, values, _color in series if row_index < len(values))
+        if total <= 0:
+            continue
+        segments = []
+        for name, values, color in series:
+            value = values[row_index] if row_index < len(values) else 0.0
+            if value <= 0:
+                continue
+            width = max(2.0, value / total * 100.0)
+            segments.append(
+                f'<span class="stack-segment" title="{html.escape(name)}: {html.escape(_format_number(value, suffix=value_suffix))}" '
+                f'style="width:{width:.2f}%;background:{html.escape(color)}"></span>'
+            )
+        rows.append(
+            '<div class="stack-row">'
+            f"<span>{html.escape(label)}</span>"
+            f'<div class="stack-track">{"".join(segments)}</div>'
+            f"<b>{html.escape(_format_number(total, suffix=value_suffix))}</b>"
+            "</div>"
+        )
+    legend = "".join(
+        f'<span class="stack-legend"><i style="background:{html.escape(color)}"></i>{html.escape(name)}</span>'
+        for name, _values, color in series
+    )
+    return f'<section class="panel"><h2>{html.escape(title)}</h2><div class="stack-legend-wrap">{legend}</div>{"".join(rows)}</section>' if rows else ""
+
+
+def _heatmap_table(
+    title: str,
+    headers: list[str],
+    rows: list[list[Any]],
+    *,
+    row_column: str,
+    column_column: str,
+    value_column: str,
+    max_columns: int = 8,
+    value_suffix: str = "",
+) -> str:
+    index = _sheet_index(headers)
+    if row_column not in index or column_column not in index or value_column not in index:
+        return ""
+    matrix: dict[str, dict[str, float]] = {}
+    column_totals: dict[str, float] = {}
+    row_totals: dict[str, float] = {}
+    for row in rows:
+        row_label = str(row[index[row_column]] if index[row_column] < len(row) and row[index[row_column]] not in (None, "") else "UNKNOWN")
+        col_label = str(row[index[column_column]] if index[column_column] < len(row) and row[index[column_column]] not in (None, "") else "UNKNOWN")
+        value = _number(row[index[value_column]] if index[value_column] < len(row) else None)
+        matrix.setdefault(row_label, {})[col_label] = matrix.setdefault(row_label, {}).get(col_label, 0.0) + value
+        column_totals[col_label] = column_totals.get(col_label, 0.0) + value
+        row_totals[row_label] = row_totals.get(row_label, 0.0) + value
+    row_labels = [label for label, _total in sorted(row_totals.items(), key=lambda item: item[1], reverse=True)[:10]]
+    col_labels = [label for label, _total in sorted(column_totals.items(), key=lambda item: item[1], reverse=True)[:max_columns]]
+    if not row_labels or not col_labels:
+        return ""
+    max_value = max((matrix.get(row_label, {}).get(col_label, 0.0) for row_label in row_labels for col_label in col_labels), default=0.0)
+    if max_value <= 0:
+        return ""
+    header_html = "".join(f"<th>{html.escape(label)}</th>" for label in col_labels)
+    body = []
+    for row_label in row_labels:
+        cells = []
+        for col_label in col_labels:
+            value = matrix.get(row_label, {}).get(col_label, 0.0)
+            alpha = 0.08 + (value / max_value * 0.54 if value > 0 else 0)
+            cells.append(
+                f'<td class="num heat" style="background:rgba(23,105,224,{alpha:.2f})">{html.escape(_format_number(value, suffix=value_suffix))}</td>'
+            )
+        body.append(f"<tr><th>{html.escape(row_label)}</th>{''.join(cells)}</tr>")
+    return (
+        f'<section class="panel wide"><h2>{html.escape(title)}</h2>'
+        f'<div class="table-wrap heatmap"><table><thead><tr><th>{html.escape(row_column)}</th>{header_html}</tr></thead>'
+        f"<tbody>{''.join(body)}</tbody></table></div></section>"
+    )
+
+
+def _comparison_cards(title: str, metrics: list[tuple[str, float, float, str]]) -> str:
+    cards = []
+    for label, previous, current, suffix in metrics:
+        delta = current - previous
+        favorable_delta = delta <= 0 if "outstanding" in label.lower() else delta >= 0
+        tone = "good" if favorable_delta else "watch"
+        cards.append(
+            f'<div class="comparison-card {tone}">'
+            f"<span>{html.escape(label)}</span>"
+            f"<strong>{html.escape(_format_number(current, suffix=suffix))}</strong>"
+            f"<small>Apr: {html.escape(_format_number(previous, suffix=suffix))} | Change: {html.escape(_format_number(delta, suffix=suffix))}</small>"
+            "</div>"
+        )
+    return f'<section class="panel wide"><h2>{html.escape(title)}</h2><div class="comparison-grid">{"".join(cards)}</div></section>' if cards else ""
+
+
 def _sheet_index(headers: list[str]) -> dict[str, int]:
     return {str(header): offset for offset, header in enumerate(headers)}
 
@@ -474,6 +618,201 @@ def _overview_cards(report_title: str, sheets: list[tuple[str, list[str], list[l
     return f'<section class="hero-card"><p class="eyebrow">Executive View</p><h2>{html.escape(report_title)}</h2><div class="kpi-grid">{"".join(cards)}</div></section>'
 
 
+def _period_metric(headers: list[str], rows: list[list[Any]], period: str, metric: str) -> float:
+    index = _sheet_index(headers)
+    if "period" not in index or metric not in index:
+        return 0.0
+    return sum(_number(row[index[metric]] if index[metric] < len(row) else None) for row in rows if str(row[index["period"]] if index["period"] < len(row) else "") == period)
+
+
+def _underwriting_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]]) -> list[str]:
+    sections: list[str] = []
+    summary = lookup.get("Summary by Product")
+    if summary:
+        headers, rows = summary
+        sections.append(
+            _donut_chart(
+                "Application Decision Mix",
+                [
+                    ("Approved", _sum_column(headers, rows, "Approved"), "#087443"),
+                    ("Rejected", _sum_column(headers, rows, "Rejected"), "#b42318"),
+                    ("Pending", _sum_column(headers, rows, "Pending"), "#b54708"),
+                ],
+            )
+        )
+        product_col = "Product" if "Product" in headers else "product"
+        approved_col = "Approved" if "Approved" in headers else "approved"
+        applications_col = "Applications" if "Applications" in headers else "applications"
+        if product_col in headers and approved_col in headers and applications_col in headers:
+            product_index = headers.index(product_col)
+            approved_index = headers.index(approved_col)
+            applications_index = headers.index(applications_col)
+            aggregates: dict[str, list[float]] = {}
+            for row in rows:
+                product = str(row[product_index] if product_index < len(row) else "UNKNOWN")
+                bucket = aggregates.setdefault(product, [0.0, 0.0])
+                bucket[0] += _number(row[approved_index] if approved_index < len(row) else None)
+                bucket[1] += _number(row[applications_index] if applications_index < len(row) else None)
+            pairs = [
+                (product, approved / applications * 100.0)
+                for product, (approved, applications) in aggregates.items()
+                if applications > 0
+            ]
+            pairs = sorted(pairs, key=lambda item: item[1], reverse=True)[:12]
+            sections.append(_bar_chart("Approval Rate by Product", [item[0] for item in pairs], [item[1] for item in pairs], value_suffix="%"))
+    funnel = lookup.get("Product Funnel")
+    if funnel:
+        headers, rows = funnel
+        index = _sheet_index(headers)
+        if {"Product", "Status", "Count"}.issubset(index):
+            products = [label for label, _total in _group_sum(headers, rows, "Product", "Count")[:10]]
+            statuses = ["APPROVED", "REJECTED", "PENDING"]
+            colors = {"APPROVED": "#087443", "REJECTED": "#b42318", "PENDING": "#b54708"}
+            series = []
+            for status in statuses:
+                values = []
+                for product in products:
+                    values.append(
+                        sum(
+                            _number(row[index["Count"]] if index["Count"] < len(row) else None)
+                            for row in rows
+                            if str(row[index["Product"]] if index["Product"] < len(row) else "") == product
+                            and str(row[index["Status"]] if index["Status"] < len(row) else "") == status
+                        )
+                    )
+                series.append((status.title(), values, colors[status]))
+            sections.append(_stacked_bar_chart("Funnel Mix by Product", products, series))
+    rejects = lookup.get("Product Reject Reasons")
+    if rejects:
+        headers, rows = rejects
+        top = _group_sum(headers, rows, "Reject Reason", "Count")[:12]
+        sections.append(_bar_chart("Top Reject Reasons", [item[0] for item in top], [item[1] for item in top]))
+    backlog = lookup.get("Product Stage Backlog")
+    if backlog:
+        headers, rows = backlog
+        sections.append(
+            _heatmap_table(
+                "Backlog Heatmap by Product and Stage",
+                headers,
+                rows,
+                row_column="Product",
+                column_column="Current Stage",
+                value_column="Count",
+                max_columns=6,
+            )
+        )
+    return [section for section in sections if section]
+
+
+def _portfolio_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]]) -> list[str]:
+    sections: list[str] = []
+    summary = lookup.get("Summary by Product")
+    if summary:
+        headers, rows = summary
+        sections.append(
+            _comparison_cards(
+                "Apr 2026 vs May 2026 MTD",
+                [
+                    ("Due Amount", _period_metric(headers, rows, "Apr 2026", "due_amount"), _period_metric(headers, rows, "May 2026 MTD", "due_amount"), ""),
+                    ("Repaid Amount", _period_metric(headers, rows, "Apr 2026", "repaid_amount"), _period_metric(headers, rows, "May 2026 MTD", "repaid_amount"), ""),
+                    ("Outstanding", _period_metric(headers, rows, "Apr 2026", "outstanding_amount"), _period_metric(headers, rows, "May 2026 MTD", "outstanding_amount"), ""),
+                ],
+            )
+        )
+        index = _sheet_index(headers)
+        if {"product", "repayment_rate"}.issubset(index):
+            pairs = [
+                (
+                    str(row[index["period"]] if index["period"] < len(row) else ""),
+                    str(row[index["product"]] if index["product"] < len(row) else "UNKNOWN"),
+                    _number(row[index["repayment_rate"]] if index["repayment_rate"] < len(row) else None),
+                )
+                for row in rows
+            ]
+            mtd_pairs = [(product, rate * 100 if rate <= 1 else rate) for period, product, rate in pairs if period == "May 2026 MTD"]
+            mtd_pairs = sorted(mtd_pairs, key=lambda item: item[1], reverse=True)[:12]
+            sections.append(_bar_chart("May MTD Repayment Rate by Product", [item[0] for item in mtd_pairs], [item[1] for item in mtd_pairs], value_suffix="%"))
+    dpd = lookup.get("DPD Buckets")
+    if dpd:
+        headers, rows = dpd
+        sections.append(
+            _heatmap_table(
+                "Outstanding Amount Heatmap by DPD Bucket",
+                headers,
+                rows,
+                row_column="product",
+                column_column="dpd_bucket",
+                value_column="outstanding_amount",
+                max_columns=8,
+            )
+        )
+    flow = lookup.get("Repay Flow Status")
+    if flow:
+        headers, rows = flow
+        top = _group_sum(headers, rows, "repay_status", "repay_amount")[:10]
+        sections.append(_bar_chart("Repay Flow Amount by Status", [item[0] for item in top], [item[1] for item in top]))
+    return [section for section in sections if section]
+
+
+def _limit_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]]) -> list[str]:
+    sections: list[str] = []
+    summary = lookup.get("Summary by Product")
+    if summary:
+        headers, rows = summary
+        index = _sheet_index(headers)
+        valid_rows = [row for row in rows if "total_limit" in index and _number(row[index["total_limit"]] if index["total_limit"] < len(row) else None) > 0]
+        if valid_rows and {"product", "used_limit", "available_limit_estimate"}.issubset(index):
+            labels = [str(row[index["product"]] if index["product"] < len(row) else "UNKNOWN") for row in valid_rows[:10]]
+            used = [_number(row[index["used_limit"]] if index["used_limit"] < len(row) else None) for row in valid_rows[:10]]
+            available = [_number(row[index["available_limit_estimate"]] if index["available_limit_estimate"] < len(row) else None) for row in valid_rows[:10]]
+            sections.append(
+                _stacked_bar_chart(
+                    "Used vs Available Limit by Product",
+                    labels,
+                    [("Used", used, "#b54708"), ("Available", available, "#087443")],
+                )
+            )
+        if {"product", "utilization_rate"}.issubset(index):
+            pairs = []
+            for row in rows:
+                rate = _number(row[index["utilization_rate"]] if index["utilization_rate"] < len(row) else None)
+                if rate > 0:
+                    pairs.append((str(row[index["product"]] if index["product"] < len(row) else "UNKNOWN"), rate * 100 if rate <= 1 else rate))
+            pairs = sorted(pairs, key=lambda item: item[1], reverse=True)[:12]
+            sections.append(_bar_chart("Utilization Rate by Product", [item[0] for item in pairs], [item[1] for item in pairs], value_suffix="%"))
+    buckets = lookup.get("Utilization Buckets")
+    if buckets:
+        headers, rows = buckets
+        sections.append(
+            _heatmap_table(
+                "Customer Count Heatmap by Utilization Bucket",
+                headers,
+                rows,
+                row_column="product",
+                column_column="utilization_bucket",
+                value_column="customers",
+                max_columns=7,
+            )
+        )
+    available = lookup.get("EOD Available Limit")
+    if available:
+        headers, rows = available
+        top = _group_sum(headers, rows, "status", "available_limit")[:8]
+        sections.append(_bar_chart("Available Limit by Status", [item[0] for item in top], [item[1] for item in top]))
+    return [section for section in sections if section]
+
+
+def _specialized_sections(report_title: str, lookup: dict[str, tuple[list[str], list[list[Any]]]]) -> list[str]:
+    normalized = report_title.lower()
+    if "underwriting" in normalized:
+        return _underwriting_sections(lookup)
+    if "portfolio repayment" in normalized:
+        return _portfolio_sections(lookup)
+    if "limit utilization" in normalized:
+        return _limit_sections(lookup)
+    return []
+
+
 def write_visualization(
     path: Path,
     *,
@@ -490,37 +829,40 @@ def write_visualization(
         sections.append(f'<section class="quality-card"><h2>Data Quality Notes</h2><ul>{notes}</ul></section>')
     else:
         sections.append('<section class="quality-card good"><h2>Data Quality Notes</h2><p>No signed 64-bit overflow, negative capacity, or rate-bound anomalies detected in aggregate sheets.</p></section>')
+    specialized = _specialized_sections(report_title, lookup)
+    sections.extend(specialized)
     summary = lookup.get("Summary by Product") or lookup.get("Funnel Summary by Product")
     if summary:
         headers, rows = summary
         index = {header: offset for offset, header in enumerate(headers)}
         product_index = index.get("product", 1 if len(headers) > 1 else 0)
-        metric = next(
-            (candidate for candidate in ("repayment_rate", "utilization_rate", "application_to_disbursement_rate") if candidate in index),
-            None,
-        )
-        if metric:
-            multiplier = 100 if rows and _number(rows[0][index[metric]]) <= 1 else 1
-            sections.append(
-                _bar_chart(
-                    f"{metric.replace('_', ' ').title()} by Product",
-                    [row[product_index] for row in rows],
-                    [_number(row[index[metric]]) * multiplier for row in rows],
-                    value_suffix="%",
-                )
+        if not specialized:
+            metric = next(
+                (candidate for candidate in ("repayment_rate", "utilization_rate", "application_to_disbursement_rate") if candidate in index),
+                None,
             )
-        amount_metric = next(
-            (candidate for candidate in ("outstanding_amount", "used_limit", "disbursed_principal", "applications") if candidate in index),
-            None,
-        )
-        if amount_metric:
-            sections.append(
-                _bar_chart(
-                    f"{amount_metric.replace('_', ' ').title()} by Product",
-                    [row[product_index] for row in rows],
-                    [row[index[amount_metric]] for row in rows],
+            if metric:
+                multiplier = 100 if rows and _number(rows[0][index[metric]]) <= 1 else 1
+                sections.append(
+                    _bar_chart(
+                        f"{metric.replace('_', ' ').title()} by Product",
+                        [row[product_index] for row in rows],
+                        [_number(row[index[metric]]) * multiplier for row in rows],
+                        value_suffix="%",
+                    )
                 )
+            amount_metric = next(
+                (candidate for candidate in ("outstanding_amount", "used_limit", "disbursed_principal", "applications") if candidate in index),
+                None,
             )
+            if amount_metric:
+                sections.append(
+                    _bar_chart(
+                        f"{amount_metric.replace('_', ' ').title()} by Product",
+                        [row[product_index] for row in rows],
+                        [row[index[amount_metric]] for row in rows],
+                    )
+                )
         sections.append(f'<section class="panel wide"><h2>Summary by Product</h2>{_table_html(headers, rows)}</section>')
     for sheet_name, headers, rows in sheets:
         if sheet_name == "Summary by Product":
@@ -550,9 +892,25 @@ h2{{margin:0 0 14px;font-size:18px;letter-spacing:0;}}
 .bar-row{{display:grid;grid-template-columns:minmax(120px,220px) 1fr minmax(90px,auto);gap:12px;align-items:center;margin:10px 0;}}
 .bar-row span{{color:#344054;font-weight:600;}} .bar-row b{{text-align:right;font-variant-numeric:tabular-nums;}}
 .bar-track{{height:18px;background:#e5e7eb;border-radius:4px;overflow:hidden;}} .bar{{height:100%;background:linear-gradient(90deg,#1769e0,#39a0ff);}}
+.donut-layout{{display:grid;grid-template-columns:180px 1fr;gap:20px;align-items:center;}}
+.donut{{width:156px;height:156px;border-radius:50%;display:grid;place-items:center;position:relative;box-shadow:inset 0 0 0 1px #e4e7ec;}}
+.donut:after{{content:"";position:absolute;width:92px;height:92px;border-radius:50%;background:#fff;box-shadow:0 0 0 1px #edf1f7;}}
+.donut span{{position:relative;z-index:1;font-weight:800;font-size:18px;}}
+.legend-row{{display:grid;grid-template-columns:14px 1fr auto;gap:8px;align-items:center;margin:8px 0;}}
+.legend-row b,.comparison-card strong{{font-variant-numeric:tabular-nums;}} .legend-dot{{width:10px;height:10px;border-radius:50%;display:inline-block;}}
+.stack-legend-wrap{{display:flex;gap:14px;flex-wrap:wrap;margin:0 0 12px;color:#475467;font-size:12px;}}
+.stack-legend i{{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px;}}
+.stack-row{{display:grid;grid-template-columns:minmax(90px,160px) 1fr minmax(90px,auto);gap:12px;align-items:center;margin:10px 0;}}
+.stack-row>span{{font-weight:600;color:#344054;}} .stack-row>b{{text-align:right;font-variant-numeric:tabular-nums;}}
+.stack-track{{height:20px;background:#e5e7eb;border-radius:4px;overflow:hidden;display:flex;}} .stack-segment{{display:block;height:100%;min-width:2px;}}
+.comparison-grid{{display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:12px;}}
+.comparison-card{{border:1px solid #e4e7ec;border-radius:8px;padding:14px;background:#fbfdff;}}
+.comparison-card span{{display:block;color:var(--muted);font-size:12px;margin-bottom:6px;}} .comparison-card strong{{display:block;font-size:22px;}}
+.comparison-card small{{display:block;margin-top:7px;color:#475467;}} .comparison-card.good strong{{color:var(--green);}} .comparison-card.watch strong{{color:var(--amber);}}
 .table-wrap{{overflow:auto;border:1px solid #edf1f7;border-radius:6px;}} table{{width:100%;border-collapse:collapse;font-size:13px;}} th,td{{border-bottom:1px solid #edf1f7;padding:8px 10px;text-align:left;white-space:nowrap;}} th{{background:#f1f6ff;font-weight:700;color:#344054;position:sticky;top:0;}} td.num{{text-align:right;font-variant-numeric:tabular-nums;}}
+.heatmap td.heat{{color:#12263f;font-weight:650;}}
 .note{{color:var(--muted);font-size:12px;margin:10px 0 0;}}
-@media(max-width:900px){{main{{grid-template-columns:1fr;padding-left:16px;padding-right:16px;}}.panel{{grid-column:1/-1;}}.kpi-grid{{grid-template-columns:1fr;}}.bar-row{{grid-template-columns:1fr;gap:6px;}}.bar-row b{{text-align:left;}}}}
+@media(max-width:900px){{main{{grid-template-columns:1fr;padding-left:16px;padding-right:16px;}}.panel{{grid-column:1/-1;}}.kpi-grid,.comparison-grid{{grid-template-columns:1fr;}}.bar-row,.stack-row,.donut-layout{{grid-template-columns:1fr;gap:6px;}}.bar-row b,.stack-row>b{{text-align:left;}}}}
 </style></head><body><header><h1>{html.escape(report_title)}</h1><p>Snapshot {html.escape(snapshot_pt_date)}. Generated {generated_at} UTC from Data Workbench aggregate output.</p></header><main>{"".join(sections)}</main></body></html>"""
     path.write_text(document, encoding="utf-8")
 
