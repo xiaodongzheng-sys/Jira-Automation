@@ -136,6 +136,92 @@ where application_submission_time >= {start_ms}
 ;"""
 
 
+def build_underwriting_funnel_mis_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    period = business_insights_period(now)
+    start_ms = _date_to_epoch_millis(period.start_date)
+    current_month_start_ms = _date_to_epoch_millis(period.current_month_start)
+    end_ms = _date_to_epoch_millis(period.end_exclusive)
+    active_now = now.astimezone(BUSINESS_INSIGHTS_TIMEZONE) if now else datetime.now(BUSINESS_INSIGHTS_TIMEZONE)
+    active_now_ms = int(active_now.timestamp() * 1000)
+    snapshot_filter = (
+        f"pt_date = '{snapshot_pt_date}'"
+        if snapshot_pt_date
+        else f"pt_date = (select max(pt_date) from {UNDERWRITING_FUNNEL_TABLE})"
+    )
+    period_expr = (
+        f"case when application_submission_time >= {current_month_start_ms} "
+        f"then '{period.current_month_label}' else '{period.previous_month_label}' end"
+    )
+    product_expr = "coalesce(nullif(product_code, ''), 'UNKNOWN')"
+    subproduct_expr = "coalesce(nullif(sub_product_code, ''), '-')"
+    status_bucket_expr = """case
+  when upper(coalesce(underwriting_status, '')) rlike '(APPROV|PASS|SUCCESS|COMPLETED)' then 'APPROVED'
+  when upper(coalesce(underwriting_status, '')) rlike '(REJECT|DECLIN|FAIL|DENY)' then 'REJECTED'
+  else 'PENDING'
+end"""
+    base_where = (
+        f"{snapshot_filter}\n"
+        f"  and application_submission_time >= {start_ms}\n"
+        f"  and application_submission_time < {end_ms}"
+    )
+    return f"""-- Credit Risk PH - Underwriting Funnel MIS
+-- Duration: {period.title}
+-- Snapshot: {snapshot_pt_date or "latest available pt_date at run time"}
+-- Run each query in Data Workbench. These are the aggregation queries used to build the Portal Excel.
+
+-- 1. Summary by Product
+select {period_expr} as period, {product_expr} as product,
+  count(1) as applications,
+  sum(case when {status_bucket_expr} = 'APPROVED' then 1 else 0 end) as approved,
+  sum(case when {status_bucket_expr} = 'REJECTED' then 1 else 0 end) as rejected,
+  sum(case when {status_bucket_expr} = 'PENDING' then 1 else 0 end) as pending,
+  round(avg(cast(apply_loan_amount as double)), 2) as avg_applied_amount
+from {UNDERWRITING_FUNNEL_TABLE}
+where {base_where}
+group by {period_expr}, {product_expr}
+order by period, product;
+
+-- 2. Product Funnel
+select {period_expr} as period, {product_expr} as product,
+  coalesce(nullif(underwriting_status, ''), 'PENDING') as status,
+  count(1) as count
+from {UNDERWRITING_FUNNEL_TABLE}
+where {base_where}
+group by {period_expr}, {product_expr}, coalesce(nullif(underwriting_status, ''), 'PENDING')
+order by period, product, status;
+
+-- 3. Product Reject Reasons
+select {period_expr} as period, {product_expr} as product,
+  coalesce(nullif(reject_reason, ''), 'Unspecified') as reject_reason,
+  count(1) as count
+from {UNDERWRITING_FUNNEL_TABLE}
+where {base_where}
+  and {status_bucket_expr} = 'REJECTED'
+group by {period_expr}, {product_expr}, coalesce(nullif(reject_reason, ''), 'Unspecified')
+order by period, product, count desc;
+
+-- 4. Product Stage Backlog
+select {period_expr} as period, {product_expr} as product,
+  coalesce(nullif(current_stage, ''), 'Unspecified') as current_stage,
+  count(1) as count,
+  min(create_date) as oldest_create_date_ms,
+  round(avg(case when create_date is not null then ({active_now_ms} - cast(create_date as double)) / 86400000.0 else null end), 2) as avg_age_days
+from {UNDERWRITING_FUNNEL_TABLE}
+where {base_where}
+group by {period_expr}, {product_expr}, coalesce(nullif(current_stage, ''), 'Unspecified')
+order by period, product, count desc;
+
+-- 5. Sub-product Funnel
+select {period_expr} as period, {product_expr} as product, {subproduct_expr} as sub_product,
+  coalesce(nullif(underwriting_status, ''), 'PENDING') as status,
+  count(1) as count
+from {UNDERWRITING_FUNNEL_TABLE}
+where {base_where}
+group by {period_expr}, {product_expr}, {subproduct_expr}, coalesce(nullif(underwriting_status, ''), 'PENDING')
+order by period, product, sub_product, status;
+"""
+
+
 def _normalize_header(value: Any) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9]+", "_", str(value or "").strip().lower()).strip("_")
     return normalized
@@ -492,7 +578,17 @@ class BusinessInsightsStore:
     def sql_for_report(self, report_id: str, *, now: datetime | None = None) -> str:
         if report_id != UNDERWRITING_FUNNEL_REPORT_ID:
             raise ToolError("SQL is not configured for this report yet.")
-        return build_underwriting_funnel_sql(now)
+        report = self.report(report_id) or {}
+        artifact = report.get("artifact") if isinstance(report.get("artifact"), dict) else {}
+        saved_sql = str(artifact.get("sql") or "").strip() if isinstance(artifact, dict) else ""
+        if saved_sql:
+            return saved_sql
+        return build_underwriting_funnel_mis_sql(now=now)
+
+    def sql_filename_for_report(self, report_id: str) -> str:
+        if report_id != UNDERWRITING_FUNNEL_REPORT_ID:
+            raise ToolError("SQL is not configured for this report yet.")
+        return f"{UNDERWRITING_FUNNEL_REPORT_ID}.sql"
 
     def save_underwriting_export(self, *, content: bytes, filename: str, now: datetime | None = None) -> dict[str, Any]:
         rows = read_underwriting_export(content, filename)
@@ -509,6 +605,7 @@ class BusinessInsightsStore:
             "source_filename": Path(filename or "export").name,
             "row_count": len(rows),
             "created_at": time_module.strftime("%Y-%m-%dT%H:%M:%SZ", time_module.gmtime()),
+            "sql": build_underwriting_funnel_sql(now),
         }
         with self._lock:
             payload = self._load()

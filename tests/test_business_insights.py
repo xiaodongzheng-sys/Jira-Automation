@@ -14,6 +14,7 @@ from bpmis_jira_tool.business_insights import (
     BusinessInsightsStore,
     UNDERWRITING_FUNNEL_REPORT_ID,
     UNDERWRITING_FUNNEL_TABLE,
+    build_underwriting_funnel_mis_sql,
     build_underwriting_funnel_sql,
     build_underwriting_funnel_workbook,
 )
@@ -98,6 +99,18 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertIn("product_code", sql)
         self.assertIn("sub_product_code", sql)
 
+    def test_underwriting_mis_sql_uses_snapshot_and_aggregation_queries(self):
+        sql = build_underwriting_funnel_mis_sql(snapshot_pt_date="2026-05-25", now=FIXED_NOW)
+
+        self.assertIn("Credit Risk PH - Underwriting Funnel MIS", sql)
+        self.assertIn("Snapshot: 2026-05-25", sql)
+        self.assertIn("pt_date = '2026-05-25'", sql)
+        self.assertIn("Summary by Product", sql)
+        self.assertIn("Product Funnel", sql)
+        self.assertIn("Product Reject Reasons", sql)
+        self.assertIn("Product Stage Backlog", sql)
+        self.assertIn("Sub-product Funnel", sql)
+
     def test_underwriting_workbook_contains_expected_sheets_and_summary_values(self):
         workbook_bytes = build_underwriting_funnel_workbook(_synthetic_underwriting_rows(), now=FIXED_NOW)
         workbook = load_workbook(io.BytesIO(workbook_bytes), data_only=True)
@@ -173,6 +186,9 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertIn("Credit Risk PH - Underwriting Funnel", response.get_data(as_text=True))
         self.assertIn("Portfolio Repayment", response.get_data(as_text=True))
         self.assertIn("Limit Utilization", response.get_data(as_text=True))
+        self.assertIn("Generate SQL", response.get_data(as_text=True))
+        self.assertNotIn("Upload Export", response.get_data(as_text=True))
+        self.assertIsNone(soup.select_one("[data-business-insights-upload]"))
 
     def test_business_insights_access_route_sql_ingest_and_download(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -201,6 +217,7 @@ class BusinessInsightsTests(unittest.TestCase):
                     session["google_credentials"] = {"token": "x"}
                 reports_response = client.get("/api/business-insights/reports?domain=credit-risk")
                 sql_response = client.get(f"/api/business-insights/reports/{UNDERWRITING_FUNNEL_REPORT_ID}/sql")
+                sql_download_response = client.get(f"/api/business-insights/reports/{UNDERWRITING_FUNNEL_REPORT_ID}/sql?format=raw&download=1")
                 ingest_response = client.post(
                     f"/api/business-insights/reports/{UNDERWRITING_FUNNEL_REPORT_ID}/ingest",
                     data={"file": (io.BytesIO(_csv_export_bytes()), "underwriting_export.csv")},
@@ -219,6 +236,10 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertEqual(len(reports_response.get_json()["reports"]), 3)
         self.assertEqual(sql_response.status_code, 200)
         self.assertIn(UNDERWRITING_FUNNEL_TABLE, sql_response.get_json()["sql"])
+        self.assertEqual(sql_download_response.status_code, 200)
+        self.assertEqual(sql_download_response.mimetype, "text/plain")
+        self.assertIn("attachment; filename=credit-risk-ph-underwriting-funnel.sql", sql_download_response.headers["Content-Disposition"])
+        self.assertIn("Summary by Product", sql_download_response.get_data(as_text=True))
         self.assertEqual(ingest_response.status_code, 200)
         self.assertEqual(ingest_response.get_json()["artifact"]["row_count"], 3)
         self.assertEqual(download_status, 200)

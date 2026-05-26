@@ -76,7 +76,10 @@ def build_business_insights_handlers(ctx: Any) -> Any:
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.NOT_FOUND
         if str(request.args.get("format") or "").lower() == "raw":
-            return Response(sql, mimetype="text/plain")
+            response = Response(sql, mimetype="text/plain")
+            if str(request.args.get("download") or "").lower() in {"1", "true", "yes"}:
+                response.headers["Content-Disposition"] = f"attachment; filename={_store().sql_filename_for_report(report_id)}"
+            return response
         return jsonify({"status": "ok", "report_id": report_id, "sql": sql})
 
     def business_insights_report_ingest(report_id: str):
