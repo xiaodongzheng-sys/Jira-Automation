@@ -2592,6 +2592,16 @@ fi
         self.assertIn("source_code_qa_ops_summary.py\" --strict", sync_script)
         self.assertIn("run_team_stack.sh\" restart", sync_script)
 
+    def test_team_stack_guard_stops_caffeinate_on_battery_power(self):
+        guard_script = (PROJECT_ROOT / "scripts/run_team_stack_guard.sh").read_text(encoding="utf-8")
+
+        self.assertIn("TEAM_STACK_CAFFEINATE_ON_BATTERY", guard_script)
+        self.assertIn('current_power_source)', guard_script)
+        self.assertIn('"Battery Power"', guard_script)
+        self.assertIn("stop_caffeinate", guard_script)
+        self.assertIn("reconcile_caffeinate", guard_script)
+        self.assertIn("Sleep prevention disabled on battery power.", guard_script)
+
     def test_host_python_upgrade_script_builds_python312_candidate(self):
         upgrade_script = (PROJECT_ROOT / "scripts/upgrade_host_python_runtime.sh").read_text(encoding="utf-8")
         setup_script = (PROJECT_ROOT / "scripts/setup_team_stack_host_workspace.sh").read_text(encoding="utf-8")

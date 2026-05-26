@@ -39,6 +39,7 @@ CLOUDFLARE_LOG_FILE="$DATA_DIR/logs/cloudflare_tunnel.log"
 CHECK_INTERVAL="${TEAM_STACK_GUARD_INTERVAL_SECONDS:-15}"
 START_READY_TIMEOUT_SECONDS="${TEAM_STACK_START_READY_TIMEOUT_SECONDS:-12}"
 USE_CAFFEINATE="${TEAM_STACK_USE_CAFFEINATE:-auto}"
+CAFFEINATE_ON_BATTERY="${TEAM_STACK_CAFFEINATE_ON_BATTERY:-0}"
 RESTART_WINDOW_SECONDS="${TEAM_STACK_RESTART_WINDOW_SECONDS:-60}"
 MAX_RESTART_BACKOFF_SECONDS="${TEAM_STACK_MAX_RESTART_BACKOFF_SECONDS:-30}"
 RESTART_ALERT_THRESHOLD="${TEAM_STACK_RESTART_ALERT_THRESHOLD:-3}"
@@ -55,6 +56,7 @@ ngrok_last_start_at=0
 portal_unhealthy_count=0
 ngrok_unhealthy_count=0
 last_storage_maintenance_at=0
+caffeinate_state=""
 
 case "$TUNNEL_PROVIDER" in
   cloudflare)
@@ -82,6 +84,17 @@ json_escape() {
   value="${value//\"/\\\"}"
   value="${value//$'\n'/\\n}"
   printf '%s' "$value"
+}
+
+is_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 log() {
@@ -271,32 +284,93 @@ compute_backoff() {
   printf '%s\n' "$backoff"
 }
 
-start_caffeinate() {
-  local should_use="0"
+current_power_source() {
+  if ! command -v pmset >/dev/null 2>&1; then
+    printf 'unknown\n'
+    return 0
+  fi
+  local source
+  source="$(pmset -g batt 2>/dev/null | awk -F"'" '/Now drawing from/ { print $2; found=1; exit } END { if (!found) print "unknown" }')" || source="unknown"
+  printf '%s\n' "${source:-unknown}"
+}
+
+caffeinate_requested() {
   case "$USE_CAFFEINATE" in
     1|true|yes|on)
-      should_use="1"
+      return 0
       ;;
     auto)
       if command -v caffeinate >/dev/null 2>&1; then
-        should_use="1"
+        return 0
       fi
       ;;
   esac
+  return 1
+}
 
-  if [[ "$should_use" != "1" ]]; then
-    log "Sleep prevention disabled for this run."
-    return 0
+caffeinate_should_run() {
+  if ! caffeinate_requested; then
+    return 1
   fi
-
   if ! command -v caffeinate >/dev/null 2>&1; then
-    log "caffeinate was requested but is not available. Continuing without sleep prevention."
+    return 1
+  fi
+  if [[ "$(current_power_source)" == "Battery Power" ]] && ! is_truthy "$CAFFEINATE_ON_BATTERY"; then
+    return 1
+  fi
+  return 0
+}
+
+stop_caffeinate() {
+  local reason="$1"
+  local caffeinate_pid
+  caffeinate_pid="$(read_pid_file "$CAFFEINATE_PID_FILE" || true)"
+  if [[ -n "${caffeinate_pid:-}" ]]; then
+    kill "$caffeinate_pid" >/dev/null 2>&1 || true
+    log "Sleep prevention disabled with caffeinate stopped (pid $caffeinate_pid; $reason)."
+  fi
+  rm -f "$CAFFEINATE_PID_FILE"
+}
+
+reconcile_caffeinate() {
+  local caffeinate_pid
+  caffeinate_pid="$(read_pid_file "$CAFFEINATE_PID_FILE" || true)"
+
+  if caffeinate_should_run; then
+    if [[ -n "${caffeinate_pid:-}" ]] && pid_is_running "$caffeinate_pid"; then
+      caffeinate_state="running"
+      return 0
+    fi
+    rm -f "$CAFFEINATE_PID_FILE"
+    caffeinate -dimsu -w $$ >/dev/null 2>&1 &
+    echo $! >"$CAFFEINATE_PID_FILE"
+    caffeinate_state="running"
+    log "Sleep prevention enabled with caffeinate (pid $(cat "$CAFFEINATE_PID_FILE"))."
     return 0
   fi
 
-  caffeinate -dimsu -w $$ >/dev/null 2>&1 &
-  echo $! >"$CAFFEINATE_PID_FILE"
-  log "Sleep prevention enabled with caffeinate (pid $(cat "$CAFFEINATE_PID_FILE"))."
+  if [[ -n "${caffeinate_pid:-}" ]]; then
+    stop_caffeinate "current power source: $(current_power_source)"
+    caffeinate_state="stopped"
+    return 0
+  fi
+
+  local skip_state skip_message
+  if ! caffeinate_requested; then
+    skip_state="disabled"
+    skip_message="Sleep prevention disabled for this run."
+  elif ! command -v caffeinate >/dev/null 2>&1; then
+    skip_state="unavailable"
+    skip_message="caffeinate was requested but is not available. Continuing without sleep prevention."
+  elif [[ "$(current_power_source)" == "Battery Power" ]] && ! is_truthy "$CAFFEINATE_ON_BATTERY"; then
+    skip_state="battery"
+    skip_message="Sleep prevention disabled on battery power."
+  fi
+
+  if [[ -n "${skip_state:-}" && "$caffeinate_state" != "$skip_state" ]]; then
+    log "$skip_message"
+    caffeinate_state="$skip_state"
+  fi
 }
 
 portal_is_healthy() {
@@ -495,9 +569,10 @@ EOF
 }
 
 log "Team stack guard started."
-start_caffeinate
+reconcile_caffeinate
 
 while true; do
+  reconcile_caffeinate
   ensure_portal_running
   if portal_is_healthy; then
     ensure_tunnel_running
