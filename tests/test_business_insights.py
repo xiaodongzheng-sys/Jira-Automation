@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -11,9 +12,15 @@ from bs4 import BeautifulSoup
 from openpyxl import load_workbook
 
 from bpmis_jira_tool.business_insights import (
+    APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID,
     BusinessInsightsStore,
+    LIMIT_UTILIZATION_REPORT_ID,
+    PORTFOLIO_REPAYMENT_REPORT_ID,
     UNDERWRITING_FUNNEL_REPORT_ID,
     UNDERWRITING_FUNNEL_TABLE,
+    build_application_disbursement_funnel_sql,
+    build_limit_utilization_sql,
+    build_portfolio_repayment_sql,
     build_underwriting_funnel_mis_sql,
     build_underwriting_funnel_sql,
     build_underwriting_funnel_workbook,
@@ -111,6 +118,21 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertIn("Product Stage Backlog", sql)
         self.assertIn("Sub-product Funnel", sql)
 
+    def test_new_credit_risk_report_sql_builders_use_accessible_tables(self):
+        portfolio_sql = build_portfolio_repayment_sql(snapshot_pt_date="2026-05-25", now=FIXED_NOW)
+        limit_sql = build_limit_utilization_sql(snapshot_pt_date="2026-05-25", now=FIXED_NOW)
+        funnel_sql = build_application_disbursement_funnel_sql(snapshot_pt_date="2026-05-25", now=FIXED_NOW)
+
+        self.assertIn("Credit Risk PH - Portfolio Repayment", portfolio_sql)
+        self.assertIn("cbs_ph_bke_loan_core_db_repay_plan_tab_ss", portfolio_sql)
+        self.assertIn("Repay Flow Status", portfolio_sql)
+        self.assertIn("Credit Risk PH - Limit Utilization", limit_sql)
+        self.assertIn("cbs_ph_bke_loan_core_db_credit_limit_tab_ss_d", limit_sql)
+        self.assertIn("Utilization Buckets", limit_sql)
+        self.assertIn("Credit Risk PH - Application to Disbursement Funnel", funnel_sql)
+        self.assertIn("cbs_ph_bke_loan_txn_db_loan_application_tab_ss", funnel_sql)
+        self.assertIn("cbs_ph_bke_loan_core_db_disburse_flow_tab_ss", funnel_sql)
+
     def test_underwriting_workbook_contains_expected_sheets_and_summary_values(self):
         workbook_bytes = build_underwriting_funnel_workbook(_synthetic_underwriting_rows(), now=FIXED_NOW)
         workbook = load_workbook(io.BytesIO(workbook_bytes), data_only=True)
@@ -142,6 +164,14 @@ class BusinessInsightsTests(unittest.TestCase):
             metadata, artifact_path = reloaded.artifact_path(artifact["id"])
             self.assertEqual(metadata["row_count"], 3)
             self.assertTrue(artifact_path.exists())
+            visualization_path = artifact_path.with_suffix(".html")
+            visualization_path.write_text("<html><body>Visualization</body></html>", encoding="utf-8")
+            payload = json.loads((Path(temp_dir) / "reports.json").read_text(encoding="utf-8"))
+            payload["artifacts"][UNDERWRITING_FUNNEL_REPORT_ID]["visualization_filename"] = visualization_path.name
+            (Path(temp_dir) / "reports.json").write_text(json.dumps(payload), encoding="utf-8")
+            visualization_metadata, resolved_visualization_path = reloaded.visualization_path(artifact["id"])
+            self.assertEqual(visualization_metadata["id"], artifact["id"])
+            self.assertEqual(resolved_visualization_path, visualization_path.resolve())
 
             artifact_path.unlink()
             with self.assertRaises(ToolError):
@@ -184,9 +214,10 @@ class BusinessInsightsTests(unittest.TestCase):
             headers = [node.get_text(strip=True) for node in table.select("thead th")]
             self.assertEqual(headers, ["Report Name", "Link"])
         self.assertIn("Credit Risk PH - Underwriting Funnel", response.get_data(as_text=True))
-        self.assertIn("Portfolio Repayment", response.get_data(as_text=True))
-        self.assertIn("Limit Utilization", response.get_data(as_text=True))
-        self.assertIn("Generate SQL", response.get_data(as_text=True))
+        self.assertIn("Credit Risk PH - Portfolio Repayment", response.get_data(as_text=True))
+        self.assertIn("Credit Risk PH - Limit Utilization", response.get_data(as_text=True))
+        self.assertIn("Credit Risk PH - Application to Disbursement Funnel", response.get_data(as_text=True))
+        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 4)
         self.assertNotIn("Upload Export", response.get_data(as_text=True))
         self.assertIsNone(soup.select_one("[data-business-insights-upload]"))
 
@@ -218,12 +249,31 @@ class BusinessInsightsTests(unittest.TestCase):
                 reports_response = client.get("/api/business-insights/reports?domain=credit-risk")
                 sql_response = client.get(f"/api/business-insights/reports/{UNDERWRITING_FUNNEL_REPORT_ID}/sql")
                 sql_download_response = client.get(f"/api/business-insights/reports/{UNDERWRITING_FUNNEL_REPORT_ID}/sql?format=raw&download=1")
+                portfolio_sql_response = client.get(f"/api/business-insights/reports/{PORTFOLIO_REPAYMENT_REPORT_ID}/sql?format=raw&download=1")
+                limit_sql_response = client.get(f"/api/business-insights/reports/{LIMIT_UTILIZATION_REPORT_ID}/sql?format=raw&download=1")
+                funnel_sql_response = client.get(f"/api/business-insights/reports/{APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID}/sql?format=raw&download=1")
                 ingest_response = client.post(
                     f"/api/business-insights/reports/{UNDERWRITING_FUNNEL_REPORT_ID}/ingest",
                     data={"file": (io.BytesIO(_csv_export_bytes()), "underwriting_export.csv")},
                     content_type="multipart/form-data",
                 )
-                artifact_url = ingest_response.get_json()["artifact"]["url"]
+                artifact = ingest_response.get_json()["artifact"]
+                artifact_url = artifact["url"]
+                visualization_filename = artifact["filename"].replace(".xlsx", ".html")
+                (Path(temp_dir) / "business_insights" / "artifacts" / visualization_filename).write_text(
+                    "<html><body>Credit Risk Visualization</body></html>",
+                    encoding="utf-8",
+                )
+                metadata_path = Path(temp_dir) / "business_insights" / "reports.json"
+                payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+                payload["artifacts"][UNDERWRITING_FUNNEL_REPORT_ID]["visualization_filename"] = visualization_filename
+                metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+                page_with_visualization = client.get("/business-insights")
+                visualized_reports_response = client.get("/api/business-insights/reports?domain=credit-risk")
+                visualization_url = visualized_reports_response.get_json()["reports"][0]["artifact"]["visualization_url"]
+                visualization_response = client.get(visualization_url)
+                visualization_body = visualization_response.get_data(as_text=True)
+                visualization_response.close()
                 download_response = client.get(artifact_url)
                 download_status = download_response.status_code
                 download_mimetype = download_response.mimetype
@@ -233,15 +283,26 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertEqual(denied.status_code, 302)
         self.assertEqual(denied.headers["Location"], "/access-denied")
         self.assertEqual(reports_response.status_code, 200)
-        self.assertEqual(len(reports_response.get_json()["reports"]), 3)
+        self.assertEqual(len(reports_response.get_json()["reports"]), 4)
         self.assertEqual(sql_response.status_code, 200)
         self.assertIn(UNDERWRITING_FUNNEL_TABLE, sql_response.get_json()["sql"])
         self.assertEqual(sql_download_response.status_code, 200)
         self.assertEqual(sql_download_response.mimetype, "text/plain")
         self.assertIn("attachment; filename=credit-risk-ph-underwriting-funnel.sql", sql_download_response.headers["Content-Disposition"])
         self.assertIn("Summary by Product", sql_download_response.get_data(as_text=True))
+        self.assertEqual(portfolio_sql_response.status_code, 200)
+        self.assertIn("Portfolio Repayment", portfolio_sql_response.get_data(as_text=True))
+        self.assertEqual(limit_sql_response.status_code, 200)
+        self.assertIn("Limit Utilization", limit_sql_response.get_data(as_text=True))
+        self.assertEqual(funnel_sql_response.status_code, 200)
+        self.assertIn("Application to Disbursement Funnel", funnel_sql_response.get_data(as_text=True))
         self.assertEqual(ingest_response.status_code, 200)
         self.assertEqual(ingest_response.get_json()["artifact"]["row_count"], 3)
+        self.assertEqual(page_with_visualization.status_code, 200)
+        self.assertIn("Open Visualization", page_with_visualization.get_data(as_text=True))
+        self.assertEqual(visualization_response.status_code, 200)
+        self.assertEqual(visualization_response.mimetype, "text/html")
+        self.assertIn("Credit Risk Visualization", visualization_body)
         self.assertEqual(download_status, 200)
         self.assertEqual(download_mimetype, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 

@@ -30,6 +30,8 @@ def build_business_insights_handlers(ctx: Any) -> Any:
             if artifact_id:
                 artifact = dict(artifact)
                 artifact["url"] = url_for("business_insights_artifact", artifact_id=artifact_id)
+                if artifact.get("visualization_filename"):
+                    artifact["visualization_url"] = url_for("business_insights_visualization", artifact_id=artifact_id)
                 item["artifact"] = artifact
         item["sql_url"] = url_for("business_insights_report_sql", report_id=item["id"])
         item["ingest_url"] = url_for("business_insights_report_ingest", report_id=item["id"])
@@ -113,12 +115,28 @@ def build_business_insights_handlers(ctx: Any) -> Any:
             as_attachment=True,
         )
 
+    def business_insights_visualization(artifact_id: str):
+        access_gate = ctx._require_business_insights_access(settings)
+        if access_gate is not None:
+            return access_gate
+        try:
+            metadata, path = _store().visualization_path(artifact_id)
+        except ToolError:
+            return redirect(url_for("business_insights_page", domain="credit-risk"))
+        return send_file(
+            path,
+            mimetype="text/html; charset=utf-8",
+            download_name=str(metadata.get("visualization_filename") or "business-insights-visualization.html"),
+            as_attachment=False,
+        )
+
     return SimpleNamespace(
         business_insights_page=business_insights_page,
         business_insights_reports_api=business_insights_reports_api,
         business_insights_report_sql=business_insights_report_sql,
         business_insights_report_ingest=business_insights_report_ingest,
         business_insights_artifact=business_insights_artifact,
+        business_insights_visualization=business_insights_visualization,
     )
 
 
@@ -128,3 +146,4 @@ def register_business_insights_routes(app: Any, handlers: Any) -> None:
     _add_route(app, "/api/business-insights/reports/<report_id>/sql", handlers.business_insights_report_sql)
     _add_route(app, "/api/business-insights/reports/<report_id>/ingest", handlers.business_insights_report_ingest, methods=["POST"])
     _add_route(app, "/business-insights/artifacts/<artifact_id>.xlsx", handlers.business_insights_artifact)
+    _add_route(app, "/business-insights/visualizations/<artifact_id>.html", handlers.business_insights_visualization)

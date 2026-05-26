@@ -27,7 +27,21 @@ BUSINESS_INSIGHTS_DOMAINS: tuple[dict[str, str], ...] = (
     {"key": "ops-risk", "label": "Ops Risk"},
 )
 UNDERWRITING_FUNNEL_REPORT_ID = "credit-risk-ph-underwriting-funnel"
+PORTFOLIO_REPAYMENT_REPORT_ID = "credit-risk-ph-portfolio-repayment"
+LIMIT_UTILIZATION_REPORT_ID = "credit-risk-ph-limit-utilization"
+APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID = "credit-risk-ph-application-disbursement-funnel"
 UNDERWRITING_FUNNEL_TABLE = "ods.crms_ph_seabank_crms_db_underwriting_record_tab_ss_d"
+REPAY_PLAN_TABLE = "ods.cbs_ph_bke_loan_core_db_repay_plan_tab_ss"
+REPAY_DETAIL_TABLE = "ods.cbs_ph_bke_loan_core_db_repay_detail_tab_ss"
+REPAY_FLOW_TABLE = "ods.cbs_ph_bke_loan_core_db_repay_flow_tab_ss"
+CREDIT_LIMIT_TABLE = "ods.cbs_ph_bke_loan_core_db_credit_limit_tab_ss_d"
+CREDIT_LIMIT_EOD_TABLE = "ods.cbs_ph_bke_loan_core_db_credit_limit_eod_tab_ss_d"
+FROZEN_LIMIT_DETAIL_TABLE = "ods.cbs_ph_bke_loan_core_db_frozen_limit_detail_tab_ss_d"
+FREEZE_LIMIT_FLOW_TABLE = "ods.cbs_ph_bke_loan_core_db_freeze_limit_flow_tab_ss_d"
+LOAN_APPLICATION_TABLE = "ods.cbs_ph_bke_loan_txn_db_loan_application_tab_ss"
+LOAN_APPLICATION_EXTRA_INFO_TABLE = "ods.cbs_ph_bke_loan_txn_db_loan_application_extra_info_tab_ss"
+DISBURSE_FLOW_TABLE = "ods.cbs_ph_bke_loan_core_db_disburse_flow_tab_ss"
+LOAN_ACCOUNT_TABLE = "ods.cbs_ph_bke_loan_core_db_loan_account_tab_ss"
 UNDERWRITING_FUNNEL_FIELDS: tuple[str, ...] = (
     "underwriting_id",
     "underwriting_purpose",
@@ -55,18 +69,25 @@ SEEDED_REPORTS: tuple[dict[str, str], ...] = (
         "status": "generator_ready",
     },
     {
-        "id": "credit-risk-ph-portfolio-repayment",
+        "id": PORTFOLIO_REPAYMENT_REPORT_ID,
         "domain": "credit-risk",
-        "name": "Portfolio Repayment",
-        "type": "planned",
-        "status": "planned",
+        "name": "Credit Risk PH - Portfolio Repayment",
+        "type": "portfolio_repayment",
+        "status": "generator_ready",
     },
     {
-        "id": "credit-risk-ph-limit-utilization",
+        "id": LIMIT_UTILIZATION_REPORT_ID,
         "domain": "credit-risk",
-        "name": "Limit Utilization",
-        "type": "planned",
-        "status": "planned",
+        "name": "Credit Risk PH - Limit Utilization",
+        "type": "limit_utilization",
+        "status": "generator_ready",
+    },
+    {
+        "id": APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID,
+        "domain": "credit-risk",
+        "name": "Credit Risk PH - Application to Disbursement Funnel",
+        "type": "application_disbursement_funnel",
+        "status": "generator_ready",
     },
 )
 
@@ -219,6 +240,293 @@ from {UNDERWRITING_FUNNEL_TABLE}
 where {base_where}
 group by {period_expr}, {product_expr}, {subproduct_expr}, coalesce(nullif(underwriting_status, ''), 'PENDING')
 order by period, product, sub_product, status;
+"""
+
+
+def _snapshot_filter(table: str, snapshot_pt_date: str | None) -> str:
+    if snapshot_pt_date:
+        return f"pt_date = '{snapshot_pt_date}'"
+    return f"pt_date = (select max(pt_date) from {table})"
+
+
+def _yyyymmdd(value: date) -> str:
+    return value.strftime("%Y%m%d")
+
+
+def _date_key_expr(column_name: str) -> str:
+    return f"regexp_replace(cast({column_name} as string), '-', '')"
+
+
+def build_portfolio_repayment_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    period = business_insights_period(now)
+    start_key = _yyyymmdd(period.start_date)
+    current_key = _yyyymmdd(period.current_month_start)
+    end_key = _yyyymmdd(period.end_exclusive)
+    plan_snapshot = _snapshot_filter(REPAY_PLAN_TABLE, snapshot_pt_date)
+    flow_snapshot = _snapshot_filter(REPAY_FLOW_TABLE, snapshot_pt_date)
+    detail_snapshot = _snapshot_filter(REPAY_DETAIL_TABLE, snapshot_pt_date)
+    repay_date_key = _date_key_expr("repay_date")
+    period_expr = f"case when {repay_date_key} >= '{current_key}' then '{period.current_month_label}' else '{period.previous_month_label}' end"
+    plan_period_where = f"{repay_date_key} >= '{start_key}' and {repay_date_key} < '{end_key}'"
+    flow_period_where = f"{repay_date_key} >= '{start_key}' and {repay_date_key} < '{end_key}'"
+    detail_period_where = f"{repay_date_key} >= '{start_key}' and {repay_date_key} < '{end_key}'"
+    dpd_bucket = """case
+  when coalesce(eod_overdue_day, overdue_day, 0) <= 0 then 'Current'
+  when coalesce(eod_overdue_day, overdue_day, 0) between 1 and 7 then 'DPD 1-7'
+  when coalesce(eod_overdue_day, overdue_day, 0) between 8 and 30 then 'DPD 8-30'
+  when coalesce(eod_overdue_day, overdue_day, 0) between 31 and 60 then 'DPD 31-60'
+  when coalesce(eod_overdue_day, overdue_day, 0) between 61 and 90 then 'DPD 61-90'
+  else 'DPD 90+'
+end"""
+    return f"""-- Credit Risk PH - Portfolio Repayment
+-- Duration: {period.title}
+-- Snapshot: {snapshot_pt_date or "latest available pt_date at run time"}
+
+-- 1. Summary by Product
+select {period_expr} as period,
+  coalesce(nullif(prod_type, ''), 'UNKNOWN') as product,
+  count(distinct loan_no) as loans_due,
+  count(1) as plan_rows,
+  sum(cast(total_amt as double)) as due_amount,
+  sum(cast(repaid_amt as double)) as repaid_amount,
+  sum(cast(total_amt as double) - cast(repaid_amt as double)) as outstanding_amount,
+  round(sum(cast(repaid_amt as double)) / nullif(sum(cast(total_amt as double)), 0), 4) as repayment_rate,
+  sum(case when coalesce(eod_overdue_day, overdue_day, 0) > 0 then 1 else 0 end) as overdue_plan_rows,
+  max(coalesce(eod_overdue_day, overdue_day, 0)) as max_dpd
+from {REPAY_PLAN_TABLE}
+where {plan_snapshot}
+  and {plan_period_where}
+group by {period_expr}, coalesce(nullif(prod_type, ''), 'UNKNOWN')
+order by period, product;
+
+-- 2. DPD Buckets
+select {period_expr} as period,
+  coalesce(nullif(prod_type, ''), 'UNKNOWN') as product,
+  {dpd_bucket} as dpd_bucket,
+  count(distinct loan_no) as loans,
+  sum(cast(total_amt as double)) as due_amount,
+  sum(cast(repaid_amt as double)) as repaid_amount,
+  sum(cast(total_amt as double) - cast(repaid_amt as double)) as outstanding_amount
+from {REPAY_PLAN_TABLE}
+where {plan_snapshot}
+  and {plan_period_where}
+group by {period_expr}, coalesce(nullif(prod_type, ''), 'UNKNOWN'), {dpd_bucket}
+order by period, product, dpd_bucket;
+
+-- 3. Repay Flow Status
+select {period_expr} as period,
+  coalesce(nullif(prod_type, ''), 'UNKNOWN') as product,
+  coalesce(nullif(repay_status, ''), 'UNKNOWN') as repay_status,
+  count(1) as flow_count,
+  sum(cast(repay_amt as double)) as repay_amount
+from {REPAY_FLOW_TABLE}
+where {flow_snapshot}
+  and {flow_period_where}
+group by {period_expr},
+  coalesce(nullif(prod_type, ''), 'UNKNOWN'), coalesce(nullif(repay_status, ''), 'UNKNOWN')
+order by period, product, repay_status;
+
+-- 4. Repay Detail by Type
+select {period_expr} as period,
+  coalesce(nullif(prod_type, ''), 'UNKNOWN') as product,
+  coalesce(nullif(repay_type, ''), 'UNKNOWN') as repay_type,
+  coalesce(nullif(source_of_repay, ''), 'UNKNOWN') as source_of_repay,
+  count(1) as detail_count,
+  sum(cast(repay_amt as double)) as repay_amount,
+  sum(cast(repay_principal as double)) as repay_principal,
+  sum(cast(repay_interest as double)) as repay_interest
+from {REPAY_DETAIL_TABLE}
+where {detail_snapshot}
+  and {detail_period_where}
+group by {period_expr},
+  coalesce(nullif(prod_type, ''), 'UNKNOWN'), coalesce(nullif(repay_type, ''), 'UNKNOWN'), coalesce(nullif(source_of_repay, ''), 'UNKNOWN')
+order by period, product, repay_type, source_of_repay;
+"""
+
+
+def build_limit_utilization_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    period = business_insights_period(now)
+    limit_snapshot = _snapshot_filter(CREDIT_LIMIT_TABLE, snapshot_pt_date)
+    eod_snapshot = _snapshot_filter(CREDIT_LIMIT_EOD_TABLE, snapshot_pt_date)
+    frozen_snapshot = _snapshot_filter(FROZEN_LIMIT_DETAIL_TABLE, snapshot_pt_date)
+    freeze_flow_snapshot = _snapshot_filter(FREEZE_LIMIT_FLOW_TABLE, snapshot_pt_date)
+    utilization_expr = "cast(used_limit as double) / nullif(cast(total_limit as double), 0)"
+    utilization_bucket = f"""case
+  when total_limit is null or cast(total_limit as double) = 0 then 'No Limit'
+  when {utilization_expr} < 0.25 then '0-25%'
+  when {utilization_expr} < 0.50 then '25-50%'
+  when {utilization_expr} < 0.75 then '50-75%'
+  when {utilization_expr} < 0.90 then '75-90%'
+  else '90%+'
+end"""
+    return f"""-- Credit Risk PH - Limit Utilization
+-- Duration: point-in-time snapshot for {period.current_date.isoformat()}
+-- Snapshot: {snapshot_pt_date or "latest available pt_date at run time"}
+
+-- 1. Summary by Product
+select coalesce(nullif(prod_type, ''), 'UNKNOWN') as product,
+  count(distinct client_no) as customers,
+  count(1) as limit_rows,
+  sum(cast(total_limit as double)) as total_limit,
+  sum(cast(used_limit as double)) as used_limit,
+  sum(cast(frozen_limit as double)) as frozen_limit,
+  sum(cast(total_limit as double) - cast(used_limit as double) - cast(frozen_limit as double)) as available_limit_estimate,
+  round(sum(cast(used_limit as double)) / nullif(sum(cast(total_limit as double)), 0), 4) as utilization_rate
+from {CREDIT_LIMIT_TABLE}
+where {limit_snapshot}
+group by coalesce(nullif(prod_type, ''), 'UNKNOWN')
+order by product;
+
+-- 2. Utilization Buckets
+select coalesce(nullif(prod_type, ''), 'UNKNOWN') as product,
+  {utilization_bucket} as utilization_bucket,
+  count(distinct client_no) as customers,
+  sum(cast(total_limit as double)) as total_limit,
+  sum(cast(used_limit as double)) as used_limit,
+  sum(cast(frozen_limit as double)) as frozen_limit
+from {CREDIT_LIMIT_TABLE}
+where {limit_snapshot}
+group by coalesce(nullif(prod_type, ''), 'UNKNOWN'), {utilization_bucket}
+order by product, utilization_bucket;
+
+-- 3. EOD Available Limit
+select coalesce(nullif(prod_type, ''), 'UNKNOWN') as product,
+  coalesce(nullif(status, ''), 'UNKNOWN') as status,
+  count(distinct client_no) as customers,
+  sum(cast(available_limit as double)) as available_limit,
+  sum(cast(earmark_limit as double)) as earmark_limit
+from {CREDIT_LIMIT_EOD_TABLE}
+where {eod_snapshot}
+group by coalesce(nullif(prod_type, ''), 'UNKNOWN'), coalesce(nullif(status, ''), 'UNKNOWN')
+order by product, status;
+
+-- 4. Frozen Limit Detail
+select coalesce(nullif(prod_type, ''), 'UNKNOWN') as product,
+  coalesce(nullif(frozen_type, ''), 'UNKNOWN') as frozen_type,
+  coalesce(nullif(status, ''), 'UNKNOWN') as status,
+  count(1) as frozen_rows,
+  sum(cast(current_limit as double)) as frozen_amount
+from {FROZEN_LIMIT_DETAIL_TABLE}
+where {frozen_snapshot}
+group by coalesce(nullif(prod_type, ''), 'UNKNOWN'), coalesce(nullif(frozen_type, ''), 'UNKNOWN'), coalesce(nullif(status, ''), 'UNKNOWN')
+order by product, frozen_type, status;
+
+-- 5. Freeze Limit Flow
+select coalesce(nullif(prod_type, ''), 'UNKNOWN') as product,
+  coalesce(nullif(status, ''), 'UNKNOWN') as status,
+  count(1) as flow_count,
+  sum(cast(amount as double)) as freeze_amount
+from {FREEZE_LIMIT_FLOW_TABLE}
+where {freeze_flow_snapshot}
+group by coalesce(nullif(prod_type, ''), 'UNKNOWN'), coalesce(nullif(status, ''), 'UNKNOWN')
+order by product, status;
+"""
+
+
+def build_application_disbursement_funnel_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    period = business_insights_period(now)
+    start_key = _yyyymmdd(period.start_date)
+    current_key = _yyyymmdd(period.current_month_start)
+    end_key = _yyyymmdd(period.end_exclusive)
+    start_ms = _date_to_epoch_millis(period.start_date)
+    end_ms = _date_to_epoch_millis(period.end_exclusive)
+    app_snapshot = _snapshot_filter(LOAN_APPLICATION_TABLE, snapshot_pt_date)
+    uw_snapshot = _snapshot_filter(UNDERWRITING_FUNNEL_TABLE, snapshot_pt_date)
+    disburse_snapshot = _snapshot_filter(DISBURSE_FLOW_TABLE, snapshot_pt_date)
+    account_snapshot = _snapshot_filter(LOAN_ACCOUNT_TABLE, snapshot_pt_date)
+    apply_date_key = _date_key_expr("apply_date")
+    disburse_date_key = _date_key_expr("disburse_date")
+    app_period = f"case when {apply_date_key} >= '{current_key}' then '{period.current_month_label}' else '{period.previous_month_label}' end"
+    disburse_period = f"case when {disburse_date_key} >= '{current_key}' then '{period.current_month_label}' else '{period.previous_month_label}' end"
+    app_where = f"{app_snapshot}\n  and {apply_date_key} >= '{start_key}'\n  and {apply_date_key} < '{end_key}'"
+    uw_where = f"{uw_snapshot}\n  and application_submission_time >= {start_ms}\n  and application_submission_time < {end_ms}"
+    disburse_where = f"{disburse_snapshot}\n  and {disburse_date_key} >= '{start_key}'\n  and {disburse_date_key} < '{end_key}'"
+    return f"""-- Credit Risk PH - Application to Disbursement Funnel
+-- Duration: {period.title}
+-- Snapshot: {snapshot_pt_date or "latest available pt_date at run time"}
+
+-- 1. Funnel Summary by Product
+with app as (
+  select {app_period} as period,
+    coalesce(nullif(prod_type, ''), 'UNKNOWN') as product,
+    count(distinct loan_apply_no) as applications,
+    sum(cast(principal as double)) as applied_principal,
+    sum(case when account_no is not null and account_no <> '' then 1 else 0 end) as applications_with_account,
+    sum(case when loan_no is not null and loan_no <> '' then 1 else 0 end) as applications_with_loan_no
+  from {LOAN_APPLICATION_TABLE}
+  where {app_where}
+  group by {app_period}, coalesce(nullif(prod_type, ''), 'UNKNOWN')
+),
+uw as (
+  select case when application_submission_time >= {_date_to_epoch_millis(period.current_month_start)} then '{period.current_month_label}' else '{period.previous_month_label}' end as period,
+    coalesce(nullif(product_code, ''), 'UNKNOWN') as product,
+    count(distinct underwriting_id) as underwriting_cases,
+    sum(case when upper(coalesce(underwriting_status, '')) rlike '(APPROV|PASS|SUCCESS|COMPLETED)' then 1 else 0 end) as approved_cases,
+    sum(case when upper(coalesce(underwriting_status, '')) rlike '(REJECT|DECLIN|FAIL|DENY)' then 1 else 0 end) as rejected_cases
+  from {UNDERWRITING_FUNNEL_TABLE}
+  where {uw_where}
+  group by case when application_submission_time >= {_date_to_epoch_millis(period.current_month_start)} then '{period.current_month_label}' else '{period.previous_month_label}' end,
+    coalesce(nullif(product_code, ''), 'UNKNOWN')
+),
+disb as (
+  select {disburse_period} as period,
+    coalesce(nullif(prod_type, ''), 'UNKNOWN') as product,
+    count(distinct loan_no) as disbursed_loans,
+    sum(cast(principal as double)) as disbursed_principal
+  from {DISBURSE_FLOW_TABLE}
+  where {disburse_where}
+    and upper(coalesce(disburse_status, '')) not rlike '(FAIL|REJECT|CANCEL|REVERS)'
+  group by {disburse_period},
+    coalesce(nullif(prod_type, ''), 'UNKNOWN')
+)
+select coalesce(app.period, uw.period, disb.period) as period,
+  coalesce(app.product, uw.product, disb.product) as product,
+  coalesce(app.applications, 0) as applications,
+  coalesce(uw.underwriting_cases, 0) as underwriting_cases,
+  coalesce(uw.approved_cases, 0) as approved_cases,
+  coalesce(uw.rejected_cases, 0) as rejected_cases,
+  coalesce(disb.disbursed_loans, 0) as disbursed_loans,
+  coalesce(app.applied_principal, 0) as applied_principal,
+  coalesce(disb.disbursed_principal, 0) as disbursed_principal,
+  round(coalesce(disb.disbursed_loans, 0) / nullif(coalesce(app.applications, 0), 0), 4) as application_to_disbursement_rate
+from app
+full outer join uw on app.period = uw.period and app.product = uw.product
+full outer join disb on coalesce(app.period, uw.period) = disb.period and coalesce(app.product, uw.product) = disb.product
+order by period, product;
+
+-- 2. Loan Application Status
+select {app_period} as period,
+  coalesce(nullif(prod_type, ''), 'UNKNOWN') as product,
+  coalesce(nullif(apply_status, ''), 'UNKNOWN') as apply_status,
+  count(distinct loan_apply_no) as applications,
+  sum(cast(principal as double)) as applied_principal
+from {LOAN_APPLICATION_TABLE}
+where {app_where}
+group by {app_period}, coalesce(nullif(prod_type, ''), 'UNKNOWN'), coalesce(nullif(apply_status, ''), 'UNKNOWN')
+order by period, product, apply_status;
+
+-- 3. Disbursement Status
+select {disburse_period} as period,
+  coalesce(nullif(prod_type, ''), 'UNKNOWN') as product,
+  coalesce(nullif(disburse_status, ''), 'UNKNOWN') as disburse_status,
+  count(1) as disburse_flows,
+  count(distinct loan_no) as loans,
+  sum(cast(principal as double)) as principal
+from {DISBURSE_FLOW_TABLE}
+where {disburse_where}
+group by {disburse_period},
+  coalesce(nullif(prod_type, ''), 'UNKNOWN'), coalesce(nullif(disburse_status, ''), 'UNKNOWN')
+order by period, product, disburse_status;
+
+-- 4. Account Opening Snapshot
+select coalesce(nullif(prod_type, ''), 'UNKNOWN') as product,
+  coalesce(nullif(status, ''), 'UNKNOWN') as account_status,
+  coalesce(nullif(account_credit_quality, ''), 'UNKNOWN') as account_credit_quality,
+  count(distinct account_no) as accounts
+from {LOAN_ACCOUNT_TABLE}
+where {account_snapshot}
+group by coalesce(nullif(prod_type, ''), 'UNKNOWN'), coalesce(nullif(status, ''), 'UNKNOWN'), coalesce(nullif(account_credit_quality, ''), 'UNKNOWN')
+order by product, account_status, account_credit_quality;
 """
 
 
@@ -576,19 +884,28 @@ class BusinessInsightsStore:
         return next((report for report in self.reports() if report["id"] == normalized_id), None)
 
     def sql_for_report(self, report_id: str, *, now: datetime | None = None) -> str:
-        if report_id != UNDERWRITING_FUNNEL_REPORT_ID:
-            raise ToolError("SQL is not configured for this report yet.")
         report = self.report(report_id) or {}
+        if not report:
+            raise ToolError("SQL is not configured for this report yet.")
         artifact = report.get("artifact") if isinstance(report.get("artifact"), dict) else {}
         saved_sql = str(artifact.get("sql") or "").strip() if isinstance(artifact, dict) else ""
         if saved_sql:
             return saved_sql
-        return build_underwriting_funnel_mis_sql(now=now)
+        builders = {
+            UNDERWRITING_FUNNEL_REPORT_ID: lambda: build_underwriting_funnel_mis_sql(now=now),
+            PORTFOLIO_REPAYMENT_REPORT_ID: lambda: build_portfolio_repayment_sql(now=now),
+            LIMIT_UTILIZATION_REPORT_ID: lambda: build_limit_utilization_sql(now=now),
+            APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID: lambda: build_application_disbursement_funnel_sql(now=now),
+        }
+        builder = builders.get(report_id)
+        if builder is None:
+            raise ToolError("SQL is not configured for this report yet.")
+        return builder()
 
     def sql_filename_for_report(self, report_id: str) -> str:
-        if report_id != UNDERWRITING_FUNNEL_REPORT_ID:
+        if self.report(report_id) is None:
             raise ToolError("SQL is not configured for this report yet.")
-        return f"{UNDERWRITING_FUNNEL_REPORT_ID}.sql"
+        return f"{report_id}.sql"
 
     def save_underwriting_export(self, *, content: bytes, filename: str, now: datetime | None = None) -> dict[str, Any]:
         rows = read_underwriting_export(content, filename)
@@ -628,3 +945,17 @@ class BusinessInsightsStore:
                     raise ToolError("Business Insights artifact was not found.")
                 return dict(metadata), path
         raise ToolError("Business Insights artifact was not found.")
+
+    def visualization_path(self, artifact_id: str) -> tuple[dict[str, Any], Path]:
+        payload = self._load()
+        artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}
+        for metadata in artifacts.values():
+            if not isinstance(metadata, dict):
+                continue
+            if str(metadata.get("id") or "") == str(artifact_id or ""):
+                path = (self.artifacts_dir / str(metadata.get("visualization_filename") or "")).resolve()
+                root = self.artifacts_dir.resolve()
+                if root not in path.parents or not path.exists():
+                    raise ToolError("Business Insights visualization was not found.")
+                return dict(metadata), path
+        raise ToolError("Business Insights visualization was not found.")

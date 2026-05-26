@@ -57,15 +57,20 @@
                     <td>
                       <div class="business-insights-link-cell">
                         {% if artifact and artifact.url %}
-                          <a class="button button-secondary" href="{{ artifact.url }}">Download Excel</a>
+                          <div class="business-insights-actions">
+                            <a class="button button-secondary" href="{{ artifact.url }}">Download Excel</a>
+                            {% if artifact.visualization_url %}
+                              <a class="button button-secondary" href="{{ artifact.visualization_url }}" target="_blank" rel="noopener">Open Visualization</a>
+                            {% endif %}
+                          </div>
                           <span class="business-insights-meta">{{ artifact.row_count }} rows - {{ artifact.created_at }}</span>
-                        {% elif report.id == underwriting_report_id %}
+                        {% elif report.status == "generator_ready" %}
                           <span class="business-insights-placeholder">No Excel file generated yet.</span>
                         {% else %}
                           <span class="business-insights-placeholder">Not generated yet.</span>
                         {% endif %}
 
-                        {% if report.id == underwriting_report_id %}
+                        {% if report.status == "generator_ready" %}
                           <div class="business-insights-actions">
                             <a
                               class="button button-secondary"
