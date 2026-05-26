@@ -370,7 +370,11 @@ select coalesce(nullif(prod_type, ''), 'UNKNOWN') as product,
   sum(cast(total_limit as double)) as total_limit,
   sum(cast(used_limit as double)) as used_limit,
   sum(cast(frozen_limit as double)) as frozen_limit,
-  sum(cast(total_limit as double) - cast(used_limit as double) - cast(frozen_limit as double)) as available_limit_estimate,
+  case
+    when sum(cast(total_limit as double)) > 0
+    then sum(cast(total_limit as double) - cast(used_limit as double) - cast(frozen_limit as double))
+    else null
+  end as available_limit_estimate,
   round(sum(cast(used_limit as double)) / nullif(sum(cast(total_limit as double)), 0), 4) as utilization_rate
 from {CREDIT_LIMIT_TABLE}
 where {limit_snapshot}
