@@ -60,6 +60,27 @@ REPORT_BUILDERS: dict[str, tuple[str, Callable[..., str]]] = {
         build_application_disbursement_funnel_sql,
     ),
 }
+PRODUCT_LABELS = {
+    "101": "SPL",
+    "102": "BCL",
+    "103": "SCL",
+    "104": "Billease BNPL",
+    "105": "Billease Cashloan",
+    "106": "Juanhand",
+    "107": "UDL",
+    "112": "Mabilis",
+    "118": "Credit Card Shopee Checkout",
+    "119": "Card Purchase",
+    "120": "SPL 0%",
+    "801": "SPL",
+    "802": "BCL",
+    "803": "SCL",
+    "804": "Billease",
+    "805": "Juanhand",
+    "806": "UDL",
+    "809": "Mabilis",
+    "812": "Credit Card",
+}
 
 
 @dataclass(frozen=True)
@@ -319,6 +340,8 @@ def _format_number(value: Any, *, suffix: str = "") -> str:
 
 def _format_cell(header: str, value: Any) -> str:
     lowered = header.lower()
+    if lowered in {"product", "product_code", "sub-product", "sub_product_code"}:
+        return _product_label(value)
     if lowered.endswith("rate") or lowered.startswith("%") or "% " in lowered:
         number = _number(value)
         if value in (None, ""):
@@ -327,6 +350,13 @@ def _format_cell(header: str, value: Any) -> str:
             number *= 100
         return f"{number:.1f}%"
     return _format_number(value) if _is_number(value) else str(value or "")
+
+
+def _product_label(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "UNKNOWN"
+    return PRODUCT_LABELS.get(raw, raw)
 
 
 def _table_html(headers: list[str], rows: list[list[Any]], *, max_rows: int = 30) -> str:
@@ -371,6 +401,8 @@ def _group_sum(headers: list[str], rows: list[list[Any]], label_column: str, val
     value_offset = index[value_column]
     for row in rows:
         label = str(row[label_offset] if label_offset < len(row) and row[label_offset] not in (None, "") else "UNKNOWN")
+        if label_column.lower() in {"product", "product_code", "sub-product", "sub_product_code"}:
+            label = _product_label(label)
         value = _number(row[value_offset] if value_offset < len(row) else None)
         grouped[label] = grouped.get(label, 0.0) + value
     return sorted(grouped.items(), key=lambda item: item[1], reverse=True)
@@ -461,6 +493,10 @@ def _heatmap_table(
     for row in rows:
         row_label = str(row[index[row_column]] if index[row_column] < len(row) and row[index[row_column]] not in (None, "") else "UNKNOWN")
         col_label = str(row[index[column_column]] if index[column_column] < len(row) and row[index[column_column]] not in (None, "") else "UNKNOWN")
+        if row_column.lower() in {"product", "product_code", "sub-product", "sub_product_code"}:
+            row_label = _product_label(row_label)
+        if column_column.lower() in {"product", "product_code", "sub-product", "sub_product_code"}:
+            col_label = _product_label(col_label)
         value = _number(row[index[value_column]] if index[value_column] < len(row) else None)
         matrix.setdefault(row_label, {})[col_label] = matrix.setdefault(row_label, {}).get(col_label, 0.0) + value
         column_totals[col_label] = column_totals.get(col_label, 0.0) + value
@@ -504,6 +540,21 @@ def _comparison_cards(title: str, metrics: list[tuple[str, float, float, str]]) 
             "</div>"
         )
     return f'<section class="panel wide"><h2>{html.escape(title)}</h2><div class="comparison-grid">{"".join(cards)}</div></section>' if cards else ""
+
+
+def _insights_panel(insights: list[tuple[str, str, str]]) -> str:
+    if not insights:
+        return ""
+    cards = []
+    for title, value, detail in insights[:4]:
+        cards.append(
+            '<div class="insight-card">'
+            f"<span>{html.escape(title)}</span>"
+            f"<strong>{html.escape(value)}</strong>"
+            f"<small>{html.escape(detail)}</small>"
+            "</div>"
+        )
+    return f'<section class="insights-card"><p class="eyebrow">Business Insights</p><h2>What to Watch</h2><div class="insight-grid">{"".join(cards)}</div></section>'
 
 
 def _sheet_index(headers: list[str]) -> dict[str, int]:
@@ -649,7 +700,7 @@ def _underwriting_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]])
             applications_index = headers.index(applications_col)
             aggregates: dict[str, list[float]] = {}
             for row in rows:
-                product = str(row[product_index] if product_index < len(row) else "UNKNOWN")
+                product = _product_label(row[product_index] if product_index < len(row) else "UNKNOWN")
                 bucket = aggregates.setdefault(product, [0.0, 0.0])
                 bucket[0] += _number(row[approved_index] if approved_index < len(row) else None)
                 bucket[1] += _number(row[applications_index] if applications_index < len(row) else None)
@@ -676,7 +727,7 @@ def _underwriting_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]])
                         sum(
                             _number(row[index["Count"]] if index["Count"] < len(row) else None)
                             for row in rows
-                            if str(row[index["Product"]] if index["Product"] < len(row) else "") == product
+                            if _product_label(row[index["Product"]] if index["Product"] < len(row) else "") == product
                             and str(row[index["Status"]] if index["Status"] < len(row) else "") == status
                         )
                     )
@@ -724,7 +775,7 @@ def _portfolio_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]]) ->
             pairs = [
                 (
                     str(row[index["period"]] if index["period"] < len(row) else ""),
-                    str(row[index["product"]] if index["product"] < len(row) else "UNKNOWN"),
+                    _product_label(row[index["product"]] if index["product"] < len(row) else "UNKNOWN"),
                     _number(row[index["repayment_rate"]] if index["repayment_rate"] < len(row) else None),
                 )
                 for row in rows
@@ -762,7 +813,7 @@ def _limit_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]]) -> lis
         index = _sheet_index(headers)
         valid_rows = [row for row in rows if "total_limit" in index and _number(row[index["total_limit"]] if index["total_limit"] < len(row) else None) > 0]
         if valid_rows and {"product", "used_limit", "available_limit_estimate"}.issubset(index):
-            labels = [str(row[index["product"]] if index["product"] < len(row) else "UNKNOWN") for row in valid_rows[:10]]
+            labels = [_product_label(row[index["product"]] if index["product"] < len(row) else "UNKNOWN") for row in valid_rows[:10]]
             used = [_number(row[index["used_limit"]] if index["used_limit"] < len(row) else None) for row in valid_rows[:10]]
             available = [_number(row[index["available_limit_estimate"]] if index["available_limit_estimate"] < len(row) else None) for row in valid_rows[:10]]
             sections.append(
@@ -777,7 +828,7 @@ def _limit_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]]) -> lis
             for row in rows:
                 rate = _number(row[index["utilization_rate"]] if index["utilization_rate"] < len(row) else None)
                 if rate > 0:
-                    pairs.append((str(row[index["product"]] if index["product"] < len(row) else "UNKNOWN"), rate * 100 if rate <= 1 else rate))
+                    pairs.append((_product_label(row[index["product"]] if index["product"] < len(row) else "UNKNOWN"), rate * 100 if rate <= 1 else rate))
             pairs = sorted(pairs, key=lambda item: item[1], reverse=True)[:12]
             sections.append(_bar_chart("Utilization Rate by Product", [item[0] for item in pairs], [item[1] for item in pairs], value_suffix="%"))
     buckets = lookup.get("Utilization Buckets")
@@ -813,6 +864,88 @@ def _specialized_sections(report_title: str, lookup: dict[str, tuple[list[str], 
     return []
 
 
+def _business_insights(report_title: str, lookup: dict[str, tuple[list[str], list[list[Any]]]]) -> str:
+    normalized = report_title.lower()
+    insights: list[tuple[str, str, str]] = []
+    summary = lookup.get("Summary by Product")
+    if "underwriting" in normalized and summary:
+        headers, rows = summary
+        index = _sheet_index(headers)
+        product_col = "Product" if "Product" in index else "product"
+        applications_col = "Applications" if "Applications" in index else "applications"
+        approved_col = "Approved" if "Approved" in index else "approved"
+        rejected_col = "Rejected" if "Rejected" in index else "rejected"
+        if {product_col, applications_col, approved_col, rejected_col}.issubset(index):
+            total_apps = _sum_column(headers, rows, applications_col)
+            total_approved = _sum_column(headers, rows, approved_col)
+            approval_rate = total_approved / total_apps * 100 if total_apps else 0
+            product_totals = []
+            for row in rows:
+                product_totals.append((
+                    _product_label(row[index[product_col]] if index[product_col] < len(row) else "UNKNOWN"),
+                    _number(row[index[applications_col]] if index[applications_col] < len(row) else None),
+                    _number(row[index[approved_col]] if index[approved_col] < len(row) else None),
+                ))
+            top_product = max(product_totals, key=lambda item: item[1], default=("UNKNOWN", 0, 0))
+            low_approval = min(
+                ((product, approved / apps * 100) for product, apps, approved in product_totals if apps > 0),
+                key=lambda item: item[1],
+                default=("UNKNOWN", 0),
+            )
+            insights.append(("Overall approval", f"{approval_rate:.1f}%", f"{_format_number(total_approved)} approvals from {_format_number(total_apps)} applications."))
+            insights.append(("Largest application source", top_product[0], f"{_format_number(top_product[1])} applications in the covered period."))
+            insights.append(("Lowest approval product", low_approval[0], f"{low_approval[1]:.1f}% approval rate, worth checking policy/rejection mix."))
+        rejects = lookup.get("Product Reject Reasons")
+        if rejects:
+            top = _group_sum(rejects[0], rejects[1], "Reject Reason", "Count")[:1]
+            if top:
+                insights.append(("Top reject driver", top[0][0], f"{_format_number(top[0][1])} rejects across products."))
+    elif "portfolio repayment" in normalized and summary:
+        headers, rows = summary
+        due = _sum_column(headers, rows, "due_amount")
+        repaid = _sum_column(headers, rows, "repaid_amount")
+        outstanding = _sum_column(headers, rows, "outstanding_amount")
+        rate = repaid / due * 100 if due else 0
+        by_product = _group_sum(headers, rows, "product", "outstanding_amount")
+        insights.append(("Portfolio repayment", f"{rate:.1f}%", f"{_format_number(repaid)} repaid against {_format_number(due)} due."))
+        insights.append(("Outstanding exposure", _format_number(outstanding), "Use DPD heatmap below to locate aging concentration."))
+        if by_product:
+            insights.append(("Largest outstanding product", by_product[0][0], f"{_format_number(by_product[0][1])} outstanding amount."))
+        dpd = lookup.get("DPD Buckets")
+        if dpd:
+            top = _group_sum(dpd[0], dpd[1], "dpd_bucket", "outstanding_amount")[:1]
+            if top:
+                insights.append(("Highest DPD exposure bucket", top[0][0], f"{_format_number(top[0][1])} outstanding amount."))
+    elif "limit utilization" in normalized and summary:
+        headers, rows = summary
+        by_used = _group_sum(headers, rows, "product", "used_limit")
+        index = _sheet_index(headers)
+        inconsistent = 0
+        valid_total_limit = 0.0
+        valid_used_limit = 0.0
+        if {"total_limit", "used_limit"}.issubset(index):
+            for row in rows:
+                row_total = _number(row[index["total_limit"]] if index["total_limit"] < len(row) else None)
+                row_used = _number(row[index["used_limit"]] if index["used_limit"] < len(row) else None)
+                if row_total == 0 and row_used != 0:
+                    inconsistent += 1
+                if row_total > 0:
+                    valid_total_limit += row_total
+                    valid_used_limit += row_used
+        utilization = valid_used_limit / valid_total_limit * 100 if valid_total_limit else 0
+        insights.append(("Booked utilization", f"{utilization:.1f}%", "Only products with positive total_limit are included."))
+        if by_used:
+            insights.append(("Largest used limit product", by_used[0][0], f"{_format_number(by_used[0][1])} used limit."))
+        if inconsistent:
+            insights.append(("Data definition caveat", f"{inconsistent} products", "total_limit is zero while used limit is non-zero; availability is undefined."))
+        available = lookup.get("EOD Available Limit")
+        if available:
+            top = _group_sum(available[0], available[1], "status", "available_limit")[:1]
+            if top:
+                insights.append(("Largest available status", top[0][0], f"{_format_number(top[0][1])} available limit."))
+    return _insights_panel(insights)
+
+
 def write_visualization(
     path: Path,
     *,
@@ -823,6 +956,9 @@ def write_visualization(
     lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
     sections: list[str] = []
     sections.append(_overview_cards(report_title, sheets))
+    insight_panel = _business_insights(report_title, lookup)
+    if insight_panel:
+        sections.append(insight_panel)
     quality_notes = _analyze_sheets(sheets)
     if quality_notes:
         notes = "".join(f"<li>{html.escape(note)}</li>" for note in quality_notes[:10])
@@ -874,23 +1010,30 @@ def write_visualization(
 <title>{html.escape(report_title)} Visualization</title>
 <style>
 :root{{--ink:#182230;--muted:#667085;--line:#d9e2ec;--bg:#f5f7fb;--blue:#1769e0;--green:#087443;--amber:#b54708;--red:#b42318;}}
+*{{box-sizing:border-box;}}
 body{{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}}
 header{{background:linear-gradient(135deg,#102a43,#173b5f);color:#fff;padding:30px 38px;}}
-header h1{{margin:0 0 8px;font-size:30px;letter-spacing:0;}} header p{{margin:0;color:#dbeafe;}}
+header h1{{margin:0 0 8px;font-size:30px;letter-spacing:0;overflow-wrap:anywhere;word-break:break-word;}} header p{{margin:0;color:#dbeafe;overflow-wrap:anywhere;}}
 main{{padding:24px 34px 38px;display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:18px;}}
-.hero-card,.quality-card,.panel{{background:#fff;border:1px solid var(--line);border-radius:8px;padding:18px;box-shadow:0 1px 2px rgba(16,42,67,.06);}}
-.hero-card,.quality-card,.wide{{grid-column:1/-1;}} .panel{{grid-column:span 6;}}
+.hero-card,.quality-card,.insights-card,.panel{{background:#fff;border:1px solid var(--line);border-radius:8px;padding:18px;box-shadow:0 1px 2px rgba(16,42,67,.06);}}
+.hero-card,.quality-card,.insights-card,.panel,main>*{{min-width:0;}}
+.hero-card,.quality-card,.insights-card,.wide{{grid-column:1/-1;}} .panel{{grid-column:span 6;}}
 .eyebrow{{margin:0 0 6px;color:var(--blue);font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;}}
-h2{{margin:0 0 14px;font-size:18px;letter-spacing:0;}}
+h2{{margin:0 0 14px;font-size:18px;letter-spacing:0;overflow-wrap:anywhere;word-break:break-word;}}
 .hero-card h2{{font-size:22px;margin-bottom:16px;}}
 .kpi-grid{{display:grid;grid-template-columns:repeat(3,minmax(160px,1fr));gap:12px;}}
 .kpi{{border:1px solid #e4e7ec;border-radius:8px;padding:14px;background:#fafcff;}}
 .kpi span{{display:block;color:var(--muted);font-size:12px;margin-bottom:6px;}} .kpi strong{{display:block;font-size:24px;}}
 .kpi.good strong{{color:var(--green);}} .kpi.watch strong{{color:var(--amber);}}
+.insights-card{{border-left:4px solid var(--blue);background:linear-gradient(180deg,#fff,#f8fbff);}}
+.insight-grid{{display:grid;grid-template-columns:repeat(4,minmax(160px,1fr));gap:12px;}}
+.insight-card{{border:1px solid #dbeafe;border-radius:8px;padding:14px;background:#fff;}}
+.insight-card span{{display:block;color:var(--muted);font-size:12px;margin-bottom:6px;}} .insight-card strong{{display:block;font-size:21px;line-height:1.2;overflow-wrap:anywhere;}}
+.insight-card small{{display:block;margin-top:8px;color:#475467;line-height:1.35;overflow-wrap:anywhere;}}
 .quality-card{{border-left:4px solid var(--amber);}} .quality-card.good{{border-left-color:var(--green);}}
 .quality-card ul{{margin:0;padding-left:18px;color:#344054;}} .quality-card li{{margin:6px 0;}}
 .bar-row{{display:grid;grid-template-columns:minmax(120px,220px) 1fr minmax(90px,auto);gap:12px;align-items:center;margin:10px 0;}}
-.bar-row span{{color:#344054;font-weight:600;}} .bar-row b{{text-align:right;font-variant-numeric:tabular-nums;}}
+.bar-row span{{color:#344054;font-weight:600;min-width:0;overflow-wrap:anywhere;}} .bar-row b{{text-align:right;font-variant-numeric:tabular-nums;}}
 .bar-track{{height:18px;background:#e5e7eb;border-radius:4px;overflow:hidden;}} .bar{{height:100%;background:linear-gradient(90deg,#1769e0,#39a0ff);}}
 .donut-layout{{display:grid;grid-template-columns:180px 1fr;gap:20px;align-items:center;}}
 .donut{{width:156px;height:156px;border-radius:50%;display:grid;place-items:center;position:relative;box-shadow:inset 0 0 0 1px #e4e7ec;}}
@@ -901,7 +1044,7 @@ h2{{margin:0 0 14px;font-size:18px;letter-spacing:0;}}
 .stack-legend-wrap{{display:flex;gap:14px;flex-wrap:wrap;margin:0 0 12px;color:#475467;font-size:12px;}}
 .stack-legend i{{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px;}}
 .stack-row{{display:grid;grid-template-columns:minmax(90px,160px) 1fr minmax(90px,auto);gap:12px;align-items:center;margin:10px 0;}}
-.stack-row>span{{font-weight:600;color:#344054;}} .stack-row>b{{text-align:right;font-variant-numeric:tabular-nums;}}
+.stack-row>span{{font-weight:600;color:#344054;min-width:0;overflow-wrap:anywhere;}} .stack-row>b{{text-align:right;font-variant-numeric:tabular-nums;}}
 .stack-track{{height:20px;background:#e5e7eb;border-radius:4px;overflow:hidden;display:flex;}} .stack-segment{{display:block;height:100%;min-width:2px;}}
 .comparison-grid{{display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:12px;}}
 .comparison-card{{border:1px solid #e4e7ec;border-radius:8px;padding:14px;background:#fbfdff;}}
@@ -910,7 +1053,7 @@ h2{{margin:0 0 14px;font-size:18px;letter-spacing:0;}}
 .table-wrap{{overflow:auto;border:1px solid #edf1f7;border-radius:6px;}} table{{width:100%;border-collapse:collapse;font-size:13px;}} th,td{{border-bottom:1px solid #edf1f7;padding:8px 10px;text-align:left;white-space:nowrap;}} th{{background:#f1f6ff;font-weight:700;color:#344054;position:sticky;top:0;}} td.num{{text-align:right;font-variant-numeric:tabular-nums;}}
 .heatmap td.heat{{color:#12263f;font-weight:650;}}
 .note{{color:var(--muted);font-size:12px;margin:10px 0 0;}}
-@media(max-width:900px){{main{{grid-template-columns:1fr;padding-left:16px;padding-right:16px;}}.panel{{grid-column:1/-1;}}.kpi-grid,.comparison-grid{{grid-template-columns:1fr;}}.bar-row,.stack-row,.donut-layout{{grid-template-columns:1fr;gap:6px;}}.bar-row b,.stack-row>b{{text-align:left;}}}}
+@media(max-width:900px){{body{{overflow-x:hidden;}}header{{padding:28px 18px;}}header h1{{font-size:28px;}}main{{grid-template-columns:1fr;padding-left:16px;padding-right:16px;}}.panel{{grid-column:1/-1;}}.kpi-grid,.comparison-grid,.insight-grid{{grid-template-columns:1fr;}}.bar-row,.stack-row,.donut-layout{{grid-template-columns:1fr;gap:6px;}}.bar-row b,.stack-row>b{{text-align:left;}}}}
 </style></head><body><header><h1>{html.escape(report_title)}</h1><p>Snapshot {html.escape(snapshot_pt_date)}. Generated {generated_at} UTC from Data Workbench aggregate output.</p></header><main>{"".join(sections)}</main></body></html>"""
     path.write_text(document, encoding="utf-8")
 
