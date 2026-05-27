@@ -171,6 +171,7 @@ class BusinessInsightsTests(unittest.TestCase):
         subproduct_rows = list(workbook["Sub-product Funnel"].iter_rows(values_only=True))
         raw_rows = list(workbook["Raw Export"].iter_rows(values_only=True))
         self.assertEqual(product_label("812"), "Credit Card")
+        self.assertEqual(product_label("812F"), "Credit Card")
         self.assertEqual(product_label("807"), "Employee Loan")
         self.assertEqual(product_label("108"), "Employee Loan")
         self.assertIn(("Apr 2026", "SPL", 1, 1, 0, 0, 1, 10000), summary_rows)
@@ -190,7 +191,7 @@ class BusinessInsightsTests(unittest.TestCase):
                         ["period", "product", "applications", "disbursed_loans", "disbursed_principal", "application_to_disbursement_rate"],
                         [
                             ["Apr 2026", "807", 10, 7, 7000, 0.7],
-                            ["Apr 2026", "812", 20, 10, 10000, 0.5],
+                            ["Apr 2026", "812F", 20, 10, 10000, 0.5],
                         ],
                     )
                 ],
@@ -198,9 +199,9 @@ class BusinessInsightsTests(unittest.TestCase):
             html = output_path.read_text(encoding="utf-8")
 
         self.assertIn("data-product-filter", html)
-        self.assertIn("Employee Loan", html)
-        self.assertIn("Credit Card", html)
-        self.assertIn('data-product="Employee Loan"', html)
+        self.assertIn("807 - Employee Loan", html)
+        self.assertIn("812F - Credit Card", html)
+        self.assertIn('data-product="807 - Employee Loan"', html)
         self.assertIn("Filters product-level charts and tables", html)
         self.assertIn('data-product-visual="1"', html)
         self.assertIn('document.querySelectorAll("[data-global-visual]")', html)

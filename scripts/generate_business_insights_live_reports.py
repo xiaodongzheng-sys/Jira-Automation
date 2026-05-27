@@ -349,7 +349,7 @@ def _format_number(value: Any, *, suffix: str = "") -> str:
 def _format_cell(header: str, value: Any) -> str:
     lowered = header.lower()
     if lowered in PRODUCT_LABEL_COLUMNS:
-        return product_label(value)
+        return _product_display_label(value)
     if lowered.endswith("rate") or lowered.startswith("%") or "% " in lowered:
         number = _number(value)
         if value in (None, ""):
@@ -360,8 +360,16 @@ def _format_cell(header: str, value: Any) -> str:
     return _format_number(value) if _is_number(value) else str(value or "")
 
 
+def _product_display_label(product: Any) -> str:
+    raw = str(product or "").strip()
+    if not raw:
+        return ""
+    label = product_label(raw)
+    return f"{raw} - {label}" if label and label != raw else raw
+
+
 def _product_data_attr(product: Any) -> str:
-    label = product_label(product)
+    label = _product_display_label(product)
     return f' data-product="{html.escape(label, quote=True)}"' if label else ""
 
 
@@ -378,7 +386,7 @@ def _product_filter_options(sheets: list[tuple[str, list[str], list[list[Any]]]]
         for row in rows:
             for offset in product_offsets:
                 if offset < len(row):
-                    products.add(product_label(row[offset]))
+                    products.add(_product_display_label(row[offset]))
     return sorted(product for product in products if product and product != "UNKNOWN")
 
 
@@ -442,7 +450,7 @@ def _bar_chart(
     labels_are_products: bool = False,
 ) -> str:
     pairs = [
-        (product_label(label) if labels_are_products else str(label or "UNKNOWN"), _number(value))
+        (_product_display_label(label) if labels_are_products else str(label or "UNKNOWN"), _number(value))
         for label, value in zip(labels, values, strict=False)
     ]
     pairs = [item for item in pairs if item[1] != 0][:12]
@@ -474,7 +482,7 @@ def _group_sum(headers: list[str], rows: list[list[Any]], label_column: str, val
     for row in rows:
         label = str(row[label_offset] if label_offset < len(row) and row[label_offset] not in (None, "") else "UNKNOWN")
         if label_column.lower() in {"product", "product_code", "sub-product", "sub_product_code"}:
-            label = product_label(label)
+            label = _product_display_label(label)
         value = _number(row[value_offset] if value_offset < len(row) else None)
         grouped[label] = grouped.get(label, 0.0) + value
     return sorted(grouped.items(), key=lambda item: item[1], reverse=True)
@@ -519,7 +527,7 @@ def _stacked_bar_chart(
         return ""
     rows = []
     for row_index, label in enumerate(labels[:12]):
-        display_label = product_label(label) if labels_are_products else label
+        display_label = _product_display_label(label) if labels_are_products else label
         total = sum(values[row_index] for _name, values, _color in series if row_index < len(values))
         if total <= 0:
             continue
@@ -570,9 +578,9 @@ def _heatmap_table(
         row_label = str(row[index[row_column]] if index[row_column] < len(row) and row[index[row_column]] not in (None, "") else "UNKNOWN")
         col_label = str(row[index[column_column]] if index[column_column] < len(row) and row[index[column_column]] not in (None, "") else "UNKNOWN")
         if row_column.lower() in {"product", "product_code", "sub-product", "sub_product_code"}:
-            row_label = product_label(row_label)
+            row_label = _product_display_label(row_label)
         if column_column.lower() in {"product", "product_code", "sub-product", "sub_product_code"}:
-            col_label = product_label(col_label)
+            col_label = _product_display_label(col_label)
         value = _number(row[index[value_column]] if index[value_column] < len(row) else None)
         matrix.setdefault(row_label, {})[col_label] = matrix.setdefault(row_label, {}).get(col_label, 0.0) + value
         column_totals[col_label] = column_totals.get(col_label, 0.0) + value
@@ -760,7 +768,7 @@ def _underwriting_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]])
             applications_index = headers.index(applications_col)
             aggregates: dict[str, list[float]] = {}
             for row in rows:
-                product = product_label(row[product_index] if product_index < len(row) else "UNKNOWN")
+                product = _product_display_label(row[product_index] if product_index < len(row) else "UNKNOWN")
                 bucket = aggregates.setdefault(product, [0.0, 0.0])
                 bucket[0] += _number(row[approved_index] if approved_index < len(row) else None)
                 bucket[1] += _number(row[applications_index] if applications_index < len(row) else None)
@@ -795,7 +803,7 @@ def _underwriting_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]])
                         sum(
                             _number(row[index["Count"]] if index["Count"] < len(row) else None)
                             for row in rows
-                            if product_label(row[index["Product"]] if index["Product"] < len(row) else "") == product
+                            if _product_display_label(row[index["Product"]] if index["Product"] < len(row) else "") == product
                             and str(row[index["Status"]] if index["Status"] < len(row) else "") == status
                         )
                     )
@@ -843,7 +851,7 @@ def _portfolio_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]]) ->
             pairs = [
                 (
                     str(row[index["period"]] if index["period"] < len(row) else ""),
-                    product_label(row[index["product"]] if index["product"] < len(row) else "UNKNOWN"),
+                    _product_display_label(row[index["product"]] if index["product"] < len(row) else "UNKNOWN"),
                     _number(row[index["repayment_rate"]] if index["repayment_rate"] < len(row) else None),
                 )
                 for row in rows
@@ -889,7 +897,7 @@ def _limit_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]]) -> lis
         index = _sheet_index(headers)
         valid_rows = [row for row in rows if "total_limit" in index and _number(row[index["total_limit"]] if index["total_limit"] < len(row) else None) > 0]
         if valid_rows and {"product", "used_limit", "available_limit_estimate"}.issubset(index):
-            labels = [product_label(row[index["product"]] if index["product"] < len(row) else "UNKNOWN") for row in valid_rows[:10]]
+            labels = [_product_display_label(row[index["product"]] if index["product"] < len(row) else "UNKNOWN") for row in valid_rows[:10]]
             used = [_number(row[index["used_limit"]] if index["used_limit"] < len(row) else None) for row in valid_rows[:10]]
             available = [_number(row[index["available_limit_estimate"]] if index["available_limit_estimate"] < len(row) else None) for row in valid_rows[:10]]
             sections.append(
@@ -905,7 +913,7 @@ def _limit_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]]) -> lis
             for row in rows:
                 rate = _number(row[index["utilization_rate"]] if index["utilization_rate"] < len(row) else None)
                 if rate > 0:
-                    pairs.append((product_label(row[index["product"]] if index["product"] < len(row) else "UNKNOWN"), rate * 100 if rate <= 1 else rate))
+                    pairs.append((_product_display_label(row[index["product"]] if index["product"] < len(row) else "UNKNOWN"), rate * 100 if rate <= 1 else rate))
             pairs = sorted(pairs, key=lambda item: item[1], reverse=True)[:12]
             sections.append(
                 _bar_chart(
@@ -965,7 +973,7 @@ def _business_insights(report_title: str, lookup: dict[str, tuple[list[str], lis
             product_rates = []
             product_dropoffs = []
             for row in rows:
-                product = product_label(row[index["product"]] if index["product"] < len(row) else "UNKNOWN")
+                product = _product_display_label(row[index["product"]] if index["product"] < len(row) else "UNKNOWN")
                 product_apps = _number(row[index["applications"]] if index["applications"] < len(row) else None)
                 product_disbursed = _number(row[index["disbursed_loans"]] if index["disbursed_loans"] < len(row) else None)
                 if product_apps > 0:
@@ -991,7 +999,7 @@ def _business_insights(report_title: str, lookup: dict[str, tuple[list[str], lis
             product_totals = []
             for row in rows:
                 product_totals.append((
-                    product_label(row[index[product_col]] if index[product_col] < len(row) else "UNKNOWN"),
+                    _product_display_label(row[index[product_col]] if index[product_col] < len(row) else "UNKNOWN"),
                     _number(row[index[applications_col]] if index[applications_col] < len(row) else None),
                     _number(row[index[approved_col]] if index[approved_col] < len(row) else None),
                 ))

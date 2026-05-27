@@ -81,6 +81,7 @@ PRODUCT_LABELS: dict[str, str] = {
     "807": "Employee Loan",
     "809": "Mabilis",
     "812": "Credit Card",
+    "812F": "Credit Card",
 }
 PRODUCT_LABEL_COLUMNS: set[str] = {"product", "product_code", "sub-product", "sub_product_code"}
 
