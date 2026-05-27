@@ -393,13 +393,13 @@ def _product_filter_html(products: list[str]) -> str:
     return (
         '<section class="filter-card wide">'
         '<div><p class="eyebrow">View Controls</p><h2>Product Filter</h2>'
-        '<p>Filters product-level charts and tables. Executive KPI cards remain all-product totals.</p></div>'
+        '<p>Filters product-level charts and tables. All-product visuals are hidden when a single product is selected.</p></div>'
         f'<label><span>Product</span><select data-product-filter>{"".join(options)}</select></label>'
         "</section>"
     )
 
 
-def _table_html(headers: list[str], rows: list[list[Any]], *, max_rows: int = 30) -> str:
+def _table_html(headers: list[str], rows: list[list[Any]], *, page_size: int = 50) -> str:
     header_html = "".join(f"<th>{html.escape(str(header))}</th>" for header in headers)
     product_offset = next(
         (
@@ -410,7 +410,7 @@ def _table_html(headers: list[str], rows: list[list[Any]], *, max_rows: int = 30
         None,
     )
     body_rows = []
-    for row in rows[:max_rows]:
+    for row in rows:
         cells = []
         for index, header in enumerate(headers):
             value = row[index] if index < len(row) else ""
@@ -418,8 +418,19 @@ def _table_html(headers: list[str], rows: list[list[Any]], *, max_rows: int = 30
             cells.append(f'<td class="{class_name}">{html.escape(_format_cell(str(header), value))}</td>')
         product_attr = _product_data_attr(row[product_offset]) if product_offset is not None and product_offset < len(row) else ""
         body_rows.append(f"<tr{product_attr}>" + "".join(cells) + "</tr>")
-    more = f'<p class="note">Showing top {max_rows} of {len(rows)} rows. Full data is in Excel.</p>' if len(rows) > max_rows else ""
-    return f'<div class="table-wrap"><table><thead><tr>{header_html}</tr></thead><tbody>{"".join(body_rows)}</tbody></table></div>{more}'
+    controls = (
+        '<div class="table-pagination" data-table-pagination>'
+        '<button type="button" data-page-prev>Previous</button>'
+        '<span data-page-info></span>'
+        '<button type="button" data-page-next>Next</button>'
+        '</div>'
+        if len(rows) > page_size
+        else ""
+    )
+    return (
+        f'<div class="table-wrap"><table class="bi-table" data-page-size="{page_size}">'
+        f'<thead><tr>{header_html}</tr></thead><tbody>{"".join(body_rows)}</tbody></table></div>{controls}'
+    )
 
 
 def _bar_chart(
@@ -430,7 +441,10 @@ def _bar_chart(
     value_suffix: str = "",
     labels_are_products: bool = False,
 ) -> str:
-    pairs = [(str(label or "UNKNOWN"), _number(value)) for label, value in zip(labels, values, strict=False)]
+    pairs = [
+        (product_label(label) if labels_are_products else str(label or "UNKNOWN"), _number(value))
+        for label, value in zip(labels, values, strict=False)
+    ]
     pairs = [item for item in pairs if item[1] != 0][:12]
     if not pairs:
         return ""
@@ -446,7 +460,8 @@ def _bar_chart(
             f"<b>{html.escape(_format_number(value, suffix=value_suffix))}</b>"
             "</div>"
         )
-    return f'<section class="panel"><h2>{html.escape(title)}</h2>{"".join(rows)}</section>'
+    scope = ' data-product-visual="1"' if labels_are_products else ' data-global-visual="1"'
+    return f'<section class="panel"{scope}><h2>{html.escape(title)}</h2>{"".join(rows)}</section>'
 
 
 def _group_sum(headers: list[str], rows: list[list[Any]], label_column: str, value_column: str) -> list[tuple[str, float]]:
@@ -484,7 +499,7 @@ def _donut_chart(title: str, values: list[tuple[str, float, str]]) -> str:
         )
         start = end
     return (
-        f'<section class="panel"><h2>{html.escape(title)}</h2>'
+        f'<section class="panel" data-global-visual="1"><h2>{html.escape(title)}</h2>'
         '<div class="donut-layout">'
         f'<div class="donut" style="background:conic-gradient({",".join(segments)})"><span>{html.escape(_format_number(total))}</span></div>'
         f'<div class="legend">{"".join(legend)}</div>'
@@ -504,6 +519,7 @@ def _stacked_bar_chart(
         return ""
     rows = []
     for row_index, label in enumerate(labels[:12]):
+        display_label = product_label(label) if labels_are_products else label
         total = sum(values[row_index] for _name, values, _color in series if row_index < len(values))
         if total <= 0:
             continue
@@ -517,10 +533,10 @@ def _stacked_bar_chart(
                 f'<span class="stack-segment" title="{html.escape(name)}: {html.escape(_format_number(value, suffix=value_suffix))}" '
                 f'style="width:{width:.2f}%;background:{html.escape(color)}"></span>'
             )
-        product_attr = _product_data_attr(label) if labels_are_products else ""
+        product_attr = _product_data_attr(display_label) if labels_are_products else ""
         rows.append(
             f'<div class="stack-row"{product_attr}>'
-            f"<span>{html.escape(label)}</span>"
+            f"<span>{html.escape(display_label)}</span>"
             f'<div class="stack-track">{"".join(segments)}</div>'
             f"<b>{html.escape(_format_number(total, suffix=value_suffix))}</b>"
             "</div>"
@@ -529,7 +545,8 @@ def _stacked_bar_chart(
         f'<span class="stack-legend"><i style="background:{html.escape(color)}"></i>{html.escape(name)}</span>'
         for name, _values, color in series
     )
-    return f'<section class="panel"><h2>{html.escape(title)}</h2><div class="stack-legend-wrap">{legend}</div>{"".join(rows)}</section>' if rows else ""
+    scope = ' data-product-visual="1"' if labels_are_products else ' data-global-visual="1"'
+    return f'<section class="panel"{scope}><h2>{html.escape(title)}</h2><div class="stack-legend-wrap">{legend}</div>{"".join(rows)}</section>' if rows else ""
 
 
 def _heatmap_table(
@@ -579,8 +596,9 @@ def _heatmap_table(
                 f'<td class="num heat" style="background:rgba(23,105,224,{alpha:.2f})">{html.escape(_format_number(value, suffix=value_suffix))}</td>'
             )
         body.append(f"<tr{product_attr}><th>{html.escape(row_label)}</th>{''.join(cells)}</tr>")
+    scope = ' data-product-visual="1"' if row_column.lower() in PRODUCT_LABEL_COLUMNS else ' data-global-visual="1"'
     return (
-        f'<section class="panel wide"><h2>{html.escape(title)}</h2>'
+        f'<section class="panel wide"{scope}><h2>{html.escape(title)}</h2>'
         f'<div class="table-wrap heatmap"><table><thead><tr><th>{html.escape(row_column)}</th>{header_html}</tr></thead>'
         f"<tbody>{''.join(body)}</tbody></table></div></section>"
     )
@@ -599,7 +617,7 @@ def _comparison_cards(title: str, metrics: list[tuple[str, float, float, str]]) 
             f"<small>Apr: {html.escape(_format_number(previous, suffix=suffix))} | Change: {html.escape(_format_number(delta, suffix=suffix))}</small>"
             "</div>"
         )
-    return f'<section class="panel wide"><h2>{html.escape(title)}</h2><div class="comparison-grid">{"".join(cards)}</div></section>' if cards else ""
+    return f'<section class="panel wide" data-global-visual="1"><h2>{html.escape(title)}</h2><div class="comparison-grid">{"".join(cards)}</div></section>' if cards else ""
 
 
 def _insights_panel(insights: list[tuple[str, str, str]]) -> str:
@@ -1152,21 +1170,76 @@ h2{{margin:0 0 14px;font-size:18px;letter-spacing:0;overflow-wrap:anywhere;word-
 .comparison-card span{{display:block;color:var(--muted);font-size:12px;margin-bottom:6px;}} .comparison-card strong{{display:block;font-size:22px;}}
 .comparison-card small{{display:block;margin-top:7px;color:#475467;}} .comparison-card.good strong{{color:var(--green);}} .comparison-card.watch strong{{color:var(--amber);}}
 .table-wrap{{overflow:auto;border:1px solid #edf1f7;border-radius:6px;}} table{{width:100%;border-collapse:collapse;font-size:13px;}} th,td{{border-bottom:1px solid #edf1f7;padding:8px 10px;text-align:left;white-space:nowrap;}} th{{background:#f1f6ff;font-weight:700;color:#344054;position:sticky;top:0;}} td.num{{text-align:right;font-variant-numeric:tabular-nums;}}
+.table-pagination{{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:10px;color:#475467;font-size:12px;}}
+.table-pagination button{{height:32px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;color:#344054;padding:0 10px;font-weight:650;cursor:pointer;}}
+.table-pagination button:disabled{{color:#98a2b3;background:#f8fafc;cursor:not-allowed;}}
 .heatmap td.heat{{color:#12263f;font-weight:650;}}
 .note{{color:var(--muted);font-size:12px;margin:10px 0 0;}}
 @media(max-width:900px){{body{{overflow-x:hidden;}}header{{padding:28px 18px;}}header h1{{font-size:28px;}}main{{grid-template-columns:1fr;padding-left:16px;padding-right:16px;}}.panel{{grid-column:1/-1;}}.filter-card{{display:grid;align-items:stretch;}}.filter-card label{{min-width:0;}}.kpi-grid,.comparison-grid,.insight-grid{{grid-template-columns:1fr;}}.bar-row,.stack-row,.donut-layout{{grid-template-columns:1fr;gap:6px;}}.bar-row b,.stack-row>b{{text-align:left;}}}}
 </style></head><body><header><h1>{html.escape(report_title)}</h1><p>Snapshot {html.escape(snapshot_pt_date)}. Generated {generated_at} UTC from Data Workbench aggregate output.</p></header><main>{"".join(sections)}</main><script>
 (() => {{
   const filter = document.querySelector("[data-product-filter]");
-  if (!filter) return;
-  const apply = () => {{
-    const selected = filter.value;
-    document.querySelectorAll("[data-product]").forEach((node) => {{
-      const visible = !selected || node.getAttribute("data-product") === selected;
-      node.hidden = !visible;
+  const tables = Array.from(document.querySelectorAll("table.bi-table"));
+  const productMatches = (node, selected) => !selected || !node.hasAttribute("data-product") || node.getAttribute("data-product") === selected;
+  const updateTables = (selected) => {{
+    tables.forEach((table) => {{
+      const pageSize = Number(table.getAttribute("data-page-size") || "50");
+      const rows = Array.from(table.tBodies[0]?.rows || []);
+      const visibleRows = rows.filter((row) => productMatches(row, selected));
+      const pages = Math.max(1, Math.ceil(visibleRows.length / pageSize));
+      const currentPage = Math.min(Number(table.dataset.page || "1"), pages);
+      table.dataset.page = String(currentPage);
+      const start = (currentPage - 1) * pageSize;
+      const end = start + pageSize;
+      rows.forEach((row) => {{
+        const filtered = !productMatches(row, selected);
+        const pageIndex = visibleRows.indexOf(row);
+        row.hidden = filtered || pageIndex < start || pageIndex >= end;
+      }});
+      const panel = table.closest(".panel");
+      const controls = panel?.querySelector("[data-table-pagination]");
+      if (!controls) return;
+      const info = controls.querySelector("[data-page-info]");
+      const previous = controls.querySelector("[data-page-prev]");
+      const next = controls.querySelector("[data-page-next]");
+      const first = visibleRows.length ? start + 1 : 0;
+      const last = Math.min(end, visibleRows.length);
+      if (info) info.textContent = `${{first}}-${{last}} of ${{visibleRows.length}}`;
+      if (previous) previous.disabled = currentPage <= 1;
+      if (next) next.disabled = currentPage >= pages;
     }});
   }};
-  filter.addEventListener("change", apply);
+  document.querySelectorAll("[data-table-pagination]").forEach((controls) => {{
+    const table = controls.closest(".panel")?.querySelector("table.bi-table");
+    if (!table) return;
+    controls.querySelector("[data-page-prev]")?.addEventListener("click", () => {{
+      table.dataset.page = String(Math.max(1, Number(table.dataset.page || "1") - 1));
+      apply();
+    }});
+    controls.querySelector("[data-page-next]")?.addEventListener("click", () => {{
+      table.dataset.page = String(Number(table.dataset.page || "1") + 1);
+      apply();
+    }});
+  }});
+  const apply = () => {{
+    const selected = filter?.value || "";
+    document.querySelectorAll("[data-product]").forEach((node) => {{
+      if (node.closest("table.bi-table")) return;
+      node.hidden = !productMatches(node, selected);
+    }});
+    document.querySelectorAll("[data-global-visual]").forEach((node) => {{
+      node.hidden = Boolean(selected);
+    }});
+    document.querySelectorAll("[data-product-visual]").forEach((panel) => {{
+      const productNodes = Array.from(panel.querySelectorAll("[data-product]"));
+      panel.hidden = Boolean(selected) && !productNodes.some((node) => productMatches(node, selected));
+    }});
+    updateTables(selected);
+  }};
+  filter?.addEventListener("change", () => {{
+    tables.forEach((table) => {{ table.dataset.page = "1"; }});
+    apply();
+  }});
   apply();
 }})();
 </script></body></html>"""

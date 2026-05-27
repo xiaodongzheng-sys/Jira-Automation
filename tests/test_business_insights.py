@@ -202,6 +202,32 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertIn("Credit Card", html)
         self.assertIn('data-product="Employee Loan"', html)
         self.assertIn("Filters product-level charts and tables", html)
+        self.assertIn('data-product-visual="1"', html)
+        self.assertIn('document.querySelectorAll("[data-global-visual]")', html)
+
+    def test_visualization_tables_render_all_rows_with_pagination(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "visualization.html"
+            rows = [["Apr 2026", "807", index, index - 1, index * 100, 0.5] for index in range(1, 56)]
+            write_visualization(
+                output_path,
+                report_title="Credit Risk PH - Application to Disbursement Funnel",
+                snapshot_pt_date="2026-05-25",
+                sheets=[
+                    (
+                        "Funnel Summary by Product",
+                        ["period", "product", "applications", "disbursed_loans", "disbursed_principal", "application_to_disbursement_rate"],
+                        rows,
+                    )
+                ],
+            )
+            html = output_path.read_text(encoding="utf-8")
+
+        self.assertIn("data-table-pagination", html)
+        self.assertIn('data-page-size="50"', html)
+        self.assertIn("<td class=\"num\">55</td>", html)
+        self.assertNotIn("Full data is in Excel", html)
+        self.assertNotIn("Showing top", html)
 
     def test_store_persists_metadata_handles_corrupt_metadata_and_missing_artifact(self):
         with tempfile.TemporaryDirectory() as temp_dir:
