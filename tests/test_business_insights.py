@@ -28,6 +28,7 @@ from bpmis_jira_tool.business_insights import (
 )
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.web import create_app
+from scripts.generate_business_insights_live_reports import write_visualization
 
 
 FIXED_NOW = datetime(2026, 5, 26, 10, 30, tzinfo=ZoneInfo("Asia/Singapore"))
@@ -170,9 +171,37 @@ class BusinessInsightsTests(unittest.TestCase):
         subproduct_rows = list(workbook["Sub-product Funnel"].iter_rows(values_only=True))
         raw_rows = list(workbook["Raw Export"].iter_rows(values_only=True))
         self.assertEqual(product_label("812"), "Credit Card")
+        self.assertEqual(product_label("807"), "Employee Loan")
+        self.assertEqual(product_label("108"), "Employee Loan")
         self.assertIn(("Apr 2026", "SPL", 1, 1, 0, 0, 1, 10000), summary_rows)
         self.assertIn(("Apr 2026", "SPL", "SPL", "APPROVED", 1, 1), subproduct_rows)
         self.assertIn("801", raw_rows[1])
+
+    def test_visualization_includes_product_filter_for_product_level_data(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "visualization.html"
+            write_visualization(
+                output_path,
+                report_title="Credit Risk PH - Application to Disbursement Funnel",
+                snapshot_pt_date="2026-05-25",
+                sheets=[
+                    (
+                        "Funnel Summary by Product",
+                        ["period", "product", "applications", "disbursed_loans", "disbursed_principal", "application_to_disbursement_rate"],
+                        [
+                            ["Apr 2026", "807", 10, 7, 7000, 0.7],
+                            ["Apr 2026", "812", 20, 10, 10000, 0.5],
+                        ],
+                    )
+                ],
+            )
+            html = output_path.read_text(encoding="utf-8")
+
+        self.assertIn("data-product-filter", html)
+        self.assertIn("Employee Loan", html)
+        self.assertIn("Credit Card", html)
+        self.assertIn('data-product="Employee Loan"', html)
+        self.assertIn("Filters product-level charts and tables", html)
 
     def test_store_persists_metadata_handles_corrupt_metadata_and_missing_artifact(self):
         with tempfile.TemporaryDirectory() as temp_dir:

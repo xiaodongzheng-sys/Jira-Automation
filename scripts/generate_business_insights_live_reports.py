@@ -359,8 +359,56 @@ def _format_cell(header: str, value: Any) -> str:
         return f"{number:.1f}%"
     return _format_number(value) if _is_number(value) else str(value or "")
 
+
+def _product_data_attr(product: Any) -> str:
+    label = product_label(product)
+    return f' data-product="{html.escape(label, quote=True)}"' if label else ""
+
+
+def _product_filter_options(sheets: list[tuple[str, list[str], list[list[Any]]]]) -> list[str]:
+    products: set[str] = set()
+    for sheet_name, headers, rows in sheets:
+        if sheet_name == "Raw Export":
+            continue
+        product_offsets = [
+            offset
+            for offset, header in enumerate(headers)
+            if str(header).strip().lower() in {"product", "product_code"}
+        ]
+        for row in rows:
+            for offset in product_offsets:
+                if offset < len(row):
+                    products.add(product_label(row[offset]))
+    return sorted(product for product in products if product and product != "UNKNOWN")
+
+
+def _product_filter_html(products: list[str]) -> str:
+    if len(products) < 2:
+        return ""
+    options = ['<option value="">All products</option>']
+    options.extend(
+        f'<option value="{html.escape(product, quote=True)}">{html.escape(product)}</option>'
+        for product in products
+    )
+    return (
+        '<section class="filter-card wide">'
+        '<div><p class="eyebrow">View Controls</p><h2>Product Filter</h2>'
+        '<p>Filters product-level charts and tables. Executive KPI cards remain all-product totals.</p></div>'
+        f'<label><span>Product</span><select data-product-filter>{"".join(options)}</select></label>'
+        "</section>"
+    )
+
+
 def _table_html(headers: list[str], rows: list[list[Any]], *, max_rows: int = 30) -> str:
     header_html = "".join(f"<th>{html.escape(str(header))}</th>" for header in headers)
+    product_offset = next(
+        (
+            offset
+            for offset, header in enumerate(headers)
+            if str(header).strip().lower() in {"product", "product_code"}
+        ),
+        None,
+    )
     body_rows = []
     for row in rows[:max_rows]:
         cells = []
@@ -368,12 +416,20 @@ def _table_html(headers: list[str], rows: list[list[Any]], *, max_rows: int = 30
             value = row[index] if index < len(row) else ""
             class_name = "num" if _is_number(value) else ""
             cells.append(f'<td class="{class_name}">{html.escape(_format_cell(str(header), value))}</td>')
-        body_rows.append("<tr>" + "".join(cells) + "</tr>")
+        product_attr = _product_data_attr(row[product_offset]) if product_offset is not None and product_offset < len(row) else ""
+        body_rows.append(f"<tr{product_attr}>" + "".join(cells) + "</tr>")
     more = f'<p class="note">Showing top {max_rows} of {len(rows)} rows. Full data is in Excel.</p>' if len(rows) > max_rows else ""
     return f'<div class="table-wrap"><table><thead><tr>{header_html}</tr></thead><tbody>{"".join(body_rows)}</tbody></table></div>{more}'
 
 
-def _bar_chart(title: str, labels: list[Any], values: list[Any], *, value_suffix: str = "") -> str:
+def _bar_chart(
+    title: str,
+    labels: list[Any],
+    values: list[Any],
+    *,
+    value_suffix: str = "",
+    labels_are_products: bool = False,
+) -> str:
     pairs = [(str(label or "UNKNOWN"), _number(value)) for label, value in zip(labels, values, strict=False)]
     pairs = [item for item in pairs if item[1] != 0][:12]
     if not pairs:
@@ -382,8 +438,9 @@ def _bar_chart(title: str, labels: list[Any], values: list[Any], *, value_suffix
     rows = []
     for label, value in pairs:
         width = max(2.0, value / maximum * 100.0)
+        product_attr = _product_data_attr(label) if labels_are_products else ""
         rows.append(
-            '<div class="bar-row">'
+            f'<div class="bar-row"{product_attr}>'
             f"<span>{html.escape(label)}</span>"
             f'<div class="bar-track"><div class="bar" style="width:{width:.1f}%"></div></div>'
             f"<b>{html.escape(_format_number(value, suffix=value_suffix))}</b>"
@@ -441,6 +498,7 @@ def _stacked_bar_chart(
     series: list[tuple[str, list[float], str]],
     *,
     value_suffix: str = "",
+    labels_are_products: bool = False,
 ) -> str:
     if not labels or not series:
         return ""
@@ -459,8 +517,9 @@ def _stacked_bar_chart(
                 f'<span class="stack-segment" title="{html.escape(name)}: {html.escape(_format_number(value, suffix=value_suffix))}" '
                 f'style="width:{width:.2f}%;background:{html.escape(color)}"></span>'
             )
+        product_attr = _product_data_attr(label) if labels_are_products else ""
         rows.append(
-            '<div class="stack-row">'
+            f'<div class="stack-row"{product_attr}>'
             f"<span>{html.escape(label)}</span>"
             f'<div class="stack-track">{"".join(segments)}</div>'
             f"<b>{html.escape(_format_number(total, suffix=value_suffix))}</b>"
@@ -511,6 +570,7 @@ def _heatmap_table(
     header_html = "".join(f"<th>{html.escape(label)}</th>" for label in col_labels)
     body = []
     for row_label in row_labels:
+        product_attr = _product_data_attr(row_label) if row_column.lower() in PRODUCT_LABEL_COLUMNS else ""
         cells = []
         for col_label in col_labels:
             value = matrix.get(row_label, {}).get(col_label, 0.0)
@@ -518,7 +578,7 @@ def _heatmap_table(
             cells.append(
                 f'<td class="num heat" style="background:rgba(23,105,224,{alpha:.2f})">{html.escape(_format_number(value, suffix=value_suffix))}</td>'
             )
-        body.append(f"<tr><th>{html.escape(row_label)}</th>{''.join(cells)}</tr>")
+        body.append(f"<tr{product_attr}><th>{html.escape(row_label)}</th>{''.join(cells)}</tr>")
     return (
         f'<section class="panel wide"><h2>{html.escape(title)}</h2>'
         f'<div class="table-wrap heatmap"><table><thead><tr><th>{html.escape(row_column)}</th>{header_html}</tr></thead>'
@@ -692,7 +752,15 @@ def _underwriting_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]])
                 if applications > 0
             ]
             pairs = sorted(pairs, key=lambda item: item[1], reverse=True)[:12]
-            sections.append(_bar_chart("Approval Rate by Product", [item[0] for item in pairs], [item[1] for item in pairs], value_suffix="%"))
+            sections.append(
+                _bar_chart(
+                    "Approval Rate by Product",
+                    [item[0] for item in pairs],
+                    [item[1] for item in pairs],
+                    value_suffix="%",
+                    labels_are_products=True,
+                )
+            )
     funnel = lookup.get("Product Funnel")
     if funnel:
         headers, rows = funnel
@@ -714,7 +782,7 @@ def _underwriting_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]])
                         )
                     )
                 series.append((status.title(), values, colors[status]))
-            sections.append(_stacked_bar_chart("Funnel Mix by Product", products, series))
+            sections.append(_stacked_bar_chart("Funnel Mix by Product", products, series, labels_are_products=True))
     rejects = lookup.get("Product Reject Reasons")
     if rejects:
         headers, rows = rejects
@@ -764,7 +832,15 @@ def _portfolio_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]]) ->
             ]
             mtd_pairs = [(product, rate * 100 if rate <= 1 else rate) for period, product, rate in pairs if period == "May 2026 MTD"]
             mtd_pairs = sorted(mtd_pairs, key=lambda item: item[1], reverse=True)[:12]
-            sections.append(_bar_chart("May MTD Repayment Rate by Product", [item[0] for item in mtd_pairs], [item[1] for item in mtd_pairs], value_suffix="%"))
+            sections.append(
+                _bar_chart(
+                    "May MTD Repayment Rate by Product",
+                    [item[0] for item in mtd_pairs],
+                    [item[1] for item in mtd_pairs],
+                    value_suffix="%",
+                    labels_are_products=True,
+                )
+            )
     dpd = lookup.get("DPD Buckets")
     if dpd:
         headers, rows = dpd
@@ -803,6 +879,7 @@ def _limit_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]]) -> lis
                     "Used vs Available Limit by Product",
                     labels,
                     [("Used", used, "#b54708"), ("Available", available, "#087443")],
+                    labels_are_products=True,
                 )
             )
         if {"product", "utilization_rate"}.issubset(index):
@@ -812,7 +889,15 @@ def _limit_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]]) -> lis
                 if rate > 0:
                     pairs.append((product_label(row[index["product"]] if index["product"] < len(row) else "UNKNOWN"), rate * 100 if rate <= 1 else rate))
             pairs = sorted(pairs, key=lambda item: item[1], reverse=True)[:12]
-            sections.append(_bar_chart("Utilization Rate by Product", [item[0] for item in pairs], [item[1] for item in pairs], value_suffix="%"))
+            sections.append(
+                _bar_chart(
+                    "Utilization Rate by Product",
+                    [item[0] for item in pairs],
+                    [item[1] for item in pairs],
+                    value_suffix="%",
+                    labels_are_products=True,
+                )
+            )
     buckets = lookup.get("Utilization Buckets")
     if buckets:
         headers, rows = buckets
@@ -961,6 +1046,10 @@ def write_visualization(
 ) -> None:
     lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
     sections: list[str] = []
+    product_options = _product_filter_options(sheets)
+    product_filter = _product_filter_html(product_options)
+    if product_filter:
+        sections.append(product_filter)
     sections.append(_overview_cards(report_title, sheets))
     insight_panel = _business_insights(report_title, lookup)
     if insight_panel:
@@ -991,6 +1080,7 @@ def write_visualization(
                         [row[product_index] for row in rows],
                         [_number(row[index[metric]]) * multiplier for row in rows],
                         value_suffix="%",
+                        labels_are_products=True,
                     )
                 )
             amount_metric = next(
@@ -1003,6 +1093,7 @@ def write_visualization(
                         f"{amount_metric.replace('_', ' ').title()} by Product",
                         [row[product_index] for row in rows],
                         [row[index[amount_metric]] for row in rows],
+                        labels_are_products=True,
                     )
                 )
         sections.append(f'<section class="panel wide"><h2>Summary by Product</h2>{_table_html(headers, rows)}</section>')
@@ -1021,9 +1112,9 @@ body{{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,B
 header{{background:linear-gradient(135deg,#102a43,#173b5f);color:#fff;padding:30px 38px;}}
 header h1{{margin:0 0 8px;font-size:30px;letter-spacing:0;overflow-wrap:anywhere;word-break:break-word;}} header p{{margin:0;color:#dbeafe;overflow-wrap:anywhere;}}
 main{{padding:24px 34px 38px;display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:18px;}}
-.hero-card,.quality-card,.insights-card,.panel{{background:#fff;border:1px solid var(--line);border-radius:8px;padding:18px;box-shadow:0 1px 2px rgba(16,42,67,.06);}}
-.hero-card,.quality-card,.insights-card,.panel,main>*{{min-width:0;}}
-.hero-card,.quality-card,.insights-card,.wide{{grid-column:1/-1;}} .panel{{grid-column:span 6;}}
+.hero-card,.quality-card,.insights-card,.filter-card,.panel{{background:#fff;border:1px solid var(--line);border-radius:8px;padding:18px;box-shadow:0 1px 2px rgba(16,42,67,.06);}}
+.hero-card,.quality-card,.insights-card,.filter-card,.panel,main>*{{min-width:0;}}
+.hero-card,.quality-card,.insights-card,.filter-card,.wide{{grid-column:1/-1;}} .panel{{grid-column:span 6;}}
 .eyebrow{{margin:0 0 6px;color:var(--blue);font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;}}
 h2{{margin:0 0 14px;font-size:18px;letter-spacing:0;overflow-wrap:anywhere;word-break:break-word;}}
 .hero-card h2{{font-size:22px;margin-bottom:16px;}}
@@ -1031,6 +1122,10 @@ h2{{margin:0 0 14px;font-size:18px;letter-spacing:0;overflow-wrap:anywhere;word-
 .kpi{{border:1px solid #e4e7ec;border-radius:8px;padding:14px;background:#fafcff;}}
 .kpi span{{display:block;color:var(--muted);font-size:12px;margin-bottom:6px;}} .kpi strong{{display:block;font-size:24px;}}
 .kpi.good strong{{color:var(--green);}} .kpi.watch strong{{color:var(--amber);}}
+.filter-card{{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;}}
+.filter-card h2{{margin-bottom:8px;}} .filter-card p{{margin:0;color:#475467;line-height:1.35;}}
+.filter-card label{{display:grid;gap:6px;min-width:220px;color:#475467;font-size:12px;font-weight:700;}}
+.filter-card select{{height:40px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;color:var(--ink);font-size:14px;padding:0 12px;}}
 .insights-card{{border-left:4px solid var(--blue);background:linear-gradient(180deg,#fff,#f8fbff);}}
 .insight-grid{{display:grid;grid-template-columns:repeat(4,minmax(160px,1fr));gap:12px;}}
 .insight-card{{border:1px solid #dbeafe;border-radius:8px;padding:14px;background:#fff;}}
@@ -1059,8 +1154,22 @@ h2{{margin:0 0 14px;font-size:18px;letter-spacing:0;overflow-wrap:anywhere;word-
 .table-wrap{{overflow:auto;border:1px solid #edf1f7;border-radius:6px;}} table{{width:100%;border-collapse:collapse;font-size:13px;}} th,td{{border-bottom:1px solid #edf1f7;padding:8px 10px;text-align:left;white-space:nowrap;}} th{{background:#f1f6ff;font-weight:700;color:#344054;position:sticky;top:0;}} td.num{{text-align:right;font-variant-numeric:tabular-nums;}}
 .heatmap td.heat{{color:#12263f;font-weight:650;}}
 .note{{color:var(--muted);font-size:12px;margin:10px 0 0;}}
-@media(max-width:900px){{body{{overflow-x:hidden;}}header{{padding:28px 18px;}}header h1{{font-size:28px;}}main{{grid-template-columns:1fr;padding-left:16px;padding-right:16px;}}.panel{{grid-column:1/-1;}}.kpi-grid,.comparison-grid,.insight-grid{{grid-template-columns:1fr;}}.bar-row,.stack-row,.donut-layout{{grid-template-columns:1fr;gap:6px;}}.bar-row b,.stack-row>b{{text-align:left;}}}}
-</style></head><body><header><h1>{html.escape(report_title)}</h1><p>Snapshot {html.escape(snapshot_pt_date)}. Generated {generated_at} UTC from Data Workbench aggregate output.</p></header><main>{"".join(sections)}</main></body></html>"""
+@media(max-width:900px){{body{{overflow-x:hidden;}}header{{padding:28px 18px;}}header h1{{font-size:28px;}}main{{grid-template-columns:1fr;padding-left:16px;padding-right:16px;}}.panel{{grid-column:1/-1;}}.filter-card{{display:grid;align-items:stretch;}}.filter-card label{{min-width:0;}}.kpi-grid,.comparison-grid,.insight-grid{{grid-template-columns:1fr;}}.bar-row,.stack-row,.donut-layout{{grid-template-columns:1fr;gap:6px;}}.bar-row b,.stack-row>b{{text-align:left;}}}}
+</style></head><body><header><h1>{html.escape(report_title)}</h1><p>Snapshot {html.escape(snapshot_pt_date)}. Generated {generated_at} UTC from Data Workbench aggregate output.</p></header><main>{"".join(sections)}</main><script>
+(() => {{
+  const filter = document.querySelector("[data-product-filter]");
+  if (!filter) return;
+  const apply = () => {{
+    const selected = filter.value;
+    document.querySelectorAll("[data-product]").forEach((node) => {{
+      const visible = !selected || node.getAttribute("data-product") === selected;
+      node.hidden = !visible;
+    }});
+  }};
+  filter.addEventListener("change", apply);
+  apply();
+}})();
+</script></body></html>"""
     path.write_text(document, encoding="utf-8")
 
 

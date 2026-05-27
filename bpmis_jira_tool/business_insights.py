@@ -67,6 +67,7 @@ PRODUCT_LABELS: dict[str, str] = {
     "105": "Billease Cashloan",
     "106": "Juanhand",
     "107": "UDL",
+    "108": "Employee Loan",
     "112": "Mabilis",
     "118": "Credit Card Shopee Checkout",
     "119": "Card Purchase",
@@ -77,6 +78,7 @@ PRODUCT_LABELS: dict[str, str] = {
     "804": "Billease",
     "805": "Juanhand",
     "806": "UDL",
+    "807": "Employee Loan",
     "809": "Mabilis",
     "812": "Credit Card",
 }
