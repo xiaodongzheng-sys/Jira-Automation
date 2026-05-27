@@ -59,6 +59,28 @@ UNDERWRITING_FUNNEL_FIELDS: tuple[str, ...] = (
     "create_date",
     "modify_date",
 )
+PRODUCT_LABELS: dict[str, str] = {
+    "101": "SPL",
+    "102": "BCL",
+    "103": "SCL",
+    "104": "Billease BNPL",
+    "105": "Billease Cashloan",
+    "106": "Juanhand",
+    "107": "UDL",
+    "112": "Mabilis",
+    "118": "Credit Card Shopee Checkout",
+    "119": "Card Purchase",
+    "120": "SPL 0%",
+    "801": "SPL",
+    "802": "BCL",
+    "803": "SCL",
+    "804": "Billease",
+    "805": "Juanhand",
+    "806": "UDL",
+    "809": "Mabilis",
+    "812": "Credit Card",
+}
+PRODUCT_LABEL_COLUMNS: set[str] = {"product", "product_code", "sub-product", "sub_product_code"}
 
 SEEDED_REPORTS: tuple[dict[str, str], ...] = (
     {
@@ -549,6 +571,13 @@ def _display_value(value: Any) -> str:
     return str(value).strip()
 
 
+def product_label(value: Any) -> str:
+    raw = _display_value(value)
+    if not raw:
+        return "UNKNOWN"
+    return PRODUCT_LABELS.get(raw, raw)
+
+
 def _read_csv_export(content: bytes) -> list[dict[str, Any]]:
     text = content.decode("utf-8-sig", errors="replace")
     sample = text[:4096]
@@ -728,8 +757,8 @@ def build_underwriting_funnel_workbook(
     normalized_rows: list[dict[str, Any]] = []
     for raw_row in rows:
         row = {_normalize_header(key): value for key, value in raw_row.items()}
-        product = _row_text(row, "product_code", default="UNKNOWN")
-        sub_product = _row_text(row, "sub_product_code", default="-") or "-"
+        product = product_label(_row_text(row, "product_code", default="UNKNOWN"))
+        sub_product = product_label(_row_text(row, "sub_product_code", default="-")) or "-"
         status = _row_text(row, "underwriting_status", default="PENDING").upper()
         status_bucket = _status_bucket(status)
         report_period = _period_label(row, period)

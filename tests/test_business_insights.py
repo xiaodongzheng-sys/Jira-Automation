@@ -24,6 +24,7 @@ from bpmis_jira_tool.business_insights import (
     build_underwriting_funnel_mis_sql,
     build_underwriting_funnel_sql,
     build_underwriting_funnel_workbook,
+    product_label,
 )
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.web import create_app
@@ -153,6 +154,26 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertIn(("May 2026 MTD", "CASH_LOAN", 1, 0, 1, 0, 0, 5000), summary_rows)
         self.assertIn(("May 2026 MTD", "PAY_LATER", 1, 0, 0, 1, 0, 1500), summary_rows)
 
+    def test_product_codes_are_displayed_as_apollo_product_names_when_known(self):
+        rows = [
+            {
+                **_synthetic_underwriting_rows()[0],
+                "underwriting_id": "UW-SPL",
+                "product_code": "801",
+                "sub_product_code": "101",
+            }
+        ]
+        workbook_bytes = build_underwriting_funnel_workbook(rows, now=FIXED_NOW)
+        workbook = load_workbook(io.BytesIO(workbook_bytes), data_only=True)
+
+        summary_rows = list(workbook["Summary by Product"].iter_rows(values_only=True))
+        subproduct_rows = list(workbook["Sub-product Funnel"].iter_rows(values_only=True))
+        raw_rows = list(workbook["Raw Export"].iter_rows(values_only=True))
+        self.assertEqual(product_label("812"), "Credit Card")
+        self.assertIn(("Apr 2026", "SPL", 1, 1, 0, 0, 1, 10000), summary_rows)
+        self.assertIn(("Apr 2026", "SPL", "SPL", "APPROVED", 1, 1), subproduct_rows)
+        self.assertIn("801", raw_rows[1])
+
     def test_store_persists_metadata_handles_corrupt_metadata_and_missing_artifact(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = BusinessInsightsStore(Path(temp_dir))
@@ -241,7 +262,8 @@ class BusinessInsightsTests(unittest.TestCase):
                 with client.session_transaction() as session:
                     session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
                     session["google_credentials"] = {"token": "x"}
-                denied = client.get("/business-insights", follow_redirects=False)
+                non_admin_page = client.get("/business-insights", follow_redirects=False)
+                non_admin_reports = client.get("/api/business-insights/reports?domain=credit-risk")
 
                 with client.session_transaction() as session:
                     session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
@@ -280,8 +302,10 @@ class BusinessInsightsTests(unittest.TestCase):
                 download_response.get_data()
                 download_response.close()
 
-        self.assertEqual(denied.status_code, 302)
-        self.assertEqual(denied.headers["Location"], "/access-denied")
+        self.assertEqual(non_admin_page.status_code, 200)
+        self.assertIn("Business Insights", non_admin_page.get_data(as_text=True))
+        self.assertEqual(non_admin_reports.status_code, 200)
+        self.assertEqual(len(non_admin_reports.get_json()["reports"]), 4)
         self.assertEqual(reports_response.status_code, 200)
         self.assertEqual(len(reports_response.get_json()["reports"]), 4)
         self.assertEqual(sql_response.status_code, 200)

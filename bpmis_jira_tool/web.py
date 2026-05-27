@@ -736,6 +736,7 @@ def create_app() -> Flask:
         can_access_team_dashboard = _can_access_team_dashboard(user_identity)
         can_access_bpmis_automation = _can_access_bpmis_automation_tool(user_identity)
         can_access_reports = _can_access_team_dashboard_monthly_report(user_identity)
+        can_access_business_insights = _can_access_business_insights(settings)
         site_tabs = []
         if _can_access_source_code_qa(settings):
             site_tabs.append(
@@ -816,7 +817,7 @@ def create_app() -> Flask:
             )
         if project_tabs:
             site_tabs.append(_nav_group("Projects", project_tabs[0]["href"], project_tabs))
-        if can_access_reports:
+        if can_access_business_insights:
             active_business_domain = str(request.args.get("domain") or "credit-risk").strip().lower()
             business_insights_tabs = [
                 {
@@ -2896,7 +2897,20 @@ def _require_team_dashboard_monthly_report_access(settings: Settings, *, api: bo
 
 
 def _require_business_insights_access(settings: Settings, *, api: bool = False):
-    return _require_team_dashboard_monthly_report_access(settings, api=api)
+    login_gate = _require_google_login(settings, api=api)
+    if login_gate is not None:
+        return login_gate
+    if _can_access_business_insights(settings):
+        return None
+    message = "Business Insights is available to signed-in portal users."
+    if api:
+        return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
+    flash(message, "error")
+    return redirect(url_for("access_denied"))
+
+
+def _can_access_business_insights(settings: Settings) -> bool:
+    return _is_portal_user()
 
 
 def _validate_config_security(settings: Settings, config_data: dict[str, Any]) -> None:

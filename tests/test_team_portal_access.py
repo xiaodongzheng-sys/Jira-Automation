@@ -941,6 +941,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self.assertIn(b">Source Code<", source_page.data)
                 self.assertIn(b">PRDs<", source_page.data)
                 self.assertIn(b">Projects<", source_page.data)
+                self.assertIn(b">Business Insights<", source_page.data)
                 self.assertIn(b'/portal-home?workspace=productization-upgrade-summary', source_page.data)
                 self.assertNotIn(b"Team Dashboard", source_page.data)
                 for admin_marker in (
@@ -997,6 +998,12 @@ class TeamPortalAccessTests(unittest.TestCase):
                 reports_response = client.get("/reports", follow_redirects=False)
                 self.assertEqual(reports_response.status_code, 302)
                 self.assertEqual(reports_response.headers["Location"], "/access-denied")
+                business_insights_response = client.get("/business-insights")
+                self.assertEqual(business_insights_response.status_code, 200)
+                self.assertIn(b"Credit Risk PH - Underwriting Funnel", business_insights_response.data)
+                business_insights_api = client.get("/api/business-insights/reports?domain=credit-risk")
+                self.assertEqual(business_insights_api.status_code, 200)
+                self.assertEqual(len(business_insights_api.get_json()["reports"]), 4)
 
                 blocked_requests = [
                     ("post", "/api/source-code-qa/config", {"pm_team": "AF", "country": "All", "repositories": []}),
@@ -1181,6 +1188,8 @@ class TeamPortalAccessTests(unittest.TestCase):
                     ("get", "/api/jobs/missing", {404}),
                     ("get", "/team-dashboard?tab=version-plan", {302}),
                     ("get", "/reports", {302}),
+                    ("get", "/business-insights", {200}),
+                    ("get", "/api/business-insights/reports?domain=credit-risk", {200}),
                     ("get", "/meeting-recorder", {302}),
                     ("get", "/meeting-translation", {302}),
                     ("get", "/gmail-sea-talk-demo", {404}),

@@ -41,11 +41,13 @@ if str(ROOT_DIR) not in sys.path:
 from bpmis_jira_tool.business_insights import (  # noqa: E402
     APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID,
     LIMIT_UTILIZATION_REPORT_ID,
+    PRODUCT_LABEL_COLUMNS,
     PORTFOLIO_REPAYMENT_REPORT_ID,
     UNDERWRITING_FUNNEL_REPORT_ID,
     build_application_disbursement_funnel_sql,
     build_limit_utilization_sql,
     build_portfolio_repayment_sql,
+    product_label,
 )
 
 DATA_ADMIN_BASE_URL = "https://data-admin.ph.seabank.io"
@@ -60,29 +62,6 @@ REPORT_BUILDERS: dict[str, tuple[str, Callable[..., str]]] = {
         build_application_disbursement_funnel_sql,
     ),
 }
-PRODUCT_LABELS = {
-    "101": "SPL",
-    "102": "BCL",
-    "103": "SCL",
-    "104": "Billease BNPL",
-    "105": "Billease Cashloan",
-    "106": "Juanhand",
-    "107": "UDL",
-    "112": "Mabilis",
-    "118": "Credit Card Shopee Checkout",
-    "119": "Card Purchase",
-    "120": "SPL 0%",
-    "801": "SPL",
-    "802": "BCL",
-    "803": "SCL",
-    "804": "Billease",
-    "805": "Juanhand",
-    "806": "UDL",
-    "809": "Mabilis",
-    "812": "Credit Card",
-}
-
-
 @dataclass(frozen=True)
 class WorkbenchSection:
     sheet_name: str
@@ -296,6 +275,35 @@ def write_workbook(path: Path, sheets: list[tuple[str, list[str], list[list[Any]
     workbook.save(path)
 
 
+def normalize_product_labels(
+    sheets: list[tuple[str, list[str], list[list[Any]]]],
+    *,
+    preserve_raw_export: bool = True,
+) -> list[tuple[str, list[str], list[list[Any]]]]:
+    normalized_sheets: list[tuple[str, list[str], list[list[Any]]]] = []
+    for sheet_name, headers, rows in sheets:
+        if preserve_raw_export and sheet_name == "Raw Export":
+            normalized_sheets.append((sheet_name, headers, rows))
+            continue
+        product_offsets = {
+            offset
+            for offset, header in enumerate(headers)
+            if str(header).strip().lower() in PRODUCT_LABEL_COLUMNS
+        }
+        if not product_offsets:
+            normalized_sheets.append((sheet_name, headers, rows))
+            continue
+        normalized_rows = []
+        for row in rows:
+            normalized_row = list(row)
+            for offset in product_offsets:
+                if offset < len(normalized_row):
+                    normalized_row[offset] = product_label(normalized_row[offset])
+            normalized_rows.append(normalized_row)
+        normalized_sheets.append((sheet_name, headers, normalized_rows))
+    return normalized_sheets
+
+
 def _number(value: Any) -> float:
     try:
         if value in (None, ""):
@@ -340,8 +348,8 @@ def _format_number(value: Any, *, suffix: str = "") -> str:
 
 def _format_cell(header: str, value: Any) -> str:
     lowered = header.lower()
-    if lowered in {"product", "product_code", "sub-product", "sub_product_code"}:
-        return _product_label(value)
+    if lowered in PRODUCT_LABEL_COLUMNS:
+        return product_label(value)
     if lowered.endswith("rate") or lowered.startswith("%") or "% " in lowered:
         number = _number(value)
         if value in (None, ""):
@@ -350,14 +358,6 @@ def _format_cell(header: str, value: Any) -> str:
             number *= 100
         return f"{number:.1f}%"
     return _format_number(value) if _is_number(value) else str(value or "")
-
-
-def _product_label(value: Any) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return "UNKNOWN"
-    return PRODUCT_LABELS.get(raw, raw)
-
 
 def _table_html(headers: list[str], rows: list[list[Any]], *, max_rows: int = 30) -> str:
     header_html = "".join(f"<th>{html.escape(str(header))}</th>" for header in headers)
@@ -402,7 +402,7 @@ def _group_sum(headers: list[str], rows: list[list[Any]], label_column: str, val
     for row in rows:
         label = str(row[label_offset] if label_offset < len(row) and row[label_offset] not in (None, "") else "UNKNOWN")
         if label_column.lower() in {"product", "product_code", "sub-product", "sub_product_code"}:
-            label = _product_label(label)
+            label = product_label(label)
         value = _number(row[value_offset] if value_offset < len(row) else None)
         grouped[label] = grouped.get(label, 0.0) + value
     return sorted(grouped.items(), key=lambda item: item[1], reverse=True)
@@ -494,9 +494,9 @@ def _heatmap_table(
         row_label = str(row[index[row_column]] if index[row_column] < len(row) and row[index[row_column]] not in (None, "") else "UNKNOWN")
         col_label = str(row[index[column_column]] if index[column_column] < len(row) and row[index[column_column]] not in (None, "") else "UNKNOWN")
         if row_column.lower() in {"product", "product_code", "sub-product", "sub_product_code"}:
-            row_label = _product_label(row_label)
+            row_label = product_label(row_label)
         if column_column.lower() in {"product", "product_code", "sub-product", "sub_product_code"}:
-            col_label = _product_label(col_label)
+            col_label = product_label(col_label)
         value = _number(row[index[value_column]] if index[value_column] < len(row) else None)
         matrix.setdefault(row_label, {})[col_label] = matrix.setdefault(row_label, {}).get(col_label, 0.0) + value
         column_totals[col_label] = column_totals.get(col_label, 0.0) + value
@@ -586,21 +586,6 @@ def _analyze_sheets(sheets: list[tuple[str, list[str], list[list[Any]]]]) -> lis
     notes: list[str] = []
     for sheet_name, headers, rows in sheets:
         header_index = {str(header).lower(): offset for offset, header in enumerate(headers)}
-        if {"total_limit", "used_limit"}.issubset(header_index):
-            total_index = header_index["total_limit"]
-            used_index = header_index["used_limit"]
-            frozen_index = header_index.get("frozen_limit")
-            inconsistent_limit_rows = 0
-            for row in rows:
-                total = _number(row[total_index] if total_index < len(row) else None)
-                used = _number(row[used_index] if used_index < len(row) else None)
-                frozen = _number(row[frozen_index] if frozen_index is not None and frozen_index < len(row) else None)
-                if total == 0 and (used != 0 or frozen != 0):
-                    inconsistent_limit_rows += 1
-            if inconsistent_limit_rows:
-                notes.append(
-                    f"{sheet_name}: {inconsistent_limit_rows} products have zero total_limit but non-zero used/frozen limit; treat availability and utilization as undefined for those rows."
-                )
         for column_index, header in enumerate(headers):
             numeric_values = []
             for row in rows:
@@ -609,14 +594,11 @@ def _analyze_sheets(sheets: list[tuple[str, list[str], list[list[Any]]]]) -> lis
                     numeric_values.append(_number(value))
             if not numeric_values:
                 continue
-            gt_int32 = sum(1 for value in numeric_values if abs(value) > 2_147_483_647)
             gt_int64 = sum(1 for value in numeric_values if abs(value) > 9_223_372_036_854_775_807)
             negatives = sum(1 for value in numeric_values if value < 0)
             lowered = str(header).lower()
             if gt_int64:
                 notes.append(f"{sheet_name}.{header}: {gt_int64} values exceed signed 64-bit integer range.")
-            elif gt_int32 and any(token in lowered for token in ("amount", "limit", "principal", "interest")):
-                notes.append(f"{sheet_name}.{header}: {gt_int32} values exceed signed 32-bit range; this is expected for aggregate currency but should be stored as 64-bit/decimal.")
             if negatives and any(token in lowered for token in ("available", "outstanding", "amount", "limit")):
                 notes.append(f"{sheet_name}.{header}: {negatives} negative aggregate values detected; validate business definition before using as available capacity.")
             if lowered.endswith("rate"):
@@ -700,7 +682,7 @@ def _underwriting_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]])
             applications_index = headers.index(applications_col)
             aggregates: dict[str, list[float]] = {}
             for row in rows:
-                product = _product_label(row[product_index] if product_index < len(row) else "UNKNOWN")
+                product = product_label(row[product_index] if product_index < len(row) else "UNKNOWN")
                 bucket = aggregates.setdefault(product, [0.0, 0.0])
                 bucket[0] += _number(row[approved_index] if approved_index < len(row) else None)
                 bucket[1] += _number(row[applications_index] if applications_index < len(row) else None)
@@ -727,7 +709,7 @@ def _underwriting_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]])
                         sum(
                             _number(row[index["Count"]] if index["Count"] < len(row) else None)
                             for row in rows
-                            if _product_label(row[index["Product"]] if index["Product"] < len(row) else "") == product
+                            if product_label(row[index["Product"]] if index["Product"] < len(row) else "") == product
                             and str(row[index["Status"]] if index["Status"] < len(row) else "") == status
                         )
                     )
@@ -775,7 +757,7 @@ def _portfolio_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]]) ->
             pairs = [
                 (
                     str(row[index["period"]] if index["period"] < len(row) else ""),
-                    _product_label(row[index["product"]] if index["product"] < len(row) else "UNKNOWN"),
+                    product_label(row[index["product"]] if index["product"] < len(row) else "UNKNOWN"),
                     _number(row[index["repayment_rate"]] if index["repayment_rate"] < len(row) else None),
                 )
                 for row in rows
@@ -813,7 +795,7 @@ def _limit_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]]) -> lis
         index = _sheet_index(headers)
         valid_rows = [row for row in rows if "total_limit" in index and _number(row[index["total_limit"]] if index["total_limit"] < len(row) else None) > 0]
         if valid_rows and {"product", "used_limit", "available_limit_estimate"}.issubset(index):
-            labels = [_product_label(row[index["product"]] if index["product"] < len(row) else "UNKNOWN") for row in valid_rows[:10]]
+            labels = [product_label(row[index["product"]] if index["product"] < len(row) else "UNKNOWN") for row in valid_rows[:10]]
             used = [_number(row[index["used_limit"]] if index["used_limit"] < len(row) else None) for row in valid_rows[:10]]
             available = [_number(row[index["available_limit_estimate"]] if index["available_limit_estimate"] < len(row) else None) for row in valid_rows[:10]]
             sections.append(
@@ -828,7 +810,7 @@ def _limit_sections(lookup: dict[str, tuple[list[str], list[list[Any]]]]) -> lis
             for row in rows:
                 rate = _number(row[index["utilization_rate"]] if index["utilization_rate"] < len(row) else None)
                 if rate > 0:
-                    pairs.append((_product_label(row[index["product"]] if index["product"] < len(row) else "UNKNOWN"), rate * 100 if rate <= 1 else rate))
+                    pairs.append((product_label(row[index["product"]] if index["product"] < len(row) else "UNKNOWN"), rate * 100 if rate <= 1 else rate))
             pairs = sorted(pairs, key=lambda item: item[1], reverse=True)[:12]
             sections.append(_bar_chart("Utilization Rate by Product", [item[0] for item in pairs], [item[1] for item in pairs], value_suffix="%"))
     buckets = lookup.get("Utilization Buckets")
@@ -868,7 +850,31 @@ def _business_insights(report_title: str, lookup: dict[str, tuple[list[str], lis
     normalized = report_title.lower()
     insights: list[tuple[str, str, str]] = []
     summary = lookup.get("Summary by Product")
-    if "underwriting" in normalized and summary:
+    funnel_summary = lookup.get("Funnel Summary by Product")
+    if "application to disbursement" in normalized and funnel_summary:
+        headers, rows = funnel_summary
+        index = _sheet_index(headers)
+        if {"applications", "disbursed_loans", "disbursed_principal", "application_to_disbursement_rate", "product"}.issubset(index):
+            applications = _sum_column(headers, rows, "applications")
+            disbursed_loans = _sum_column(headers, rows, "disbursed_loans")
+            disbursed_principal = _sum_column(headers, rows, "disbursed_principal")
+            conversion_rate = disbursed_loans / applications * 100 if applications else 0
+            product_rates = []
+            product_dropoffs = []
+            for row in rows:
+                product = product_label(row[index["product"]] if index["product"] < len(row) else "UNKNOWN")
+                product_apps = _number(row[index["applications"]] if index["applications"] < len(row) else None)
+                product_disbursed = _number(row[index["disbursed_loans"]] if index["disbursed_loans"] < len(row) else None)
+                if product_apps > 0:
+                    product_rates.append((product, product_disbursed / product_apps * 100))
+                    product_dropoffs.append((product, product_apps - product_disbursed))
+            lowest_conversion = min(product_rates, key=lambda item: item[1], default=("UNKNOWN", 0))
+            largest_dropoff = max(product_dropoffs, key=lambda item: item[1], default=("UNKNOWN", 0))
+            insights.append(("Application to disbursement", f"{conversion_rate:.1f}%", f"{_format_number(disbursed_loans)} disbursed loans from {_format_number(applications)} applications."))
+            insights.append(("Disbursed principal", _format_number(disbursed_principal), "Total principal disbursed in the covered period."))
+            insights.append(("Lowest conversion product", lowest_conversion[0], f"{lowest_conversion[1]:.1f}% application-to-disbursement rate."))
+            insights.append(("Largest funnel drop-off", largest_dropoff[0], f"{_format_number(largest_dropoff[1])} applications did not become disbursed loans."))
+    elif "underwriting" in normalized and summary:
         headers, rows = summary
         index = _sheet_index(headers)
         product_col = "Product" if "Product" in index else "product"
@@ -882,7 +888,7 @@ def _business_insights(report_title: str, lookup: dict[str, tuple[list[str], lis
             product_totals = []
             for row in rows:
                 product_totals.append((
-                    _product_label(row[index[product_col]] if index[product_col] < len(row) else "UNKNOWN"),
+                    product_label(row[index[product_col]] if index[product_col] < len(row) else "UNKNOWN"),
                     _number(row[index[applications_col]] if index[applications_col] < len(row) else None),
                     _number(row[index[approved_col]] if index[approved_col] < len(row) else None),
                 ))
@@ -1099,7 +1105,7 @@ def report_has_artifacts(portal_data_dir: Path, report_id: str) -> bool:
     )
 
 
-def sheets_from_workbook(path: Path) -> list[tuple[str, list[str], list[list[Any]]]]:
+def sheets_from_workbook(path: Path, *, include_raw_export: bool = False) -> list[tuple[str, list[str], list[list[Any]]]]:
     workbook = load_workbook(path, read_only=True, data_only=True)
     try:
         sheets: list[tuple[str, list[str], list[list[Any]]]] = []
@@ -1109,10 +1115,10 @@ def sheets_from_workbook(path: Path) -> list[tuple[str, list[str], list[list[Any
                 continue
             headers = [str(value or "") for value in raw_rows[0]]
             rows = [list(row) for row in raw_rows[1:] if any(value not in (None, "") for value in row)]
-            if sheet.title == "Raw Export":
+            if sheet.title == "Raw Export" and not include_raw_export:
                 continue
             sheets.append((sheet.title, headers, rows))
-        return sheets
+        return normalize_product_labels(sheets)
     finally:
         workbook.close()
 
@@ -1145,6 +1151,40 @@ def refresh_existing_visualizations(portal_data_dir: Path, *, report_ids: list[s
         )
         artifact["visualization_filename"] = visualization_filename
         print(f"{report_id}: refreshed visualization={visualization_filename}", flush=True)
+    payload["artifacts"] = artifacts
+    persist_metadata(portal_data_dir, payload)
+
+
+def normalize_existing_product_labels(portal_data_dir: Path, *, report_ids: list[str] | None = None) -> None:
+    payload = load_metadata(portal_data_dir)
+    artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}
+    selected = set(report_ids or artifacts.keys())
+    root = artifacts_dir(portal_data_dir)
+    title_by_report = {
+        UNDERWRITING_FUNNEL_REPORT_ID: "Credit Risk PH - Underwriting Funnel",
+        **{report_id: title for report_id, (title, _builder) in REPORT_BUILDERS.items()},
+    }
+    for report_id, artifact in artifacts.items():
+        if report_id not in selected or not isinstance(artifact, dict):
+            continue
+        filename = str(artifact.get("filename") or "")
+        if not filename:
+            continue
+        workbook_path = root / filename
+        if not workbook_path.exists():
+            print(f"{report_id}: workbook missing; skipping product label normalization.", flush=True)
+            continue
+        sheets = sheets_from_workbook(workbook_path, include_raw_export=True)
+        write_workbook(workbook_path, sheets)
+        visualization_filename = str(artifact.get("visualization_filename") or filename.replace(".xlsx", ".html"))
+        write_visualization(
+            root / visualization_filename,
+            report_title=title_by_report.get(report_id, report_id),
+            snapshot_pt_date=str(artifact.get("snapshot_pt_date") or "2026-05-25"),
+            sheets=[sheet for sheet in sheets if sheet[0] != "Raw Export"],
+        )
+        artifact["visualization_filename"] = visualization_filename
+        print(f"{report_id}: normalized product labels in excel={filename} visualization={visualization_filename}", flush=True)
     payload["artifacts"] = artifacts
     persist_metadata(portal_data_dir, payload)
 
@@ -1198,8 +1238,9 @@ def generate_report(
     html_filename = f"{report_id}-{artifact_id[:8]}.html"
     root = artifacts_dir(portal_data_dir)
     root.mkdir(parents=True, exist_ok=True)
-    write_workbook(root / xlsx_filename, sheets)
-    write_visualization(root / html_filename, report_title=title, snapshot_pt_date=snapshot_pt_date, sheets=sheets)
+    display_sheets = normalize_product_labels(sheets)
+    write_workbook(root / xlsx_filename, display_sheets)
+    write_visualization(root / html_filename, report_title=title, snapshot_pt_date=snapshot_pt_date, sheets=display_sheets)
     metadata = {
         "id": artifact_id,
         "report_id": report_id,
@@ -1232,6 +1273,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Regenerate HTML visualizations from existing Excel artifacts without calling Data Workbench.",
     )
+    parser.add_argument(
+        "--normalize-product-labels",
+        action="store_true",
+        help="Rewrite existing Excel and HTML artifacts so known product codes display Apollo product names.",
+    )
     parser.add_argument("--snapshot-pt-date", default="2026-05-25", help="Data Workbench pt_date snapshot to use.")
     parser.add_argument(
         "--portal-data-dir",
@@ -1250,6 +1296,10 @@ def main() -> int:
     if args.refresh_visualizations:
         selected_report_ids = args.report_id if args.report_id else None
         refresh_existing_visualizations(portal_data_dir, report_ids=selected_report_ids)
+        return 0
+    if args.normalize_product_labels:
+        selected_report_ids = args.report_id if args.report_id else None
+        normalize_existing_product_labels(portal_data_dir, report_ids=selected_report_ids)
         return 0
 
     token = load_data_admin_token(chrome_profile=args.chrome_profile)
