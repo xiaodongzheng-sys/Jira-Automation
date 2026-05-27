@@ -760,8 +760,8 @@ def build_underwriting_funnel_workbook(
     normalized_rows: list[dict[str, Any]] = []
     for raw_row in rows:
         row = {_normalize_header(key): value for key, value in raw_row.items()}
-        product = product_label(_row_text(row, "product_code", default="UNKNOWN"))
-        sub_product = product_label(_row_text(row, "sub_product_code", default="-")) or "-"
+        product = _row_text(row, "product_code", default="UNKNOWN")
+        sub_product = _row_text(row, "sub_product_code", default="-") or "-"
         status = _row_text(row, "underwriting_status", default="PENDING").upper()
         status_bucket = _status_bucket(status)
         report_period = _period_label(row, period)

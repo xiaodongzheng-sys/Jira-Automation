@@ -174,8 +174,8 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertEqual(product_label("812F"), "Credit Card")
         self.assertEqual(product_label("807"), "Employee Loan")
         self.assertEqual(product_label("108"), "Employee Loan")
-        self.assertIn(("Apr 2026", "SPL", 1, 1, 0, 0, 1, 10000), summary_rows)
-        self.assertIn(("Apr 2026", "SPL", "SPL", "APPROVED", 1, 1), subproduct_rows)
+        self.assertIn(("Apr 2026", "801", 1, 1, 0, 0, 1, 10000), summary_rows)
+        self.assertIn(("Apr 2026", "801", "101", "APPROVED", 1, 1), subproduct_rows)
         self.assertIn("801", raw_rows[1])
 
     def test_visualization_includes_product_filter_for_product_level_data(self):

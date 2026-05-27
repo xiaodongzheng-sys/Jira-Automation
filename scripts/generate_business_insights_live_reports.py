@@ -41,6 +41,7 @@ if str(ROOT_DIR) not in sys.path:
 from bpmis_jira_tool.business_insights import (  # noqa: E402
     APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID,
     LIMIT_UTILIZATION_REPORT_ID,
+    PRODUCT_LABELS,
     PRODUCT_LABEL_COLUMNS,
     PORTFOLIO_REPAYMENT_REPORT_ID,
     UNDERWRITING_FUNNEL_REPORT_ID,
@@ -61,6 +62,13 @@ REPORT_BUILDERS: dict[str, tuple[str, Callable[..., str]]] = {
         "Credit Risk PH - Application to Disbursement Funnel",
         build_application_disbursement_funnel_sql,
     ),
+}
+
+PREFERRED_PRODUCT_CODES: dict[str, str] = {
+    "Credit Card": "812F",
+}
+PREFERRED_SUB_PRODUCT_CODES: dict[str, str] = {
+    "Employee Loan": "108",
 }
 @dataclass(frozen=True)
 class WorkbenchSection:
@@ -346,10 +354,43 @@ def _format_number(value: Any, *, suffix: str = "") -> str:
     return f"{text}{suffix}"
 
 
+def _preferred_code_for_label(label: str, *, header: str = "") -> str:
+    normalized_header = header.strip().lower()
+    if normalized_header in {"sub-product", "sub_product_code"} and label in PREFERRED_SUB_PRODUCT_CODES:
+        return PREFERRED_SUB_PRODUCT_CODES[label]
+    if normalized_header in {"product", "product_code"} and label in PREFERRED_PRODUCT_CODES:
+        return PREFERRED_PRODUCT_CODES[label]
+    candidates = [code for code, mapped in PRODUCT_LABELS.items() if mapped == label]
+    if not candidates:
+        return ""
+    if normalized_header in {"product", "product_code"}:
+        product_candidates = [code for code in candidates if code.upper().startswith("8")]
+        if product_candidates:
+            return sorted(product_candidates)[0]
+    if normalized_header in {"sub-product", "sub_product_code"}:
+        subproduct_candidates = [code for code in candidates if not code.upper().startswith("8")]
+        if subproduct_candidates:
+            return sorted(subproduct_candidates)[0]
+    return sorted(candidates)[0]
+
+
+def _product_display_label(product: Any, *, header: str = "product") -> str:
+    raw = str(product or "").strip()
+    if not raw:
+        return ""
+    if " - " in raw:
+        return raw
+    label = product_label(raw)
+    if label != raw:
+        return f"{raw} - {label}"
+    preferred_code = _preferred_code_for_label(raw, header=header)
+    return f"{preferred_code} - {raw}" if preferred_code else raw
+
+
 def _format_cell(header: str, value: Any) -> str:
     lowered = header.lower()
     if lowered in PRODUCT_LABEL_COLUMNS:
-        return _product_display_label(value)
+        return _product_display_label(value, header=lowered)
     if lowered.endswith("rate") or lowered.startswith("%") or "% " in lowered:
         number = _number(value)
         if value in (None, ""):
@@ -360,16 +401,8 @@ def _format_cell(header: str, value: Any) -> str:
     return _format_number(value) if _is_number(value) else str(value or "")
 
 
-def _product_display_label(product: Any) -> str:
-    raw = str(product or "").strip()
-    if not raw:
-        return ""
-    label = product_label(raw)
-    return f"{raw} - {label}" if label and label != raw else raw
-
-
-def _product_data_attr(product: Any) -> str:
-    label = _product_display_label(product)
+def _product_data_attr(product: Any, *, header: str = "product") -> str:
+    label = _product_display_label(product, header=header)
     return f' data-product="{html.escape(label, quote=True)}"' if label else ""
 
 
@@ -386,7 +419,7 @@ def _product_filter_options(sheets: list[tuple[str, list[str], list[list[Any]]]]
         for row in rows:
             for offset in product_offsets:
                 if offset < len(row):
-                    products.add(_product_display_label(row[offset]))
+                    products.add(_product_display_label(row[offset], header="product"))
     return sorted(product for product in products if product and product != "UNKNOWN")
 
 
@@ -424,7 +457,7 @@ def _table_html(headers: list[str], rows: list[list[Any]], *, page_size: int = 5
             value = row[index] if index < len(row) else ""
             class_name = "num" if _is_number(value) else ""
             cells.append(f'<td class="{class_name}">{html.escape(_format_cell(str(header), value))}</td>')
-        product_attr = _product_data_attr(row[product_offset]) if product_offset is not None and product_offset < len(row) else ""
+        product_attr = _product_data_attr(row[product_offset], header=str(headers[product_offset]).strip().lower()) if product_offset is not None and product_offset < len(row) else ""
         body_rows.append(f"<tr{product_attr}>" + "".join(cells) + "</tr>")
     controls = (
         '<div class="table-pagination" data-table-pagination>'
@@ -450,7 +483,7 @@ def _bar_chart(
     labels_are_products: bool = False,
 ) -> str:
     pairs = [
-        (_product_display_label(label) if labels_are_products else str(label or "UNKNOWN"), _number(value))
+        (_product_display_label(label, header="product") if labels_are_products else str(label or "UNKNOWN"), _number(value))
         for label, value in zip(labels, values, strict=False)
     ]
     pairs = [item for item in pairs if item[1] != 0][:12]
@@ -482,7 +515,7 @@ def _group_sum(headers: list[str], rows: list[list[Any]], label_column: str, val
     for row in rows:
         label = str(row[label_offset] if label_offset < len(row) and row[label_offset] not in (None, "") else "UNKNOWN")
         if label_column.lower() in {"product", "product_code", "sub-product", "sub_product_code"}:
-            label = _product_display_label(label)
+            label = _product_display_label(label, header=label_column.lower())
         value = _number(row[value_offset] if value_offset < len(row) else None)
         grouped[label] = grouped.get(label, 0.0) + value
     return sorted(grouped.items(), key=lambda item: item[1], reverse=True)
@@ -527,7 +560,7 @@ def _stacked_bar_chart(
         return ""
     rows = []
     for row_index, label in enumerate(labels[:12]):
-        display_label = _product_display_label(label) if labels_are_products else label
+        display_label = _product_display_label(label, header="product") if labels_are_products else label
         total = sum(values[row_index] for _name, values, _color in series if row_index < len(values))
         if total <= 0:
             continue
@@ -541,7 +574,7 @@ def _stacked_bar_chart(
                 f'<span class="stack-segment" title="{html.escape(name)}: {html.escape(_format_number(value, suffix=value_suffix))}" '
                 f'style="width:{width:.2f}%;background:{html.escape(color)}"></span>'
             )
-        product_attr = _product_data_attr(display_label) if labels_are_products else ""
+        product_attr = _product_data_attr(display_label, header="product") if labels_are_products else ""
         rows.append(
             f'<div class="stack-row"{product_attr}>'
             f"<span>{html.escape(display_label)}</span>"
@@ -578,9 +611,9 @@ def _heatmap_table(
         row_label = str(row[index[row_column]] if index[row_column] < len(row) and row[index[row_column]] not in (None, "") else "UNKNOWN")
         col_label = str(row[index[column_column]] if index[column_column] < len(row) and row[index[column_column]] not in (None, "") else "UNKNOWN")
         if row_column.lower() in {"product", "product_code", "sub-product", "sub_product_code"}:
-            row_label = _product_display_label(row_label)
+            row_label = _product_display_label(row_label, header=row_column.lower())
         if column_column.lower() in {"product", "product_code", "sub-product", "sub_product_code"}:
-            col_label = _product_display_label(col_label)
+            col_label = _product_display_label(col_label, header=column_column.lower())
         value = _number(row[index[value_column]] if index[value_column] < len(row) else None)
         matrix.setdefault(row_label, {})[col_label] = matrix.setdefault(row_label, {}).get(col_label, 0.0) + value
         column_totals[col_label] = column_totals.get(col_label, 0.0) + value
@@ -595,7 +628,7 @@ def _heatmap_table(
     header_html = "".join(f"<th>{html.escape(label)}</th>" for label in col_labels)
     body = []
     for row_label in row_labels:
-        product_attr = _product_data_attr(row_label) if row_column.lower() in PRODUCT_LABEL_COLUMNS else ""
+        product_attr = _product_data_attr(row_label, header=row_column.lower()) if row_column.lower() in PRODUCT_LABEL_COLUMNS else ""
         cells = []
         for col_label in col_labels:
             value = matrix.get(row_label, {}).get(col_label, 0.0)
@@ -1295,7 +1328,12 @@ def report_has_artifacts(portal_data_dir: Path, report_id: str) -> bool:
     )
 
 
-def sheets_from_workbook(path: Path, *, include_raw_export: bool = False) -> list[tuple[str, list[str], list[list[Any]]]]:
+def sheets_from_workbook(
+    path: Path,
+    *,
+    include_raw_export: bool = False,
+    normalize_products: bool = True,
+) -> list[tuple[str, list[str], list[list[Any]]]]:
     workbook = load_workbook(path, read_only=True, data_only=True)
     try:
         sheets: list[tuple[str, list[str], list[list[Any]]]] = []
@@ -1308,7 +1346,7 @@ def sheets_from_workbook(path: Path, *, include_raw_export: bool = False) -> lis
             if sheet.title == "Raw Export" and not include_raw_export:
                 continue
             sheets.append((sheet.title, headers, rows))
-        return normalize_product_labels(sheets)
+        return normalize_product_labels(sheets) if normalize_products else sheets
     finally:
         workbook.close()
 
@@ -1337,7 +1375,7 @@ def refresh_existing_visualizations(portal_data_dir: Path, *, report_ids: list[s
             root / visualization_filename,
             report_title=title_by_report.get(report_id, report_id),
             snapshot_pt_date=str(artifact.get("snapshot_pt_date") or "2026-05-25"),
-            sheets=sheets_from_workbook(workbook_path),
+            sheets=sheets_from_workbook(workbook_path, normalize_products=False),
         )
         artifact["visualization_filename"] = visualization_filename
         print(f"{report_id}: refreshed visualization={visualization_filename}", flush=True)
@@ -1364,8 +1402,8 @@ def normalize_existing_product_labels(portal_data_dir: Path, *, report_ids: list
         if not workbook_path.exists():
             print(f"{report_id}: workbook missing; skipping product label normalization.", flush=True)
             continue
-        sheets = sheets_from_workbook(workbook_path, include_raw_export=True)
-        write_workbook(workbook_path, sheets)
+        sheets = sheets_from_workbook(workbook_path, include_raw_export=True, normalize_products=False)
+        write_workbook(workbook_path, normalize_product_labels(sheets))
         visualization_filename = str(artifact.get("visualization_filename") or filename.replace(".xlsx", ".html"))
         write_visualization(
             root / visualization_filename,
@@ -1430,7 +1468,7 @@ def generate_report(
     root.mkdir(parents=True, exist_ok=True)
     display_sheets = normalize_product_labels(sheets)
     write_workbook(root / xlsx_filename, display_sheets)
-    write_visualization(root / html_filename, report_title=title, snapshot_pt_date=snapshot_pt_date, sheets=display_sheets)
+    write_visualization(root / html_filename, report_title=title, snapshot_pt_date=snapshot_pt_date, sheets=sheets)
     metadata = {
         "id": artifact_id,
         "report_id": report_id,
