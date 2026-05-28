@@ -947,6 +947,55 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
 
         self.assertEqual(vplan._safe_list_issues_for_version(RaisingIssuesClient(), "v1"), [])
 
+    def test_sync_includes_spdbp_tickets_under_af_version(self) -> None:
+        config = {
+            "version_plan": {
+                "af": {
+                    "bundles": {
+                        "af-20260520": {
+                            "manual_rows": []
+                        }
+                    },
+                    "pipeline_rows": [],
+                }
+            }
+        }
+
+        class MockBPMISClient(FakeBPMISVersionPlanClient):
+            def list_issues_for_version(self, version_id: str) -> list[dict]:
+                if version_id == "af-20260520":
+                    return [
+                        {
+                            "jiraKey": "SPDBP-12345",
+                            "summary": "[Feature] Direct SPDBP ticket under AF version",
+                            "status": "Developing",
+                            "reporter": {"email": "chang.wang@npt.sg"},
+                            "jiraRegionalPmPicId": [{"email": "chang.wang@npt.sg"}],
+                            "parentIds": ["biz-1"],
+                        },
+                        {
+                            "jiraKey": "OTHER-99999",
+                            "summary": "Non-SPDBP ticket under AF version",
+                            "status": "Developing",
+                            "reporter": {"email": "chang.wang@npt.sg"},
+                        }
+                    ]
+                return []
+
+        client = MockBPMISClient()
+        synced = version_plan_sync(
+            config,
+            client,
+            now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
+        )
+        payload = version_plan_payload(synced, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
+
+        bundle = payload["bundles"][0]
+        synced_jira_ids = [row["jira_id"] for row in bundle["synced_rows"]]
+
+        self.assertIn("SPDBP-12345", synced_jira_ids)
+        self.assertNotIn("OTHER-99999", synced_jira_ids)
+
     def test_parser_market_and_date_helper_edges(self) -> None:
         self.assertEqual(vplan._bundle_payload({"prd_deadline_date": "2026-05-10"}, today=date(2026, 5, 16))["synced_rows"], [])
         self.assertEqual(vplan._latest_mapped_release_date({"bad": {}, "good": {"release_date": "2026-05-26"}}), "2026-05-26")
