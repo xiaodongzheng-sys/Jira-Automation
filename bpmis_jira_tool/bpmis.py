@@ -1112,7 +1112,9 @@ class BPMISDirectApiClient(BPMISClient):
         page_size = 1000
         start_dt = release_cutoff or datetime(1970, 1, 1, tzinfo=timezone.utc)
         end_dt = release_before_cutoff or (start_dt + timedelta(days=730))
-        end_date = end_dt.date().isoformat()
+        # BPMIS versions/list treats timelineEndBefore as a strict upper bound,
+        # so advance by one day to include versions released on the requested end date.
+        end_date = (end_dt.date() + timedelta(days=1)).isoformat()
         start_date = start_dt.date().isoformat()
         try:
             while True:

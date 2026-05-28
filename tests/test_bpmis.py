@@ -2810,7 +2810,7 @@ class BPMISClientTests(unittest.TestCase):
                 searches.append(search)
                 if path == "/api/v1/versions/list":
                     self.assertEqual(search["timelineEndAfter"], "2026-03-01")
-                    self.assertEqual(search["timelineEndBefore"], "2028-02-29")
+                    self.assertEqual(search["timelineEndBefore"], "2028-03-01")
                     self.assertEqual(search["pageSize"], 1000)
                     return {
                         "data": {
@@ -2887,7 +2887,7 @@ class BPMISClientTests(unittest.TestCase):
                 searches.append(search)
                 if path == "/api/v1/versions/list":
                     self.assertEqual(search["timelineEndAfter"], "2026-05-20")
-                    self.assertEqual(search["timelineEndBefore"], "2026-05-28")
+                    self.assertEqual(search["timelineEndBefore"], "2026-05-29")
                     return {
                         "data": {
                             "rows": [
