@@ -629,7 +629,6 @@ def _sync_rows_for_bundle(
     }
     release_after = str(af_version.get("release_date") or "").strip()
     release_before = _latest_mapped_release_date(mapped_versions)
-    bundle_version_names = _bundle_jira_version_names(af_version, mapped_versions)
     for raw in _safe_list_jira_tasks_for_release_window(
         bpmis_client,
         VERSION_PLAN_AF_PM_EMAILS,
@@ -638,7 +637,7 @@ def _sync_rows_for_bundle(
     ):
         if _is_closed_or_icebox(raw):
             continue
-        if not _row_matches_bundle_versions(raw, bundle_version_names):
+        if _row_has_planning_version(raw):
             continue
         jira_id = _extract_jira_id(raw)
         if not jira_id or jira_id in seen:
@@ -665,19 +664,8 @@ def _sync_rows_for_bundle(
     return rows
 
 
-def _bundle_jira_version_names(af_version: dict[str, Any], mapped_versions: dict[str, Any]) -> set[str]:
-    names = {_normalize_version_match_text(af_version.get("version_name"))}
-    for version in mapped_versions.values():
-        if isinstance(version, dict):
-            names.add(_normalize_version_match_text(version.get("version_name")))
-    return {name for name in names if name and name != "-"}
-
-
-def _row_matches_bundle_versions(row: dict[str, Any], bundle_version_names: set[str]) -> bool:
-    if not bundle_version_names:
-        return False
-    row_version_names = _row_jira_version_names(row)
-    return bool(row_version_names & bundle_version_names)
+def _row_has_planning_version(row: dict[str, Any]) -> bool:
+    return any(name.startswith("planning") for name in _row_jira_version_names(row))
 
 
 def _row_jira_version_names(row: dict[str, Any]) -> set[str]:

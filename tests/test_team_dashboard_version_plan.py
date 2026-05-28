@@ -168,6 +168,15 @@ class FakeBPMISVersionPlanClient:
                 "parent_project": {"priority": "SP", "market": "SG"},
             },
             {
+                "jira_id": "SGDB-planning",
+                "jira_title": "Planning Version",
+                "status": "Developing",
+                "pm_email": "zoey.luxy@npt.sg",
+                "market": "SG",
+                "version": "Planning_DBPSG_v2.85_0608",
+                "parent_project": {"priority": "SP", "market": "SG"},
+            },
+            {
                 "jira_id": "SPDBP-closed",
                 "jira_title": "Closed task",
                 "status": "Closed",
@@ -261,16 +270,17 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(bundle["prd_deadline_date"], "2026-05-10")
         self.assertEqual(bundle["prd_initial_date"], "2026-05-06")
         self.assertEqual(bundle["prd_final_date"], "2026-05-08")
-        self.assertEqual(bundle["synced_rows"][0]["jira_id"], "SPDBP-94945")
-        self.assertEqual(bundle["synced_rows"][0]["market"], "Regional")
-        self.assertEqual(bundle["synced_rows"][0]["priority"], "P0")
-        self.assertEqual(bundle["synced_rows"][0]["pm"], ["Wang Chang"])
-        self.assertEqual(bundle["synced_rows"][0]["productization_efforts"], "Y")
+        spdbp_row = next(row for row in bundle["synced_rows"] if row["jira_id"] == "SPDBP-94945")
+        self.assertEqual(spdbp_row["market"], "Regional")
+        self.assertEqual(spdbp_row["priority"], "P0")
+        self.assertEqual(spdbp_row["pm"], ["Wang Chang"])
+        self.assertEqual(spdbp_row["productization_efforts"], "Y")
         self.assertEqual([row["pm"][0] for row in bundle["synced_rows"] if row["priority"] == "P0"], ["Wang Chang", "Zoey"])
         sg_row = next(row for row in bundle["synced_rows"] if row["jira_id"] == "SGDB-75128")
         self.assertEqual(sg_row["market"], "SG")
         self.assertEqual(sg_row["productization_efforts"], "N")
-        self.assertNotIn("SGDB-wrong-version", [row["jira_id"] for row in bundle["synced_rows"]])
+        self.assertIn("SGDB-wrong-version", [row["jira_id"] for row in bundle["synced_rows"]])
+        self.assertNotIn("SGDB-planning", [row["jira_id"] for row in bundle["synced_rows"]])
         self.assertEqual(bundle["mapped_versions"]["DBPSG"]["version_name"], "DBPSG_v2.85_0526")
         self.assertEqual(len(client.release_window_calls), 1)
         self.assertEqual(client.release_window_calls[0]["release_after"], "2026-05-20")
@@ -316,7 +326,7 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         archived = payload["archived_bundles"][0]
         self.assertEqual(archived["af_version_name"], "AF_1.0.76_20260520")
         self.assertEqual(archived["manual_rows"], [])
-        self.assertEqual(archived["synced_rows"][0]["jira_id"], "SPDBP-94945")
+        self.assertIn("SPDBP-94945", [row["jira_id"] for row in archived["synced_rows"]])
 
     def test_manual_cell_add_delete_and_priority_order_persist(self) -> None:
         config = normalize_version_plan_state(
@@ -912,12 +922,13 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         rows = vplan._sync_rows_for_bundle(
             ReleaseWindowClient(
                 [
-                    {"jiraLink": "https://jira/browse/SPDBP-100", "summary": "Linked", "parentIds": ["ok"], "version": "AF_1"},
-                    {"jira_id": "SPDBP-100", "summary": "Duplicate", "version": "AF_1"},
+                    {"jiraLink": "https://jira/browse/SPDBP-100", "summary": "Linked", "parentIds": ["ok"]},
+                    {"jira_id": "SPDBP-100", "summary": "Duplicate"},
+                    {"jira_id": "SPDBP-101", "summary": "Planning", "version": "Planning_AF_1"},
                     {"jiraLink": "https://example.invalid/no-ticket", "summary": "No id"},
                 ]
             ),
-            {"version_id": "af-1", "version_name": "AF_1", "release_date": "2026-05-20"},
+            {"version_id": "af-1", "release_date": "2026-05-20"},
             {},
             [{"jira_id": "SPDBP-100", "remarks": "Existing note"}],
         )
