@@ -521,7 +521,7 @@ def _synced_row(row: dict[str, Any]) -> dict[str, Any]:
         "row_id": str(row.get("row_id") or f"sync-{jira_id or uuid.uuid4().hex}"),
         "row_type": "synced",
         "jira_id": jira_id,
-        "jira_link": str(row.get("jira_link") or "").strip(),
+        "jira_link": _canonical_jira_link(row.get("jira_link"), jira_id),
         "market": _market_from_jira_board(jira_board) or _normalize_market(row.get("market")),
         "jira_summary": str(row.get("jira_summary") or row.get("feature") or "").strip(),
         "priority": _normalize_priority(row.get("priority")),
@@ -641,6 +641,8 @@ def _sync_rows_for_bundle(
     for raw in candidates:
         if _is_closed_or_icebox(raw):
             continue
+        if _row_has_excluded_task_type(raw):
+            continue
         if _row_has_planning_version(raw):
             continue
         jira_id = _extract_jira_id(raw)
@@ -677,6 +679,11 @@ def _row_is_productization_ticket(row: dict[str, Any]) -> bool:
     jira_id = _extract_jira_id(row)
     jira_board = _extract_jira_board(row) or jira_id
     return _jira_board_is_productization(jira_board)
+
+
+def _row_has_excluded_task_type(row: dict[str, Any]) -> bool:
+    task_type = _extract_task_type(row).casefold()
+    return task_type in {"tech", "support"}
 
 
 def _row_has_planning_version(row: dict[str, Any]) -> bool:
@@ -951,15 +958,40 @@ def _extract_jira_id(row: dict[str, Any]) -> str:
 
 def _extract_jira_link(row: dict[str, Any], jira_id: str) -> str:
     link = _extract_first_text(row, "jira_link", "ticket_link", "jiraLink", "ticketLink", "jiraUrl", "url", "link")
-    if link:
-        return link
-    return f"https://jira.shopee.io/browse/{jira_id}" if jira_id else ""
+    return _canonical_jira_link(link, jira_id)
+
+
+def _canonical_jira_link(link: Any, jira_id: str) -> str:
+    jira_key = str(jira_id or "").strip()
+    raw_link = str(link or "").strip()
+    if jira_key:
+        preferred = f"https://jira.shopee.io/browse/{jira_key}"
+        if not raw_link:
+            return preferred
+        normalized = raw_link.lower()
+        if "jira.shopee.io/browse/" in normalized:
+            return preferred
+        if re.search(rf"(^|[^A-Z0-9]){re.escape(jira_key)}($|[^A-Z0-9])", raw_link, flags=re.IGNORECASE):
+            return preferred
+    return raw_link
 
 
 def _extract_pm(row: dict[str, Any]) -> list[str]:
     value = row.get("pm_email") or row.get("jiraRegionalPmPicId") or row.get("regionalPmPic") or row.get("productManager") or row.get("pm")
     people = _flatten_people(value)
     return _normalize_pm_values(people)
+
+
+def _extract_task_type(row: dict[str, Any]) -> str:
+    return _extract_first_text(
+        row,
+        "task_type",
+        "taskType",
+        "taskTypeId",
+        "task_type_label",
+        "taskTypeLabel",
+        "issueTaskType",
+    )
 
 
 def _flatten_people(value: Any) -> list[str]:

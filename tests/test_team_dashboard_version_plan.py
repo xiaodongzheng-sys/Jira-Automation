@@ -135,6 +135,7 @@ class FakeBPMISVersionPlanClient:
                 "jira_id": "SPDBP-94945",
                 "jira_title": "[Feature] Antifraud - UIUX Improvement for AMR",
                 "status": "Developing",
+                "jira_link": "https://app.bankpmtool.uk/SPDBP-94945",
                 "pm_email": "chang.wang@npt.sg",
                 "market": "SG",
                 "version": "AF_1.0.76_20260520",
@@ -175,6 +176,26 @@ class FakeBPMISVersionPlanClient:
                 "market": "SG",
                 "version": "Planning_DBPSG_v2.85_0608",
                 "parent_project": {"priority": "SP", "market": "SG"},
+            },
+            {
+                "jira_id": "SGDB-tech",
+                "jira_title": "Tech ticket",
+                "status": "Developing",
+                "pm_email": "zoey.luxy@npt.sg",
+                "market": "SG",
+                "version": "DBPSG_v2.85_0526",
+                "taskType": "Tech",
+                "parent_project": {"priority": "P0", "market": "SG"},
+            },
+            {
+                "jira_id": "SGDB-support",
+                "jira_title": "Support ticket",
+                "status": "Developing",
+                "pm_email": "zoey.luxy@npt.sg",
+                "market": "SG",
+                "version": "DBPSG_v2.85_0526",
+                "taskType": {"label": "Support"},
+                "parent_project": {"priority": "P0", "market": "SG"},
             },
             {
                 "jira_id": "SPDBP-closed",
@@ -275,12 +296,15 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(spdbp_row["priority"], "P0")
         self.assertEqual(spdbp_row["pm"], ["Wang Chang"])
         self.assertEqual(spdbp_row["productization_efforts"], "Y")
+        self.assertEqual(spdbp_row["jira_link"], "https://jira.shopee.io/browse/SPDBP-94945")
         self.assertEqual([row["pm"][0] for row in bundle["synced_rows"] if row["priority"] == "P0"], ["Wang Chang", "Zoey"])
         sg_row = next(row for row in bundle["synced_rows"] if row["jira_id"] == "SGDB-75128")
         self.assertEqual(sg_row["market"], "SG")
         self.assertEqual(sg_row["productization_efforts"], "N")
         self.assertIn("SGDB-wrong-version", [row["jira_id"] for row in bundle["synced_rows"]])
         self.assertNotIn("SGDB-planning", [row["jira_id"] for row in bundle["synced_rows"]])
+        self.assertNotIn("SGDB-tech", [row["jira_id"] for row in bundle["synced_rows"]])
+        self.assertNotIn("SGDB-support", [row["jira_id"] for row in bundle["synced_rows"]])
         self.assertEqual(bundle["mapped_versions"]["DBPSG"]["version_name"], "DBPSG_v2.85_0526")
         self.assertEqual(len(client.release_window_calls), 1)
         self.assertEqual(client.release_window_calls[0]["release_after"], "2026-05-20")
@@ -315,6 +339,7 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
                         "jiraKey": "SPDBP-94945",
                         "summary": "[Feature] Antifraud - UIUX Improvement for AMR",
                         "status": "Developing",
+                        "jiraLink": "https://app.bankpmtool.uk/SPDBP-94945",
                         "reporter": {"email": "chang.wang@npt.sg"},
                         "jiraRegionalPmPicId": [{"email": "chang.wang@npt.sg"}],
                         "parentIds": ["biz-1"],
@@ -344,6 +369,7 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         spdbp_row = next(row for row in bundle["synced_rows"] if row["jira_id"] == "SPDBP-94945")
         self.assertEqual(spdbp_row["market"], "Regional")
         self.assertEqual(spdbp_row["productization_efforts"], "Y")
+        self.assertEqual(spdbp_row["jira_link"], "https://jira.shopee.io/browse/SPDBP-94945")
 
     def test_seen_past_version_moves_to_archived_without_manual_rows(self) -> None:
         config = {
@@ -990,7 +1016,7 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["jira_id"], "SPDBP-100")
         self.assertEqual(rows[0]["remarks"], "Existing note")
-        self.assertEqual(rows[0]["jira_link"], "https://jira/browse/SPDBP-100")
+        self.assertEqual(rows[0]["jira_link"], "https://jira.shopee.io/browse/SPDBP-100")
         self.assertEqual(vplan._safe_list_productization_issues_for_version(ReleaseWindowClient([]), "af-1"), [])
         self.assertTrue(vplan._row_is_productization_ticket({"jira_id": "SPDBP-100"}))
         self.assertFalse(vplan._row_is_productization_ticket({"jira_id": "SGDB-100"}))
