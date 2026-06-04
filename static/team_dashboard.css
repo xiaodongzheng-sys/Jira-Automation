@@ -1707,14 +1707,6 @@
   min-width: 0;
 }
 
-.team-dashboard-version-plan-bundle.is-archived .team-dashboard-version-plan-bundle-toggle-row {
-  display: none;
-}
-
-.team-dashboard-version-plan-bundle.is-archived > .team-dashboard-version-plan-sheet {
-  grid-column: 1 / -1;
-}
-
 @media (max-width: 760px) {
   .team-dashboard-version-plan-head .button-row {
     width: 100%;
