@@ -629,21 +629,16 @@ def _sync_rows_for_bundle(
     }
     release_after = str(af_version.get("release_date") or "").strip()
     release_before = _latest_mapped_release_date(mapped_versions)
-    raw_tasks = list(_safe_list_jira_tasks_for_release_window(
+    af_version_id = str(af_version.get("version_id") or "").strip()
+    candidates = _safe_list_jira_tasks_for_release_window(
         bpmis_client,
         VERSION_PLAN_AF_PM_EMAILS,
         release_after=release_after,
         release_before=release_before,
-    ))
-    af_version_id = str(af_version.get("version_id") or "").strip()
+    )
     if af_version_id:
-        af_version_tasks = _safe_list_issues_for_version(bpmis_client, af_version_id)
-        for raw in af_version_tasks:
-            jira_id = _extract_jira_id(raw)
-            board = _extract_jira_board(raw) or jira_id
-            if jira_id and (str(board).upper().startswith("SPDBP") or str(jira_id).upper().startswith("SPDBP-")):
-                raw_tasks.append(raw)
-    for raw in raw_tasks:
+        candidates.extend(_safe_list_productization_issues_for_version(bpmis_client, af_version_id))
+    for raw in candidates:
         if _is_closed_or_icebox(raw):
             continue
         if _row_has_planning_version(raw):
@@ -671,6 +666,17 @@ def _sync_rows_for_bundle(
             )
         )
     return rows
+
+
+def _safe_list_productization_issues_for_version(bpmis_client: Any, version_id: str) -> list[dict[str, Any]]:
+    rows = _safe_list_issues_for_version(bpmis_client, version_id)
+    return [row for row in rows if _row_is_productization_ticket(row)]
+
+
+def _row_is_productization_ticket(row: dict[str, Any]) -> bool:
+    jira_id = _extract_jira_id(row)
+    jira_board = _extract_jira_board(row) or jira_id
+    return _jira_board_is_productization(jira_board)
 
 
 def _row_has_planning_version(row: dict[str, Any]) -> bool:

@@ -291,6 +291,60 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(bundle["manual_rows"][0]["feature"], "Manual item")
         self.assertEqual(payload["pipeline_rows"][0]["feature"], "Keep pipeline")
 
+    def test_sync_includes_spdbp_issues_linked_directly_to_af_version(self) -> None:
+        class DirectAfVersionClient(FakeBPMISVersionPlanClient):
+            def list_jira_tasks_created_by_emails(self, emails: list[str], **kwargs) -> list[dict]:
+                self.release_window_calls.append({"emails": emails, **kwargs})
+                return [
+                    {
+                        "jira_id": "SGDB-75128",
+                        "jira_title": "[Feature] SG owner mapping",
+                        "status": "Developing",
+                        "pm_email": "zoey.luxy@npt.sg",
+                        "market": "SG",
+                        "version": "DBPSG_v2.85_0526",
+                        "parent_project": {"priority": "P0", "market": "SG"},
+                    }
+                ]
+
+            def list_issues_for_version(self, version_id: str) -> list[dict]:
+                if version_id != "af-20260520":
+                    return []
+                return [
+                    {
+                        "jiraKey": "SPDBP-94945",
+                        "summary": "[Feature] Antifraud - UIUX Improvement for AMR",
+                        "status": "Developing",
+                        "reporter": {"email": "chang.wang@npt.sg"},
+                        "jiraRegionalPmPicId": [{"email": "chang.wang@npt.sg"}],
+                        "parentIds": ["biz-1"],
+                    },
+                    {
+                        "jiraKey": "SPDBP-rene",
+                        "summary": "[Feature] Rene owner mapping",
+                        "status": "Developing",
+                        "reporter": {"email": "chongzj@npt.sg"},
+                        "jiraRegionalPmPicId": [{"email": "chongzj@npt.sg"}],
+                        "parentIds": ["biz-2"],
+                    },
+                ]
+
+        synced = version_plan_sync(
+            {"version_plan": normalize_version_plan_state({})},
+            DirectAfVersionClient(),
+            now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
+        )
+        payload = version_plan_payload(synced, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
+
+        bundle = payload["bundles"][0]
+        jira_ids = [row["jira_id"] for row in bundle["synced_rows"]]
+        self.assertIn("SPDBP-94945", jira_ids)
+        self.assertIn("SPDBP-rene", jira_ids)
+        self.assertIn("SGDB-75128", jira_ids)
+        spdbp_row = next(row for row in bundle["synced_rows"] if row["jira_id"] == "SPDBP-94945")
+        self.assertEqual(spdbp_row["market"], "Regional")
+        self.assertEqual(spdbp_row["productization_efforts"], "Y")
+
     def test_seen_past_version_moves_to_archived_without_manual_rows(self) -> None:
         config = {
             "version_plan": {
@@ -937,6 +991,9 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(rows[0]["jira_id"], "SPDBP-100")
         self.assertEqual(rows[0]["remarks"], "Existing note")
         self.assertEqual(rows[0]["jira_link"], "https://jira/browse/SPDBP-100")
+        self.assertEqual(vplan._safe_list_productization_issues_for_version(ReleaseWindowClient([]), "af-1"), [])
+        self.assertTrue(vplan._row_is_productization_ticket({"jira_id": "SPDBP-100"}))
+        self.assertFalse(vplan._row_is_productization_ticket({"jira_id": "SGDB-100"}))
 
         self.assertEqual(vplan._safe_search_versions(ReleaseWindowClient([]), "AF_"), [])
         self.assertEqual(vplan._safe_list_issues_for_version(object(), "v1"), [])
