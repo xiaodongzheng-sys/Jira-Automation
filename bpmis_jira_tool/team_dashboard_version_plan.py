@@ -649,7 +649,13 @@ def _sync_rows_for_bundle(
         if not jira_id or jira_id in seen:
             continue
         seen.add(jira_id)
-        parent = _task_parent_project(raw) or _parent_project_detail(bpmis_client, raw)
+        parent = _task_parent_project(raw)
+        priority = _extract_sync_row_priority(raw, parent)
+        if not priority:
+            parent_detail = _parent_project_detail(bpmis_client, raw)
+            if parent_detail:
+                parent = parent or parent_detail
+                priority = _extract_sync_row_priority(raw, parent_detail)
         existing = existing_by_jira.get(jira_id) or {}
         rows.append(
             _synced_row(
@@ -659,7 +665,7 @@ def _sync_rows_for_bundle(
                     "jira_link": _extract_jira_link(raw, jira_id),
                     "market": _extract_market_from_jira_board(raw, jira_id),
                     "jira_summary": _extract_first_text(raw, "jira_title", "summary", "title", "jiraSummary"),
-                    "priority": _extract_parent_priority(parent),
+                    "priority": priority,
                     "pm": _extract_pm(raw),
                     "remarks": existing.get("remarks") or "",
                     "productization_efforts": _extract_productization_efforts(raw, jira_id),
@@ -773,6 +779,13 @@ def _safe_list_jira_tasks_for_release_window(
 def _task_parent_project(row: dict[str, Any]) -> dict[str, Any]:
     parent = row.get("parent_project")
     return parent if isinstance(parent, dict) else {}
+
+
+def _extract_sync_row_priority(row: dict[str, Any], parent: dict[str, Any] | None = None) -> str:
+    direct_priority = _extract_first_text(row, "priority", "bizPriorityId", "bizPriority", "priorityId")
+    if direct_priority:
+        return direct_priority
+    return _extract_parent_priority(parent or {})
 
 
 def _extract_parent_priority(parent: dict[str, Any]) -> str:

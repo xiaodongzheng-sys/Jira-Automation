@@ -644,19 +644,17 @@
 
   const renderVersionPlanBundleToggle = (bundle, { archived = false } = {}) => {
     const key = versionPlanBundleKey(bundle);
-    const collapsed = !archived && isVersionPlanBundleCollapsed(bundle);
+    const collapsed = isVersionPlanBundleCollapsed(bundle);
     return `
       <div class="team-dashboard-version-plan-bundle-toggle-row">
-        ${archived ? '' : `
-          <button
-            class="button button-secondary team-dashboard-version-plan-bundle-toggle"
-            type="button"
-            data-version-plan-bundle-toggle
-            data-version-plan-bundle-id="${escapeHtml(key)}"
-            aria-expanded="${collapsed ? 'false' : 'true'}"
-            aria-label="${collapsed ? 'Expand' : 'Collapse'} ${escapeHtml(versionPlanBundleTitle(bundle))}"
-          >${collapsed ? '+' : '-'}</button>
-        `}
+        <button
+          class="button button-secondary team-dashboard-version-plan-bundle-toggle"
+          type="button"
+          data-version-plan-bundle-toggle
+          data-version-plan-bundle-id="${escapeHtml(key)}"
+          aria-expanded="${collapsed ? 'false' : 'true'}"
+          aria-label="${collapsed ? 'Expand' : 'Collapse'} ${escapeHtml(versionPlanBundleTitle(bundle))}"
+        >${collapsed ? '+' : '-'}</button>
         <strong class="team-dashboard-version-plan-collapsed-title">${escapeHtml(versionPlanBundleTitle(bundle))}</strong>
       </div>
     `;
@@ -819,10 +817,13 @@
   const renderVersionPlanArchivedBundle = (bundle) => {
     const mapped = bundle.mapped_versions && typeof bundle.mapped_versions === 'object' ? bundle.mapped_versions : {};
     const headerFeature = versionPlanSheetTitle(versionPlanBundleTitle(bundle), mapped);
+    const collapsed = isVersionPlanBundleCollapsed(bundle);
     return `
-      <section class="team-dashboard-version-plan-bundle is-archived">
+      <section class="team-dashboard-version-plan-bundle is-archived${collapsed ? ' is-collapsed' : ''}" data-version-plan-bundle-id="${escapeHtml(versionPlanBundleKey(bundle))}">
         ${renderVersionPlanBundleToggle(bundle, { archived: true })}
-        ${renderVersionPlanRows(filterVersionPlanRowsByPm(bundle.synced_rows || []), { scope: 'archived', versionId: bundle.version_id, readOnly: true, title: 'archived Jira rows', headerFeature })}
+        <div data-version-plan-bundle-body ${collapsed ? 'hidden' : ''}>
+          ${renderVersionPlanRows(filterVersionPlanRowsByPm(bundle.synced_rows || []), { scope: 'archived', versionId: bundle.version_id, readOnly: true, title: 'archived Jira rows', headerFeature })}
+        </div>
       </section>
     `;
   };

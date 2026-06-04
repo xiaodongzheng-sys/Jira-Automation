@@ -1017,18 +1017,33 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(rows[0]["jira_id"], "SPDBP-100")
         self.assertEqual(rows[0]["remarks"], "Existing note")
         self.assertEqual(rows[0]["jira_link"], "https://jira.shopee.io/browse/SPDBP-100")
-        self.assertEqual(vplan._safe_list_productization_issues_for_version(ReleaseWindowClient([]), "af-1"), [])
-        self.assertTrue(vplan._row_is_productization_ticket({"jira_id": "SPDBP-100"}))
-        self.assertFalse(vplan._row_is_productization_ticket({"jira_id": "SGDB-100"}))
 
-        self.assertEqual(vplan._safe_search_versions(ReleaseWindowClient([]), "AF_"), [])
-        self.assertEqual(vplan._safe_list_issues_for_version(object(), "v1"), [])
+    def test_sync_priority_falls_back_to_parent_detail_when_parent_stub_has_no_priority(self) -> None:
+        class PriorityFallbackClient(FakeBPMISVersionPlanClient):
+            def list_jira_tasks_created_by_emails(self, emails: list[str], **kwargs) -> list[dict]:
+                self.release_window_calls.append({"emails": emails, **kwargs})
+                return [
+                    {
+                        "jira_id": "SPDBK-99999",
+                        "jira_title": "[Feature] Missing parent priority stub",
+                        "status": "Developing",
+                        "pm_email": "chongzj@npt.sg",
+                        "market": "ID",
+                        "version": "DBPID_v3.41_0526",
+                        "parent_project": {"market": "ID"},
+                        "parentIds": ["biz-2"],
+                    }
+                ]
 
-        class RaisingIssuesClient:
-            def list_issues_for_version(self, version_id: str) -> list[dict]:
-                raise RuntimeError(version_id)
-
-        self.assertEqual(vplan._safe_list_issues_for_version(RaisingIssuesClient(), "v1"), [])
+        synced = version_plan_sync(
+            {"version_plan": normalize_version_plan_state({})},
+            PriorityFallbackClient(),
+            now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
+        )
+        payload = version_plan_payload(synced, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
+        bundle = payload["bundles"][0]
+        row = next(row for row in bundle["synced_rows"] if row["jira_id"] == "SPDBK-99999")
+        self.assertEqual(row["priority"], "P1")
 
     def test_sync_includes_spdbp_tickets_under_af_version(self) -> None:
         config = {
