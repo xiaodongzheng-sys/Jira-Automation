@@ -789,10 +789,10 @@ def _task_parent_project(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _extract_sync_row_priority(row: dict[str, Any], parent: dict[str, Any] | None = None) -> str:
-    direct_priority = _extract_first_text(row, "priority", "bizPriorityId", "bizPriority", "priorityId")
-    if direct_priority:
-        return direct_priority
-    return _extract_parent_priority(parent or {})
+    parent_priority = _extract_parent_priority(parent or {})
+    if parent_priority:
+        return parent_priority
+    return _extract_first_text(row, "priority", "bizPriorityId", "bizPriority", "priorityId")
 
 
 def _extract_parent_priority(parent: dict[str, Any]) -> str:

@@ -1089,6 +1089,33 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         row = next(row for row in bundle["synced_rows"] if row["jira_id"] == "SPDBK-99999")
         self.assertEqual(row["priority"], "P1")
 
+    def test_sync_priority_prefers_parent_project_over_jira_priority(self) -> None:
+        class ParentWinsClient(FakeBPMISVersionPlanClient):
+            def list_jira_tasks_created_by_emails(self, emails: list[str], **kwargs) -> list[dict]:
+                self.release_window_calls.append({"emails": emails, **kwargs})
+                return [
+                    {
+                        "jira_id": "SPDBP-parent-wins",
+                        "jira_title": "[Feature] Parent wins priority",
+                        "status": "Developing",
+                        "pm_email": "chongzj@npt.sg",
+                        "market": "Regional",
+                        "version": "AF_1.0.76_20260520",
+                        "bizPriorityId": "P2",
+                        "parent_project": {"priority": "P1", "market": "Regional"},
+                    }
+                ]
+
+        synced = version_plan_sync(
+            {"version_plan": normalize_version_plan_state({})},
+            ParentWinsClient(),
+            now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
+        )
+        payload = version_plan_payload(synced, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
+        bundle = payload["bundles"][0]
+        row = next(row for row in bundle["synced_rows"] if row["jira_id"] == "SPDBP-parent-wins")
+        self.assertEqual(row["priority"], "P1")
+
     def test_sync_includes_spdbp_tickets_under_af_version(self) -> None:
         config = {
             "version_plan": {
