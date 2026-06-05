@@ -40,6 +40,10 @@ VERSION_PLAN_SYNC_OPERATION = "af_version_plan"
 VERSION_PLAN_AUDIT_LIMIT = 500
 
 
+class VersionPlanSyncUpstreamError(RuntimeError):
+    """Raised when a critical BPMIS upstream call fails during Version Plan sync."""
+
+
 PIPELINE_SEED_ROWS: tuple[tuple[str, str, str], ...] = (
     ("[ID] Corporate Internet Banking Phase 2", "SP", "Wang Chang"),
     ("[SG] [ID] Child Account", "SP", "Wang Chang"),
@@ -184,7 +188,7 @@ def version_plan_sync(config: dict[str, Any], bpmis_client: Any, *, now: datetim
     if current_dt.tzinfo is None:
         current_dt = current_dt.replace(tzinfo=VERSION_PLAN_TIMEZONE)
 
-    af_versions = [_version_record(row) for row in _safe_search_versions(bpmis_client, "AF_")]
+    af_versions = [_version_record(row) for row in _search_versions_or_raise(bpmis_client, "AF_")]
     af_versions = [row for row in af_versions if row["version_id"] and row["version_name"].startswith("AF_") and row["release_date"]]
     if not af_versions:
         af["sync_state"] = {
@@ -198,9 +202,9 @@ def version_plan_sync(config: dict[str, Any], bpmis_client: Any, *, now: datetim
         config["version_plan"] = plan
         return config
     dbp_versions_by_prefix = {
-        "DBPSG": [_version_record(row) for row in _safe_search_versions(bpmis_client, "DBPSG_")],
-        "DBPID": [_version_record(row) for row in _safe_search_versions(bpmis_client, "DBPID_")],
-        "DBPPH": [_version_record(row) for row in _safe_search_versions(bpmis_client, "DBPPH_")],
+        "DBPSG": [_version_record(row) for row in _search_versions_or_raise(bpmis_client, "DBPSG_")],
+        "DBPID": [_version_record(row) for row in _search_versions_or_raise(bpmis_client, "DBPID_")],
+        "DBPPH": [_version_record(row) for row in _search_versions_or_raise(bpmis_client, "DBPPH_")],
     }
     range_end = _next_quarter_end(today)
     upcoming = [row for row in af_versions if _date_in_range(_parse_date(row["release_date"]), today, range_end)]
@@ -636,9 +640,9 @@ def _sync_rows_for_bundle(
     af_version_id = str(af_version.get("version_id") or "").strip()
     candidates: list[dict[str, Any]] = []
     if af_version_id:
-        candidates.extend(_safe_list_productization_issues_for_version(bpmis_client, af_version_id))
+        candidates.extend(_list_productization_issues_for_version_or_raise(bpmis_client, af_version_id))
     candidates.extend(
-        _safe_list_jira_tasks_for_release_window(
+        _list_jira_tasks_for_release_window_or_raise(
             bpmis_client,
             VERSION_PLAN_AF_PM_EMAILS,
             release_after=release_after,
@@ -685,6 +689,11 @@ def _sync_rows_for_bundle(
 
 def _safe_list_productization_issues_for_version(bpmis_client: Any, version_id: str) -> list[dict[str, Any]]:
     rows = _safe_list_issues_for_version(bpmis_client, version_id)
+    return [row for row in rows if _row_is_productization_ticket(row)]
+
+
+def _list_productization_issues_for_version_or_raise(bpmis_client: Any, version_id: str) -> list[dict[str, Any]]:
+    rows = _list_issues_for_version_or_raise(bpmis_client, version_id)
     return [row for row in rows if _row_is_productization_ticket(row)]
 
 
@@ -783,6 +792,28 @@ def _safe_list_jira_tasks_for_release_window(
         return []
 
 
+def _list_jira_tasks_for_release_window_or_raise(
+    bpmis_client: Any,
+    emails: tuple[str, ...],
+    *,
+    release_after: str,
+    release_before: str,
+) -> list[dict[str, Any]]:
+    if not hasattr(bpmis_client, "list_jira_tasks_created_by_emails"):
+        return []
+    try:
+        rows = bpmis_client.list_jira_tasks_created_by_emails(
+            list(emails),
+            release_after=release_after,
+            release_before=release_before,
+        )
+    except Exception as error:  # noqa: BLE001
+        raise VersionPlanSyncUpstreamError(
+            "Version Plan sync aborted because BPMIS release-window Jira lookup failed."
+        ) from error
+    return [row for row in rows or [] if isinstance(row, dict)]
+
+
 def _task_parent_project(row: dict[str, Any]) -> dict[str, Any]:
     parent = row.get("parent_project")
     return parent if isinstance(parent, dict) else {}
@@ -844,12 +875,32 @@ def _safe_search_versions(bpmis_client: Any, query: str) -> list[dict[str, Any]]
         return []
 
 
+def _search_versions_or_raise(bpmis_client: Any, query: str) -> list[dict[str, Any]]:
+    try:
+        rows = bpmis_client.search_versions(query) if hasattr(bpmis_client, "search_versions") else []
+    except Exception as error:  # noqa: BLE001
+        raise VersionPlanSyncUpstreamError(
+            f"Version Plan sync aborted because BPMIS version lookup failed for '{query}'."
+        ) from error
+    return [row for row in rows or [] if isinstance(row, dict)]
+
+
 def _safe_list_issues_for_version(bpmis_client: Any, version_id: str) -> list[dict[str, Any]]:
     try:
         rows = bpmis_client.list_issues_for_version(version_id) if hasattr(bpmis_client, "list_issues_for_version") else []
         return [row for row in rows or [] if isinstance(row, dict)]
     except Exception:
         return []
+
+
+def _list_issues_for_version_or_raise(bpmis_client: Any, version_id: str) -> list[dict[str, Any]]:
+    try:
+        rows = bpmis_client.list_issues_for_version(version_id) if hasattr(bpmis_client, "list_issues_for_version") else []
+    except Exception as error:  # noqa: BLE001
+        raise VersionPlanSyncUpstreamError(
+            f"Version Plan sync aborted because BPMIS version issue lookup failed for '{version_id}'."
+        ) from error
+    return [row for row in rows or [] if isinstance(row, dict)]
 
 
 def _find_manual_row(plan: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:

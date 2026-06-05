@@ -826,6 +826,34 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(payload["bundles"][0]["manual_rows"][0]["feature"], "Cached manual")
         self.assertEqual(payload["bundles"][0]["synced_rows"][0]["jira_id"], "SPDBP-1")
 
+    def test_release_window_failure_aborts_sync_instead_of_returning_partial_rows(self) -> None:
+        class ReleaseWindowFailureClient(FakeBPMISVersionPlanClient):
+            def list_jira_tasks_created_by_emails(self, emails: list[str], **kwargs) -> list[dict]:
+                raise RuntimeError("release window failed")
+
+        with self.assertRaises(vplan.VersionPlanSyncUpstreamError) as ctx:
+            version_plan_sync(
+                {"version_plan": normalize_version_plan_state({})},
+                ReleaseWindowFailureClient(),
+                now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
+            )
+        self.assertIn("release-window Jira lookup failed", str(ctx.exception))
+
+    def test_direct_version_failure_aborts_sync_instead_of_returning_partial_rows(self) -> None:
+        class DirectVersionFailureClient(FakeBPMISVersionPlanClient):
+            def list_issues_for_version(self, version_id: str) -> list[dict]:
+                if version_id == "af-20260520":
+                    raise RuntimeError("version issue lookup failed")
+                return super().list_issues_for_version(version_id)
+
+        with self.assertRaises(vplan.VersionPlanSyncUpstreamError) as ctx:
+            version_plan_sync(
+                {"version_plan": normalize_version_plan_state({})},
+                DirectVersionFailureClient(),
+                now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
+            )
+        self.assertIn("version issue lookup failed", str(ctx.exception))
+
     def test_auto_sync_attempt_guard_blocks_same_day_error_loop(self) -> None:
         config = {
             "version_plan": {
@@ -926,11 +954,9 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
             def search_versions(self, query: str) -> list[dict]:
                 raise RuntimeError(query)
 
-        synced = version_plan_sync({}, RaisingSearchClient(), now=datetime(2026, 5, 16, 9, 0))
-        payload = version_plan_payload(synced, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
-
-        self.assertEqual(payload["sync_state"]["state"], "error")
-        self.assertIn("No AF versions", payload["sync_state"]["error"])
+        with self.assertRaises(vplan.VersionPlanSyncUpstreamError):
+            version_plan_sync({}, RaisingSearchClient(), now=datetime(2026, 5, 16, 9, 0))
+        self.assertEqual(vplan._safe_search_versions(RaisingSearchClient(), "AF_"), [])
 
         merged = merge_version_plan_editable_state(
             {"version_plan": normalize_version_plan_state({"af": {"bundles": {}}})},
