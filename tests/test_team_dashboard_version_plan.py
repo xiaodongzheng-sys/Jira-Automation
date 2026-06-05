@@ -371,6 +371,46 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(spdbp_row["productization_efforts"], "Y")
         self.assertEqual(spdbp_row["jira_link"], "https://jira.shopee.io/browse/SPDBP-94945")
 
+    def test_direct_version_row_wins_when_release_window_duplicate_has_less_pm_data(self) -> None:
+        class PreferDirectVersionClient(FakeBPMISVersionPlanClient):
+            def list_jira_tasks_created_by_emails(self, emails: list[str], **kwargs) -> list[dict]:
+                self.release_window_calls.append({"emails": emails, **kwargs})
+                return [
+                    {
+                        "jira_id": "SPDBP-97778",
+                        "jira_title": "[Feature] Admin Portal AMR Sampling Logic Configuration",
+                        "status": "Developing",
+                        "jira_link": "SPDBP-97778",
+                        "market": "Regional",
+                        "version": "AF_v1.0.82_20260626",
+                        "parent_project": {"priority": "P2", "market": "Regional"},
+                    }
+                ]
+
+            def list_issues_for_version(self, version_id: str) -> list[dict]:
+                if version_id != "af-20260520":
+                    return []
+                return [
+                    {
+                        "jiraLink": "SPDBP-97778",
+                        "summary": "[Feature] Admin Portal AMR Sampling Logic Configuration",
+                        "status": "Developing",
+                        "jiraRegionalPmPicId": [{"email": "junwei.ong@npt.sg"}],
+                        "reporter": {"email": "junwei.ong@npt.sg"},
+                        "bizPriorityId": "P2",
+                    }
+                ]
+
+        synced = version_plan_sync(
+            {"version_plan": normalize_version_plan_state({})},
+            PreferDirectVersionClient(),
+            now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
+        )
+        payload = version_plan_payload(synced, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
+        bundle = payload["bundles"][0]
+        row = next(row for row in bundle["synced_rows"] if row["jira_id"] == "SPDBP-97778")
+        self.assertEqual(row["pm"], ["Junwei"])
+
     def test_seen_past_version_moves_to_archived_without_manual_rows(self) -> None:
         config = {
             "version_plan": {

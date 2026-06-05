@@ -634,14 +634,17 @@ def _sync_rows_for_bundle(
     release_after = str(af_version.get("release_date") or "").strip()
     release_before = _latest_mapped_release_date(mapped_versions)
     af_version_id = str(af_version.get("version_id") or "").strip()
-    candidates = _safe_list_jira_tasks_for_release_window(
-        bpmis_client,
-        VERSION_PLAN_AF_PM_EMAILS,
-        release_after=release_after,
-        release_before=release_before,
-    )
+    candidates: list[dict[str, Any]] = []
     if af_version_id:
-        candidates.extend(_safe_list_productization_issues_for_version(bpmis_client, af_version_id))
+        candidates.extend(_safe_list_issues_for_version(bpmis_client, af_version_id))
+    candidates.extend(
+        _safe_list_jira_tasks_for_release_window(
+            bpmis_client,
+            VERSION_PLAN_AF_PM_EMAILS,
+            release_after=release_after,
+            release_before=release_before,
+        )
+    )
     for raw in candidates:
         if _is_closed_or_icebox(raw):
             continue
