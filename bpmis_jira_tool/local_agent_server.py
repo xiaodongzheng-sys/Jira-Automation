@@ -55,6 +55,7 @@ from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.seatalk_stores import SeaTalkNameMappingStore, SeaTalkTodoStore
 from bpmis_jira_tool.source_code_qa import SourceCodeQAService
 from bpmis_jira_tool.source_code_qa_factory import build_source_code_qa_service_from_settings
+from bpmis_jira_tool.source_code_qa_repo_downloads import build_repo_download_zip
 from bpmis_jira_tool.source_code_qa_stores import (
     SourceCodeQAAttachmentStore,
     SourceCodeQAGeneratedArtifactStore,
@@ -295,6 +296,16 @@ def create_local_agent_app() -> Flask:
         else:
             result = service.ensure_synced_today(pm_team=pm_team, country=country)
         return jsonify({"status": "ok", **result})
+
+    @app.get("/api/local-agent/source-code-qa/repo-downloads/<scope_key>")
+    def source_code_qa_repo_download(scope_key: str):
+        metadata, content = build_repo_download_zip(_source_code_qa_service(), scope_key)
+        return send_file(
+            io.BytesIO(content),
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name=str(metadata.get("filename") or "source-code-repos.zip"),
+        )
 
     @app.post("/api/local-agent/source-code-qa/query")
     def source_code_qa_query():

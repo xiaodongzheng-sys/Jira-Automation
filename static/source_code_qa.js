@@ -16,6 +16,8 @@
   const effortJobsUrlTemplate = root.dataset.effortJobsUrl || jobsUrlTemplate;
   const feedbackUrl = root.dataset.feedbackUrl;
   const sessionsUrl = root.dataset.sessionsUrl;
+  const repoDownloadUrlTemplate = root.dataset.repoDownloadUrl || '/api/source-code-qa/repo-downloads/__SCOPE_KEY__';
+  const canChat = root.dataset.canChat === 'true';
   const canManage = root.dataset.canManage === 'true';
   const options = JSON.parse(root.dataset.options || '{}');
 
@@ -138,7 +140,9 @@
 
   const setSourceView = (view) => {
     const adminViews = new Set(['admin', 'effort']);
-    const nextView = adminViews.has(view) && canManage ? view : 'chat';
+    const sharedViews = new Set(canChat ? ['chat', 'download'] : ['download']);
+    const fallbackView = canChat ? 'chat' : 'download';
+    const nextView = sharedViews.has(view) ? view : (adminViews.has(view) && canManage ? view : fallbackView);
     viewTabs.forEach((tab) => {
       const active = tab.dataset.sourceViewTab === nextView;
       tab.classList.toggle('is-active', active);
@@ -2873,13 +2877,17 @@
   });
   copyAnswerButton?.addEventListener('click', copyAnswerWithCitations);
 
-  setSourceView('chat');
+  setSourceView(canChat ? 'chat' : 'download');
   updateRuntimeEvidenceCountryOptions();
   restoreLastQueryConfig();
   restoreEffortAssessmentCache();
   loadLatestEffortAssessment();
-  applyActiveSession(null);
+  if (canChat) {
+    applyActiveSession(null);
+  }
   updateAnswerModeState();
   loadConfig();
-  loadSessions();
+  if (canChat) {
+    loadSessions();
+  }
 })();

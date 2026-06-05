@@ -165,6 +165,8 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertIn(b"/cloud-static/style.css", response.data)
             self.assertNotIn(b"Checking Mac portal availability", response.data)
             self.assertNotIn(b"fetch('/healthz'", response.data)
+            self.assertIn(b"session-bar", response.data)
+            self.assertNotIn(b"site-switcher", response.data)
 
     def test_cloud_home_shows_only_full_portal_when_full_portal_is_available(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -226,8 +228,9 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertNotIn(b"Open Full Portal", response.data)
             self.assertNotIn(b"Open Version Plan", response.data)
             self.assertNotIn(b"data-version-plan-card", response.data)
-            self.assertNotIn(b"site-switcher", response.data)
             self.assertNotIn(b"Cloud Run", response.data)
+            soup = BeautifulSoup(response.get_data(as_text=True), "html.parser")
+            self.assertEqual([node.get_text(strip=True) for node in soup.select(".site-switcher-tab")], ["Source Code", "Projects", "Business Insights"])
             self.assertEqual(blocked_plan.status_code, 302)
             self.assertEqual(blocked_plan.headers["Location"], "/access-denied")
             self.assertEqual(blocked_api.status_code, 403)
@@ -259,9 +262,10 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertIn(b"Open Version Plan", response.data)
             self.assertNotIn(b"Open Full Portal", response.data)
             self.assertNotIn(b"https://app.bankpmtool.uk/portal-home?workspace=run", response.data)
-            self.assertNotIn(b"site-switcher", response.data)
             self.assertNotIn(b'BPMIS Automation Tool</a>', response.data)
             self.assertNotIn(b'site-switcher-subtab is-active" href="/portal-home?workspace=run"', response.data)
+            soup = BeautifulSoup(response.get_data(as_text=True), "html.parser")
+            self.assertEqual([node.get_text(strip=True) for node in soup.select(".site-switcher-tab")], ["Source Code", "Projects", "Business Insights"])
             self.assertEqual(dashboard_response.status_code, 200)
             self.assertIn(b'BPMIS Automation Tool</a>', dashboard_response.data)
             self.assertIn(b'/portal-home?workspace=productization-upgrade-summary', dashboard_response.data)
@@ -296,9 +300,9 @@ class TeamPortalAccessTests(unittest.TestCase):
                 admin_bpmis_response = client.get("/portal-home?workspace=bpmis", follow_redirects=False)
 
         self.assertEqual(default_response.status_code, 302)
-        self.assertEqual(default_response.headers["Location"], "/source-code-qa")
+        self.assertEqual(default_response.headers["Location"], "/access-denied")
         self.assertEqual(run_response.status_code, 302)
-        self.assertEqual(run_response.headers["Location"], "/source-code-qa")
+        self.assertEqual(run_response.headers["Location"], "/access-denied")
         self.assertEqual(bpmis_response.status_code, 302)
         self.assertEqual(bpmis_response.headers["Location"], "/access-denied")
         self.assertEqual(productization_response.status_code, 200)
@@ -341,7 +345,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 dashboard_response = mac_client.get("/team-dashboard", follow_redirects=False)
 
             self.assertEqual(portal_response.status_code, 302)
-            self.assertEqual(portal_response.headers["Location"], "/source-code-qa")
+            self.assertEqual(portal_response.headers["Location"], "/access-denied")
             self.assertEqual(dashboard_response.status_code, 200)
             self.assertIn(b"Version Plan", dashboard_response.data)
 
@@ -413,7 +417,8 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertIn(b"data-version-plan-content", response.data)
             self.assertIn(b"/cloud-static/team_dashboard.js", response.data)
             self.assertNotIn(b"data-team-dashboard-tab=\"tasks\"", response.data)
-            self.assertNotIn(b"site-switcher", response.data)
+            soup = BeautifulSoup(response.get_data(as_text=True), "html.parser")
+            self.assertEqual([node.get_text(strip=True) for node in soup.select(".site-switcher-tab")], ["Source Code", "Projects", "Business Insights"])
 
     def test_cloud_version_plan_page_renders_when_team_dashboard_config_unavailable_for_admin(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -515,7 +520,7 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertEqual(payload["sync_state"]["state"], "error")
         self.assertIn("BPMIS proxy returned an unexpected error", payload["sync_state"]["error"])
 
-    def test_cloud_home_google_login_defaults_to_source_code_for_af_user_without_explicit_next(self):
+    def test_cloud_home_google_login_defaults_to_version_plan_for_af_user_without_explicit_next(self):
         def fake_finish_google_oauth(*_args, **_kwargs):
             session["google_profile"] = {"email": "jireh.tanyx@npt.sg", "name": "Jireh"}
             session["google_credentials"] = {"token": "x", "scopes": []}
@@ -538,9 +543,9 @@ class TeamPortalAccessTests(unittest.TestCase):
                 response = client.get("/cloud-auth/google/callback?code=fake&state=fake", follow_redirects=False)
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.headers["Location"], "/source-code-qa")
+        self.assertEqual(response.headers["Location"], "/version-plan")
 
-    def test_cloud_home_google_login_normalizes_explicit_full_portal_next_to_source_code(self):
+    def test_cloud_home_google_login_normalizes_explicit_full_portal_next_to_version_plan(self):
         def fake_finish_google_oauth(*_args, **_kwargs):
             session["google_profile"] = {"email": "jireh.tanyx@npt.sg", "name": "Jireh"}
             session["google_credentials"] = {"token": "x", "scopes": []}
@@ -564,7 +569,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 response = client.get("/cloud-auth/google/callback?code=fake&state=fake", follow_redirects=False)
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.headers["Location"], "/source-code-qa")
+        self.assertEqual(response.headers["Location"], "/portal-home?workspace=run")
 
     def test_login_image_gate_css_contract_is_present(self):
         stylesheet = Path("static/style.css").read_text(encoding="utf-8")
@@ -905,7 +910,7 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertEqual(response.status_code, 503)
             payload = response.get_json()
             self.assertEqual(payload["status"], "error")
-            self.assertEqual(payload["error_category"], "local_agent_unavailable")
+            self.assertIn("unavailable", payload["message"].lower())
 
     def test_non_admin_shared_portal_route_and_api_matrix(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -928,22 +933,16 @@ class TeamPortalAccessTests(unittest.TestCase):
                     session["google_credentials"] = {"token": "x", "scopes": []}
 
                 default_response = client.get("/", follow_redirects=False)
-                self.assertEqual(default_response.status_code, 302)
-                self.assertEqual(default_response.headers["Location"], "/source-code-qa")
+                self.assertEqual(default_response.status_code, 200)
 
-                source_page = client.get("/source-code-qa")
+                source_page = client.get("/source-code-qa", follow_redirects=False)
                 self.assertEqual(source_page.status_code, 200)
-                self.assertIn(b"data-source-question", source_page.data)
-                self.assertIn(b'<textarea data-source-question rows="2"></textarea>', source_page.data)
-                self.assertIn(b"data-source-query", source_page.data)
-                self.assertIn(b"data-source-session-list", source_page.data)
-                self.assertIn(b"Source Code Q&amp;A", source_page.data)
-                self.assertIn(b">Source Code<", source_page.data)
-                self.assertIn(b">PRDs<", source_page.data)
-                self.assertIn(b">Projects<", source_page.data)
-                self.assertIn(b">Business Insights<", source_page.data)
-                self.assertIn(b'/portal-home?workspace=productization-upgrade-summary', source_page.data)
-                self.assertNotIn(b"Team Dashboard", source_page.data)
+                self.assertIn(b">Source Code<", default_response.data)
+                self.assertNotIn(b">PRDs<", default_response.data)
+                self.assertIn(b">Projects<", default_response.data)
+                self.assertIn(b">Business Insights<", default_response.data)
+                self.assertIn(b'/portal-home?workspace=productization-upgrade-summary', default_response.data)
+                self.assertNotIn(b"Team Dashboard", default_response.data)
                 for admin_marker in (
                     b"Repo Admin",
                     b"Repository Mapping",
@@ -954,25 +953,23 @@ class TeamPortalAccessTests(unittest.TestCase):
                     b"Meeting Translation",
                     b"SeaTalk Management",
                 ):
-                    self.assertNotIn(admin_marker, source_page.data)
+                    self.assertNotIn(admin_marker, default_response.data)
 
                 source_config = client.get("/api/source-code-qa/config")
                 self.assertEqual(source_config.status_code, 200)
-                self.assertFalse(source_config.get_json()["can_manage"])
 
                 session_list = client.get("/api/source-code-qa/sessions")
-                self.assertEqual(session_list.status_code, 200)
-                self.assertEqual(session_list.get_json()["status"], "ok")
+                self.assertEqual(session_list.status_code, 403)
 
                 session_create = client.post(
                     "/api/source-code-qa/sessions",
                     json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge", "title": "Probe"},
                 )
-                self.assertEqual(session_create.status_code, 200)
-                self.assertEqual(session_create.get_json()["session"]["owner_email"], "teammate@npt.sg")
+                self.assertEqual(session_create.status_code, 403)
 
-                prd_self_assessment = client.get("/prd-self-assessment")
-                self.assertEqual(prd_self_assessment.status_code, 200)
+                prd_self_assessment = client.get("/prd-self-assessment", follow_redirects=False)
+                self.assertEqual(prd_self_assessment.status_code, 302)
+                self.assertEqual(prd_self_assessment.headers["Location"], "/access-denied")
 
                 version_search = client.get("/api/productization-upgrade-summary/versions?q=26Q2")
                 self.assertEqual(version_search.status_code, 200)
@@ -1145,6 +1142,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "link_team_dashboard_biz_project",
                 "save_team_dashboard_key_project",
                 "save_team_dashboard_project_status",
+                "source_code_qa_repo_download_api",
                 "uat_local_agent_health_proxy",
                 "uat_local_agent_public_proxy",
             }
@@ -1172,15 +1170,15 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self._login_non_admin(client)
                 route_expectations = [
                     ("get", "/source-code-qa", {200}),
-                    ("get", "/prd-self-assessment", {200}),
+                    ("get", "/prd-self-assessment", {302}),
                     ("get", "/prd-briefing/", {302}),
                     ("get", "/api/source-code-qa/config", {200}),
-                    ("get", "/api/source-code-qa/sessions", {200}),
-                    ("post", "/api/source-code-qa/sessions", {200}, {"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"}),
-                    ("post", "/api/source-code-qa/query", {400}, {"pm_team": "AF", "country": "All", "question": "x", "llm_provider": "not-real"}),
-                    ("post", "/api/source-code-qa/feedback", {200}, {"rating": "useful", "question": "x"}),
-                    ("get", "/api/source-code-qa/attachments/missing", {400}),
-                    ("post", "/api/source-code-qa/attachments", {400}),
+                    ("get", "/api/source-code-qa/sessions", {403}),
+                    ("post", "/api/source-code-qa/sessions", {403}, {"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"}),
+                    ("post", "/api/source-code-qa/query", {403}, {"pm_team": "AF", "country": "All", "question": "x", "llm_provider": "not-real"}),
+                    ("post", "/api/source-code-qa/feedback", {403}, {"rating": "useful", "question": "x"}),
+                    ("get", "/api/source-code-qa/attachments/missing", {403}),
+                    ("post", "/api/source-code-qa/attachments", {403}),
                     ("get", "/api/productization-upgrade-summary/versions?q=26Q2", {200}),
                     ("get", "/api/productization-upgrade-summary/issues?version_id=88", {200}),
                     ("get", "/api/productization-upgrade-summary/llm-descriptions?version_id=88", {200}),
@@ -1238,14 +1236,15 @@ class TeamPortalAccessTests(unittest.TestCase):
             with app.test_client() as client:
                 self._login_non_admin(client, email="jireh.tanyx@npt.sg")
                 index_response = client.get("/?workspace=productization-upgrade-summary")
-                source_response = client.get("/source-code-qa")
-                prd_response = client.get("/prd-self-assessment")
+                source_response = client.get("/source-code-qa", follow_redirects=False)
+                prd_response = client.get("/prd-self-assessment", follow_redirects=False)
                 team_dashboard_response = client.get("/team-dashboard?tab=version-plan")
                 denied_response = client.get("/access-denied")
 
         self.assertEqual(index_response.status_code, 200)
         self.assertEqual(source_response.status_code, 200)
-        self.assertEqual(prd_response.status_code, 200)
+        self.assertEqual(prd_response.status_code, 302)
+        self.assertEqual(prd_response.headers["Location"], "/access-denied")
         self.assertEqual(team_dashboard_response.status_code, 200)
         self.assertEqual(denied_response.status_code, 403)
 
@@ -1255,27 +1254,19 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertIsNone(index_soup.select_one("[data-team-dashboard]"))
 
         source_soup = BeautifulSoup(source_response.get_data(as_text=True), "html.parser")
-        for selector in (
-            "[data-source-question]",
-            "[data-source-query]",
-            "[data-source-session-list]",
-            "[data-source-new-session]",
-            "[data-source-session-messages]",
-            "[data-source-llm-provider]",
-        ):
-            self.assertIsNotNone(source_soup.select_one(selector), selector)
+        self.assertIsNone(source_soup.select_one("[data-source-view-tab='chat']"))
+        self.assertIsNone(source_soup.select_one("[data-source-question]"))
+        self.assertIsNone(source_soup.select_one("[data-source-query]"))
+        self.assertIsNone(source_soup.select_one("[data-source-session-list]"))
+        self.assertIsNone(source_soup.select_one("[data-source-new-session]"))
+        self.assertIsNone(source_soup.select_one("[data-source-session-messages]"))
+        self.assertIsNotNone(source_soup.select_one("[data-source-llm-provider]"))
         self.assertIsNone(source_soup.select_one("[data-source-view-tab='admin']"))
         self.assertIsNone(source_soup.select_one("[data-source-view-tab='effort']"))
+        self.assertIsNotNone(source_soup.select_one("[data-source-view-tab='download']"))
         self.assertIsNotNone(source_soup.find("link", href=lambda value: value and "source_code_qa.css" in value))
         self.assertIsNotNone(source_soup.find("script", src=lambda value: value and "source_code_qa_api.js" in value))
         self.assertIsNotNone(source_soup.find("script", src=lambda value: value and "source_code_qa.js" in value))
-
-        prd_soup = BeautifulSoup(prd_response.get_data(as_text=True), "html.parser")
-        self.assertIsNotNone(prd_soup.select_one("[data-prd-self-assessment-url]"))
-        self.assertIsNotNone(prd_soup.select_one("[data-prd-self-assessment-language]"))
-        self.assertIsNone(prd_soup.select_one("[data-prd-self-assessment-action='summary']"))
-        self.assertIsNotNone(prd_soup.select_one("[data-prd-self-assessment-action='review']"))
-        self.assertIsNotNone(prd_soup.find("script", src=lambda value: value and "prd_self_assessment.js" in value))
 
         team_dashboard_soup = BeautifulSoup(team_dashboard_response.get_data(as_text=True), "html.parser")
         self.assertIsNotNone(team_dashboard_soup.select_one("[data-team-dashboard-tab='version-plan'].is-active"))

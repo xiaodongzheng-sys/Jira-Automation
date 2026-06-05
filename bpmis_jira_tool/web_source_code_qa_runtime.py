@@ -58,6 +58,10 @@ def _can_manage_source_code_qa(settings: Settings) -> bool:
     return _is_portal_admin()
 
 
+def _can_use_source_code_qa_chat(settings: Settings) -> bool:
+    return _is_portal_admin()
+
+
 def _source_code_qa_auth_payload(settings: Settings) -> dict[str, Any]:
     email = _current_google_email()
     owner_email = settings.source_code_qa_owner_email.strip().lower()
@@ -442,7 +446,7 @@ def _require_source_code_qa_access(settings: Settings, *, api: bool = False):
     login_gate = _require_google_login(settings, api=api)
     if login_gate is not None:
         return login_gate
-    message = "Source Code Q&A is available to signed-in @npt.sg users and the configured test account."
+    message = "Source Code Q&A is restricted to signed-in NPT users."
     if not _can_access_source_code_qa(settings):
         if api:
             return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
@@ -461,6 +465,23 @@ def _require_source_code_qa_manage_access(settings: Settings, *, api: bool = Fal
         f"Signed in as {auth_payload['signed_in_email'] or 'unknown'}."
     )
     if not _can_manage_source_code_qa(settings):
+        if api:
+            return jsonify({"status": "error", "message": message, "auth": auth_payload}), HTTPStatus.FORBIDDEN
+        flash(message, "error")
+        return redirect(url_for("source_code_qa"))
+    return None
+
+
+def _require_source_code_qa_chat_access(settings: Settings, *, api: bool = False):
+    access_gate = _require_source_code_qa_access(settings, api=api)
+    if access_gate is not None:
+        return access_gate
+    auth_payload = _source_code_qa_auth_payload(settings)
+    message = (
+        f"Source Code Q&A chat is restricted to {PORTAL_ADMIN_EMAIL}. "
+        f"Signed in as {auth_payload['signed_in_email'] or 'unknown'}."
+    )
+    if not _can_use_source_code_qa_chat(settings):
         if api:
             return jsonify({"status": "error", "message": message, "auth": auth_payload}), HTTPStatus.FORBIDDEN
         flash(message, "error")

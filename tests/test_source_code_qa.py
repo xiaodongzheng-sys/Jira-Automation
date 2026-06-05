@@ -1,6 +1,7 @@
 import json
 import io
 import os
+import subprocess
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -76,38 +77,60 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     @staticmethod
-    def _login(client, email="teammate@npt.sg"):
+    def _login(client, email="xiaodong.zheng@npt.sg"):
         with client.session_transaction() as session:
             session["google_profile"] = {"email": email, "name": "Portal User"}
             session["google_credentials"] = {"token": "x", "scopes": []}
 
-    def test_npt_user_defaults_to_source_code_qa_without_project_tab_when_no_project_access(self):
-        with self.app.test_client() as client:
-            self._login(client)
-            default_response = client.get("/", follow_redirects=False)
-            response = client.get("/source-code-qa")
+    def _seed_repo_download_scope(self, *, pm_team="AF", country="All", display_name="Portal Repo", url="https://git.example.com/team/portal.git"):
+        service = self.app.config["SOURCE_CODE_QA_SERVICE"]
+        service.save_mapping(pm_team=pm_team, country=country, repositories=[{"display_name": display_name, "url": url}])
+        key = service.mapping_key(pm_team, country)
+        entry = service._load_entries_for_key(key)[0]
+        repo_path = service._repo_path(key, entry)
+        repo_path.mkdir(parents=True, exist_ok=True)
+        (repo_path / "README.md").write_text("# portal repo\n", encoding="utf-8")
+        (repo_path / ".gitignore").write_text(".pytest_cache/\n", encoding="utf-8")
+        subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "add", "."], cwd=repo_path, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return repo_path
 
-        self.assertEqual(default_response.status_code, 302)
-        self.assertEqual(default_response.headers["Location"], "/source-code-qa")
+    def test_npt_user_can_access_source_code_qa_direct_url(self):
+        with self.app.test_client() as client:
+            self._login(client, "teammate@npt.sg")
+            default_response = client.get("/", follow_redirects=False)
+            page_response = client.get("/source-code-qa", follow_redirects=False)
+            api_response = client.get("/api/source-code-qa/config")
+            sessions_response = client.get("/api/source-code-qa/sessions")
+
+        self.assertEqual(default_response.status_code, 200)
+        self.assertEqual(page_response.status_code, 200)
+        self.assertEqual(api_response.status_code, 200)
+        self.assertEqual(sessions_response.status_code, 403)
+        self.assertEqual(api_response.get_json()["status"], "ok")
+        self.assertIn('href="/source-code-qa">Source Code</a>', default_response.get_data(as_text=True))
+
+    def test_admin_user_can_access_source_code_qa_directly(self):
+        with self.app.test_client() as client:
+            self._login(client, "xiaodong.zheng@npt.sg")
+            response = client.get("/source-code-qa", follow_redirects=True)
+
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
         self.assertIn("Source Code Q&amp;A", html)
         self.assertIn('href="/source-code-qa">Source Code</a>', html)
         self.assertIn(">Projects<", html)
-        self.assertIn('href="/portal-home?workspace=productization-upgrade-summary"', html)
-        self.assertNotIn('href="/team-dashboard">Team Dashboard</a>', html)
         self.assertIn('data-source-question rows="2"', html)
         self.assertLess(html.index("data-source-attachments"), html.index("data-source-question"))
         self.assertLess(html.index("data-source-question"), html.index("data-source-attachment-upload"))
         self.assertLess(html.index("data-source-attachment-upload"), html.index("data-source-query"))
-
-    def test_whitelisted_gmail_user_also_sees_source_code_tab(self):
-        with self.app.test_client() as client:
-            self._login(client, "xiaodong.zheng1991@gmail.com")
-            response = client.get("/", follow_redirects=True)
-
-        self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Source Code Q&amp;A", response.data)
 
     def test_non_npt_user_is_blocked_from_page_and_api(self):
         with self.app.test_client() as client:
@@ -125,13 +148,17 @@ class SourceCodeQARouteTests(unittest.TestCase):
             self._login(client, "xiaodong.zheng@npt.sg")
             owner_response = client.get("/source-code-qa")
             self._login(client, "teammate@npt.sg")
-            teammate_response = client.get("/source-code-qa")
+            teammate_response = client.get("/source-code-qa", follow_redirects=False)
 
         self.assertIn(b"Repository Mapping", owner_response.data)
         self.assertIn(b"Repo Admin", owner_response.data)
         self.assertIn(b"Effort Assessment", owner_response.data)
+        self.assertIn(b"Repo Download", owner_response.data)
+        self.assertIn(b">Source Code<", owner_response.data)
+        self.assertIn(b">PRDs<", owner_response.data)
         self.assertLess(owner_response.data.index(b"Chat"), owner_response.data.index(b"Effort Assessment"))
         self.assertLess(owner_response.data.index(b"Effort Assessment"), owner_response.data.index(b"Repo Admin"))
+        self.assertLess(owner_response.data.index(b"Chat"), owner_response.data.index(b"Repo Download"))
         self.assertIn(b'data-tab-trigger="admin"', owner_response.data)
         self.assertIn(b'data-tab-trigger="effort"', owner_response.data)
         self.assertIn(b'data-source-view-tab="admin"', owner_response.data)
@@ -144,25 +171,31 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn(b"data-source-effort-run", owner_response.data)
         self.assertIn(b"Save Config", owner_response.data)
         self.assertIn(b"Sync / Refresh", owner_response.data)
+        self.assertEqual(teammate_response.status_code, 200)
+        self.assertIn(b"Repo Download", teammate_response.data)
+        self.assertNotIn(b"Chat", teammate_response.data)
         self.assertNotIn(b"Repository Mapping", teammate_response.data)
         self.assertNotIn(b"Repo Admin", teammate_response.data)
         self.assertNotIn(b"Effort Assessment", teammate_response.data)
-        self.assertNotIn(b'data-tab-trigger="admin"', teammate_response.data)
-        self.assertNotIn(b'data-tab-trigger="effort"', teammate_response.data)
-        self.assertNotIn(b'data-source-view-tab="admin"', teammate_response.data)
-        self.assertNotIn(b'data-source-view-tab="effort"', teammate_response.data)
         self.assertNotIn(b"Save Config", teammate_response.data)
         self.assertNotIn(b"Sync / Refresh", teammate_response.data)
-        self.assertIn(b"data-source-question", teammate_response.data)
-        self.assertIn(b"data-source-live-answer", teammate_response.data)
-        self.assertNotIn(b"LLM Budget", teammate_response.data)
-        self.assertIn(b"data-source-llm-provider", teammate_response.data)
-        self.assertIn(b"data-source-session-list", teammate_response.data)
-        self.assertIn(b"data-source-new-session", teammate_response.data)
-        self.assertIn(b"data-source-session-messages", teammate_response.data)
-        self.assertIn(b"Codex", teammate_response.data)
+        self.assertNotIn(b'data-source-view-tab="chat"', teammate_response.data)
+        self.assertIn(b'data-source-view-tab="download"', teammate_response.data)
         self.assertNotIn(b"Model Availability", owner_response.data)
-        self.assertNotIn(b"Model Availability", teammate_response.data)
+
+    def test_repo_download_endpoint_is_available_to_non_admin(self):
+        self._seed_repo_download_scope()
+        with self.app.test_client() as client:
+            self._login(client, "teammate@npt.sg")
+            download = client.get("/api/source-code-qa/repo-downloads/AF:All")
+
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(download.headers["Content-Type"], "application/zip")
+        with zipfile.ZipFile(io.BytesIO(download.data)) as archive:
+            names = archive.namelist()
+            self.assertIn("manifest.json", names)
+            self.assertIn("Portal-Repo/README.md", names)
+            self.assertNotIn("Portal-Repo/.git/config", names)
 
     def test_sync_refresh_uses_sync_job_status_endpoint(self):
         with self.app.test_client() as client:

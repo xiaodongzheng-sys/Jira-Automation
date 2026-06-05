@@ -37,9 +37,43 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
             team_profiles=TEAM_PROFILE_DEFAULTS,
             country_options=list(CRMS_COUNTRIES),
             all_country=ALL_COUNTRY,
+            repo_download_scopes=repo_download_scope_definitions(),
+            can_use_source_code_qa_chat=_can_use_source_code_qa_chat(settings),
             can_manage_source_code_qa=_can_manage_source_code_qa(settings),
             asset_revision=_current_release_revision(),
         )
+
+    @app.get("/api/source-code-qa/repo-downloads/<scope_key>")
+    def source_code_qa_repo_download_api(scope_key: str):
+        access_gate = _require_source_code_qa_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            scope = resolve_repo_download_scope(scope_key)
+            if _local_agent_source_code_qa_enabled(settings):
+                response = _build_local_agent_client(settings).source_code_qa_repo_download(scope["scope_key"])
+                content_type = response.headers.get("Content-Type") or "application/zip"
+                download_name = scope["filename"]
+                disposition = response.headers.get("Content-Disposition") or ""
+                match = re.search(r'filename="?([^";]+)"?', disposition)
+                if match:
+                    download_name = match.group(1)
+                return send_file(
+                    io.BytesIO(response.content),
+                    mimetype=content_type,
+                    download_name=download_name,
+                    as_attachment=True,
+                )
+            metadata, content = build_repo_download_zip(_build_source_code_qa_service(), scope["scope_key"])
+            return send_file(
+                io.BytesIO(content),
+                mimetype="application/zip",
+                download_name=str(metadata.get("filename") or scope["filename"]),
+                as_attachment=True,
+            )
+        except ToolError as error:
+            status_code = HTTPStatus.SERVICE_UNAVAILABLE if _is_local_agent_unavailable_error(error) else HTTPStatus.BAD_REQUEST
+            return jsonify({"status": "error", "message": str(error), "error_category": _tool_error_category(error)}), status_code
 
     @app.get("/api/source-code-qa/config")
     def source_code_qa_config_api():
@@ -151,7 +185,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
 
     @app.route("/api/source-code-qa/sessions", methods=["GET", "POST"])
     def source_code_qa_sessions_api():
-        access_gate = _require_source_code_qa_access(settings, api=True)
+        access_gate = _require_source_code_qa_chat_access(settings, api=True)
         if access_gate is not None:
             return access_gate
         store = _get_source_code_qa_session_store()
@@ -176,7 +210,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
 
     @app.get("/api/source-code-qa/sessions/<session_id>")
     def source_code_qa_session_api(session_id: str):
-        access_gate = _require_source_code_qa_access(settings, api=True)
+        access_gate = _require_source_code_qa_chat_access(settings, api=True)
         if access_gate is not None:
             return access_gate
         store = _get_source_code_qa_session_store()
@@ -187,7 +221,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
 
     @app.post("/api/source-code-qa/sessions/<session_id>/archive")
     def source_code_qa_session_archive_api(session_id: str):
-        access_gate = _require_source_code_qa_access(settings, api=True)
+        access_gate = _require_source_code_qa_chat_access(settings, api=True)
         if access_gate is not None:
             return access_gate
         store = _get_source_code_qa_session_store()
@@ -198,7 +232,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
 
     @app.post("/api/source-code-qa/attachments")
     def source_code_qa_attachments_api():
-        access_gate = _require_source_code_qa_access(settings, api=True)
+        access_gate = _require_source_code_qa_chat_access(settings, api=True)
         if access_gate is not None:
             return access_gate
         owner_email = _current_google_email() or "local"
@@ -225,7 +259,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
 
     @app.get("/api/source-code-qa/attachments/<attachment_id>")
     def source_code_qa_attachment_api(attachment_id: str):
-        access_gate = _require_source_code_qa_access(settings, api=True)
+        access_gate = _require_source_code_qa_chat_access(settings, api=True)
         if access_gate is not None:
             return access_gate
         owner_email = _current_google_email() or "local"
@@ -251,7 +285,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
 
     @app.get("/api/source-code-qa/generated-artifacts/<artifact_id>")
     def source_code_qa_generated_artifact_api(artifact_id: str):
-        access_gate = _require_source_code_qa_access(settings, api=True)
+        access_gate = _require_source_code_qa_chat_access(settings, api=True)
         if access_gate is not None:
             return access_gate
         owner_email = _current_google_email() or "local"
@@ -333,7 +367,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
 
     @app.post("/api/source-code-qa/query")
     def source_code_qa_query_api():
-        access_gate = _require_source_code_qa_access(settings, api=True)
+        access_gate = _require_source_code_qa_chat_access(settings, api=True)
         if access_gate is not None:
             return access_gate
         payload = request.get_json(silent=True) or {}
@@ -500,7 +534,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
 
     @app.post("/api/source-code-qa/feedback")
     def source_code_qa_feedback_api():
-        access_gate = _require_source_code_qa_access(settings, api=True)
+        access_gate = _require_source_code_qa_chat_access(settings, api=True)
         if access_gate is not None:
             return access_gate
         payload = request.get_json(silent=True) or {}
@@ -514,7 +548,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
     @app.get("/api/source-code-qa/query-jobs/<job_id>")
     def source_code_qa_query_job_api(job_id: str):
-        access_gate = _require_source_code_qa_access(settings, api=True)
+        access_gate = _require_source_code_qa_chat_access(settings, api=True)
         if access_gate is not None:
             return access_gate
         snapshot = _source_code_qa_job_snapshot_for_current_user(job_id)
@@ -532,7 +566,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
 
     @app.get("/api/source-code-qa/query-jobs/<job_id>/events")
     def source_code_qa_query_job_events_api(job_id: str):
-        access_gate = _require_source_code_qa_access(settings, api=True)
+        access_gate = _require_source_code_qa_chat_access(settings, api=True)
         if access_gate is not None:
             return access_gate
         if _source_code_qa_job_snapshot_for_current_user(job_id) is None:

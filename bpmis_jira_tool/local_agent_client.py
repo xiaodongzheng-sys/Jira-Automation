@@ -127,6 +127,16 @@ class LocalAgentClient:
             {"pm_team": pm_team, "country": country, "background": background},
         )
 
+    def source_code_qa_repo_download(self, scope_key: str) -> requests.Response:
+        safe_scope_key = quote(str(scope_key or "").strip(), safe="")
+        return self._request_raw(
+            "GET",
+            f"/api/local-agent/source-code-qa/repo-downloads/{safe_scope_key}",
+            signed=True,
+            expect_json=False,
+            stream=True,
+        )
+
     def source_code_qa_query(self, payload: dict[str, Any], *, progress_callback: Callable[[str, str, int, int], None] | None = None) -> dict[str, Any]:
         if progress_callback is None:
             return self._request("POST", "/api/local-agent/source-code-qa/query", payload)

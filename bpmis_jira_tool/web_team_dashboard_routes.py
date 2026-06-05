@@ -450,7 +450,6 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             seatalk_configured=False,
             version_plan_only=True,
             cloud_auth_mode=True,
-            suppress_site_navigation=not _full_portal_navigation_available(settings),
         )
 
 

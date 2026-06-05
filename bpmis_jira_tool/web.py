@@ -122,6 +122,11 @@ from bpmis_jira_tool.source_code_qa import CRMS_COUNTRIES, ALL_COUNTRY, IDENTIFI
 from bpmis_jira_tool.source_code_qa_factory import build_source_code_qa_service_from_settings
 from bpmis_jira_tool.source_code_qa_jobs import SourceCodeQAQueryScheduler
 from bpmis_jira_tool.source_code_qa_llm_providers import LLM_PROVIDER_ALLOWED_QUERY_CHOICES, LLM_PROVIDER_CODEX_CLI_BRIDGE
+from bpmis_jira_tool.source_code_qa_repo_downloads import (
+    build_repo_download_zip,
+    repo_download_scope_definitions,
+    resolve_repo_download_scope,
+)
 from bpmis_jira_tool.source_code_qa_sql_artifacts import (
     build_source_code_qa_sql_readme as _build_source_code_qa_sql_readme,
     extract_source_code_qa_sql_blocks as _extract_source_code_qa_sql_blocks,
@@ -136,6 +141,7 @@ from bpmis_jira_tool.web_source_code_qa_runtime import (
     _get_source_code_qa_runtime_evidence_store,
     _can_access_source_code_qa,
     _can_manage_source_code_qa,
+    _can_use_source_code_qa_chat,
     _source_code_qa_auth_payload,
     _source_code_qa_git_auth_ready,
     _build_source_code_qa_service,
@@ -158,6 +164,7 @@ from bpmis_jira_tool.web_source_code_qa_runtime import (
     _build_source_code_qa_session_context,
     _source_code_qa_release_gate_payload,
     _require_source_code_qa_access,
+    _require_source_code_qa_chat_access,
     _require_source_code_qa_manage_access,
     _classify_source_code_qa_job_error,
     _public_source_code_qa_job_snapshot,
@@ -738,6 +745,7 @@ def create_app() -> Flask:
         can_access_reports = _can_access_team_dashboard_monthly_report(user_identity)
         can_access_business_insights = _can_access_business_insights(settings)
         site_tabs = []
+        show_admin_tool_entries = _is_portal_admin()
         if _can_access_source_code_qa(settings):
             site_tabs.append(
                 {
@@ -747,7 +755,7 @@ def create_app() -> Flask:
                 }
             )
         meeting_tabs = []
-        if _can_access_meeting_recorder(settings):
+        if show_admin_tool_entries and _can_access_meeting_recorder(settings):
             meeting_tabs.append(
                 {
                     "label": "Meeting Recorder",
@@ -764,7 +772,7 @@ def create_app() -> Flask:
             )
             site_tabs.append(_nav_group("Meeting", url_for("meeting_recorder_page"), meeting_tabs))
         prd_tabs = []
-        if _can_access_prd_self_assessment(settings):
+        if show_admin_tool_entries and _can_access_prd_self_assessment(settings):
             prd_tabs.append(
                 {
                     "label": "PRD Self-Assessment",
@@ -772,7 +780,7 @@ def create_app() -> Flask:
                     "active": current_endpoint == "prd_self_assessment_page",
                 }
             )
-        if _can_access_prd_briefing(settings):
+        if show_admin_tool_entries and _can_access_prd_briefing(settings):
             prd_tabs.append(
                 {
                     "label": "PRD Briefing Tool",
@@ -837,7 +845,7 @@ def create_app() -> Flask:
                 },
             ]
             site_tabs.append(_nav_group("Business Insights", url_for("business_insights_page", domain="credit-risk"), business_insights_tabs))
-        if _can_access_vpn_connection(settings):
+        if show_admin_tool_entries and _can_access_vpn_connection(settings):
             site_tabs.append(
                 _nav_group(
                     "Others",
@@ -969,11 +977,10 @@ def create_app() -> Flask:
                 full_portal_available=full_portal_available,
                 full_portal_login_url=None if _google_session_is_connected() else url_for("google_login", next=full_portal_path),
                 cloud_auth_mode=True,
-                suppress_site_navigation=not full_portal_available,
             )
 
         if _site_requires_google_login(settings) and not _google_session_is_connected():
-            return render_template("login_gate.html", page_title="Sign In")
+            return render_template("login_gate.html", page_title="Sign In", user_identity=_get_user_identity(settings))
 
         if str(request.args.get("workspace") or "").strip() == "team-dashboard":
             return redirect(url_for("team_dashboard_page"))
@@ -982,7 +989,7 @@ def create_app() -> Flask:
         if (
             not requested_workspace_tab
             and not has_bpmis_return_state
-            and _can_access_source_code_qa(settings)
+            and _is_portal_admin()
         ):
             return redirect(url_for("source_code_qa"))
 
@@ -1052,7 +1059,7 @@ def create_app() -> Flask:
             return redirect(url_for("access_denied"))
 
         if _site_requires_google_login(settings) and not _google_session_is_connected():
-            return render_template("login_gate.html", page_title="Sign In")
+            return render_template("login_gate.html", page_title="Sign In", user_identity=_get_user_identity(settings))
 
         requested_workspace_tab = str(request.args.get("workspace") or "").strip()
         source_target = _normalize_portal_landing_redirect(settings, requested_workspace_tab)
@@ -1134,7 +1141,7 @@ def create_app() -> Flask:
 
     @app.get("/access-denied")
     def access_denied():
-        return render_template("access_denied.html", page_title="Access Restricted"), HTTPStatus.FORBIDDEN
+        return render_template("access_denied.html", page_title="Access Restricted", user_identity=_get_user_identity(settings)), HTTPStatus.FORBIDDEN
 
     @app.get("/vpn-connection")
     def vpn_connection_page():
@@ -2031,7 +2038,7 @@ def _full_portal_navigation_available(settings: Settings) -> bool:
 
 
 def _portal_home_source_code_target(settings: Settings) -> str:
-    return url_for("source_code_qa") if _can_access_source_code_qa(settings) else ""
+    return url_for("source_code_qa") if _is_portal_admin() and _can_access_source_code_qa(settings) else ""
 
 
 def _normalize_portal_landing_redirect(settings: Settings, workspace_tab: str) -> str:
@@ -2078,7 +2085,7 @@ def _pop_post_google_login_redirect() -> str:
 
 
 def _cloud_home_default_post_login_redirect(settings: Settings, user_identity: dict[str, str | None]) -> str:
-    if _can_access_source_code_qa(settings):
+    if _is_portal_admin(user_identity.get("email")):
         return url_for("source_code_qa")
     if settings.cloud_home_enabled and _can_access_team_dashboard_version_plan(user_identity):
         return url_for("version_plan_page")
@@ -2090,7 +2097,7 @@ def _can_access_prd_briefing(settings: Settings) -> bool:
 
 
 def _can_access_prd_self_assessment(settings: Settings) -> bool:
-    return _is_portal_user()
+    return _is_portal_admin()
 
 
 def _can_access_seatalk_management(settings: Settings) -> bool:
@@ -2553,7 +2560,7 @@ def _require_prd_self_assessment_access(settings: Settings, *, api: bool = False
     login_gate = _require_google_login(settings, api=api)
     if login_gate is not None:
         return login_gate
-    message = "PRD Self-Assessment is available to signed-in npt.sg users and the configured test account."
+    message = f"PRD Self-Assessment is restricted to {PORTAL_ADMIN_EMAIL}."
     if not _can_access_prd_self_assessment(settings):
         if api:
             return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
