@@ -1104,7 +1104,8 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
             )["DBPSG"]["version_name"],
             "-",
         )
-        self.assertEqual(vplan._normalize_pm_values(["", "unknown", "tbc", "xiaodong.zheng@npt.sg", "jun wei"]), ["Jun Wei"])
+        self.assertEqual(vplan._normalize_pm_values(["", "unknown", "tbc", "xiaodong.zheng@npt.sg", "jun wei"]), ["Xiaodong"])
+        self.assertEqual(vplan._normalize_pm_values(["junwei.ong@npt.sg"]), ["Junwei"])
         self.assertTrue(vplan._is_af_reporter({"reporter": {"name": "Jireh.Tanyx@npt.sg"}}))
         self.assertTrue(vplan._is_af_reporter({"pm_email": "keryin.lim@npt.sg"}))
         self.assertEqual(vplan._extract_jira_id({"jiraUrl": "https://jira/browse/SGDB-88"}), "SGDB-88")

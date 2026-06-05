@@ -1147,7 +1147,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
             "status": "ok",
             "can_sync": True,
             "priority_order": ["SP", "P0", "P1", "P2", "P3"],
-            "pm_options": ["Wang Chang", "Zoey", "Jireh", "Ker Yin", "Rene", "Jun Wei"],
+            "pm_options": ["Wang Chang", "Zoey", "Jireh", "Ker Yin", "Rene", "Junwei", "Xiaodong"],
             "sync_state": {"state": "idle", "last_synced_date_sgt": "2026-05-17"},
             "bundles": [
                 {
@@ -1214,10 +1214,10 @@ class PortalE2ESmokeTest(unittest.TestCase):
                             "row_type": "synced",
                             "jira_id": "SPDBP-2",
                             "jira_link": "https://jira.example/SPDBP-2",
-                            "jira_summary": "Jun Wei archived row",
+                            "jira_summary": "Junwei archived row",
                             "market": "Regional",
                             "priority": "P2",
-                            "pm": ["Jun Wei"],
+                            "pm": ["Junwei"],
                             "productization_efforts": "Y",
                             "remarks": "",
                         },
@@ -1257,7 +1257,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
         pm_filter = page.locator('[data-version-plan-pm-filter]')
         self.assertEqual(
             pm_filter.locator("option").all_text_contents(),
-            ["All PMs", "-", "Wang Chang", "Zoey", "Jireh", "Ker Yin", "Rene", "Jun Wei"],
+            ["All PMs", "-", "Wang Chang", "Zoey", "Jireh", "Ker Yin", "Rene", "Junwei", "Xiaodong"],
         )
 
         pm_filter.select_option("Zoey")
@@ -1275,7 +1275,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
 
         pm_filter.select_option("All PMs")
         page.locator('[data-version-plan-row-id="manual-rene"]').get_by_text("Rene manual row").wait_for(timeout=5000)
-        page.locator('[data-version-plan-row-id="arch-junwei"]').get_by_text("Jun Wei archived row").wait_for(timeout=5000)
+        page.locator('[data-version-plan-row-id="arch-junwei"]').get_by_text("Junwei archived row").wait_for(timeout=5000)
         self.assertEqual(version_plan_request_count, 1)
 
     def test_team_dashboard_project_status_editing_smoke(self) -> None:

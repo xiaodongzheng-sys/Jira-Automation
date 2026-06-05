@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 
 VERSION_PLAN_PRIORITY_ORDER = ("SP", "P0", "P1", "P2", "P3")
-VERSION_PLAN_PM_OPTIONS = ("Wang Chang", "Zoey", "Jireh", "Ker Yin", "Rene", "Jun Wei")
+VERSION_PLAN_PM_OPTIONS = ("Wang Chang", "Zoey", "Jireh", "Ker Yin", "Rene", "Junwei", "Xiaodong")
 VERSION_PLAN_AF_PM_EMAILS = (
     "jireh.tanyx@npt.sg",
     "keryin.lim@npt.sg",
@@ -29,7 +29,11 @@ VERSION_PLAN_PM_ALIASES = {
     "keryin": "Ker Yin",
     "chongzj@npt.sg": "Rene",
     "rene": "Rene",
-    "jun wei": "Jun Wei",
+    "jun wei": "Junwei",
+    "junwei": "Junwei",
+    "junwei.ong@npt.sg": "Junwei",
+    "xiaodong.zheng@npt.sg": "Xiaodong",
+    "xiaodong": "Xiaodong",
 }
 VERSION_PLAN_TIMEZONE = ZoneInfo("Asia/Singapore")
 VERSION_PLAN_SYNC_OPERATION = "af_version_plan"
@@ -924,7 +928,7 @@ def _normalize_pm_values(value: Any) -> list[str]:
         if not text:
             continue
         text_key = text.casefold()
-        if text_key in {"tbc", "xiaodong.zheng@npt.sg"}:
+        if text_key in {"tbc"}:
             continue
         canonical = VERSION_PLAN_PM_ALIASES.get(text_key) or allowed.get(text_key, text)
         if canonical not in VERSION_PLAN_PM_OPTIONS:

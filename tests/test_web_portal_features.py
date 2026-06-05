@@ -1113,6 +1113,10 @@ class WebPortalFeatureTests(unittest.TestCase):
                     session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
                     session["google_credentials"] = {"token": "x"}
                 user_response = client.get("/?workspace=run")
+                user_source_direct_response = client.get("/source-code-qa", follow_redirects=False)
+                user_prd_direct_response = client.get("/prd-self-assessment", follow_redirects=False)
+                user_prd_api_response = client.get("/api/prd-self-assessment/latest")
+                user_prd_denied_page = client.get("/prd-self-assessment", follow_redirects=True)
 
             with app.test_client() as client:
                 with client.session_transaction() as session:
@@ -1133,13 +1137,29 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b">Team Dashboard<", user_response.data)
         self.assertNotIn(b'href="/team-dashboard"', user_response.data)
         self.assertNotIn(b">Reports<", user_response.data)
+        self.assertNotIn(b">Meeting<", user_response.data)
+        self.assertNotIn(b">Others<", user_response.data)
+        self.assertEqual(user_source_direct_response.status_code, 302)
+        self.assertEqual(user_source_direct_response.headers["Location"], "/")
+        self.assertEqual(user_prd_direct_response.status_code, 302)
+        self.assertEqual(user_prd_direct_response.headers["Location"], "/access-denied")
+        self.assertEqual(user_prd_api_response.status_code, 403)
+        self.assertIn(b">Projects<", user_prd_denied_page.data)
+        self.assertIn(b">Business Insights<", user_prd_denied_page.data)
+        self.assertNotIn(b">Source Code<", user_prd_denied_page.data)
         self.assertEqual(sophia_response.status_code, 200)
         self.assertNotIn(b">Team Default Admin<", sophia_response.data)
         self.assertNotIn(b">Team Dashboard<", sophia_response.data)
         self.assertNotIn(b'href="/team-dashboard"', sophia_response.data)
         self.assertNotIn(b">Reports<", sophia_response.data)
-        self.assertIn(b">PRDs<", user_response.data)
-        self.assertIn(b">Source Code<", user_response.data)
+        self.assertNotIn(b">Meeting<", sophia_response.data)
+        self.assertNotIn(b">Others<", sophia_response.data)
+        self.assertNotIn(b">PRDs<", user_response.data)
+        self.assertNotIn(b">Source Code<", user_response.data)
+        self.assertIn(b">Meeting<", admin_response.data)
+        self.assertIn(b">Others<", admin_response.data)
+        self.assertIn(b">PRDs<", admin_response.data)
+        self.assertIn(b">Source Code<", admin_response.data)
 
     def test_team_dashboard_is_standalone_page_for_admin_user(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -3580,7 +3600,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("version_plan_sync_running", script)
         self.assertIn("${rowChangesPaused ? 'disabled' : ''}", script)
         self.assertGreaterEqual(script.count("planUrl.searchParams.set('sync', '0')"), 2)
-        self.assertIn("versionPlanPmFilterOptions = ['All PMs', '-', 'Wang Chang', 'Zoey', 'Jireh', 'Ker Yin', 'Rene', 'Jun Wei']", script)
+        self.assertIn("versionPlanPmFilterOptions = ['All PMs', '-', 'Wang Chang', 'Zoey', 'Jireh', 'Ker Yin', 'Rene', 'Junwei', 'Xiaodong']", script)
         self.assertIn("data-version-plan-pm-filter", script)
         self.assertIn("versionPlanPriorityOrder = ['SP', 'P0', 'P1', 'P2', 'P3']", script)
         self.assertIn("sortVersionPlanManualRowsForDisplay", script)
