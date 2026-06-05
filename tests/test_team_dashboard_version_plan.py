@@ -623,11 +623,11 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         )
 
         self.assertNotIn("TBC", payload["pm_options"])
+        self.assertEqual(payload["pipeline_rows"][0]["pm"], ["Wang Chang"])
 
     def test_extract_pm_falls_back_to_reporter_mapping(self) -> None:
         self.assertEqual(vplan._extract_pm({"reporter": {"email": "xiaodong.zheng@npt.sg"}}), ["Xiaodong"])
         self.assertEqual(vplan._extract_pm({"reporter": {"email": "junwei.ong@npt.sg"}}), ["Junwei"])
-        self.assertEqual(payload["pipeline_rows"][0]["pm"], ["Wang Chang"])
 
     def test_not_started_dev_version_is_manual_only_after_sync(self) -> None:
         config = {
