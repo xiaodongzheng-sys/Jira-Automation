@@ -994,7 +994,16 @@ def _canonical_jira_link(link: Any, jira_id: str) -> str:
 
 
 def _extract_pm(row: dict[str, Any]) -> list[str]:
-    value = row.get("pm_email") or row.get("jiraRegionalPmPicId") or row.get("regionalPmPic") or row.get("productManager") or row.get("pm")
+    value = (
+        row.get("pm_email")
+        or row.get("jiraRegionalPmPicId")
+        or row.get("regionalPmPic")
+        or row.get("productManager")
+        or row.get("pm")
+        or row.get("reporter")
+        or row.get("reporterEmail")
+        or row.get("reporter_email")
+    )
     people = _flatten_people(value)
     return _normalize_pm_values(people)
 
