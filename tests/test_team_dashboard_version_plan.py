@@ -409,7 +409,7 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         payload = version_plan_payload(synced, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
         bundle = payload["bundles"][0]
         row = next(row for row in bundle["synced_rows"] if row["jira_id"] == "SPDBP-97778")
-        self.assertEqual(row["pm"], ["Junwei"])
+        self.assertEqual(row["pm"], ["Jun Wei"])
 
     def test_seen_past_version_moves_to_archived_without_manual_rows(self) -> None:
         config = {
@@ -667,7 +667,7 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
 
     def test_extract_pm_falls_back_to_reporter_mapping(self) -> None:
         self.assertEqual(vplan._extract_pm({"reporter": {"email": "xiaodong.zheng@npt.sg"}}), ["Xiaodong"])
-        self.assertEqual(vplan._extract_pm({"reporter": {"email": "junwei.ong@npt.sg"}}), ["Junwei"])
+        self.assertEqual(vplan._extract_pm({"reporter": {"email": "junwei.ong@npt.sg"}}), ["Jun Wei"])
 
     def test_not_started_dev_version_is_manual_only_after_sync(self) -> None:
         config = {
@@ -1149,7 +1149,7 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
             "-",
         )
         self.assertEqual(vplan._normalize_pm_values(["", "unknown", "tbc", "xiaodong.zheng@npt.sg", "jun wei"]), ["Xiaodong"])
-        self.assertEqual(vplan._normalize_pm_values(["junwei.ong@npt.sg"]), ["Junwei"])
+        self.assertEqual(vplan._normalize_pm_values(["junwei.ong@npt.sg"]), ["Jun Wei"])
         self.assertTrue(vplan._is_af_reporter({"reporter": {"name": "Jireh.Tanyx@npt.sg"}}))
         self.assertTrue(vplan._is_af_reporter({"pm_email": "keryin.lim@npt.sg"}))
         self.assertEqual(vplan._extract_jira_id({"jiraUrl": "https://jira/browse/SGDB-88"}), "SGDB-88")

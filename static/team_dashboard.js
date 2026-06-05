@@ -490,7 +490,7 @@
       .filter(Boolean);
     const options = Array.isArray(versionPlanState?.pm_options) && versionPlanState.pm_options.length
       ? versionPlanState.pm_options
-      : ['Wang Chang', 'Zoey', 'Jireh', 'Ker Yin', 'Rene', 'Junwei', 'Xiaodong'];
+      : ['Wang Chang', 'Zoey', 'Jireh', 'Ker Yin', 'Rene', 'Jun Wei', 'Xiaodong'];
     const visibleOptions = options
       .map((pm) => String(pm || '').trim())
       .filter((pm) => pm && pm !== 'TBC');
@@ -533,7 +533,7 @@
     [...(Array.isArray(rows) ? rows : [])].sort(versionPlanManualRowCompare)
   );
 
-  const versionPlanPmFilterOptions = ['All PMs', '-', 'Wang Chang', 'Zoey', 'Jireh', 'Ker Yin', 'Rene', 'Junwei', 'Xiaodong'];
+  const versionPlanPmFilterOptions = ['All PMs', '-', 'Wang Chang', 'Zoey', 'Jireh', 'Ker Yin', 'Rene', 'Jun Wei', 'Xiaodong'];
 
   const ensureVersionPlanPmFilter = () => {
     if (!versionPlanHeadActions || versionPlanHeadActions.querySelector('[data-version-plan-pm-filter]')) return;

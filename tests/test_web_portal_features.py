@@ -3600,7 +3600,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("version_plan_sync_running", script)
         self.assertIn("${rowChangesPaused ? 'disabled' : ''}", script)
         self.assertGreaterEqual(script.count("planUrl.searchParams.set('sync', '0')"), 2)
-        self.assertIn("versionPlanPmFilterOptions = ['All PMs', '-', 'Wang Chang', 'Zoey', 'Jireh', 'Ker Yin', 'Rene', 'Junwei', 'Xiaodong']", script)
+        self.assertIn("versionPlanPmFilterOptions = ['All PMs', '-', 'Wang Chang', 'Zoey', 'Jireh', 'Ker Yin', 'Rene', 'Jun Wei', 'Xiaodong']", script)
         self.assertIn("data-version-plan-pm-filter", script)
         self.assertIn("versionPlanPriorityOrder = ['SP', 'P0', 'P1', 'P2', 'P3']", script)
         self.assertIn("sortVersionPlanManualRowsForDisplay", script)

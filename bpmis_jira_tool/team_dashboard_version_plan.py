@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 
 VERSION_PLAN_PRIORITY_ORDER = ("SP", "P0", "P1", "P2", "P3")
-VERSION_PLAN_PM_OPTIONS = ("Wang Chang", "Zoey", "Jireh", "Ker Yin", "Rene", "Junwei", "Xiaodong")
+VERSION_PLAN_PM_OPTIONS = ("Wang Chang", "Zoey", "Jireh", "Ker Yin", "Rene", "Jun Wei", "Xiaodong")
 VERSION_PLAN_AF_PM_EMAILS = (
     "jireh.tanyx@npt.sg",
     "keryin.lim@npt.sg",
@@ -29,9 +29,9 @@ VERSION_PLAN_PM_ALIASES = {
     "keryin": "Ker Yin",
     "chongzj@npt.sg": "Rene",
     "rene": "Rene",
-    "jun wei": "Junwei",
-    "junwei": "Junwei",
-    "junwei.ong@npt.sg": "Junwei",
+    "jun wei": "Jun Wei",
+    "junwei": "Jun Wei",
+    "junwei.ong@npt.sg": "Jun Wei",
     "xiaodong.zheng@npt.sg": "Xiaodong",
     "xiaodong": "Xiaodong",
 }
