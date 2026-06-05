@@ -636,7 +636,7 @@ def _sync_rows_for_bundle(
     af_version_id = str(af_version.get("version_id") or "").strip()
     candidates: list[dict[str, Any]] = []
     if af_version_id:
-        candidates.extend(_safe_list_issues_for_version(bpmis_client, af_version_id))
+        candidates.extend(_safe_list_productization_issues_for_version(bpmis_client, af_version_id))
     candidates.extend(
         _safe_list_jira_tasks_for_release_window(
             bpmis_client,
