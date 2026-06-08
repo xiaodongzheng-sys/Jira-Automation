@@ -970,7 +970,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
     def test_prd_self_assessment_route_allows_npt_google_user(self):
         with self.app.test_client() as client:
             with client.session_transaction() as session:
-                session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
                 session["google_credentials"] = {
                     "token": "x",
                     "scopes": ["https://www.googleapis.com/auth/drive.readonly"],
@@ -981,14 +981,14 @@ class PRDBriefingRouteTests(unittest.TestCase):
             self.assertIn(b"PRD Self-Assessment", response.data)
             self.assertIn(b"data-prd-self-assessment-url", response.data)
             self.assertIn(b"data-prd-self-assessment-language", response.data)
-            self.assertNotIn(b"Generate PRD Summary", response.data)
+            self.assertIn(b"Generate PRD Summary", response.data)
             self.assertIn(b"Generate AI PRD Review", response.data)
             self.assertIn(b"data-latest-url", response.data)
 
     def test_prd_self_assessment_route_allows_test_gmail_user(self):
         with self.app.test_client() as client:
             with client.session_transaction() as session:
-                session["google_profile"] = {"email": "xiaodong.zheng1991@gmail.com", "name": "Test User"}
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
                 session["google_credentials"] = {"token": "x"}
 
             response = client.get("/prd-self-assessment/", follow_redirects=False)
@@ -1009,7 +1009,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
     def test_prd_self_assessment_review_endpoint_returns_chinese_markdown(self, _mock_service):
         with self.app.test_client() as client:
             with client.session_transaction() as session:
-                session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
                 session["google_credentials"] = {"token": "x"}
             response = client.post(
                 "/api/prd-self-assessment/review",
@@ -1026,7 +1026,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
     def test_prd_self_assessment_review_endpoint_can_queue_async_job(self, _mock_service):
         with self.app.test_client() as client:
             with client.session_transaction() as session:
-                session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
                 session["google_credentials"] = {"token": "x"}
             response = client.post(
                 "/api/prd-self-assessment/review",
@@ -1050,7 +1050,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
         service = mock_service.return_value
         with self.app.test_client() as client:
             with client.session_transaction() as session:
-                session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
                 session["google_credentials"] = {"token": "x"}
             response = client.post(
                 "/api/prd-self-assessment/sections",
@@ -1068,7 +1068,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
         service = mock_service.return_value
         with self.app.test_client() as client:
             with client.session_transaction() as session:
-                session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
                 session["google_credentials"] = {
                     "token": "x",
                     "scopes": ["https://www.googleapis.com/auth/drive.readonly"],
@@ -1152,7 +1152,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
         with patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client):
             with self.app.test_client() as client:
                 with client.session_transaction() as session:
-                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
                     session["google_credentials"] = {"token": "x"}
                 response = client.post(
                     "/api/prd-self-assessment/review",
@@ -1171,7 +1171,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
         with patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client):
             with self.app.test_client() as client:
                 with client.session_transaction() as session:
-                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
                     session["google_credentials"] = {"token": "x"}
                 response = client.post(
                     "/api/prd-self-assessment/sections",
@@ -1181,7 +1181,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(payload["sections"][0]["title"], "Remote Section")
-        self.assertEqual(fake_client.payload["owner_key"], "google:teammate@npt.sg")
+        self.assertEqual(fake_client.payload["owner_key"], "google:xiaodong.zheng@npt.sg")
 
     @patch("bpmis_jira_tool.web._local_agent_source_code_qa_enabled", return_value=True)
     def test_prd_self_assessment_latest_endpoint_can_route_to_local_agent(self, _mock_enabled):
@@ -1189,14 +1189,14 @@ class PRDBriefingRouteTests(unittest.TestCase):
         with patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client):
             with self.app.test_client() as client:
                 with client.session_transaction() as session:
-                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
                     session["google_credentials"] = {"token": "x"}
                 response = client.get("/api/prd-self-assessment/latest")
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(payload["latest"]["payload"]["payload"]["review"]["result_markdown"], "### Latest Remote Review")
-        self.assertEqual(fake_client.payload["owner_key"], "google:teammate@npt.sg")
+        self.assertEqual(fake_client.payload["owner_key"], "google:xiaodong.zheng@npt.sg")
 
     def test_prd_self_assessment_external_failure_matrix_returns_stable_json(self):
         class FailingService:
@@ -1221,8 +1221,8 @@ class PRDBriefingRouteTests(unittest.TestCase):
             ):
                 with self.app.test_client() as client:
                     with client.session_transaction() as session:
-                        email = "xiaodong.zheng@npt.sg" if action == "summary" else "teammate@npt.sg"
-                        name = "Xiaodong Zheng" if action == "summary" else "Teammate"
+                        email = "xiaodong.zheng@npt.sg"
+                        name = "Xiaodong Zheng"
                         session["google_profile"] = {"email": email, "name": name}
                         session["google_credentials"] = {"token": "x"}
                     response = client.post(path, json={"prd_url": "https://example.atlassian.net/wiki/pages/123", "language": "en"})
@@ -1245,7 +1245,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
         with patch("bpmis_jira_tool.web._build_local_agent_client", return_value=TimeoutLocalAgentClient()):
             with self.app.test_client() as client:
                 with client.session_transaction() as session:
-                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
                     session["google_credentials"] = {"token": "x"}
                 response = client.post(
                     "/api/prd-self-assessment/review",

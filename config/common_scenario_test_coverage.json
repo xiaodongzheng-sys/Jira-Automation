@@ -34,7 +34,7 @@
           "description": "Saved sessions, attachment scoping, generated artifacts, and SQL packages are covered.",
           "tests": [
             "tests.test_source_code_qa.SourceCodeQARouteTests.test_source_code_qa_session_api_creates_lists_and_loads_session",
-            "tests.test_source_code_qa.SourceCodeQARouteTests.test_source_code_qa_attachment_upload_is_session_scoped",
+            "tests.test_source_code_qa.SourceCodeQARouteTests.test_source_code_qa_route_attachment_artifact_runtime_and_feedback_boundaries",
             "tests.test_source_code_qa.SourceCodeQARouteTests.test_source_code_qa_sql_answer_creates_downloadable_package"
           ]
         },

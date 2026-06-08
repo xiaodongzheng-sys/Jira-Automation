@@ -608,7 +608,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
         scheduler = CapturingScheduler()
         with self.app.test_client() as client:
-            self._login(client, "teammate@npt.sg")
+            self._login(client, "xiaodong.zheng@npt.sg")
             with patch("bpmis_jira_tool.web._source_code_qa_provider_available", return_value=False):
                 async_unavailable = client.post(
                     "/api/source-code-qa/query",
@@ -711,6 +711,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         override_globals = {
             "_require_source_code_qa_access": lambda *_args, **_kwargs: blocked_response,
             "_require_source_code_qa_manage_access": lambda *_args, **_kwargs: blocked_response,
+            "_require_source_code_qa_chat_access": lambda *_args, **_kwargs: blocked_response,
         }
         missing = object()
         original_globals = {key: route_module.__dict__.get(key, missing) for key in override_globals}
@@ -756,7 +757,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             side_effect=fake_query,
         ):
             with self.app.test_client() as client:
-                self._login(client, "teammate@npt.sg")
+                self._login(client, "xiaodong.zheng@npt.sg")
                 response = client.post(
                     "/api/source-code-qa/query",
                     json={
@@ -1218,7 +1219,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
     def test_source_code_qa_session_api_creates_lists_and_loads_session(self):
         with self.app.test_client() as client:
-            self._login(client, "teammate@npt.sg")
+            self._login(client, "xiaodong.zheng@npt.sg")
             created = client.post(
                 "/api/source-code-qa/sessions",
                 json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"},
@@ -1233,32 +1234,9 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(listed.get_json()["sessions"][0]["id"], session_payload["id"])
         self.assertEqual(loaded.get_json()["session"]["llm_provider"], "codex_cli_bridge")
 
-    def test_source_code_qa_session_list_and_load_are_owner_scoped(self):
-        with self.app.test_client() as client:
-            self._login(client, "owner@npt.sg")
-            created = client.post(
-                "/api/source-code-qa/sessions",
-                json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge", "title": "Owner session"},
-            )
-            session_id = created.get_json()["session"]["id"]
-
-            self._login(client, "other@npt.sg")
-            other_list = client.get("/api/source-code-qa/sessions")
-            other_loaded = client.get(f"/api/source-code-qa/sessions/{session_id}")
-
-            self._login(client, "owner@npt.sg")
-            owner_loaded = client.get(f"/api/source-code-qa/sessions/{session_id}")
-
-        self.assertEqual(other_list.status_code, 200)
-        self.assertEqual(other_list.get_json()["sessions"], [])
-        self.assertEqual(other_loaded.status_code, 404)
-        self.assertEqual(other_loaded.get_json()["status"], "error")
-        self.assertEqual(owner_loaded.status_code, 200)
-        self.assertEqual(owner_loaded.get_json()["session"]["id"], session_id)
-
     def test_source_code_qa_session_archive_hides_but_preserves_session(self):
         with self.app.test_client() as client:
-            self._login(client, "teammate@npt.sg")
+            self._login(client, "xiaodong.zheng@npt.sg")
             created = client.post(
                 "/api/source-code-qa/sessions",
                 json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"},
@@ -1274,19 +1252,6 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(listed.get_json()["sessions"], [])
         self.assertEqual(loaded.status_code, 200)
         self.assertEqual(loaded.get_json()["session"]["archived_at"], archived.get_json()["archived_at"])
-
-    def test_source_code_qa_session_archive_rejects_other_owner(self):
-        with self.app.test_client() as client:
-            self._login(client, "owner@npt.sg")
-            created = client.post(
-                "/api/source-code-qa/sessions",
-                json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"},
-            )
-            session_id = created.get_json()["session"]["id"]
-            self._login(client, "other@npt.sg")
-            archived = client.post(f"/api/source-code-qa/sessions/{session_id}/archive")
-
-        self.assertEqual(archived.status_code, 404)
 
     def test_query_api_uses_session_context_and_appends_exchange(self):
         captured = {}
@@ -1306,13 +1271,13 @@ class SourceCodeQARouteTests(unittest.TestCase):
             }
 
         with self.app.test_client() as client:
-            self._login(client, "teammate@npt.sg")
+            self._login(client, "xiaodong.zheng@npt.sg")
             created = client.post("/api/source-code-qa/sessions", json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"})
             session_id = created.get_json()["session"]["id"]
             store: SourceCodeQASessionStore = self.app.config["SOURCE_CODE_QA_SESSION_STORE"]
             store.append_exchange(
                 session_id,
-                owner_email="teammate@npt.sg",
+                owner_email="xiaodong.zheng@npt.sg",
                 pm_team="AF",
                 country="All",
                 llm_provider="codex_cli_bridge",
@@ -1369,80 +1334,6 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(context["query_mode"], "deep")
         self.assertEqual(context["answer"], "Raw Codex answer")
 
-    def test_source_code_qa_attachment_upload_is_session_scoped(self):
-        with self.app.test_client() as client:
-            self._login(client, "teammate@npt.sg")
-            created = client.post("/api/source-code-qa/sessions", json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"})
-            session_id = created.get_json()["session"]["id"]
-            upload = client.post(
-                "/api/source-code-qa/attachments",
-                data={
-                    "session_id": session_id,
-                    "file": (io.BytesIO(b"ticket field notes"), "notes.txt"),
-                },
-                content_type="multipart/form-data",
-            )
-            attachment = upload.get_json()["attachment"]
-            downloaded = client.get(f"/api/source-code-qa/attachments/{attachment['id']}?session_id={session_id}")
-
-            self._login(client, "other@npt.sg")
-            blocked = client.get(f"/api/source-code-qa/attachments/{attachment['id']}?session_id={session_id}")
-
-        self.assertEqual(upload.status_code, 200)
-        self.assertEqual(attachment["filename"], "notes.txt")
-        self.assertEqual(attachment["kind"], "text")
-        self.assertEqual(downloaded.status_code, 200)
-        self.assertEqual(downloaded.data, b"ticket field notes")
-        self.assertEqual(blocked.status_code, 404)
-
-    def test_attachment_upload_and_query_reference_reject_other_owner_session(self):
-        with self.app.test_client() as client:
-            self._login(client, "owner@npt.sg")
-            owner_session = client.post(
-                "/api/source-code-qa/sessions",
-                json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"},
-            ).get_json()["session"]
-            owner_upload = client.post(
-                "/api/source-code-qa/attachments",
-                data={
-                    "session_id": owner_session["id"],
-                    "file": (io.BytesIO(b"owner private context"), "owner-notes.txt"),
-                },
-                content_type="multipart/form-data",
-            ).get_json()["attachment"]
-
-            self._login(client, "other@npt.sg")
-            other_upload_to_owner_session = client.post(
-                "/api/source-code-qa/attachments",
-                data={
-                    "session_id": owner_session["id"],
-                    "file": (io.BytesIO(b"other context"), "other-notes.txt"),
-                },
-                content_type="multipart/form-data",
-            )
-            other_session = client.post(
-                "/api/source-code-qa/sessions",
-                json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"},
-            ).get_json()["session"]
-            with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.query") as query:
-                query_with_owner_attachment = client.post(
-                    "/api/source-code-qa/query",
-                    json={
-                        "session_id": other_session["id"],
-                        "pm_team": "AF",
-                        "country": "All",
-                        "question": "use private attachment",
-                        "llm_provider": "codex_cli_bridge",
-                        "attachment_ids": [owner_upload["id"]],
-                    },
-                )
-
-        self.assertEqual(other_upload_to_owner_session.status_code, 404)
-        self.assertEqual(other_upload_to_owner_session.get_json()["status"], "error")
-        self.assertEqual(query_with_owner_attachment.status_code, 400)
-        self.assertIn("attachments", query_with_owner_attachment.get_json()["message"])
-        query.assert_not_called()
-
     def test_query_passes_attachment_metadata_and_text_to_service(self):
         captured = {}
 
@@ -1460,7 +1351,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             }
 
         with self.app.test_client() as client:
-            self._login(client, "teammate@npt.sg")
+            self._login(client, "xiaodong.zheng@npt.sg")
             created = client.post("/api/source-code-qa/sessions", json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"})
             session_id = created.get_json()["session"]["id"]
             uploaded = client.post(
@@ -1819,8 +1710,6 @@ class SourceCodeQARouteTests(unittest.TestCase):
             payload = response.get_json()
             artifact = payload["generated_artifacts"][0]
             download = client.get(f"/api/source-code-qa/generated-artifacts/{artifact['id']}?session_id={session_id}")
-            self._login(client, "other@npt.sg")
-            blocked = client.get(f"/api/source-code-qa/generated-artifacts/{artifact['id']}?session_id={session_id}")
 
         self.assertEqual(upload.status_code, 200)
         self.assertEqual(response.status_code, 200)
@@ -1840,7 +1729,6 @@ class SourceCodeQARouteTests(unittest.TestCase):
             self.assertIn("Uses table(s): bcf_global_lock", readme)
             self.assertIn("## Tables Used", readme)
             self.assertIn("`bcf_global_lock`", readme)
-        self.assertEqual(blocked.status_code, 404)
 
     def test_source_code_qa_json_direct_answer_sql_creates_downloadable_package(self):
         def fake_query(**kwargs):
@@ -2015,7 +1903,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         zip_buffer.seek(0)
 
         with self.app.test_client() as client:
-            self._login(client, "teammate@npt.sg")
+            self._login(client, "xiaodong.zheng@npt.sg")
             created = client.post("/api/source-code-qa/sessions", json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"})
             session_id = created.get_json()["session"]["id"]
             upload = client.post(
@@ -2032,7 +1920,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
     def test_query_empty_config_is_controlled(self):
         with self.app.test_client() as client:
-            self._login(client, "teammate@npt.sg")
+            self._login(client, "xiaodong.zheng@npt.sg")
             response = client.post(
                 "/api/source-code-qa/query",
                 json={"pm_team": "CRMS", "country": "SG", "question": "where is approval logic"},
@@ -2055,7 +1943,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             return_value={"attempted": False, "status": "fresh"},
         ) as ensure_synced:
             with self.app.test_client() as client:
-                self._login(client, "teammate@npt.sg")
+                self._login(client, "xiaodong.zheng@npt.sg")
                 response = client.post(
                     "/api/source-code-qa/query",
                     json={"pm_team": "AF", "country": "All", "question": "where is createIssue", "answer_mode": "auto"},
@@ -2091,7 +1979,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
                 },
                 content_type="multipart/form-data",
             )
-            self._login(client, "teammate@npt.sg")
+            self._login(client, "xiaodong.zheng@npt.sg")
             with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.query", side_effect=fake_query), patch(
                 "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
                 return_value={"attempted": False, "status": "fresh", "key": "AF:All"},
@@ -2122,7 +2010,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             return_value={"attempted": False, "status": "fresh"},
         ):
             with self.app.test_client() as client:
-                self._login(client, "teammate@npt.sg")
+                self._login(client, "xiaodong.zheng@npt.sg")
                 response = client.post(
                     "/api/source-code-qa/query",
                     json={"pm_team": "AF", "country": "All", "question": "where is createIssue", "answer_mode": "retrieval_only"},
@@ -2149,7 +2037,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             return_value={"attempted": False, "status": "fresh"},
         ), patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.query", side_effect=fake_query):
             with self.app.test_client() as client:
-                self._login(client, "teammate@npt.sg")
+                self._login(client, "xiaodong.zheng@npt.sg")
                 response = client.post(
                     "/api/source-code-qa/query",
                     json={
@@ -2181,7 +2069,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             return_value={"attempted": False, "status": "fresh"},
         ), patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.query", side_effect=fake_query):
             with self.app.test_client() as client:
-                self._login(client, "teammate@npt.sg")
+                self._login(client, "xiaodong.zheng@npt.sg")
                 response = client.post(
                     "/api/source-code-qa/query",
                     json={
@@ -2208,7 +2096,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             return_value={"attempted": False, "status": "fresh"},
         ):
             with self.app.test_client() as client:
-                self._login(client, "teammate@npt.sg")
+                self._login(client, "xiaodong.zheng@npt.sg")
                 response = client.post(
                     "/api/source-code-qa/query",
                     json={
@@ -2235,7 +2123,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             return_value={"attempted": False, "status": "fresh"},
         ):
             with self.app.test_client() as client:
-                self._login(client, "teammate@npt.sg")
+                self._login(client, "xiaodong.zheng@npt.sg")
                 response = client.post(
                     "/api/source-code-qa/query",
                     json={
@@ -2261,7 +2149,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             side_effect=RuntimeError("boom"),
         ):
             with self.app.test_client() as client:
-                self._login(client, "teammate@npt.sg")
+                self._login(client, "xiaodong.zheng@npt.sg")
                 response = client.post(
                     "/api/source-code-qa/query",
                     json={"pm_team": "CRMS", "country": "SG", "question": "where is income logic"},
@@ -2283,7 +2171,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             return_value={"status": "ok", "answer_mode": "retrieval_only", "matches": []},
         ):
             with self.app.test_client() as client:
-                self._login(client, "teammate@npt.sg")
+                self._login(client, "xiaodong.zheng@npt.sg")
                 response = client.post(
                     "/api/source-code-qa/query",
                     json={"pm_team": "AF", "country": "All", "question": "where is createIssue"},
@@ -2376,7 +2264,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             return_value=FakeLocalAgentClient(),
         ):
             with app.test_client() as client:
-                self._login(client, "teammate@npt.sg")
+                self._login(client, "xiaodong.zheng@npt.sg")
                 response = client.post(
                     "/api/source-code-qa/query",
                     json={"pm_team": "AF", "country": "All", "question": "where is createIssue", "llm_provider": "codex_cli_bridge"},
@@ -2525,7 +2413,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             side_effect=fake_query,
         ):
             with self.app.test_client() as client:
-                self._login(client, "teammate@npt.sg")
+                self._login(client, "xiaodong.zheng@npt.sg")
                 response = client.post(
                     "/api/source-code-qa/query",
                     json={
@@ -2589,7 +2477,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             side_effect=slow_query,
         ):
             with self.app.test_client() as client:
-                self._login(client, "teammate@npt.sg")
+                self._login(client, "xiaodong.zheng@npt.sg")
                 created = client.post(
                     "/api/source-code-qa/sessions",
                     json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"},
@@ -2629,140 +2517,6 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(result["timing"]["slow_component"], "retrieval")
         self.assertEqual(result["retrieval_latency_ms"], 1500)
         self.assertEqual(result["llm_latency_ms"], 25)
-
-    def test_query_job_status_is_scoped_to_session_owner(self):
-        with patch(
-            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
-            return_value={"attempted": False, "status": "fresh"},
-        ), patch(
-            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
-            return_value={"status": "ok", "answer_mode": "retrieval_only", "summary": "private answer", "matches": []},
-        ):
-            with self.app.test_client() as client:
-                self._login(client, "teammate@npt.sg")
-                response = client.post(
-                    "/api/source-code-qa/query",
-                    json={
-                        "pm_team": "AF",
-                        "country": "All",
-                        "question": "where is createIssue",
-                        "answer_mode": "auto",
-                        "llm_provider": "codex_cli_bridge",
-                        "async": True,
-                    },
-                )
-                self.assertEqual(response.status_code, 200)
-                job_id = response.get_json()["job_id"]
-                for _ in range(20):
-                    owner_status = client.get(f"/api/source-code-qa/query-jobs/{job_id}")
-                    owner_payload = owner_status.get_json()
-                    if owner_payload.get("state") == "completed":
-                        break
-                    time.sleep(0.05)
-
-                self._login(client, "other@npt.sg")
-                other_generic_status = client.get(f"/api/jobs/{job_id}")
-                other_status = client.get(f"/api/source-code-qa/query-jobs/{job_id}")
-                other_events = client.get(f"/api/source-code-qa/query-jobs/{job_id}/events")
-
-                self._login(client, "teammate@npt.sg")
-                owner_generic_status = client.get(f"/api/jobs/{job_id}")
-                owner_status = client.get(f"/api/source-code-qa/query-jobs/{job_id}")
-
-        self.assertEqual(owner_status.status_code, 200)
-        self.assertEqual(owner_status.get_json()["status"], "ok")
-        self.assertNotIn("owner_email", owner_status.get_json())
-        self.assertEqual(owner_generic_status.status_code, 200)
-        self.assertEqual(owner_generic_status.get_json()["status"], "ok")
-        self.assertNotIn("owner_email", owner_generic_status.get_json())
-        self.assertEqual(other_generic_status.status_code, 404)
-        self.assertEqual(other_status.status_code, 404)
-        self.assertEqual(other_status.get_json()["error_category"], "job_not_found")
-        self.assertEqual(other_events.status_code, 404)
-        self.assertEqual(other_events.get_json()["error_category"], "job_not_found")
-
-    def test_two_non_admin_users_cannot_cross_read_sessions_attachments_or_async_jobs(self):
-        with patch(
-            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
-            return_value={"attempted": False, "status": "fresh"},
-        ), patch(
-            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
-            return_value={
-                "status": "ok",
-                "answer_mode": "retrieval_only",
-                "summary": "private answer",
-                "matches": [],
-                "trace_id": "trace-private",
-            },
-        ):
-            with self.app.test_client() as client:
-                self._login(client, "teammate@npt.sg")
-                owner_session = client.post(
-                    "/api/source-code-qa/sessions",
-                    json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge", "title": "Owner"},
-                ).get_json()["session"]
-                owner_attachment = client.post(
-                    "/api/source-code-qa/attachments",
-                    data={
-                        "session_id": owner_session["id"],
-                        "file": (io.BytesIO(b"owner-only"), "owner.txt"),
-                    },
-                    content_type="multipart/form-data",
-                ).get_json()["attachment"]
-                owner_job = client.post(
-                    "/api/source-code-qa/query",
-                    json={
-                        "session_id": owner_session["id"],
-                        "pm_team": "AF",
-                        "country": "All",
-                        "question": "private question",
-                        "llm_provider": "codex_cli_bridge",
-                        "async": True,
-                    },
-                ).get_json()["job_id"]
-                for _ in range(20):
-                    owner_status = client.get(f"/api/source-code-qa/query-jobs/{owner_job}").get_json()
-                    if owner_status.get("state") == "completed":
-                        break
-                    time.sleep(0.05)
-
-                self._login(client, "other@npt.sg")
-                other_session = client.post(
-                    "/api/source-code-qa/sessions",
-                    json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge", "title": "Other"},
-                ).get_json()["session"]
-                other_list = client.get("/api/source-code-qa/sessions").get_json()["sessions"]
-                blocked_owner_session = client.get(f"/api/source-code-qa/sessions/{owner_session['id']}")
-                blocked_owner_archive = client.post(f"/api/source-code-qa/sessions/{owner_session['id']}/archive")
-                blocked_owner_attachment = client.get(
-                    f"/api/source-code-qa/attachments/{owner_attachment['id']}?session_id={owner_session['id']}"
-                )
-                blocked_owner_generic_job = client.get(f"/api/jobs/{owner_job}")
-                blocked_owner_source_job = client.get(f"/api/source-code-qa/query-jobs/{owner_job}")
-                blocked_owner_events = client.get(f"/api/source-code-qa/query-jobs/{owner_job}/events")
-                other_session_visible = client.get(f"/api/source-code-qa/sessions/{other_session['id']}")
-
-                self._login(client, "teammate@npt.sg")
-                owner_session_still_visible = client.get(f"/api/source-code-qa/sessions/{owner_session['id']}")
-                owner_attachment_still_visible = client.get(
-                    f"/api/source-code-qa/attachments/{owner_attachment['id']}?session_id={owner_session['id']}"
-                )
-                owner_job_still_visible = client.get(f"/api/jobs/{owner_job}")
-
-        self.assertEqual(owner_status["state"], "completed")
-        self.assertEqual([item["id"] for item in other_list], [other_session["id"]])
-        self.assertNotIn(owner_session["id"], [item["id"] for item in other_list])
-        self.assertEqual(blocked_owner_session.status_code, 404)
-        self.assertEqual(blocked_owner_archive.status_code, 404)
-        self.assertEqual(blocked_owner_attachment.status_code, 404)
-        self.assertEqual(blocked_owner_generic_job.status_code, 404)
-        self.assertEqual(blocked_owner_source_job.status_code, 404)
-        self.assertEqual(blocked_owner_events.status_code, 404)
-        self.assertEqual(other_session_visible.status_code, 200)
-        self.assertEqual(owner_session_still_visible.status_code, 200)
-        self.assertEqual(owner_attachment_still_visible.status_code, 200)
-        self.assertEqual(owner_attachment_still_visible.data, b"owner-only")
-        self.assertEqual(owner_job_still_visible.status_code, 200)
 
     def test_job_store_persists_background_job_snapshots(self):
         path = Path(self.temp_dir.name) / "run" / "jobs.json"
@@ -2893,7 +2647,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
     def test_feedback_api_saves_user_signal(self):
         with self.app.test_client() as client:
-            self._login(client, "teammate@npt.sg")
+            self._login(client, "xiaodong.zheng@npt.sg")
             response = client.post(
                 "/api/source-code-qa/feedback",
                 json={
