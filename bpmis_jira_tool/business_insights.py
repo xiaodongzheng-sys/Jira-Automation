@@ -85,6 +85,37 @@ PRODUCT_LABELS: dict[str, str] = {
 }
 PRODUCT_LABEL_COLUMNS: set[str] = {"product", "product_code", "sub-product", "sub_product_code"}
 
+# ---------------------------------------------------------------------------
+# Anti-fraud (PH) report identifiers and lake (ODS) source tables.
+# ---------------------------------------------------------------------------
+# Table names are live-validated ODS tables available through Data Workbench.
+# The AF lake uses two naming styles:
+#   ods.mbs_ph_seabank_anti_fraud_db_<table>_ss        (scene / sub_scene / action)
+#   ods.mbs_anti_fraud_<table>_ss                      (rule / feature / identify / review)
+#   ods.mbs_app_anti_fraud_ss                          (event-level AF/auth challenge records)
+# Not available in ODS grants during live validation: rule_trigger_log_tab and
+# new_authen_process_tab. Hit-rate and auth friction use identify/request/app tables instead.
+AF_SCENARIOS_ACTIONS_REPORT_ID = "anti-fraud-ph-scenarios-actions-auth-steps"
+AF_RULES_REPORT_ID = "anti-fraud-ph-rules"
+AF_FEATURES_REPORT_ID = "anti-fraud-ph-features"
+AF_RULE_EFFECTIVENESS_REPORT_ID = "anti-fraud-ph-rule-effectiveness"
+AF_FRAUD_LOSS_REPORT_ID = "anti-fraud-ph-fraud-loss-cases"
+AF_AUTH_FUNNEL_REPORT_ID = "anti-fraud-ph-auth-funnel"
+
+AF_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_scene_tab_ss"
+AF_SUB_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_sub_scene_tab_ss"
+AF_ACTION_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_action_tab_ss"
+AF_RULE_CONFIG_TABLE = "ods.mbs_anti_fraud_rule_config_tab_ss"
+AF_FEATURE_CONFIG_TABLE = "ods.mbs_anti_fraud_feature_config_tab_ss"
+AF_IDENTIFY_RECORD_TABLE = "ods.mbs_anti_fraud_identify_record_tab_ss"
+AF_IDENTIFY_REJECT_TABLE = "ods.mbs_anti_fraud_identify_reject_tab_ss"
+AF_REQUEST_STATISTIC_TABLE = "ods.mbs_anti_fraud_request_statistic_tab_ss"
+AF_RULE_TRIGGER_STATISTIC_TABLE = "ods.mbs_anti_fraud_rule_trigger_statistic_tab_ss"
+AF_REVIEW_CASE_TABLE = "ods.mbs_anti_fraud_review_case_tab_ss"
+AF_REVIEW_RECORD_TABLE = "ods.mbs_anti_fraud_review_record_tab_ss"
+AF_APP_ANTI_FRAUD_TABLE = "ods.mbs_app_anti_fraud_ss"
+AF_SCENARIO_FLOW_CONFIG_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_biz_scenario_flow_config_tab_df"
+
 SEEDED_REPORTS: tuple[dict[str, str], ...] = (
     {
         "id": UNDERWRITING_FUNNEL_REPORT_ID,
@@ -112,6 +143,48 @@ SEEDED_REPORTS: tuple[dict[str, str], ...] = (
         "domain": "credit-risk",
         "name": "Credit Risk PH - Application to Disbursement Funnel",
         "type": "application_disbursement_funnel",
+        "status": "generator_ready",
+    },
+    {
+        "id": AF_SCENARIOS_ACTIONS_REPORT_ID,
+        "domain": "anti-fraud",
+        "name": "Anti-fraud PH - L1+L2 Scenarios, Actions & Auth Steps",
+        "type": "af_scenarios_actions",
+        "status": "generator_ready",
+    },
+    {
+        "id": AF_RULES_REPORT_ID,
+        "domain": "anti-fraud",
+        "name": "Anti-fraud PH - Rules",
+        "type": "af_rules",
+        "status": "generator_ready",
+    },
+    {
+        "id": AF_FEATURES_REPORT_ID,
+        "domain": "anti-fraud",
+        "name": "Anti-fraud PH - Features",
+        "type": "af_features",
+        "status": "generator_ready",
+    },
+    {
+        "id": AF_RULE_EFFECTIVENESS_REPORT_ID,
+        "domain": "anti-fraud",
+        "name": "Anti-fraud PH - Rule Effectiveness / Hit-Rate",
+        "type": "af_rule_effectiveness",
+        "status": "generator_ready",
+    },
+    {
+        "id": AF_FRAUD_LOSS_REPORT_ID,
+        "domain": "anti-fraud",
+        "name": "Anti-fraud PH - Fraud Loss & Case Outcomes",
+        "type": "af_fraud_loss",
+        "status": "generator_ready",
+    },
+    {
+        "id": AF_AUTH_FUNNEL_REPORT_ID,
+        "domain": "anti-fraud",
+        "name": "Anti-fraud PH - Authentication Funnel / Customer Friction",
+        "type": "af_auth_funnel",
         "status": "generator_ready",
     },
 )
@@ -559,6 +632,361 @@ order by product, account_status, account_credit_quality;
 """
 
 
+def _aliased_snapshot_filter(alias: str, table: str, snapshot_pt_date: str | None) -> str:
+    if snapshot_pt_date:
+        return f"{alias}.pt_date = '{snapshot_pt_date}'"
+    return f"{alias}.pt_date = (select max(pt_date) from {table})"
+
+
+def _af_report_header(title: str, snapshot_pt_date: str | None, period: BusinessInsightsPeriod | None = None) -> str:
+    lines = [
+        f"-- {title}",
+        f"-- Snapshot: {snapshot_pt_date or 'latest available pt_date at run time'}",
+    ]
+    if period is not None:
+        lines.append(f"-- Duration: {period.title}")
+    lines.append("-- Lake (ODS) tables from the RPMAF01 grant (table_access_20260605).")
+    lines.append("-- Run each numbered section in Data Workbench (SparkSQL); each becomes one Excel sheet.")
+    return "\n".join(lines)
+
+
+def build_af_scenarios_actions_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    scene_snap = _aliased_snapshot_filter("s", AF_SCENE_TABLE, snapshot_pt_date)
+    sub_scene_snap = _aliased_snapshot_filter("ss", AF_SUB_SCENE_TABLE, snapshot_pt_date)
+    action_snap = _aliased_snapshot_filter("a", AF_ACTION_TABLE, snapshot_pt_date)
+    flow_snap = _aliased_snapshot_filter("f", AF_SCENARIO_FLOW_CONFIG_TABLE, snapshot_pt_date)
+    header = _af_report_header("Anti-fraud PH - L1+L2 Scenarios, Actions & Auth Steps", snapshot_pt_date)
+    return f"""{header}
+-- Scenario flow config provides the live scene/sub-scene/action/auth-step mapping.
+
+-- 1. L1 Scenarios
+select
+  s.code as l1_scene_code,
+  s.name as l1_scene_name,
+  s.enum_name as l1_enum_name,
+  case s.scene_type when 0 then 'realScene' when 1 then 'logicScene' else concat('scene_type_', cast(s.scene_type as string)) end as l1_scene_type,
+  case s.business_category when 0 then 'Retail' when 1 then 'Corporate' else cast(s.business_category as string) end as business_category,
+  s.mode,
+  s.source,
+  s.real_scene_sub_scene,
+  s.description
+from {AF_SCENE_TABLE} s
+where {scene_snap}
+order by s.code;
+
+-- 2. L2 Sub-Scenarios
+select
+  ss.code as l2_sub_scene_code,
+  ss.name as l2_sub_scene_name,
+  ss.enum_name as l2_enum_name
+from {AF_SUB_SCENE_TABLE} ss
+where {sub_scene_snap}
+order by ss.code;
+
+-- 3. Actions and Auth Steps
+select
+  a.code as action_code,
+  a.name as action_name,
+  a.enum_name as action_enum_name,
+  case a.type when 1 then 'Business' when 2 then 'Authentication (Auth Step)' else concat('type_', cast(a.type as string)) end as action_type
+from {AF_ACTION_TABLE} a
+where {action_snap}
+order by a.type, a.code;
+
+-- 4. Scenario Action Auth Flow
+select
+  f.scene as l1_scene_code,
+  s.name as l1_scene_name,
+  f.sub_scene as l2_sub_scene_code,
+  ss.name as l2_sub_scene_name,
+  f.action as action_code,
+  a.name as action_name,
+  case a.type when 1 then 'Business' when 2 then 'Authentication (Auth Step)' else concat('type_', cast(a.type as string)) end as action_type,
+  f.default_step,
+  f.challenge1_step,
+  f.challenge2_step,
+  f.challenge3_step,
+  f.challenge4_step,
+  f.challenge5_step
+from {AF_SCENARIO_FLOW_CONFIG_TABLE} f
+left join {AF_SCENE_TABLE} s on s.code = f.scene and {scene_snap}
+left join {AF_SUB_SCENE_TABLE} ss on ss.code = f.sub_scene and {sub_scene_snap}
+left join {AF_ACTION_TABLE} a on a.code = f.action and {action_snap}
+where {flow_snap}
+order by f.scene, f.sub_scene, f.action;
+"""
+
+
+def build_af_rules_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    rule_snap = _aliased_snapshot_filter("rc", AF_RULE_CONFIG_TABLE, snapshot_pt_date)
+    header = _af_report_header("Anti-fraud PH - Rules", snapshot_pt_date)
+    return f"""{header}
+-- outcome_type: 2=Challenge (confirmed in code); 1=Punish / 3=Reject inferred from column comment.
+-- rule_scenario_config_tab is not granted, so per-rule scenario mapping is omitted.
+
+-- 1. Rule Catalog
+select
+  rc.rule_id,
+  rc.rule_name,
+  rc.feature_expr,
+  case when rc.status > 0 then 'Active' else 'Inactive/Draft' end as rule_status,
+  rc.status as status_code,
+  case rc.outcome_type when 1 then 'Punish' when 2 then 'Challenge' when 3 then 'Reject' else cast(rc.outcome_type as string) end as outcome_type,
+  case rc.real_time when 1 then 'Real-time' else 'Batch' end as execution_mode,
+  rc.risk_level,
+  rc.priority,
+  rc.review_priority,
+  rc.punish_action,
+  rc.punish_scene,
+  rc.punish_sub_scene,
+  rc.notice_template
+from {AF_RULE_CONFIG_TABLE} rc
+where {rule_snap}
+order by case when rc.status > 0 then 0 else 1 end, rc.rule_id;
+
+-- 2. Rule Count by Status and Outcome
+select
+  case when rc.status > 0 then 'Active' else 'Inactive/Draft' end as rule_status,
+  case rc.outcome_type when 1 then 'Punish' when 2 then 'Challenge' when 3 then 'Reject' else cast(rc.outcome_type as string) end as outcome_type,
+  count(1) as rule_count
+from {AF_RULE_CONFIG_TABLE} rc
+where {rule_snap}
+group by 1, 2
+order by rule_status, outcome_type;
+"""
+
+
+def build_af_features_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    feature_snap = _aliased_snapshot_filter("fc", AF_FEATURE_CONFIG_TABLE, snapshot_pt_date)
+    header = _af_report_header("Anti-fraud PH - Features", snapshot_pt_date)
+    return f"""{header}
+-- feature status: 1=Active, -1=Inactive. feature_scenario_config_tab is not granted, so scenario mapping is omitted.
+
+-- 1. Feature Catalog
+select
+  fc.feature_id,
+  fc.feature_name,
+  fc.function_id,
+  case fc.status when 1 then 'Active' when -1 then 'Inactive' else cast(fc.status as string) end as feature_status,
+  fc.type as feature_type,
+  fc.base_obj,
+  fc.count_obj,
+  fc.time_range as count_window_seconds,
+  fc.operator,
+  fc.threshold,
+  case fc.consecutive when 1 then 'Y' else 'N' end as consecutive,
+  fc.scene,
+  fc.sub_scene,
+  fc.action,
+  fc.event_status,
+  fc.scenario_type,
+  fc.business_category
+from {AF_FEATURE_CONFIG_TABLE} fc
+where {feature_snap}
+order by case when fc.status = 1 then 0 else 1 end, fc.feature_id;
+
+-- 2. Feature Count by Status
+select
+  case fc.status when 1 then 'Active' when -1 then 'Inactive' else cast(fc.status as string) end as feature_status,
+  count(1) as feature_count
+from {AF_FEATURE_CONFIG_TABLE} fc
+where {feature_snap}
+group by 1
+order by feature_status;
+"""
+
+
+def build_af_rule_effectiveness_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    period = business_insights_period(now)
+    start_ms = _date_to_epoch_millis(period.start_date)
+    current_month_start_ms = _date_to_epoch_millis(period.current_month_start)
+    end_ms = _date_to_epoch_millis(period.end_exclusive)
+    start_key = _yyyymmdd(period.start_date)
+    end_key = _yyyymmdd(period.current_date)
+    identify_snap = _aliased_snapshot_filter("i", AF_IDENTIFY_RECORD_TABLE, snapshot_pt_date)
+    reject_snap = _aliased_snapshot_filter("r", AF_IDENTIFY_REJECT_TABLE, snapshot_pt_date)
+    request_snap = _aliased_snapshot_filter("rq", AF_REQUEST_STATISTIC_TABLE, snapshot_pt_date)
+    stat_snap = _aliased_snapshot_filter("rs", AF_RULE_TRIGGER_STATISTIC_TABLE, snapshot_pt_date)
+    period_expr = (
+        f"case when i.operation_time >= {current_month_start_ms} "
+        f"then '{period.current_month_label}' else '{period.previous_month_label}' end"
+    )
+    identify_window = f"i.operation_time >= {start_ms} and i.operation_time < {end_ms}"
+    reject_period_expr = (
+        f"case when r.operation_time >= {current_month_start_ms} "
+        f"then '{period.current_month_label}' else '{period.previous_month_label}' end"
+    )
+    reject_window = f"r.operation_time >= {start_ms} and r.operation_time < {end_ms}"
+    header = _af_report_header("Anti-fraud PH - Rule Effectiveness / Hit-Rate", snapshot_pt_date, period)
+    return f"""{header}
+-- rule_trigger_log_tab is not available in ODS. This dashboard uses request_statistic,
+-- identify_record, identify_reject, and rule_trigger_statistic aggregates.
+
+-- 1. Request Outcome Summary
+select
+  case when rq.date >= '{_yyyymmdd(period.current_month_start)}' then '{period.current_month_label}' else '{period.previous_month_label}' end as period,
+  sum(coalesce(rq.total_req_num, 0)) as total_requests,
+  sum(coalesce(rq.success_num, 0)) as successful_requests,
+  sum(coalesce(rq.fail_num, 0)) as failed_requests,
+  sum(coalesce(rq.pass_num, 0)) as pass_num,
+  sum(coalesce(rq.challenge_num, 0)) as challenge_num,
+  sum(coalesce(rq.reject_num, 0)) as reject_num,
+  round((sum(coalesce(rq.challenge_num, 0)) + sum(coalesce(rq.reject_num, 0))) / nullif(sum(coalesce(rq.total_req_num, 0)), 0) * 100, 2) as action_rate_pct
+from {AF_REQUEST_STATISTIC_TABLE} rq
+where {request_snap}
+  and rq.date >= '{start_key}'
+  and rq.date <= '{end_key}'
+group by case when rq.date >= '{_yyyymmdd(period.current_month_start)}' then '{period.current_month_label}' else '{period.previous_month_label}' end
+order by period;
+
+-- 2. Identify Result by Scene
+select
+  {period_expr} as period,
+  i.operation_scene,
+  i.sub_scene,
+  i.identify_result,
+  i.reject_type,
+  count(1) as request_count,
+  count(distinct i.uid) as distinct_users,
+  sum(coalesce(cast(i.transaction_amount as double), 0)) as transaction_amount
+from {AF_IDENTIFY_RECORD_TABLE} i
+where {identify_snap}
+  and {identify_window}
+group by {period_expr}, i.operation_scene, i.sub_scene, i.identify_result, i.reject_type
+order by request_count desc;
+
+-- 3. Reject Rule Hit Summary
+select
+  {reject_period_expr} as period,
+  r.reject_rule,
+  r.reject_type,
+  r.operation_scene,
+  r.operation_position,
+  count(1) as reject_count,
+  count(distinct r.uid) as distinct_users,
+  sum(coalesce(cast(r.transaction_amount as double), 0)) as rejected_transaction_amount
+from {AF_IDENTIFY_REJECT_TABLE} r
+where {reject_snap}
+  and {reject_window}
+group by {reject_period_expr}, r.reject_rule, r.reject_type, r.operation_scene, r.operation_position
+order by reject_count desc;
+
+-- 4. Daily Challenge / Reject / Punish Totals
+select
+  rs.date as trigger_date,
+  sum(coalesce(rs.challenge_num, 0)) as challenge_num,
+  sum(coalesce(rs.reject_num, 0)) as reject_num,
+  sum(coalesce(rs.punish_num, 0)) as punish_num
+from {AF_RULE_TRIGGER_STATISTIC_TABLE} rs
+where {stat_snap}
+  and rs.date >= '{start_key}'
+  and rs.date <= '{end_key}'
+group by rs.date
+order by trigger_date;
+"""
+
+
+def build_af_fraud_loss_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    period = business_insights_period(now)
+    start_ms = _date_to_epoch_millis(period.start_date)
+    current_month_start_ms = _date_to_epoch_millis(period.current_month_start)
+    end_ms = _date_to_epoch_millis(period.end_exclusive)
+    case_snap = _aliased_snapshot_filter("c", AF_REVIEW_CASE_TABLE, snapshot_pt_date)
+    period_expr = (
+        f"case when c.create_date >= {current_month_start_ms} "
+        f"then '{period.current_month_label}' else '{period.previous_month_label}' end"
+    )
+    window = f"c.create_date >= {start_ms} and c.create_date < {end_ms}"
+    header = _af_report_header("Anti-fraud PH - Fraud Loss & Case Outcomes", snapshot_pt_date, period)
+    return f"""{header}
+-- review_case_tab: fraud_loss decimal; case_status in (Open, Closed, Deleted); review_type in (Proactive, Reactive).
+
+-- 1. Fraud Loss Summary by Type
+select
+  {period_expr} as period,
+  case when c.review_type is null or c.review_type = '' then 'Unspecified' else c.review_type end as review_type,
+  case when c.sub_memo is null or c.sub_memo = '' then 'Unspecified' else c.sub_memo end as fraud_type,
+  count(1) as case_count,
+  sum(cast(c.fraud_loss as double)) as total_fraud_loss,
+  round(avg(cast(c.fraud_loss as double)), 2) as avg_fraud_loss,
+  sum(case when c.case_status = 'Closed' then 1 else 0 end) as closed_cases,
+  sum(case when c.case_status = 'Open' then 1 else 0 end) as open_cases
+from {AF_REVIEW_CASE_TABLE} c
+where {case_snap}
+  and {window}
+  and c.case_status <> 'Deleted'
+group by {period_expr},
+  case when c.review_type is null or c.review_type = '' then 'Unspecified' else c.review_type end,
+  case when c.sub_memo is null or c.sub_memo = '' then 'Unspecified' else c.sub_memo end
+order by total_fraud_loss desc;
+
+-- 2. Loss Borne By
+select
+  {period_expr} as period,
+  case when c.loss_borne_by is null or c.loss_borne_by = '' then 'Unspecified' else c.loss_borne_by end as loss_borne_by,
+  count(1) as case_count,
+  sum(cast(c.fraud_loss as double)) as total_fraud_loss,
+  sum(coalesce(c.disputed_fraud_num, 0)) as disputed_txn_total,
+  sum(case when c.account_restriction = 'Yes' then 1 else 0 end) as cases_with_acct_restriction
+from {AF_REVIEW_CASE_TABLE} c
+where {case_snap}
+  and {window}
+  and c.case_status <> 'Deleted'
+group by {period_expr},
+  case when c.loss_borne_by is null or c.loss_borne_by = '' then 'Unspecified' else c.loss_borne_by end
+order by total_fraud_loss desc;
+"""
+
+
+def build_af_auth_funnel_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    period = business_insights_period(now)
+    start_ms = _date_to_epoch_millis(period.start_date)
+    end_ms = _date_to_epoch_millis(period.end_exclusive)
+    app_snap = _aliased_snapshot_filter("a", AF_APP_ANTI_FRAUD_TABLE, snapshot_pt_date)
+    window = f"cast(a.operationtime as bigint) >= {start_ms} and cast(a.operationtime as bigint) < {end_ms}"
+    header = _af_report_header("Anti-fraud PH - Authentication Funnel / Customer Friction", snapshot_pt_date, period)
+    return f"""{header}
+-- Uses event-level AF app records; auth-step table is not available in current ODS grants.
+
+-- 1. Auth Challenge Volume by Scene
+select
+  a.operationscene as operation_scene,
+  a.subscene as sub_scene,
+  coalesce(nullif(a.extrainfo_authenticationtype, ''), 'Unspecified') as authentication_type,
+  coalesce(nullif(a.extrainfo_challengetype, ''), 'Unspecified') as challenge_type,
+  count(1) as requests,
+  count(distinct a.uid) as distinct_users,
+  count(distinct a.extrainfo_challengeid) as distinct_challenges
+from {AF_APP_ANTI_FRAUD_TABLE} a
+where {app_snap}
+  and {window}
+  and (a.extrainfo_authenticationtype is not null or a.extrainfo_challengeid is not null or a.extrainfo_challengetype is not null)
+group by a.operationscene, a.subscene,
+  coalesce(nullif(a.extrainfo_authenticationtype, ''), 'Unspecified'),
+  coalesce(nullif(a.extrainfo_challengetype, ''), 'Unspecified')
+order by requests desc;
+
+-- 2. Authentication Outcome Distribution
+select
+  a.operationscene as operation_scene,
+  coalesce(nullif(a.extrainfo_authenticationtype, ''), 'Unspecified') as authentication_type,
+  coalesce(nullif(a.identifystatus, ''), nullif(a.status, ''), 'Unspecified') as outcome_status,
+  coalesce(nullif(a.identifyreason, ''), 'Unspecified') as outcome_reason,
+  count(1) as requests,
+  count(distinct a.uid) as distinct_users,
+  round(count(1) / sum(count(1)) over (partition by a.operationscene, coalesce(nullif(a.extrainfo_authenticationtype, ''), 'Unspecified')) * 100, 2) as pct_within_scene_authtype
+from {AF_APP_ANTI_FRAUD_TABLE} a
+where {app_snap}
+  and {window}
+  and (a.extrainfo_authenticationtype is not null or a.extrainfo_challengeid is not null or a.extrainfo_challengetype is not null)
+group by a.operationscene,
+  coalesce(nullif(a.extrainfo_authenticationtype, ''), 'Unspecified'),
+  coalesce(nullif(a.identifystatus, ''), nullif(a.status, ''), 'Unspecified'),
+  coalesce(nullif(a.identifyreason, ''), 'Unspecified')
+order by operation_scene, authentication_type, requests desc;
+"""
+
+
 def _normalize_header(value: Any) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9]+", "_", str(value or "").strip().lower()).strip("_")
     return normalized
@@ -932,6 +1360,12 @@ class BusinessInsightsStore:
             PORTFOLIO_REPAYMENT_REPORT_ID: lambda: build_portfolio_repayment_sql(now=now),
             LIMIT_UTILIZATION_REPORT_ID: lambda: build_limit_utilization_sql(now=now),
             APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID: lambda: build_application_disbursement_funnel_sql(now=now),
+            AF_SCENARIOS_ACTIONS_REPORT_ID: lambda: build_af_scenarios_actions_sql(now=now),
+            AF_RULES_REPORT_ID: lambda: build_af_rules_sql(now=now),
+            AF_FEATURES_REPORT_ID: lambda: build_af_features_sql(now=now),
+            AF_RULE_EFFECTIVENESS_REPORT_ID: lambda: build_af_rule_effectiveness_sql(now=now),
+            AF_FRAUD_LOSS_REPORT_ID: lambda: build_af_fraud_loss_sql(now=now),
+            AF_AUTH_FUNNEL_REPORT_ID: lambda: build_af_auth_funnel_sql(now=now),
         }
         builder = builders.get(report_id)
         if builder is None:
