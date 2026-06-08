@@ -11,11 +11,16 @@ SERVICE="${CLOUD_RUN_SERVICE:-team-portal}"
 REGION="${CLOUD_RUN_REGION:-asia-southeast1}"
 UAT_TAG="${CLOUD_RUN_UAT_TAG:-uat}"
 HOST_ROOT="${TEAM_STACK_HOST_ROOT:-$(recommended_team_stack_root)}"
+# Promotion target source:
+#   uat         (default) - promote the Cloud Run revision tagged "$UAT_TAG"
+#   origin_main           - Live-only: promote origin/main directly, skipping
+#                           Cloud Run/UAT entirely (Live = Mac host serving origin/main)
+PROMOTE_LIVE_TARGET="${PROMOTE_LIVE_TARGET:-uat}"
 GCLOUD_BIN="${GCLOUD_BIN:-$(command -v gcloud || true)}"
 if [[ -z "$GCLOUD_BIN" && -x "$HOME/google-cloud-sdk/bin/gcloud" ]]; then
   GCLOUD_BIN="$HOME/google-cloud-sdk/bin/gcloud"
 fi
-if [[ -z "$GCLOUD_BIN" ]]; then
+if [[ -z "$GCLOUD_BIN" && "$PROMOTE_LIVE_TARGET" != "origin_main" ]]; then
   echo "gcloud is not installed. Install Google Cloud SDK first."
   exit 1
 fi
@@ -33,7 +38,9 @@ CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED="${CLOUD_RUN_DEPLOY_ACCOUNT:-$(read_env_value 
 if [[ -n "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED" ]]; then
   ACCOUNT_ARGS=(--account "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED")
 fi
-require_gcloud_noninteractive_deploy_auth "$GCLOUD_BIN" "$GOOGLE_CLOUD_PROJECT_RESOLVED" "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED"
+if [[ "$PROMOTE_LIVE_TARGET" != "origin_main" ]]; then
+  require_gcloud_noninteractive_deploy_auth "$GCLOUD_BIN" "$GOOGLE_CLOUD_PROJECT_RESOLVED" "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED"
+fi
 
 enforce_release_window_target live
 
@@ -223,22 +230,6 @@ wait_for_healthz_revision() {
   return 1
 }
 
-SERVICE_JSON="$(json_from_gcloud_service)"
-UAT_REVISION="$(printf '%s' "$SERVICE_JSON" | UAT_TAG_VALUE="$UAT_TAG" "$PYTHON_BIN" -c 'import json, os, sys; p=json.load(sys.stdin); tag=os.environ["UAT_TAG_VALUE"]; matches=[t for t in p.get("status", {}).get("traffic", []) if t.get("tag")==tag]; print(matches[0].get("revisionName", "") if matches else "")')"
-UAT_URL="$(printf '%s' "$SERVICE_JSON" | UAT_TAG_VALUE="$UAT_TAG" "$PYTHON_BIN" -c 'import json, os, sys; p=json.load(sys.stdin); tag=os.environ["UAT_TAG_VALUE"]; matches=[t for t in p.get("status", {}).get("traffic", []) if t.get("tag")==tag]; print(matches[0].get("url", "") if matches else "")')"
-if [[ -z "$UAT_REVISION" ]]; then
-  echo "No Cloud Run revision is tagged '$UAT_TAG'. Deploy UAT first."
-  exit 1
-fi
-
-REVISION_JSON="$(json_from_gcloud_revision "$UAT_REVISION")"
-UAT_COMMIT="$(printf '%s' "$REVISION_JSON" | "$PYTHON_BIN" -c 'import json, sys; p=json.load(sys.stdin); env=p.get("spec", {}).get("containers", [{}])[0].get("env", []); values={item.get("name"): item.get("value") for item in env}; print(values.get("TEAM_PORTAL_RELEASE_REVISION", "") or "")')"
-if [[ -z "$UAT_COMMIT" || "$UAT_COMMIT" == *"-dirty-"* || "$UAT_COMMIT" == "unknown" ]]; then
-  echo "UAT revision $UAT_REVISION does not contain a clean TEAM_PORTAL_RELEASE_REVISION."
-  echo "Value: ${UAT_COMMIT:-<missing>}"
-  exit 1
-fi
-
 if [[ ! -d "$HOST_ROOT/.git" ]]; then
   echo "Host workspace is missing or is not a git checkout: $HOST_ROOT"
   exit 1
@@ -246,11 +237,36 @@ fi
 
 git -C "$HOST_ROOT" fetch origin >/dev/null
 ORIGIN_MAIN="$(git -C "$HOST_ROOT" rev-parse origin/main)"
-if [[ "$ORIGIN_MAIN" != "$UAT_COMMIT" ]]; then
-  echo "UAT commit is not the current origin/main. Re-deploy UAT from the latest pushed commit before promoting."
-  echo "UAT commit:  $UAT_COMMIT"
-  echo "origin/main: $ORIGIN_MAIN"
-  exit 1
+
+if [[ "$PROMOTE_LIVE_TARGET" == "origin_main" ]]; then
+  # Live-only: the Mac host serves origin/main directly; no Cloud Run/UAT lookup.
+  UAT_COMMIT="$ORIGIN_MAIN"
+  UAT_REVISION="<live-only: origin/main>"
+  UAT_URL=""
+  echo "Live-only promotion: targeting origin/main $UAT_COMMIT (Cloud Run UAT skipped)."
+else
+  SERVICE_JSON="$(json_from_gcloud_service)"
+  UAT_REVISION="$(printf '%s' "$SERVICE_JSON" | UAT_TAG_VALUE="$UAT_TAG" "$PYTHON_BIN" -c 'import json, os, sys; p=json.load(sys.stdin); tag=os.environ["UAT_TAG_VALUE"]; matches=[t for t in p.get("status", {}).get("traffic", []) if t.get("tag")==tag]; print(matches[0].get("revisionName", "") if matches else "")')"
+  UAT_URL="$(printf '%s' "$SERVICE_JSON" | UAT_TAG_VALUE="$UAT_TAG" "$PYTHON_BIN" -c 'import json, os, sys; p=json.load(sys.stdin); tag=os.environ["UAT_TAG_VALUE"]; matches=[t for t in p.get("status", {}).get("traffic", []) if t.get("tag")==tag]; print(matches[0].get("url", "") if matches else "")')"
+  if [[ -z "$UAT_REVISION" ]]; then
+    echo "No Cloud Run revision is tagged '$UAT_TAG'. Deploy UAT first."
+    exit 1
+  fi
+
+  REVISION_JSON="$(json_from_gcloud_revision "$UAT_REVISION")"
+  UAT_COMMIT="$(printf '%s' "$REVISION_JSON" | "$PYTHON_BIN" -c 'import json, sys; p=json.load(sys.stdin); env=p.get("spec", {}).get("containers", [{}])[0].get("env", []); values={item.get("name"): item.get("value") for item in env}; print(values.get("TEAM_PORTAL_RELEASE_REVISION", "") or "")')"
+  if [[ -z "$UAT_COMMIT" || "$UAT_COMMIT" == *"-dirty-"* || "$UAT_COMMIT" == "unknown" ]]; then
+    echo "UAT revision $UAT_REVISION does not contain a clean TEAM_PORTAL_RELEASE_REVISION."
+    echo "Value: ${UAT_COMMIT:-<missing>}"
+    exit 1
+  fi
+
+  if [[ "$ORIGIN_MAIN" != "$UAT_COMMIT" ]]; then
+    echo "UAT commit is not the current origin/main. Re-deploy UAT from the latest pushed commit before promoting."
+    echo "UAT commit:  $UAT_COMMIT"
+    echo "origin/main: $ORIGIN_MAIN"
+    exit 1
+  fi
 fi
 
 if ! git -C "$HOST_ROOT" diff --quiet --no-ext-diff --exit-code || ! git -C "$HOST_ROOT" diff --cached --quiet --no-ext-diff --exit-code; then
@@ -258,7 +274,11 @@ if ! git -C "$HOST_ROOT" diff --quiet --no-ext-diff --exit-code || ! git -C "$HO
   exit 1
 fi
 
-echo "Promoting Cloud Run UAT tag '$UAT_TAG' to Mac-hosted Live."
+if [[ "$PROMOTE_LIVE_TARGET" == "origin_main" ]]; then
+  echo "Promoting origin/main to Mac-hosted Live (Cloud Run UAT skipped)."
+else
+  echo "Promoting Cloud Run UAT tag '$UAT_TAG' to Mac-hosted Live."
+fi
 echo "UAT revision: $UAT_REVISION"
 echo "UAT URL: ${UAT_URL:-<not reported>}"
 echo "Git commit: $UAT_COMMIT"

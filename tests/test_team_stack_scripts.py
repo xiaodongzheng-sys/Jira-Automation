@@ -854,6 +854,59 @@ exit 0
             self.assertNotEqual(completed.returncode, 0)
             self.assertIn("UAT commit is not the current origin/main", completed.stdout)
 
+    def test_promote_live_only_targets_origin_main_without_gcloud(self):
+        # Live-only mode (PROMOTE_LIVE_TARGET=origin_main) must promote origin/main
+        # directly, never touching Cloud Run/UAT and never invoking gcloud.
+        promote_script = PROJECT_ROOT / "scripts/promote_uat_to_live.sh"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            origin_path = temp_path / "origin"
+            host_path = temp_path / "host"
+            seed_path = temp_path / "seed"
+            subprocess.run(["git", "init", "-b", "main", str(seed_path)], check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=seed_path, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=seed_path, check=True)
+            (seed_path / "README.md").write_text("first\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=seed_path, check=True)
+            subprocess.run(["git", "commit", "-m", "first"], cwd=seed_path, check=True, capture_output=True)
+            subprocess.run(["git", "clone", "--bare", str(seed_path), str(origin_path)], check=True, capture_output=True)
+            subprocess.run(["git", "clone", str(origin_path), str(host_path)], check=True, capture_output=True)
+
+            completed = subprocess.run(
+                ["bash", str(promote_script)],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "PYTHON_BIN": sys.executable,
+                    "TEAM_STACK_HOST_ROOT": str(host_path),
+                    "PROMOTE_LIVE_TARGET": "origin_main",
+                    "PROMOTE_UAT_DRY_RUN": "1",
+                    # Point gcloud at a path that does not exist: live-only must
+                    # never invoke it, so the run still succeeds.
+                    "GCLOUD_BIN": str(temp_path / "no-such-gcloud"),
+                },
+                cwd=PROJECT_ROOT,
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stdout + completed.stderr)
+            self.assertIn("Live-only promotion: targeting origin/main", completed.stdout)
+            self.assertIn("Promoting origin/main to Mac-hosted Live", completed.stdout)
+            self.assertNotIn("Deploy UAT first", completed.stdout)
+            self.assertNotIn("UAT commit is not the current origin/main", completed.stdout)
+
+    def test_release_live_only_requires_pushed_commit_and_skips_uat(self):
+        # The live-only wrapper refuses to deploy a commit that is not on
+        # origin/main, and its help text documents that UAT is skipped.
+        live_only_script = PROJECT_ROOT / "scripts/release_live_only.sh"
+        self.assertTrue(live_only_script.exists())
+        text = live_only_script.read_text(encoding="utf-8")
+        self.assertIn("PROMOTE_LIVE_TARGET=origin_main", text)
+        self.assertNotIn("release_uat_fast.sh", text)
+        self.assertIn("run_system_full_test_gate.py", text)
+
     def test_cloud_run_default_deploy_still_uses_source(self):
         deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run.sh"
 
