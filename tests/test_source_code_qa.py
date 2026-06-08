@@ -130,6 +130,48 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn('data-source-question rows="2"', html)
         self.assertLess(html.index("data-source-attachments"), html.index("data-source-question"))
         self.assertLess(html.index("data-source-question"), html.index("data-source-attachment-upload"))
+
+    def test_source_code_qa_view_panels_are_siblings_not_nested(self):
+        # Regression: the chat <section> was missing a closing tag, nesting the
+        # download/effort/admin panels inside it. They then inherited the chat
+        # panel's display:none and never showed when their tab was selected.
+        from html.parser import HTMLParser
+
+        with self.app.test_client() as client:
+            self._login(client, "xiaodong.zheng@npt.sg")
+            response = client.get("/source-code-qa", follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+
+        class _PanelNesting(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self._section_stack = []  # one bool per open <section>: is it a view panel?
+                self.nested = []
+                self.seen = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag != "section":
+                    return
+                panel = dict(attrs).get("data-source-view-panel")
+                if panel is not None:
+                    self.seen.append(panel)
+                    if any(self._section_stack):
+                        self.nested.append(panel)
+                self._section_stack.append(panel is not None)
+
+            def handle_endtag(self, tag):
+                if tag == "section" and self._section_stack:
+                    self._section_stack.pop()
+
+        parser = _PanelNesting()
+        parser.feed(html)
+        self.assertEqual(
+            sorted(parser.seen), ["admin", "chat", "download", "effort"]
+        )
+        self.assertEqual(
+            parser.nested, [], f"view panels must not be nested inside each other: {parser.nested}"
+        )
         self.assertLess(html.index("data-source-attachment-upload"), html.index("data-source-query"))
 
     def test_non_npt_user_is_blocked_from_page_and_api(self):
