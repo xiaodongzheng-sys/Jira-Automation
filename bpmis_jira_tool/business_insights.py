@@ -643,13 +643,12 @@ order by a.type, a.code;
 
 -- 4. Scenario Action Auth Flow
 select
-  f.scene as l1_scene_code,
   s.name as l1_scene_name,
-  f.sub_scene as l2_sub_scene_code,
+  s.enum_name as l1_enum_name,
   ss.name as l2_sub_scene_name,
-  f.action as action_code,
+  ss.enum_name as l2_enum_name,
   a.name as action_name,
-  case a.type when 1 then 'Business' when 2 then 'Authentication (Auth Step)' else concat('type_', cast(a.type as string)) end as action_type,
+  a.enum_name as action_enum_name,
   f.default_step,
   f.challenge1_step,
   f.challenge2_step,

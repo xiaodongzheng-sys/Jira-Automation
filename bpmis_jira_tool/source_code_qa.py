@@ -76,8 +76,10 @@ from bpmis_jira_tool.source_code_qa_codex_prompts import (
     codex_system_instruction,
 )
 from bpmis_jira_tool.source_code_qa_llm_providers import (
+    ClaudeCliBridgeSourceCodeQALLMProvider,
     CodexCliBridgeSourceCodeQALLMProvider,
     LLM_PROVIDER_ALLOWED_QUERY_CHOICES,
+    LLM_PROVIDER_CLAUDE_CLI_BRIDGE,
     LLM_PROVIDER_CODEX_CLI_BRIDGE,
     SourceCodeQALLMProvider,
 )

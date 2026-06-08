@@ -434,6 +434,69 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
         for section in sections:
             self.assertTrue(section.query.strip())
 
+    def test_scenario_flow_section_exposes_enum_name_columns(self):
+        sql = build_af_scenarios_actions_sql(snapshot_pt_date="2026-05-25", now=FIXED_NOW)
+        flow_section = next(
+            section for section in extract_sql_sections(sql) if section.sheet_name == "Scenario Action Auth Flow"
+        )
+        for column in (
+            "l1_scene_name",
+            "l1_enum_name",
+            "l2_sub_scene_name",
+            "l2_enum_name",
+            "action_name",
+            "action_enum_name",
+            "default_step",
+            "challenge5_step",
+        ):
+            self.assertIn(column, flow_section.query)
+
+    def test_visualization_renders_only_searchable_flow_table(self):
+        flow_headers = [
+            "l1_scene_name",
+            "l1_enum_name",
+            "l2_sub_scene_name",
+            "l2_enum_name",
+            "action_name",
+            "action_enum_name",
+            "default_step",
+            "challenge1_step",
+            "challenge2_step",
+            "challenge3_step",
+            "challenge4_step",
+            "challenge5_step",
+        ]
+        flow_rows = [
+            ["Login", "LOGIN", "Password Login", "PWD_LOGIN", "OTP", "SEND_OTP", "step_a", "step_b", "", "", "", ""],
+            ["Transfer", "TRANSFER", "P2P", "P2P_TRANSFER", "Face", "FACE_CHECK", "step_c", "", "", "", "", ""],
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "visualization.html"
+            write_visualization(
+                output_path,
+                report_title="Anti-fraud PH - L1+L2 Scenarios, Actions & Auth Steps",
+                snapshot_pt_date="2026-05-25",
+                sheets=[
+                    ("L1 Scenarios", ["l1_scene_code", "l1_scene_name"], [["100", "Login"]]),
+                    ("Scenario Action Auth Flow", flow_headers, flow_rows),
+                ],
+                report_id=AF_SCENARIOS_ACTIONS_REPORT_ID,
+            )
+            html = output_path.read_text(encoding="utf-8")
+
+        # Only the flow table is rendered, with a search box.
+        self.assertIn("data-flow-table", html)
+        self.assertIn("data-search", html)
+        self.assertIn("Search scene name or step", html)
+        for header in flow_headers:
+            self.assertIn(f"<th>{header}</th>", html)
+        self.assertIn("Password Login", html)
+        self.assertIn("P2P_TRANSFER", html)
+        # The other sheets and the generic dashboard chrome are not rendered.
+        self.assertNotIn("L1 Scenarios", html)
+        self.assertNotIn("data-product-filter", html)
+        self.assertNotIn("Data Quality Notes", html)
+
     def test_generator_report_builders_include_scenarios_actions(self):
         self.assertIn(AF_SCENARIOS_ACTIONS_REPORT_ID, REPORT_BUILDERS)
         title, builder = REPORT_BUILDERS[AF_SCENARIOS_ACTIONS_REPORT_ID]

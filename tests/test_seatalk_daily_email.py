@@ -69,7 +69,13 @@ from bpmis_jira_tool.seatalk_daily_email import (
     _build_unanswered_seatalk_question_hints,
     _daily_brief_user_prompt,
 )
-from bpmis_jira_tool.seatalk_dashboard import SEATALK_INSIGHTS_TIMEZONE
+import bpmis_jira_tool.seatalk_dashboard as seatalk_dashboard
+from bpmis_jira_tool.seatalk_dashboard import SEATALK_INSIGHTS_TIMEZONE, SeaTalkDashboardService
+from bpmis_jira_tool.source_code_qa_llm_providers import (
+    LLM_PROVIDER_CLAUDE_CLI_BRIDGE,
+    LLM_PROVIDER_CODEX_CLI_BRIDGE,
+)
+from bpmis_jira_tool.source_code_qa_types import LLMGenerateResult
 from bpmis_jira_tool.trello_daily_summary import (
     TrelloDailySummaryClient,
     TrelloDailySummaryStore,
@@ -159,6 +165,85 @@ class SeaTalkDailyEmailCodexRoutingTests(unittest.TestCase):
             service = build_seatalk_service(Settings.from_env(), data_root=Path(temp_dir))
 
         self.assertEqual(service.codex_model, "gpt-5.5")
+
+    def test_build_seatalk_service_defaults_to_codex_provider(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"TEAM_PORTAL_DATA_DIR": temp_dir},
+            clear=True,
+        ), patch("bpmis_jira_tool.config.find_dotenv", return_value=""):
+            service = build_seatalk_service(Settings.from_env(), data_root=Path(temp_dir))
+
+        self.assertEqual(service.insights_llm_provider, LLM_PROVIDER_CODEX_CLI_BRIDGE)
+        self.assertIsNone(service.claude_model)
+
+    def test_build_seatalk_service_uses_claude_when_env_set(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "DAILY_BRIEF_INSIGHTS_LLM_PROVIDER": "claude_cli_bridge",
+                "DAILY_BRIEF_CLAUDE_MODEL": "claude-opus-4-8",
+            },
+            clear=True,
+        ), patch("bpmis_jira_tool.config.find_dotenv", return_value=""):
+            service = build_seatalk_service(Settings.from_env(), data_root=Path(temp_dir))
+
+        self.assertEqual(service.insights_llm_provider, LLM_PROVIDER_CLAUDE_CLI_BRIDGE)
+        self.assertEqual(service.claude_model, "claude-opus-4-8")
+
+
+class SeaTalkInsightsProviderRoutingTests(unittest.TestCase):
+    def _service(self, provider: str) -> SeaTalkDashboardService:
+        return SeaTalkDashboardService(
+            owner_email="owner@example.com",
+            codex_workspace_root="/tmp",
+            insights_llm_provider=provider,
+            claude_model="claude-opus-4-8",
+        )
+
+    def test_claude_provider_used_when_selected(self):
+        service = self._service(LLM_PROVIDER_CLAUDE_CLI_BRIDGE)
+        claude_result = LLMGenerateResult(payload={"text": "{}"}, usage={}, model="claude-opus-4-8", attempts=1)
+        with patch.object(seatalk_dashboard, "ClaudeCliBridgeSourceCodeQALLMProvider") as ClaudeProvider, patch.object(
+            seatalk_dashboard, "CodexCliBridgeSourceCodeQALLMProvider"
+        ) as CodexProvider, patch.object(service, "_parse_insights_response", side_effect=lambda text: {"parsed": text}):
+            ClaudeProvider.return_value.generate.return_value = claude_result
+            ClaudeProvider.return_value.extract_text.return_value = "{}"
+            _, parsed = service._run_codex_insights_prompt(prompt="hi", system_prompt="sys")
+
+        self.assertEqual(parsed, {"parsed": "{}"})
+        ClaudeProvider.return_value.generate.assert_called_once()
+        CodexProvider.assert_not_called()
+
+    def test_falls_back_to_codex_when_claude_fails(self):
+        service = self._service(LLM_PROVIDER_CLAUDE_CLI_BRIDGE)
+        codex_result = LLMGenerateResult(payload={"text": "CODEX"}, usage={}, model="gpt-5.5", attempts=1)
+        with patch.object(seatalk_dashboard, "ClaudeCliBridgeSourceCodeQALLMProvider") as ClaudeProvider, patch.object(
+            seatalk_dashboard, "CodexCliBridgeSourceCodeQALLMProvider"
+        ) as CodexProvider, patch.object(service, "_parse_insights_response", side_effect=lambda text: text):
+            ClaudeProvider.return_value.generate.side_effect = ToolError("Not logged in")
+            CodexProvider.return_value.generate.return_value = codex_result
+            CodexProvider.return_value.extract_text.return_value = "CODEX"
+            _, parsed = service._run_codex_insights_prompt(prompt="hi", system_prompt="sys")
+
+        self.assertEqual(parsed, "CODEX")
+        ClaudeProvider.return_value.generate.assert_called_once()
+        CodexProvider.return_value.generate.assert_called_once()
+
+    def test_codex_provider_used_by_default(self):
+        service = self._service("")
+        codex_result = LLMGenerateResult(payload={"text": "CODEX"}, usage={}, model="gpt-5.5", attempts=1)
+        with patch.object(seatalk_dashboard, "ClaudeCliBridgeSourceCodeQALLMProvider") as ClaudeProvider, patch.object(
+            seatalk_dashboard, "CodexCliBridgeSourceCodeQALLMProvider"
+        ) as CodexProvider, patch.object(service, "_parse_insights_response", side_effect=lambda text: text):
+            CodexProvider.return_value.generate.return_value = codex_result
+            CodexProvider.return_value.extract_text.return_value = "CODEX"
+            _, parsed = service._run_codex_insights_prompt(prompt="hi", system_prompt="sys")
+
+        self.assertEqual(parsed, "CODEX")
+        ClaudeProvider.assert_not_called()
+        CodexProvider.return_value.generate.assert_called_once()
 
 
 class SeaTalkDailyEmailTests(unittest.TestCase):

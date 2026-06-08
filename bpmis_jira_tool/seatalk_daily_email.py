@@ -389,6 +389,9 @@ def build_seatalk_service(settings: Settings, *, data_root: Path) -> SeaTalkDash
         ),
         codex_timeout_seconds=settings.source_code_qa_codex_timeout_seconds,
         codex_concurrency=settings.source_code_qa_codex_concurrency,
+        insights_llm_provider=str(os.getenv("DAILY_BRIEF_INSIGHTS_LLM_PROVIDER") or "").strip(),
+        claude_model=str(os.getenv("DAILY_BRIEF_CLAUDE_MODEL") or "").strip(),
+        claude_binary=str(os.getenv("DAILY_BRIEF_CLAUDE_BINARY") or "").strip(),
         name_overrides_path=seatalk_name_overrides_path(data_root=data_root),
         daily_cache_dir=data_root / "seatalk" / "cache",
     )

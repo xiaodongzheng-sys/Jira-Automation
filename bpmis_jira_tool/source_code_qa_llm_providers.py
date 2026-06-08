@@ -33,7 +33,21 @@ from bpmis_jira_tool.source_code_qa_types import (
 LOGGER = logging.getLogger(__name__)
 
 LLM_PROVIDER_CODEX_CLI_BRIDGE = "codex_cli_bridge"
+LLM_PROVIDER_CLAUDE_CLI_BRIDGE = "claude_cli_bridge"
 LLM_PROVIDER_ALLOWED_QUERY_CHOICES = {LLM_PROVIDER_CODEX_CLI_BRIDGE}
+DEFAULT_CLAUDE_CLI_MODEL = "claude-opus-4-8"
+CLAUDE_CLI_DISALLOWED_TOOLS = (
+    "Bash",
+    "Read",
+    "Edit",
+    "Write",
+    "NotebookEdit",
+    "WebFetch",
+    "WebSearch",
+    "Glob",
+    "Grep",
+    "Task",
+)
 
 
 class SourceCodeQALLMProvider:
@@ -891,6 +905,262 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
             index = summarized.index("--output-last-message")
             if index + 1 < len(summarized):
                 summarized[index + 1] = "<output-file>"
+        return summarized
+
+
+class ClaudeCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
+    """Generate insights by driving the local Claude Code CLI (`claude -p`).
+
+    Mirrors the Codex bridge contract: `generate` accepts the same Gemini-shaped
+    payload and returns an `LLMGenerateResult` whose `payload["text"]` holds the
+    model's answer. Used by the daily brief so it can run on Opus 4.8 instead of
+    the spend-capped Codex backend.
+    """
+
+    name = LLM_PROVIDER_CLAUDE_CLI_BRIDGE
+    _semaphore_lock = threading.Lock()
+    _run_semaphore = threading.BoundedSemaphore(1)
+    _semaphore_limit = 1
+
+    def __init__(
+        self,
+        *,
+        workspace_root: Path,
+        timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS,
+        concurrency_limit: int = 1,
+        model: str | None = None,
+        claude_binary: str | None = None,
+    ) -> None:
+        self.workspace_root = Path(workspace_root)
+        self.timeout_seconds = max(10, int(timeout_seconds or DEFAULT_LLM_TIMEOUT_SECONDS))
+        self.concurrency_limit = max(1, min(int(concurrency_limit or 1), 4))
+        self.model = str(model or os.getenv("DAILY_BRIEF_CLAUDE_MODEL") or DEFAULT_CLAUDE_CLI_MODEL).strip() or DEFAULT_CLAUDE_CLI_MODEL
+        self.claude_binary = str(claude_binary or os.getenv("DAILY_BRIEF_CLAUDE_BINARY") or "claude").strip() or "claude"
+
+    @classmethod
+    def _semaphore_for_limit(cls, limit: int) -> threading.BoundedSemaphore:
+        normalized_limit = max(1, min(int(limit or 1), 4))
+        with cls._semaphore_lock:
+            if cls._semaphore_limit != normalized_limit:
+                cls._run_semaphore = threading.BoundedSemaphore(normalized_limit)
+                cls._semaphore_limit = normalized_limit
+            return cls._run_semaphore
+
+    def ready(self) -> bool:
+        return bool(shutil.which(self.claude_binary))
+
+    def generate(
+        self,
+        *,
+        payload: dict[str, Any],
+        primary_model: str,
+        fallback_model: str,
+    ) -> LLMGenerateResult:
+        del fallback_model
+        if not self.ready():
+            raise ToolError(
+                "Claude Code CLI is unavailable. Install it or set DAILY_BRIEF_CLAUDE_BINARY to the `claude` path."
+            )
+        system_text, user_text = self._system_and_user_from_payload(payload)
+        model = str(primary_model or self.model).strip() or self.model
+        prompt_mode = str(payload.get("codex_prompt_mode") or "").strip()
+        timeout_seconds = max(10, int(payload.get("_timeout_seconds") or self.timeout_seconds))
+        command = self._build_command(model=model, system_text=system_text)
+        started_at = time.time()
+        queue_started = time.time()
+        semaphore = self._semaphore_for_limit(self.concurrency_limit)
+        semaphore.acquire()
+        queue_wait_ms = int((time.time() - queue_started) * 1000)
+        try:
+            with tempfile.TemporaryDirectory(prefix="claude-brief-") as neutral_cwd:
+                try:
+                    result = subprocess.run(
+                        command,
+                        input=user_text,
+                        cwd=neutral_cwd,
+                        text=True,
+                        capture_output=True,
+                        env=self._claude_env(),
+                        timeout=timeout_seconds,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired as error:
+                    self._record_ledger(payload, user_text, prompt_mode, model, "timeout", started_at, queue_wait_ms, error_category="timeout", error=str(error))
+                    raise ToolError(f"Claude Code CLI timed out after {timeout_seconds}s.") from error
+                except OSError as error:
+                    self._record_ledger(payload, user_text, prompt_mode, model, "error", started_at, queue_wait_ms, error_category="os_error", error=str(error))
+                    raise ToolError(f"Claude Code CLI failed to launch. {error}") from error
+        finally:
+            semaphore.release()
+        if result.returncode != 0:
+            detail = self._sanitize(f"{result.stderr}\n{result.stdout}")
+            self._record_ledger(payload, user_text, prompt_mode, model, "error", started_at, queue_wait_ms, error_category="nonzero_exit", error=detail[:500])
+            raise ToolError(f"Claude Code CLI exited with {result.returncode}. {detail[:500]}")
+        answer = self._extract_result_text(result.stdout, payload, user_text, prompt_mode, model, started_at, queue_wait_ms)
+        if not answer:
+            self._record_ledger(payload, user_text, prompt_mode, model, "error", started_at, queue_wait_ms, error_category="empty_answer", error="Claude Code CLI returned no readable answer.")
+            raise ToolError("Claude Code CLI returned no readable answer.")
+        latency_ms = int((time.time() - started_at) * 1000)
+        self._record_ledger(payload, user_text, prompt_mode, model, "ok", started_at, queue_wait_ms, latency_ms=latency_ms)
+        return LLMGenerateResult(
+            payload={
+                "text": answer,
+                "finish_reason": "claude_cli_completed",
+                "claude_cli_model": model,
+            },
+            usage={},
+            model=model,
+            attempts=1,
+            latency_ms=latency_ms,
+            attempt_log=(
+                {
+                    "model": model,
+                    "attempt": 1,
+                    "status": "ok",
+                    "retryable": False,
+                    "latency_ms": latency_ms,
+                    "provider": self.name,
+                    "exit_code": result.returncode,
+                    "timeout": False,
+                    "workspace_root": str(self.workspace_root),
+                    "prompt_mode": prompt_mode,
+                    "concurrency_limit": self.concurrency_limit,
+                    "queue_wait_ms": queue_wait_ms,
+                    "command": self._command_summary(command),
+                },
+            ),
+        )
+
+    def extract_text(self, payload: dict[str, Any]) -> str:
+        text = str(payload.get("text") or "").strip()
+        if text:
+            return text
+        raise ToolError("Claude Code CLI returned no readable answer.")
+
+    def public_config(self) -> dict[str, Any]:
+        return {
+            "provider": self.name,
+            "ready": self.ready(),
+            "model": self.model,
+            "workspace_root": str(self.workspace_root),
+            "runtime": {"timeout_seconds": self.timeout_seconds, "concurrency": self.concurrency_limit},
+        }
+
+    def _build_command(self, *, model: str, system_text: str) -> list[str]:
+        command = [
+            self.claude_binary,
+            "-p",
+            "--model",
+            model,
+            "--output-format",
+            "json",
+            "--strict-mcp-config",
+            "--setting-sources",
+            "",
+        ]
+        if system_text:
+            command.extend(["--system-prompt", system_text])
+        command.append("--disallowedTools")
+        command.extend(CLAUDE_CLI_DISALLOWED_TOOLS)
+        return command
+
+    def _claude_env(self) -> dict[str, str]:
+        return dict(os.environ)
+
+    def _extract_result_text(
+        self,
+        stdout: str,
+        payload: dict[str, Any],
+        user_text: str,
+        prompt_mode: str,
+        model: str,
+        started_at: float,
+        queue_wait_ms: int,
+    ) -> str:
+        text = str(stdout or "").strip()
+        if not text:
+            return ""
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            # Non-JSON output (e.g. --output-format text); treat the whole stream as the answer.
+            return text
+        if not isinstance(data, dict):
+            return text
+        if data.get("is_error"):
+            detail = str(data.get("result") or data.get("error") or "Claude Code CLI error").strip()
+            self._record_ledger(payload, user_text, prompt_mode, model, "error", started_at, queue_wait_ms, error_category="api_error_payload", error=detail[:500])
+            raise ToolError(f"Claude Code CLI returned an error: {detail[:300]}")
+        result = data.get("result")
+        return result.strip() if isinstance(result, str) else ""
+
+    def _record_ledger(
+        self,
+        payload: dict[str, Any],
+        prompt: str,
+        prompt_mode: str,
+        model: str,
+        status: str,
+        started_at: float,
+        queue_wait_ms: int,
+        *,
+        latency_ms: int | None = None,
+        error_category: str = "",
+        error: str = "",
+    ) -> None:
+        flow = str(payload.get("_llm_ledger_flow") or infer_llm_flow(prompt_mode))
+        route = str(payload.get("_llm_ledger_route") or "")
+        record_llm_call(
+            provider=self.name,
+            flow=flow,
+            prompt_mode=prompt_mode,
+            route=route,
+            model_id=model,
+            reasoning_effort="",
+            status=status,
+            latency_ms=int(latency_ms if latency_ms is not None else (time.time() - started_at) * 1000),
+            estimated_prompt_tokens=estimate_prompt_tokens(prompt, payload.get("_codex_estimated_prompt_tokens")),
+            prompt_chars=len(prompt),
+            prompt_bytes=len(prompt.encode("utf-8")),
+            prompt_sha256=prompt_sha256(prompt),
+            error_category=error_category,
+            error=error,
+            command_mode="claude_cli",
+            queue_wait_ms=queue_wait_ms,
+            attempt_count=1,
+        )
+
+    @staticmethod
+    def _system_and_user_from_payload(payload: dict[str, Any]) -> tuple[str, str]:
+        system_text = "\n".join(
+            str(part.get("text") or "").strip()
+            for part in (payload.get("systemInstruction") or {}).get("parts") or []
+            if str(part.get("text") or "").strip()
+        )
+        user_parts: list[str] = []
+        for content in payload.get("contents") or []:
+            for part in content.get("parts") or []:
+                text = str(part.get("text") or "").strip()
+                if text:
+                    user_parts.append(text)
+        return system_text.strip(), "\n\n".join(user_parts).strip()
+
+    @staticmethod
+    def _sanitize(output: str) -> str:
+        return re.sub(r"\s+", " ", str(output or "").strip())
+
+    @staticmethod
+    def _command_summary(command: list[str]) -> list[str]:
+        summarized: list[str] = []
+        skip_next = False
+        for index, token in enumerate(command):
+            if skip_next:
+                summarized.append("<system-prompt>")
+                skip_next = False
+                continue
+            summarized.append(token)
+            if token == "--system-prompt":
+                skip_next = True
         return summarized
 
 

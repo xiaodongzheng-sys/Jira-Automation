@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 from dataclasses import dataclass
@@ -15,8 +16,11 @@ from zoneinfo import ZoneInfo
 from bpmis_jira_tool.codex_model_router import CODEX_ROUTE_CHEAP, resolve_codex_model, resolve_codex_reasoning_effort
 from bpmis_jira_tool.errors import ConfigError, ToolError
 from bpmis_jira_tool.source_code_qa import (
+    ClaudeCliBridgeSourceCodeQALLMProvider,
     CodexCliBridgeSourceCodeQALLMProvider,
     DEFAULT_CODEX_TIMEOUT_SECONDS,
+    LLM_PROVIDER_CLAUDE_CLI_BRIDGE,
+    LLM_PROVIDER_CODEX_CLI_BRIDGE,
 )
 
 
@@ -27,6 +31,7 @@ SEATALK_DEFAULT_DATA_DIR = "~/Library/Application Support/SeaTalk"
 SEATALK_INSIGHTS_PROMPT_MODE = "seatalk_7_day_insights_v4"
 SEATALK_NAME_MAPPINGS_CANDIDATE_VERSION = "v3_auto_mappings"
 SEATALK_INSIGHTS_TIMEZONE = ZoneInfo("Asia/Singapore")
+LOGGER = logging.getLogger(__name__)
 SEATALK_INSIGHTS_HISTORY_MAX_CHARS = 90_000
 SEATALK_INSIGHTS_TODO_HISTORY_MAX_CHARS = 45_000
 SEATALK_INSIGHTS_SIGNAL_MAX_CHARS = 60_000
@@ -83,6 +88,9 @@ class SeaTalkDashboardService:
         codex_timeout_seconds: int = DEFAULT_CODEX_TIMEOUT_SECONDS,
         codex_concurrency: int = 1,
         codex_binary: str | None = None,
+        insights_llm_provider: str | None = None,
+        claude_model: str | None = None,
+        claude_binary: str | None = None,
         name_overrides_path: str | Path | None = None,
         daily_cache_dir: str | Path | None = None,
         command_runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
@@ -99,6 +107,11 @@ class SeaTalkDashboardService:
         self.codex_timeout_seconds = max(10, int(codex_timeout_seconds or DEFAULT_CODEX_TIMEOUT_SECONDS))
         self.codex_concurrency = max(1, min(int(codex_concurrency or 1), 4))
         self.codex_binary = str(codex_binary or os.getenv("SOURCE_CODE_QA_CODEX_BINARY") or "codex").strip() or "codex"
+        self.insights_llm_provider = (
+            str(insights_llm_provider or "").strip().lower() or LLM_PROVIDER_CODEX_CLI_BRIDGE
+        )
+        self.claude_model = str(claude_model or "").strip() or None
+        self.claude_binary = str(claude_binary or "").strip() or None
         self.name_overrides_path = Path(name_overrides_path).expanduser() if name_overrides_path else None
         self.daily_cache_dir = Path(daily_cache_dir).expanduser() if daily_cache_dir else None
         self._command_runner = command_runner
@@ -432,13 +445,6 @@ class SeaTalkDashboardService:
         return result.stdout
 
     def _run_codex_insights_prompt(self, *, prompt: str, system_prompt: str | None = None):
-        provider = CodexCliBridgeSourceCodeQALLMProvider(
-            workspace_root=self.codex_workspace_root,
-            timeout_seconds=self.codex_timeout_seconds,
-            concurrency_limit=self.codex_concurrency,
-            session_mode="ephemeral",
-            codex_binary=self.codex_binary,
-        )
         effective_system_prompt = system_prompt or self._insights_system_prompt()
         estimated_prompt_tokens = max(1, (len(str(prompt or "")) + len(str(effective_system_prompt or "")) + 3) // 4)
         prompt_payload = {
@@ -457,6 +463,37 @@ class SeaTalkDashboardService:
                 else "not_needed"
             ),
         }
+        # Daily-brief instances may run insights on the local Claude Code CLI (Opus 4.8)
+        # instead of the spend-capped Codex backend. On any Claude failure (e.g. CLI not
+        # logged in) fall back to Codex so the brief still degrades gracefully.
+        if self.insights_llm_provider == LLM_PROVIDER_CLAUDE_CLI_BRIDGE:
+            try:
+                claude_provider = ClaudeCliBridgeSourceCodeQALLMProvider(
+                    workspace_root=self.codex_workspace_root,
+                    timeout_seconds=self.codex_timeout_seconds,
+                    concurrency_limit=self.codex_concurrency,
+                    model=self.claude_model,
+                    claude_binary=self.claude_binary,
+                )
+                result = claude_provider.generate(
+                    payload=prompt_payload,
+                    primary_model=self.claude_model or "",
+                    fallback_model=self.claude_model or "",
+                )
+                text = claude_provider.extract_text(result.payload)
+                return result, self._parse_insights_response(text)
+            except ToolError as error:
+                LOGGER.warning(
+                    "seatalk_insights_claude_cli_fallback_to_codex %s",
+                    json.dumps({"error": str(error)[:300]}, ensure_ascii=False, sort_keys=True),
+                )
+        provider = CodexCliBridgeSourceCodeQALLMProvider(
+            workspace_root=self.codex_workspace_root,
+            timeout_seconds=self.codex_timeout_seconds,
+            concurrency_limit=self.codex_concurrency,
+            session_mode="ephemeral",
+            codex_binary=self.codex_binary,
+        )
         result = provider.generate(
             payload=prompt_payload,
             primary_model=self.codex_model,

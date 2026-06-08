@@ -1102,13 +1102,104 @@ def _business_insights(report_title: str, lookup: dict[str, tuple[list[str], lis
     return _insights_panel(insights)
 
 
+def _scenario_auth_flow_document(
+    report_title: str,
+    snapshot_pt_date: str,
+    sheets: list[tuple[str, list[str], list[list[Any]]]],
+) -> str:
+    lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
+    flow = lookup.get("Scenario Action Auth Flow")
+    if flow is not None:
+        headers, rows = flow
+    elif sheets:
+        _name, headers, rows = sheets[-1]
+    else:
+        headers, rows = [], []
+    header_html = "".join(f"<th>{html.escape(str(header))}</th>" for header in headers)
+    body_rows = []
+    for row in rows:
+        cells = "".join(
+            f"<td>{html.escape(str(row[index] if index < len(row) else ''))}</td>"
+            for index in range(len(headers))
+        )
+        body_rows.append(f"<tr>{cells}</tr>")
+    table_html = (
+        f'<div class="table-wrap"><table data-flow-table><thead><tr>{header_html}</tr></thead>'
+        f'<tbody>{"".join(body_rows)}</tbody></table></div>'
+        if headers
+        else '<p class="empty">No scenario flow rows were returned.</p>'
+    )
+    generated_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+    row_count = len(rows)
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(report_title)} Visualization</title>
+<style>
+:root{{--ink:#182230;--muted:#667085;--line:#d9e2ec;--bg:#f5f7fb;--blue:#1769e0;}}
+*{{box-sizing:border-box;}}
+body{{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}}
+header{{background:linear-gradient(135deg,#102a43,#173b5f);color:#fff;padding:30px 38px;}}
+header h1{{margin:0 0 8px;font-size:28px;overflow-wrap:anywhere;}} header p{{margin:0;color:#dbeafe;}}
+main{{padding:24px 34px 38px;}}
+.panel{{background:#fff;border:1px solid var(--line);border-radius:8px;padding:18px;box-shadow:0 1px 2px rgba(16,42,67,.06);}}
+h2{{margin:0 0 14px;font-size:18px;}}
+.search-bar{{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap;}}
+.search-bar input{{flex:1;min-width:240px;height:40px;border:1px solid #cbd5e1;border-radius:6px;padding:0 12px;font-size:14px;}}
+.search-bar .count{{color:var(--muted);font-size:13px;white-space:nowrap;}}
+.table-wrap{{overflow:auto;border:1px solid #edf1f7;border-radius:6px;max-height:74vh;}}
+table{{width:100%;border-collapse:collapse;font-size:13px;}}
+th,td{{border-bottom:1px solid #edf1f7;padding:8px 10px;text-align:left;white-space:nowrap;vertical-align:top;}}
+th{{background:#f1f6ff;font-weight:700;color:#344054;position:sticky;top:0;}}
+tr.no-match{{display:none;}}
+.empty{{padding:18px;color:var(--muted);}}
+</style></head><body>
+<header><h1>{html.escape(report_title)}</h1><p>Snapshot {html.escape(snapshot_pt_date)}. Generated {generated_at} UTC from Data Workbench output.</p></header>
+<main><section class="panel">
+<h2>Scenario Action Auth Flow</h2>
+<div class="search-bar">
+<input type="search" data-search placeholder="Search scene name or step…" aria-label="Search scene name or step">
+<span class="count" data-count>{row_count} of {row_count} rows</span>
+</div>
+{table_html}
+</section></main>
+<script>
+(() => {{
+  const input = document.querySelector("[data-search]");
+  const counter = document.querySelector("[data-count]");
+  const rows = Array.from(document.querySelectorAll("[data-flow-table] tbody tr"));
+  const total = rows.length;
+  rows.forEach((row) => {{ row.dataset.text = row.textContent.toLowerCase(); }});
+  const apply = () => {{
+    const query = (input?.value || "").trim().toLowerCase();
+    let visible = 0;
+    rows.forEach((row) => {{
+      const match = !query || row.dataset.text.includes(query);
+      row.classList.toggle("no-match", !match);
+      if (match) visible += 1;
+    }});
+    if (counter) counter.textContent = `${{visible}} of ${{total}} rows`;
+  }};
+  input?.addEventListener("input", apply);
+  apply();
+}})();
+</script>
+</body></html>"""
+
+
 def write_visualization(
     path: Path,
     *,
     report_title: str,
     snapshot_pt_date: str,
     sheets: list[tuple[str, list[str], list[list[Any]]]],
+    report_id: str = "",
 ) -> None:
+    if report_id == AF_SCENARIOS_ACTIONS_REPORT_ID:
+        path.write_text(
+            _scenario_auth_flow_document(report_title, snapshot_pt_date, sheets),
+            encoding="utf-8",
+        )
+        return
     lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
     sections: list[str] = []
     product_options = _product_filter_options(sheets)
@@ -1382,6 +1473,7 @@ def refresh_existing_visualizations(portal_data_dir: Path, *, report_ids: list[s
             report_title=title_by_report.get(report_id, report_id),
             snapshot_pt_date=str(artifact.get("snapshot_pt_date") or "2026-05-25"),
             sheets=sheets_from_workbook(workbook_path, normalize_products=False),
+            report_id=report_id,
         )
         artifact["visualization_filename"] = visualization_filename
         print(f"{report_id}: refreshed visualization={visualization_filename}", flush=True)
@@ -1416,6 +1508,7 @@ def normalize_existing_product_labels(portal_data_dir: Path, *, report_ids: list
             report_title=title_by_report.get(report_id, report_id),
             snapshot_pt_date=str(artifact.get("snapshot_pt_date") or "2026-05-25"),
             sheets=[sheet for sheet in sheets if sheet[0] != "Raw Export"],
+            report_id=report_id,
         )
         artifact["visualization_filename"] = visualization_filename
         print(f"{report_id}: normalized product labels in excel={filename} visualization={visualization_filename}", flush=True)
@@ -1474,7 +1567,7 @@ def generate_report(
     root.mkdir(parents=True, exist_ok=True)
     display_sheets = normalize_product_labels(sheets)
     write_workbook(root / xlsx_filename, display_sheets)
-    write_visualization(root / html_filename, report_title=title, snapshot_pt_date=snapshot_pt_date, sheets=sheets)
+    write_visualization(root / html_filename, report_title=title, snapshot_pt_date=snapshot_pt_date, sheets=sheets, report_id=report_id)
     metadata = {
         "id": artifact_id,
         "report_id": report_id,
