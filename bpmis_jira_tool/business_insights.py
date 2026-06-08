@@ -85,6 +85,20 @@ PRODUCT_LABELS: dict[str, str] = {
 }
 PRODUCT_LABEL_COLUMNS: set[str] = {"product", "product_code", "sub-product", "sub_product_code"}
 
+# ---------------------------------------------------------------------------
+# Anti-fraud (PH) report identifiers and lake (ODS) source tables.
+# ---------------------------------------------------------------------------
+# Table names are live-validated ODS tables available through Data Workbench.
+# The AF lake uses two naming styles:
+#   ods.mbs_ph_seabank_anti_fraud_db_<table>_ss        (scene / sub_scene / action)
+#   ods.mbs_ph_seabank_anti_fraud_db_<table>_df        (scenario flow config)
+AF_SCENARIOS_ACTIONS_REPORT_ID = "anti-fraud-ph-scenarios-actions-auth-steps"
+
+AF_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_scene_tab_ss"
+AF_SUB_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_sub_scene_tab_ss"
+AF_ACTION_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_action_tab_ss"
+AF_SCENARIO_FLOW_CONFIG_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_biz_scenario_flow_config_tab_df"
+
 SEEDED_REPORTS: tuple[dict[str, str], ...] = (
     {
         "id": UNDERWRITING_FUNNEL_REPORT_ID,
@@ -112,6 +126,13 @@ SEEDED_REPORTS: tuple[dict[str, str], ...] = (
         "domain": "credit-risk",
         "name": "Credit Risk PH - Application to Disbursement Funnel",
         "type": "application_disbursement_funnel",
+        "status": "generator_ready",
+    },
+    {
+        "id": AF_SCENARIOS_ACTIONS_REPORT_ID,
+        "domain": "anti-fraud",
+        "name": "Anti-fraud PH - L1+L2 Scenarios, Actions & Auth Steps",
+        "type": "af_scenarios_actions",
         "status": "generator_ready",
     },
 )
@@ -559,6 +580,91 @@ order by product, account_status, account_credit_quality;
 """
 
 
+def _aliased_snapshot_filter(alias: str, table: str, snapshot_pt_date: str | None) -> str:
+    if snapshot_pt_date:
+        return f"{alias}.pt_date = '{snapshot_pt_date}'"
+    return f"{alias}.pt_date = (select max(pt_date) from {table})"
+
+
+def _af_report_header(title: str, snapshot_pt_date: str | None, period: BusinessInsightsPeriod | None = None) -> str:
+    lines = [
+        f"-- {title}",
+        f"-- Snapshot: {snapshot_pt_date or 'latest available pt_date at run time'}",
+    ]
+    if period is not None:
+        lines.append(f"-- Duration: {period.title}")
+    lines.append("-- Lake (ODS) tables from the RPMAF01 grant (table_access_20260605).")
+    lines.append("-- Run each numbered section in Data Workbench (SparkSQL); each becomes one Excel sheet.")
+    return "\n".join(lines)
+
+
+def build_af_scenarios_actions_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    scene_snap = _aliased_snapshot_filter("s", AF_SCENE_TABLE, snapshot_pt_date)
+    sub_scene_snap = _aliased_snapshot_filter("ss", AF_SUB_SCENE_TABLE, snapshot_pt_date)
+    action_snap = _aliased_snapshot_filter("a", AF_ACTION_TABLE, snapshot_pt_date)
+    flow_snap = _aliased_snapshot_filter("f", AF_SCENARIO_FLOW_CONFIG_TABLE, snapshot_pt_date)
+    header = _af_report_header("Anti-fraud PH - L1+L2 Scenarios, Actions & Auth Steps", snapshot_pt_date)
+    return f"""{header}
+-- Scenario flow config provides the live scene/sub-scene/action/auth-step mapping.
+
+-- 1. L1 Scenarios
+select
+  s.code as l1_scene_code,
+  s.name as l1_scene_name,
+  s.enum_name as l1_enum_name,
+  case s.scene_type when 0 then 'realScene' when 1 then 'logicScene' else concat('scene_type_', cast(s.scene_type as string)) end as l1_scene_type,
+  case s.business_category when 0 then 'Retail' when 1 then 'Corporate' else cast(s.business_category as string) end as business_category,
+  s.mode,
+  s.source,
+  s.real_scene_sub_scene,
+  s.description
+from {AF_SCENE_TABLE} s
+where {scene_snap}
+order by s.code;
+
+-- 2. L2 Sub-Scenarios
+select
+  ss.code as l2_sub_scene_code,
+  ss.name as l2_sub_scene_name,
+  ss.enum_name as l2_enum_name
+from {AF_SUB_SCENE_TABLE} ss
+where {sub_scene_snap}
+order by ss.code;
+
+-- 3. Actions and Auth Steps
+select
+  a.code as action_code,
+  a.name as action_name,
+  a.enum_name as action_enum_name,
+  case a.type when 1 then 'Business' when 2 then 'Authentication (Auth Step)' else concat('type_', cast(a.type as string)) end as action_type
+from {AF_ACTION_TABLE} a
+where {action_snap}
+order by a.type, a.code;
+
+-- 4. Scenario Action Auth Flow
+select
+  f.scene as l1_scene_code,
+  s.name as l1_scene_name,
+  f.sub_scene as l2_sub_scene_code,
+  ss.name as l2_sub_scene_name,
+  f.action as action_code,
+  a.name as action_name,
+  case a.type when 1 then 'Business' when 2 then 'Authentication (Auth Step)' else concat('type_', cast(a.type as string)) end as action_type,
+  f.default_step,
+  f.challenge1_step,
+  f.challenge2_step,
+  f.challenge3_step,
+  f.challenge4_step,
+  f.challenge5_step
+from {AF_SCENARIO_FLOW_CONFIG_TABLE} f
+left join {AF_SCENE_TABLE} s on s.code = f.scene and {scene_snap}
+left join {AF_SUB_SCENE_TABLE} ss on ss.code = f.sub_scene and {sub_scene_snap}
+left join {AF_ACTION_TABLE} a on a.code = f.action and {action_snap}
+where {flow_snap}
+order by f.scene, f.sub_scene, f.action;
+"""
+
+
 def _normalize_header(value: Any) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9]+", "_", str(value or "").strip().lower()).strip("_")
     return normalized
@@ -932,6 +1038,7 @@ class BusinessInsightsStore:
             PORTFOLIO_REPAYMENT_REPORT_ID: lambda: build_portfolio_repayment_sql(now=now),
             LIMIT_UTILIZATION_REPORT_ID: lambda: build_limit_utilization_sql(now=now),
             APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID: lambda: build_application_disbursement_funnel_sql(now=now),
+            AF_SCENARIOS_ACTIONS_REPORT_ID: lambda: build_af_scenarios_actions_sql(now=now),
         }
         builder = builders.get(report_id)
         if builder is None:

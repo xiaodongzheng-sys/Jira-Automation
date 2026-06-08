@@ -39,12 +39,14 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from bpmis_jira_tool.business_insights import (  # noqa: E402
+    AF_SCENARIOS_ACTIONS_REPORT_ID,
     APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID,
     LIMIT_UTILIZATION_REPORT_ID,
     PRODUCT_LABELS,
     PRODUCT_LABEL_COLUMNS,
     PORTFOLIO_REPAYMENT_REPORT_ID,
     UNDERWRITING_FUNNEL_REPORT_ID,
+    build_af_scenarios_actions_sql,
     build_application_disbursement_funnel_sql,
     build_limit_utilization_sql,
     build_portfolio_repayment_sql,
@@ -61,6 +63,10 @@ REPORT_BUILDERS: dict[str, tuple[str, Callable[..., str]]] = {
     APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID: (
         "Credit Risk PH - Application to Disbursement Funnel",
         build_application_disbursement_funnel_sql,
+    ),
+    AF_SCENARIOS_ACTIONS_REPORT_ID: (
+        "Anti-fraud PH - L1+L2 Scenarios, Actions & Auth Steps",
+        build_af_scenarios_actions_sql,
     ),
 }
 

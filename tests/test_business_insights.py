@@ -12,12 +12,15 @@ from bs4 import BeautifulSoup
 from openpyxl import load_workbook
 
 from bpmis_jira_tool.business_insights import (
+    AF_SCENARIOS_ACTIONS_REPORT_ID,
+    AF_SCENE_TABLE,
     APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID,
     BusinessInsightsStore,
     LIMIT_UTILIZATION_REPORT_ID,
     PORTFOLIO_REPAYMENT_REPORT_ID,
     UNDERWRITING_FUNNEL_REPORT_ID,
     UNDERWRITING_FUNNEL_TABLE,
+    build_af_scenarios_actions_sql,
     build_application_disbursement_funnel_sql,
     build_limit_utilization_sql,
     build_portfolio_repayment_sql,
@@ -28,7 +31,11 @@ from bpmis_jira_tool.business_insights import (
 )
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.web import create_app
-from scripts.generate_business_insights_live_reports import write_visualization
+from scripts.generate_business_insights_live_reports import (
+    REPORT_BUILDERS,
+    extract_sql_sections,
+    write_visualization,
+)
 
 
 FIXED_NOW = datetime(2026, 5, 26, 10, 30, tzinfo=ZoneInfo("Asia/Singapore"))
@@ -294,7 +301,8 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertIn("Credit Risk PH - Portfolio Repayment", response.get_data(as_text=True))
         self.assertIn("Credit Risk PH - Limit Utilization", response.get_data(as_text=True))
         self.assertIn("Credit Risk PH - Application to Disbursement Funnel", response.get_data(as_text=True))
-        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 4)
+        self.assertIn("Anti-fraud PH - L1+L2 Scenarios, Actions &amp; Auth Steps", response.get_data(as_text=True))
+        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 5)
         self.assertNotIn("Upload Export", response.get_data(as_text=True))
         self.assertIsNone(soup.select_one("[data-business-insights-upload]"))
 
@@ -385,6 +393,84 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertIn("Credit Risk Visualization", visualization_body)
         self.assertEqual(download_status, 200)
         self.assertEqual(download_mimetype, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+class AntiFraudBusinessInsightsTests(unittest.TestCase):
+    def test_seeded_reports_include_scenarios_actions_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = BusinessInsightsStore(Path(tmp))
+            reports = store.reports("anti-fraud")
+        ids = {report["id"] for report in reports}
+        self.assertEqual(ids, {AF_SCENARIOS_ACTIONS_REPORT_ID})
+        report = reports[0]
+        self.assertEqual(report["domain"], "anti-fraud")
+        self.assertEqual(report["status"], "generator_ready")
+        self.assertIsNone(report["artifact"])
+
+    def test_store_returns_sql_for_scenarios_actions_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = BusinessInsightsStore(Path(tmp))
+            sql = store.sql_for_report(AF_SCENARIOS_ACTIONS_REPORT_ID, now=FIXED_NOW)
+            self.assertTrue(sql.strip())
+            self.assertEqual(
+                store.sql_filename_for_report(AF_SCENARIOS_ACTIONS_REPORT_ID),
+                f"{AF_SCENARIOS_ACTIONS_REPORT_ID}.sql",
+            )
+
+    def test_scenarios_actions_sql_uses_granted_tables_and_snapshot(self):
+        sql = build_af_scenarios_actions_sql(snapshot_pt_date="2026-05-25")
+        self.assertIn(AF_SCENE_TABLE, sql)
+        self.assertEqual(AF_SCENE_TABLE, "ods.mbs_ph_seabank_anti_fraud_db_scene_tab_ss")
+        self.assertIn("pt_date = '2026-05-25'", sql)
+        # Auth steps are surfaced via the action type label and the flow-config challenge steps.
+        self.assertIn("Authentication (Auth Step)", sql)
+        self.assertIn("default_step", sql)
+        self.assertIn("challenge1_step", sql)
+
+    def test_scenarios_actions_sql_has_numbered_sections_for_generator(self):
+        sql = build_af_scenarios_actions_sql(snapshot_pt_date="2026-05-25", now=FIXED_NOW)
+        sections = extract_sql_sections(sql)
+        self.assertTrue(sections, "scenarios/actions SQL produced no generator sections")
+        for section in sections:
+            self.assertTrue(section.query.strip())
+
+    def test_generator_report_builders_include_scenarios_actions(self):
+        self.assertIn(AF_SCENARIOS_ACTIONS_REPORT_ID, REPORT_BUILDERS)
+        title, builder = REPORT_BUILDERS[AF_SCENARIOS_ACTIONS_REPORT_ID]
+        self.assertTrue(title.startswith("Anti-fraud PH -"))
+        self.assertTrue(callable(builder))
+
+    def test_anti_fraud_report_renders_on_page(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "ENV_FILE": os.devnull,
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
+                    session["google_credentials"] = {"token": "x"}
+                reports_response = client.get("/api/business-insights/reports?domain=anti-fraud")
+                page_response = client.get("/business-insights?domain=anti-fraud")
+
+        self.assertEqual(reports_response.status_code, 200)
+        returned_ids = {report["id"] for report in reports_response.get_json()["reports"]}
+        self.assertEqual(returned_ids, {AF_SCENARIOS_ACTIONS_REPORT_ID})
+        self.assertEqual(page_response.status_code, 200)
+        self.assertIn(
+            "Anti-fraud PH - L1+L2 Scenarios, Actions &amp; Auth Steps",
+            page_response.get_data(as_text=True),
+        )
 
 
 if __name__ == "__main__":
