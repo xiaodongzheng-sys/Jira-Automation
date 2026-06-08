@@ -39,24 +39,12 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from bpmis_jira_tool.business_insights import (  # noqa: E402
-    AF_AUTH_FUNNEL_REPORT_ID,
-    AF_FEATURES_REPORT_ID,
-    AF_FRAUD_LOSS_REPORT_ID,
-    AF_RULE_EFFECTIVENESS_REPORT_ID,
-    AF_RULES_REPORT_ID,
-    AF_SCENARIOS_ACTIONS_REPORT_ID,
     APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID,
     LIMIT_UTILIZATION_REPORT_ID,
     PRODUCT_LABELS,
     PRODUCT_LABEL_COLUMNS,
     PORTFOLIO_REPAYMENT_REPORT_ID,
     UNDERWRITING_FUNNEL_REPORT_ID,
-    build_af_auth_funnel_sql,
-    build_af_features_sql,
-    build_af_fraud_loss_sql,
-    build_af_rule_effectiveness_sql,
-    build_af_rules_sql,
-    build_af_scenarios_actions_sql,
     build_application_disbursement_funnel_sql,
     build_limit_utilization_sql,
     build_portfolio_repayment_sql,
@@ -73,21 +61,6 @@ REPORT_BUILDERS: dict[str, tuple[str, Callable[..., str]]] = {
     APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID: (
         "Credit Risk PH - Application to Disbursement Funnel",
         build_application_disbursement_funnel_sql,
-    ),
-    AF_SCENARIOS_ACTIONS_REPORT_ID: (
-        "Anti-fraud PH - L1+L2 Scenarios, Actions & Auth Steps",
-        build_af_scenarios_actions_sql,
-    ),
-    AF_RULES_REPORT_ID: ("Anti-fraud PH - Rules", build_af_rules_sql),
-    AF_FEATURES_REPORT_ID: ("Anti-fraud PH - Features", build_af_features_sql),
-    AF_RULE_EFFECTIVENESS_REPORT_ID: (
-        "Anti-fraud PH - Rule Effectiveness / Hit-Rate",
-        build_af_rule_effectiveness_sql,
-    ),
-    AF_FRAUD_LOSS_REPORT_ID: ("Anti-fraud PH - Fraud Loss & Case Outcomes", build_af_fraud_loss_sql),
-    AF_AUTH_FUNNEL_REPORT_ID: (
-        "Anti-fraud PH - Authentication Funnel / Customer Friction",
-        build_af_auth_funnel_sql,
     ),
 }
 
@@ -255,7 +228,7 @@ def run_workbench_query(
         log_data = log_payload.get("data") if isinstance(log_payload.get("data"), dict) else {}
         final_status = str(log_data.get("status") or "")
         last_log = str(log_data.get("log") or log_response.text)
-        if final_status in {"SUCCESS", "FAILED", "CANCELED", "ERROR"}:
+        if final_status in {"SUCCESS", "FAILED", "CANCELED"}:
             break
         time.sleep(poll_seconds)
     if final_status != "SUCCESS":
@@ -298,27 +271,11 @@ def style_sheet(sheet: Any) -> None:
     sheet.auto_filter.ref = sheet.dimensions
 
 
-def excel_sheet_title(title: str, existing: set[str] | None = None) -> str:
-    cleaned = re.sub(r"[:\\/?*\[\]]+", " ", str(title or "Sheet")).strip() or "Sheet"
-    base = cleaned[:31]
-    if existing is None:
-        return base
-    candidate = base
-    suffix = 1
-    while candidate in existing:
-        tail = f" {suffix}"
-        candidate = f"{base[: 31 - len(tail)]}{tail}"
-        suffix += 1
-    existing.add(candidate)
-    return candidate
-
-
 def write_workbook(path: Path, sheets: list[tuple[str, list[str], list[list[Any]]]]) -> None:
     workbook = Workbook()
     workbook.remove(workbook.active)
-    used_sheet_names: set[str] = set()
     for sheet_name, schema, rows in sheets:
-        sheet = workbook.create_sheet(excel_sheet_title(sheet_name, used_sheet_names))
+        sheet = workbook.create_sheet(sheet_name[:31])
         sheet.append(schema)
         for row in rows:
             sheet.append(row)

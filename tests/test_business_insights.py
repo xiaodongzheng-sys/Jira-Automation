@@ -12,27 +12,12 @@ from bs4 import BeautifulSoup
 from openpyxl import load_workbook
 
 from bpmis_jira_tool.business_insights import (
-    AF_AUTH_FUNNEL_REPORT_ID,
-    AF_APP_ANTI_FRAUD_TABLE,
-    AF_FEATURES_REPORT_ID,
-    AF_FRAUD_LOSS_REPORT_ID,
-    AF_IDENTIFY_RECORD_TABLE,
-    AF_RULE_EFFECTIVENESS_REPORT_ID,
-    AF_RULES_REPORT_ID,
-    AF_SCENARIOS_ACTIONS_REPORT_ID,
-    AF_SCENE_TABLE,
     APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID,
     BusinessInsightsStore,
     LIMIT_UTILIZATION_REPORT_ID,
     PORTFOLIO_REPAYMENT_REPORT_ID,
     UNDERWRITING_FUNNEL_REPORT_ID,
     UNDERWRITING_FUNNEL_TABLE,
-    build_af_auth_funnel_sql,
-    build_af_features_sql,
-    build_af_fraud_loss_sql,
-    build_af_rule_effectiveness_sql,
-    build_af_rules_sql,
-    build_af_scenarios_actions_sql,
     build_application_disbursement_funnel_sql,
     build_limit_utilization_sql,
     build_portfolio_repayment_sql,
@@ -43,11 +28,7 @@ from bpmis_jira_tool.business_insights import (
 )
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.web import create_app
-from scripts.generate_business_insights_live_reports import (
-    REPORT_BUILDERS,
-    extract_sql_sections,
-    write_visualization,
-)
+from scripts.generate_business_insights_live_reports import write_visualization
 
 
 FIXED_NOW = datetime(2026, 5, 26, 10, 30, tzinfo=ZoneInfo("Asia/Singapore"))
@@ -313,7 +294,7 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertIn("Credit Risk PH - Portfolio Repayment", response.get_data(as_text=True))
         self.assertIn("Credit Risk PH - Limit Utilization", response.get_data(as_text=True))
         self.assertIn("Credit Risk PH - Application to Disbursement Funnel", response.get_data(as_text=True))
-        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 10)
+        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 4)
         self.assertNotIn("Upload Export", response.get_data(as_text=True))
         self.assertIsNone(soup.select_one("[data-business-insights-upload]"))
 
@@ -404,110 +385,6 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertIn("Credit Risk Visualization", visualization_body)
         self.assertEqual(download_status, 200)
         self.assertEqual(download_mimetype, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-
-class AntiFraudBusinessInsightsTests(unittest.TestCase):
-    AF_REPORT_IDS = (
-        AF_SCENARIOS_ACTIONS_REPORT_ID,
-        AF_RULES_REPORT_ID,
-        AF_FEATURES_REPORT_ID,
-        AF_RULE_EFFECTIVENESS_REPORT_ID,
-        AF_FRAUD_LOSS_REPORT_ID,
-        AF_AUTH_FUNNEL_REPORT_ID,
-    )
-
-    def test_seeded_reports_include_six_anti_fraud_reports(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            store = BusinessInsightsStore(Path(tmp))
-            reports = store.reports("anti-fraud")
-        ids = {report["id"] for report in reports}
-        self.assertEqual(ids, set(self.AF_REPORT_IDS))
-        for report in reports:
-            self.assertEqual(report["domain"], "anti-fraud")
-            self.assertEqual(report["status"], "generator_ready")
-            self.assertIsNone(report["artifact"])
-
-    def test_store_returns_sql_for_each_anti_fraud_report(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            store = BusinessInsightsStore(Path(tmp))
-            for report_id in self.AF_REPORT_IDS:
-                sql = store.sql_for_report(report_id, now=FIXED_NOW)
-                self.assertTrue(sql.strip(), f"empty SQL for {report_id}")
-                self.assertEqual(store.sql_filename_for_report(report_id), f"{report_id}.sql")
-
-    def test_each_anti_fraud_sql_has_numbered_sections_for_generator(self):
-        builders = (
-            build_af_scenarios_actions_sql,
-            build_af_rules_sql,
-            build_af_features_sql,
-            build_af_rule_effectiveness_sql,
-            build_af_fraud_loss_sql,
-            build_af_auth_funnel_sql,
-        )
-        for builder in builders:
-            sql = builder(snapshot_pt_date="2026-05-25", now=FIXED_NOW)
-            sections = extract_sql_sections(sql)
-            self.assertTrue(sections, f"{builder.__name__} produced no generator sections")
-            for section in sections:
-                self.assertTrue(section.query.strip())
-
-    def test_config_report_uses_granted_ods_tables_and_snapshot(self):
-        sql = build_af_scenarios_actions_sql(snapshot_pt_date="2026-05-25")
-        self.assertIn(AF_SCENE_TABLE, sql)
-        self.assertEqual(AF_SCENE_TABLE, "ods.mbs_ph_seabank_anti_fraud_db_scene_tab_ss")
-        self.assertIn("pt_date = '2026-05-25'", sql)
-        # Auth steps are surfaced via the action type label.
-        self.assertIn("Authentication (Auth Step)", sql)
-
-    def test_operational_reports_use_period_window(self):
-        effectiveness_sql = build_af_rule_effectiveness_sql(snapshot_pt_date="2026-05-25", now=FIXED_NOW)
-        self.assertIn("Duration: Apr 2026 + May 2026 MTD", effectiveness_sql)
-        self.assertIn(AF_IDENTIFY_RECORD_TABLE, effectiveness_sql)
-        self.assertEqual(AF_IDENTIFY_RECORD_TABLE, "ods.mbs_anti_fraud_identify_record_tab_ss")
-        self.assertIn("operation_time >= 1774972800000", effectiveness_sql)
-        self.assertIn("operation_time < 1779811200000", effectiveness_sql)
-
-        auth_sql = build_af_auth_funnel_sql(snapshot_pt_date="2026-05-25", now=FIXED_NOW)
-        self.assertIn(AF_APP_ANTI_FRAUD_TABLE, auth_sql)
-        self.assertIn("cast(a.operationtime as bigint) >= 1774972800000", auth_sql)
-
-    def test_generator_report_builders_include_anti_fraud(self):
-        for report_id in self.AF_REPORT_IDS:
-            self.assertIn(report_id, REPORT_BUILDERS)
-            title, builder = REPORT_BUILDERS[report_id]
-            self.assertTrue(title.startswith("Anti-fraud PH -"))
-            self.assertTrue(callable(builder))
-
-    def test_anti_fraud_reports_render_on_page(self):
-        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
-            os.environ,
-            {
-                "ENV_FILE": os.devnull,
-                "FLASK_SECRET_KEY": "test-secret",
-                "TEAM_PORTAL_DATA_DIR": temp_dir,
-                "TEAM_PORTAL_BASE_URL": "",
-                "TEAM_ALLOWED_EMAILS": "",
-                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
-                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
-            },
-            clear=True,
-        ):
-            app = create_app()
-            app.testing = True
-            with app.test_client() as client:
-                with client.session_transaction() as session:
-                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
-                    session["google_credentials"] = {"token": "x"}
-                reports_response = client.get("/api/business-insights/reports?domain=anti-fraud")
-                page_response = client.get("/business-insights?domain=anti-fraud")
-
-        self.assertEqual(reports_response.status_code, 200)
-        returned_ids = {report["id"] for report in reports_response.get_json()["reports"]}
-        self.assertEqual(returned_ids, set(self.AF_REPORT_IDS))
-        page_body = page_response.get_data(as_text=True)
-        self.assertEqual(page_response.status_code, 200)
-        self.assertIn("Anti-fraud PH - L1+L2 Scenarios, Actions &amp; Auth Steps", page_body)
-        self.assertIn("Anti-fraud PH - Rule Effectiveness / Hit-Rate", page_body)
 
 
 if __name__ == "__main__":
