@@ -334,4 +334,8 @@ if [[ -n "$PUBLIC_URL" ]]; then
     15 >/dev/null
 fi
 
-echo "Mac-hosted Live now serves UAT commit $UAT_COMMIT."
+if [[ "$PROMOTE_LIVE_TARGET" == "origin_main" ]]; then
+  echo "Mac-hosted Live now serves origin/main commit $UAT_COMMIT."
+else
+  echo "Mac-hosted Live now serves UAT commit $UAT_COMMIT."
+fi
