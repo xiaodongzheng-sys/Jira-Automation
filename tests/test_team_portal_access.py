@@ -271,7 +271,7 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertIn(b'/portal-home?workspace=productization-upgrade-summary', dashboard_response.data)
             self.assertNotIn(b'href="https://app.bankpmtool.uk/?workspace=run"', dashboard_response.data)
 
-    def test_portal_home_lands_on_source_code_and_bpmis_is_admin_only(self):
+    def test_portal_home_lands_on_version_plan_and_bpmis_is_admin_only(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -312,7 +312,7 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertNotIn(b"Save Setup", productization_response.data)
         self.assertNotIn(b"BPMIS Projects", productization_response.data)
         self.assertEqual(admin_default_response.status_code, 302)
-        self.assertEqual(admin_default_response.headers["Location"], "/source-code-qa")
+        self.assertEqual(admin_default_response.headers["Location"], "/version-plan")
         self.assertEqual(admin_bpmis_response.status_code, 200)
         self.assertIn(b"BPMIS Automation Tool", admin_bpmis_response.data)
 
@@ -345,7 +345,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 dashboard_response = mac_client.get("/team-dashboard", follow_redirects=False)
 
             self.assertEqual(portal_response.status_code, 302)
-            self.assertEqual(portal_response.headers["Location"], "/access-denied")
+            self.assertEqual(portal_response.headers["Location"], "/version-plan")
             self.assertEqual(dashboard_response.status_code, 200)
             self.assertIn(b"Version Plan", dashboard_response.data)
 
@@ -569,7 +569,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 response = client.get("/cloud-auth/google/callback?code=fake&state=fake", follow_redirects=False)
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.headers["Location"], "/portal-home?workspace=run")
+        self.assertEqual(response.headers["Location"], "/version-plan")
 
     def test_login_image_gate_css_contract_is_present(self):
         stylesheet = Path("static/style.css").read_text(encoding="utf-8")

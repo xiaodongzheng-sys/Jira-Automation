@@ -986,12 +986,10 @@ def create_app() -> Flask:
             return redirect(url_for("team_dashboard_page"))
         requested_workspace_tab = str(request.args.get("workspace") or "").strip()
         has_bpmis_return_state = any(key in session for key in ("default_workspace_tab", "last_results", "run_notice"))
-        if (
-            not requested_workspace_tab
-            and not has_bpmis_return_state
-            and _is_portal_admin()
-        ):
-            return redirect(url_for("source_code_qa"))
+        if not requested_workspace_tab and not has_bpmis_return_state:
+            default_landing = _default_portal_landing_target(settings)
+            if default_landing:
+                return redirect(default_landing)
 
         results = _results_for_display(session.pop("last_results", []))
         run_notice = session.pop("run_notice", None)
@@ -2037,13 +2035,19 @@ def _full_portal_navigation_available(settings: Settings) -> bool:
     )
 
 
-def _portal_home_source_code_target(settings: Settings) -> str:
-    return url_for("source_code_qa") if _is_portal_admin() and _can_access_source_code_qa(settings) else ""
+def _default_portal_landing_target(settings: Settings, user_identity: dict[str, str | None] | None = None) -> str:
+    # Every signed-in user defaults to the Version Plan view when they can access
+    # it (portal admins and AF/Risk team). Users without access fall through to
+    # the normal portal home rather than a forced access-denied redirect.
+    identity = user_identity if user_identity is not None else _get_user_identity(settings)
+    if _can_access_team_dashboard_version_plan(identity):
+        return url_for("version_plan_page")
+    return ""
 
 
 def _normalize_portal_landing_redirect(settings: Settings, workspace_tab: str) -> str:
     if workspace_tab in {"", "run"}:
-        return _portal_home_source_code_target(settings)
+        return _default_portal_landing_target(settings)
     return ""
 
 
@@ -2085,11 +2089,7 @@ def _pop_post_google_login_redirect() -> str:
 
 
 def _cloud_home_default_post_login_redirect(settings: Settings, user_identity: dict[str, str | None]) -> str:
-    if _is_portal_admin(user_identity.get("email")):
-        return url_for("source_code_qa")
-    if settings.cloud_home_enabled and _can_access_team_dashboard_version_plan(user_identity):
-        return url_for("version_plan_page")
-    return ""
+    return _default_portal_landing_target(settings, user_identity)
 
 
 def _can_access_prd_briefing(settings: Settings) -> bool:
