@@ -1217,6 +1217,86 @@ def _kpi_cards_panel(title: str, pairs: list[tuple[str, str]]) -> str:
     return f'<section class="panel"><h2>{html.escape(title)}</h2><div class="kpi-grid">{cards}</div></section>'
 
 
+def _expandable_rule_panel(
+    title: str,
+    placeholder: str,
+    summary: tuple[list[str], list[list[Any]]],
+    detail: tuple[list[str], list[list[Any]]],
+    *,
+    key_columns: tuple[str, ...],
+    main_columns: tuple[str, ...],
+    detail_columns: tuple[str, ...],
+    name_column: str,
+) -> str:
+    """Render a per-rule table whose rows expand to a nested scene breakdown.
+
+    `summary` is one row per rule; `detail` is one row per rule x scene. Rows are
+    linked by `key_columns`. A single search box filters rules by their own text
+    plus their child scene names.
+    """
+    s_head, s_rows = summary
+    d_head, d_rows = detail
+    si = {str(col): offset for offset, col in enumerate(s_head)}
+    di = {str(col): offset for offset, col in enumerate(d_head)}
+
+    def cell(value: Any) -> str:
+        return "" if value is None else str(value)
+
+    def sval(row: list[Any], col: str) -> str:
+        return cell(row[si[col]]) if col in si and si[col] < len(row) else ""
+
+    def dval(row: list[Any], col: str) -> str:
+        return cell(row[di[col]]) if col in di and di[col] < len(row) else ""
+
+    grouped: dict[tuple[str, ...], list[list[Any]]] = {}
+    for row in d_rows:
+        grouped.setdefault(tuple(dval(row, col) for col in key_columns), []).append(row)
+
+    head_html = "<th></th>" + "".join(f"<th>{html.escape(col)}</th>" for col in main_columns)
+    body: list[str] = []
+    for srow in s_rows:
+        key = tuple(sval(srow, col) for col in key_columns)
+        key_attr = html.escape("|".join(key), quote=True)
+        kids = grouped.get(key, [])
+        scene_text = " ".join(dval(k, name_column) for k in kids)
+        data_text = html.escape(" ".join([*key, scene_text]).lower(), quote=True)
+        cells = "".join(f"<td>{html.escape(sval(srow, col))}</td>" for col in main_columns)
+        expander = (
+            '<button class="expander" type="button" aria-expanded="false" aria-label="Toggle scene breakdown">&#9654;</button>'
+            if kids
+            else ""
+        )
+        body.append(
+            f'<tr class="rule-row" data-key="{key_attr}" data-text="{data_text}">'
+            f'<td class="exp-cell">{expander}</td>{cells}</tr>'
+        )
+        if kids:
+            d_head_html = "".join(f"<th>{html.escape(col)}</th>" for col in detail_columns)
+            d_body = "".join(
+                "<tr>" + "".join(f"<td>{html.escape(dval(k, col))}</td>" for col in detail_columns) + "</tr>"
+                for k in kids
+            )
+            inner = f'<table class="detail-table"><thead><tr>{d_head_html}</tr></thead><tbody>{d_body}</tbody></table>'
+            body.append(
+                f'<tr class="detail-row" data-key="{key_attr}" hidden>'
+                f'<td class="detail-cell" colspan="{len(main_columns) + 1}">{inner}</td></tr>'
+            )
+    total = len(s_rows)
+    table_html = (
+        f'<div class="table-wrap"><table class="rule-table"><thead><tr>{head_html}</tr></thead>'
+        f'<tbody>{"".join(body)}</tbody></table></div>'
+        if s_rows
+        else '<p class="empty">No rows were returned.</p>'
+    )
+    return (
+        f'<section class="panel rule-panel"><h2>{html.escape(title)}</h2>'
+        '<div class="search-bar">'
+        f'<input type="search" data-search placeholder="{html.escape(placeholder)}" aria-label="{html.escape(placeholder)}">'
+        f'<span class="count" data-count>{total} of {total} rules</span>'
+        f"</div>{table_html}</section>"
+    )
+
+
 def _searchable_tables_document(
     report_title: str,
     snapshot_pt_date: str,
@@ -1252,6 +1332,12 @@ th,td{{border-bottom:1px solid #edf1f7;padding:8px 10px;text-align:left;white-sp
 th{{background:#f1f6ff;font-weight:700;color:#344054;position:sticky;top:0;}}
 th .th-label{{display:block;margin-bottom:6px;}}
 th .col-filter{{display:block;width:100%;min-width:90px;font-weight:400;font-size:12px;padding:3px 6px;border:1px solid #cbd5e1;border-radius:4px;background:#fff;}}
+.exp-cell{{width:34px;text-align:center;}}
+.expander{{border:none;background:none;cursor:pointer;font-size:11px;color:var(--blue);padding:2px 4px;line-height:1;}}
+td.detail-cell{{padding:0;background:#f8fbff;}}
+.detail-table{{width:100%;border-collapse:collapse;}}
+.detail-table th{{position:static;background:#eef4ff;font-size:12px;}}
+.detail-table th,.detail-table td{{border-bottom:1px solid #e6eefb;}}
 tr.no-match{{display:none;}}
 .empty{{padding:18px;color:var(--muted);}}
 </style></head><body>
@@ -1260,6 +1346,7 @@ tr.no-match{{display:none;}}
 <script>
 (() => {{
   document.querySelectorAll(".panel").forEach((panel) => {{
+    if (!panel.querySelector("table.search-table")) return;
     const input = panel.querySelector("[data-search]");
     const counter = panel.querySelector("[data-count]");
     const colFilters = Array.from(panel.querySelectorAll(".col-filter"));
@@ -1289,6 +1376,44 @@ tr.no-match{{display:none;}}
     }};
     input?.addEventListener("input", apply);
     colFilters.forEach((f) => f.addEventListener("input", apply));
+    apply();
+  }});
+  document.querySelectorAll(".rule-panel").forEach((panel) => {{
+    const table = panel.querySelector("table.rule-table");
+    if (!table) return;
+    const input = panel.querySelector("[data-search]");
+    const counter = panel.querySelector("[data-count]");
+    const mainRows = Array.from(table.querySelectorAll("tr.rule-row"));
+    const details = {{}};
+    table.querySelectorAll("tr.detail-row").forEach((d) => {{ details[d.dataset.key] = d; }});
+    const total = mainRows.length;
+    table.querySelectorAll(".expander").forEach((btn) => {{
+      btn.addEventListener("click", () => {{
+        const tr = btn.closest("tr");
+        const d = details[tr.dataset.key];
+        const open = btn.getAttribute("aria-expanded") === "true";
+        btn.setAttribute("aria-expanded", String(!open));
+        btn.innerHTML = open ? "&#9654;" : "&#9660;";
+        if (d) d.hidden = open;
+      }});
+    }});
+    const apply = () => {{
+      const query = (input?.value || "").trim().toLowerCase();
+      let visible = 0;
+      mainRows.forEach((tr) => {{
+        const match = !query || (tr.dataset.text || "").includes(query);
+        tr.hidden = !match;
+        const d = details[tr.dataset.key];
+        if (d && !match) {{
+          d.hidden = true;
+          const btn = tr.querySelector(".expander");
+          if (btn) {{ btn.setAttribute("aria-expanded", "false"); btn.innerHTML = "&#9654;"; }}
+        }}
+        if (match) visible += 1;
+      }});
+      if (counter) counter.textContent = `${{visible}} of ${{total}} rules`;
+    }};
+    input?.addEventListener("input", apply);
     apply();
   }});
 }})();
@@ -1455,18 +1580,43 @@ def write_visualization(
         intro = _kpi_cards_panel(f"Hit-Rate Summary — {scope_label}" if scope_label else "Hit-Rate Summary", kpis)
         placeholders = {
             "Request Outcome Summary": "Filter…",
-            "Reject Rule Hit Summary": "Search rule, scene or type…",
             "Daily Challenge/Reject/Punish": "Search date…",
         }
-        panels = [
-            _searchable_table_panel(
-                sheet_name,
-                headers,
-                rows,
-                placeholder=placeholders.get(sheet_name, "Search…"),
+        breakdown = eff_lookup.get("Reject Rule Scene Breakdown")
+        panels = []
+        for sheet_name, headers, rows in sheets:
+            if sheet_name == "Reject Rule Scene Breakdown":
+                # Consumed into the expandable Reject Rule Hit Summary panel.
+                continue
+            if sheet_name == "Reject Rule Hit Summary" and breakdown:
+                panels.append(
+                    _expandable_rule_panel(
+                        "Reject Rule Hit Summary",
+                        "Search rule, type or scene…",
+                        (headers, rows),
+                        breakdown,
+                        key_columns=("reject_rule", "reject_type"),
+                        main_columns=(
+                            "reject_rule",
+                            "reject_type",
+                            "reject_count",
+                            "distinct_users",
+                            "distinct_scenes",
+                            "rejected_amount_php",
+                        ),
+                        detail_columns=("scene_name", "reject_count", "distinct_users", "rejected_amount_php"),
+                        name_column="scene_name",
+                    )
+                )
+                continue
+            panels.append(
+                _searchable_table_panel(
+                    sheet_name,
+                    headers,
+                    rows,
+                    placeholder=placeholders.get(sheet_name, "Search…"),
+                )
             )
-            for sheet_name, headers, rows in sheets
-        ]
         path.write_text(
             _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),
             encoding="utf-8",

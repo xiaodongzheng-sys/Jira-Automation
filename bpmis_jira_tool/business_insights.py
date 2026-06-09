@@ -781,6 +781,7 @@ where {request_snap}
 -- 2. Reject Rule Hit Summary
 -- Aggregated per reject_rule (+ reject_type): there are tens of rules but tens of thousands of
 -- rule x scene x position combinations, so a rule-level rollup is the complete hit-rate view.
+-- transaction_amount is the banking account transaction amount in PHP.
 select
   '{month_label}' as period,
   r.reject_rule,
@@ -788,7 +789,7 @@ select
   count(1) as reject_count,
   count(distinct r.uid) as distinct_users,
   count(distinct r.operation_scene) as distinct_scenes,
-  sum(coalesce(cast(r.transaction_amount as double), 0)) as rejected_transaction_amount
+  sum(coalesce(cast(r.transaction_amount as double), 0)) as rejected_amount_php
 from {AF_IDENTIFY_REJECT_TABLE} r
 where {reject_snap}
   and r.operation_time >= {start_ms}
@@ -796,7 +797,28 @@ where {reject_snap}
 group by r.reject_rule, r.reject_type
 order by reject_count desc;
 
--- 3. Daily Challenge/Reject/Punish
+-- 3. Reject Rule Scene Breakdown
+-- Per reject_rule x operation_scene, with the scene name resolved from the scene config table.
+-- Powers the expandable per-rule scene breakdown in the dashboard. Amount is in PHP.
+select
+  r.reject_rule,
+  r.reject_type,
+  r.operation_scene,
+  coalesce(s.name, concat('scene_', cast(r.operation_scene as string))) as scene_name,
+  count(1) as reject_count,
+  count(distinct r.uid) as distinct_users,
+  sum(coalesce(cast(r.transaction_amount as double), 0)) as rejected_amount_php
+from {AF_IDENTIFY_REJECT_TABLE} r
+left join {AF_SCENE_TABLE} s
+  on s.code = cast(r.operation_scene as string)
+  and s.pt_date = (select max(pt_date) from {AF_SCENE_TABLE})
+where {reject_snap}
+  and r.operation_time >= {start_ms}
+  and r.operation_time < {end_ms}
+group by r.reject_rule, r.reject_type, r.operation_scene, s.name
+order by r.reject_rule, reject_count desc;
+
+-- 4. Daily Challenge/Reject/Punish
 select
   rs.date as trigger_date,
   sum(coalesce(rs.challenge_num, 0)) as challenge_num,

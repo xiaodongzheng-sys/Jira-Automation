@@ -674,13 +674,21 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
         sections = extract_sql_sections(sql)
         self.assertEqual(
             [s.sheet_name for s in sections],
-            ["Request Outcome Summary", "Reject Rule Hit Summary", "Daily Challenge/Reject/Punish"],
+            [
+                "Request Outcome Summary",
+                "Reject Rule Hit Summary",
+                "Reject Rule Scene Breakdown",
+                "Daily Challenge/Reject/Punish",
+            ],
         )
         self.assertIn(AF_REQUEST_STATISTIC_TABLE, sql)
         self.assertIn(AF_IDENTIFY_REJECT_TABLE, sql)
         # identify_record is empty in ODS, so that table is not queried.
         self.assertNotIn("from ods.mbs_anti_fraud_identify_record", sql)
         self.assertNotIn("Identify Result by Scene", sql)
+        # transaction amount is surfaced as PHP, and the breakdown resolves scene names.
+        self.assertIn("rejected_amount_php", sql)
+        self.assertIn("scene_name", sql)
         # Full previous calendar month (April 2026) bounded by exclusive upper key.
         self.assertIn("Scope: Apr 2026", sql)
         self.assertIn("rq.date >= '20260401'", sql)
@@ -690,11 +698,20 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
         self.assertNotIn("rq.total_req_num", sql)
         self.assertIn("action_rate_pct", sql)
 
-    def test_visualization_renders_kpis_plus_searchable_sections(self):
+    def test_visualization_renders_kpis_and_expandable_reject_scene_breakdown(self):
         summary_headers = ["period", "total_outcomes", "pass_num", "challenge_num", "reject_num", "action_rate_pct"]
         summary_rows = [["May 2026", "446218000", "427348342", "18070027", "849571", "4.23"]]
-        reject_headers = ["period", "reject_rule", "reject_type", "operation_scene", "reject_count"]
-        reject_rows = [["May 2026", "D0163v2", "1", "1037", "26568"], ["May 2026", "D0200", "2", "1040", "12000"]]
+        reject_headers = ["period", "reject_rule", "reject_type", "reject_count", "distinct_users", "distinct_scenes", "rejected_amount_php"]
+        reject_rows = [
+            ["May 2026", "U0059", "1", "33968", "20000", "2", "150000.5"],
+            ["May 2026", "D0191", "2", "12479", "9000", "1", "0"],
+        ]
+        breakdown_headers = ["reject_rule", "reject_type", "operation_scene", "scene_name", "reject_count", "distinct_users", "rejected_amount_php"]
+        breakdown_rows = [
+            ["U0059", "1", "1001", "Login", "18088", "12000", "100000.5"],
+            ["U0059", "1", "1092", "ShopeepaySeabankInactiveLogin", "15880", "8000", "50000"],
+            ["D0191", "2", "1101", "QRScan", "12479", "9000", "0"],
+        ]
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = Path(temp_dir) / "viz.html"
             write_visualization(
@@ -704,6 +721,8 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
                 sheets=[
                     ("Request Outcome Summary", summary_headers, summary_rows),
                     ("Reject Rule Hit Summary", reject_headers, reject_rows),
+                    ("Reject Rule Scene Breakdown", breakdown_headers, breakdown_rows),
+                    ("Daily Challenge/Reject/Punish", ["trigger_date", "challenge_num", "reject_num", "punish_num"], [["20260501", "1", "2", "3"]]),
                 ],
                 report_id=AF_RULE_EFFECTIVENESS_REPORT_ID,
             )
@@ -714,11 +733,17 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
         self.assertIn("Action rate", html)
         self.assertIn("4.23%", html)
         self.assertIn('<div class="kpi">', html)
-        # Searchable, per-column-filterable section tables.
+        # Expandable rule table with nested scene-breakdown rows.
         self.assertIn("<h2>Reject Rule Hit Summary</h2>", html)
+        self.assertIn('class="rule-table"', html)
+        self.assertIn('class="expander"', html)
+        self.assertIn('class="detail-table"', html)
+        self.assertIn("ShopeepaySeabankInactiveLogin", html)  # child scene name
+        self.assertIn("rejected_amount_php", html)  # PHP-labelled column
+        # The breakdown is nested, not rendered as its own standalone panel.
+        self.assertNotIn("<h2>Reject Rule Scene Breakdown</h2>", html)
+        # The other sections remain plain searchable tables.
         self.assertIn('class="search-table"', html)
-        self.assertIn('class="col-filter"', html)
-        self.assertIn("D0163v2", html)
 
 
 if __name__ == "__main__":
