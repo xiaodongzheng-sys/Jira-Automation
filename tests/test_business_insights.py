@@ -450,6 +450,11 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
             "challenge5_step",
         ):
             self.assertIn(column, flow_section.query)
+        # The flow-config table stores names (not codes), so dims join on name.
+        self.assertIn("s.name = f.scene", flow_section.query)
+        self.assertIn("ss.name = f.sub_scene", flow_section.query)
+        self.assertIn("a.name = f.action", flow_section.query)
+        self.assertNotIn("s.code = f.scene", flow_section.query)
 
     def test_visualization_renders_only_searchable_flow_table(self):
         flow_headers = [
@@ -489,13 +494,49 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
         self.assertIn("data-search", html)
         self.assertIn("Search scene name or step", html)
         for header in flow_headers:
-            self.assertIn(f"<th>{header}</th>", html)
+            expected = f'<th class="step">{header}</th>' if header.endswith("_step") else f"<th>{header}</th>"
+            self.assertIn(expected, html)
         self.assertIn("Password Login", html)
         self.assertIn("P2P_TRANSFER", html)
+        # Step columns get a fixed 50-character width and wrap.
+        self.assertIn('<th class="step">default_step</th>', html)
+        self.assertIn('<th class="step">challenge5_step</th>', html)
+        self.assertIn('<td class="step">step_a</td>', html)
+        self.assertIn("th.step,td.step{width:50ch;min-width:50ch;max-width:50ch;white-space:normal;", html)
+        # Non-step columns are not tagged.
+        self.assertIn("<th>l1_scene_name</th>", html)
         # The other sheets and the generic dashboard chrome are not rendered.
         self.assertNotIn("L1 Scenarios", html)
         self.assertNotIn("data-product-filter", html)
         self.assertNotIn("Data Quality Notes", html)
+
+    def test_latest_snapshot_resolves_to_anchor_table_max_pt_date(self):
+        from scripts import generate_business_insights_live_reports as gen
+
+        self.assertEqual(
+            gen.REPORT_SNAPSHOT_ANCHOR_TABLE[AF_SCENARIOS_ACTIONS_REPORT_ID],
+            "ods.mbs_ph_seabank_anti_fraud_db_biz_scenario_flow_config_tab_df",
+        )
+        captured = {}
+
+        def fake_run(session, section, *, poll_seconds, max_polls):
+            captured["query"] = section.query
+            return ["pt_date"], [["2026-06-08"]], "exec-1"
+
+        with patch.object(gen, "run_workbench_query", fake_run):
+            resolved = gen.resolve_snapshot_pt_date(
+                object(), AF_SCENARIOS_ACTIONS_REPORT_ID, poll_seconds=1, max_polls=1
+            )
+        self.assertEqual(resolved, "2026-06-08")
+        self.assertIn("max(pt_date)", captured["query"])
+        self.assertIn("biz_scenario_flow_config_tab_df", captured["query"])
+
+    def test_unknown_report_has_no_snapshot_anchor(self):
+        from scripts import generate_business_insights_live_reports as gen
+
+        self.assertIsNone(
+            gen.resolve_snapshot_pt_date(object(), "does-not-exist", poll_seconds=1, max_polls=1)
+        )
 
     def test_generator_report_builders_include_scenarios_actions(self):
         self.assertIn(AF_SCENARIOS_ACTIONS_REPORT_ID, REPORT_BUILDERS)

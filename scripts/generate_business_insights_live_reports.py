@@ -39,12 +39,16 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from bpmis_jira_tool.business_insights import (  # noqa: E402
+    AF_SCENARIO_FLOW_CONFIG_TABLE,
     AF_SCENARIOS_ACTIONS_REPORT_ID,
     APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID,
+    CREDIT_LIMIT_TABLE,
     LIMIT_UTILIZATION_REPORT_ID,
+    LOAN_APPLICATION_TABLE,
     PRODUCT_LABELS,
     PRODUCT_LABEL_COLUMNS,
     PORTFOLIO_REPAYMENT_REPORT_ID,
+    REPAY_PLAN_TABLE,
     UNDERWRITING_FUNNEL_REPORT_ID,
     build_af_scenarios_actions_sql,
     build_application_disbursement_funnel_sql,
@@ -69,6 +73,18 @@ REPORT_BUILDERS: dict[str, tuple[str, Callable[..., str]]] = {
         build_af_scenarios_actions_sql,
     ),
 }
+
+# Anchor table per report used to resolve the latest available pt_date when the
+# snapshot is "latest". Tables in a report share a daily snapshot, so the anchor's
+# max(pt_date) is used to pin every section to the same snapshot.
+REPORT_SNAPSHOT_ANCHOR_TABLE: dict[str, str] = {
+    PORTFOLIO_REPAYMENT_REPORT_ID: REPAY_PLAN_TABLE,
+    LIMIT_UTILIZATION_REPORT_ID: CREDIT_LIMIT_TABLE,
+    APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID: LOAN_APPLICATION_TABLE,
+    AF_SCENARIOS_ACTIONS_REPORT_ID: AF_SCENARIO_FLOW_CONFIG_TABLE,
+}
+
+LATEST_SNAPSHOT = "latest"
 
 PREFERRED_PRODUCT_CODES: dict[str, str] = {
     "Credit Card": "812F",
@@ -188,6 +204,32 @@ def extract_sql_sections(sql: str) -> list[WorkbenchSection]:
         if query:
             sections.append(WorkbenchSection(sheet_name=sheet_name, query=query))
     return sections
+
+
+def resolve_snapshot_pt_date(
+    session: requests.Session,
+    report_id: str,
+    *,
+    poll_seconds: int,
+    max_polls: int,
+) -> str | None:
+    """Return the latest available pt_date for the report's anchor table.
+
+    Returns None when no anchor is configured; callers then let each SQL section
+    fall back to its own ``max(pt_date)`` subquery.
+    """
+    table = REPORT_SNAPSHOT_ANCHOR_TABLE.get(report_id)
+    if not table:
+        return None
+    _schema, rows, _execution_id = run_workbench_query(
+        session,
+        WorkbenchSection(sheet_name="resolve snapshot", query=f"select max(pt_date) as pt_date from {table}"),
+        poll_seconds=poll_seconds,
+        max_polls=max_polls,
+    )
+    if rows and rows[0] and rows[0][0]:
+        return str(rows[0][0]).strip()
+    return None
 
 
 def run_workbench_query(
@@ -1115,11 +1157,22 @@ def _scenario_auth_flow_document(
         _name, headers, rows = sheets[-1]
     else:
         headers, rows = [], []
-    header_html = "".join(f"<th>{html.escape(str(header))}</th>" for header in headers)
+    step_offsets = {
+        index for index, header in enumerate(headers) if str(header).strip().lower().endswith("_step")
+    }
+    header_html = "".join(
+        f'<th{" class=\"step\"" if index in step_offsets else ""}>{html.escape(str(header))}</th>'
+        for index, header in enumerate(headers)
+    )
+
+    def _cell(value: Any) -> str:
+        return "" if value is None else str(value)
+
     body_rows = []
     for row in rows:
         cells = "".join(
-            f"<td>{html.escape(str(row[index] if index < len(row) else ''))}</td>"
+            f'<td{" class=\"step\"" if index in step_offsets else ""}>'
+            f"{html.escape(_cell(row[index] if index < len(row) else ''))}</td>"
             for index in range(len(headers))
         )
         body_rows.append(f"<tr>{cells}</tr>")
@@ -1150,6 +1203,7 @@ h2{{margin:0 0 14px;font-size:18px;}}
 table{{width:100%;border-collapse:collapse;font-size:13px;}}
 th,td{{border-bottom:1px solid #edf1f7;padding:8px 10px;text-align:left;white-space:nowrap;vertical-align:top;}}
 th{{background:#f1f6ff;font-weight:700;color:#344054;position:sticky;top:0;}}
+th.step,td.step{{width:50ch;min-width:50ch;max-width:50ch;white-space:normal;overflow-wrap:anywhere;word-break:break-word;}}
 tr.no-match{{display:none;}}
 .empty{{padding:18px;color:var(--muted);}}
 </style></head><body>
@@ -1548,6 +1602,7 @@ def generate_report(
         raise RuntimeError(f"Unsupported report id: {report_id}")
     title, builder = report_config
     sql = builder(snapshot_pt_date=snapshot_pt_date, now=now)
+    display_snapshot = snapshot_pt_date or "latest available pt_date at run time"
     sections = extract_sql_sections(sql)
     if not sections:
         raise RuntimeError(f"{report_id}: no SQL sections found.")
@@ -1567,13 +1622,13 @@ def generate_report(
     root.mkdir(parents=True, exist_ok=True)
     display_sheets = normalize_product_labels(sheets)
     write_workbook(root / xlsx_filename, display_sheets)
-    write_visualization(root / html_filename, report_title=title, snapshot_pt_date=snapshot_pt_date, sheets=sheets, report_id=report_id)
+    write_visualization(root / html_filename, report_title=title, snapshot_pt_date=display_snapshot, sheets=sheets, report_id=report_id)
     metadata = {
         "id": artifact_id,
         "report_id": report_id,
         "filename": xlsx_filename,
         "visualization_filename": html_filename,
-        "source_filename": f"data-workbench-aggregates-{snapshot_pt_date}.xlsx",
+        "source_filename": f"data-workbench-aggregates-{snapshot_pt_date or 'latest'}.xlsx",
         "row_count": sum(len(rows) for _sheet, _headers, rows in sheets),
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "snapshot_pt_date": snapshot_pt_date,
@@ -1605,7 +1660,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Rewrite existing Excel and HTML artifacts so known product codes display Apollo product names.",
     )
-    parser.add_argument("--snapshot-pt-date", default="2026-05-25", help="Data Workbench pt_date snapshot to use.")
+    parser.add_argument(
+        "--snapshot-pt-date",
+        default=LATEST_SNAPSHOT,
+        help="Data Workbench pt_date snapshot to use, or 'latest' (default) to resolve the newest available partition at run time.",
+    )
     parser.add_argument(
         "--portal-data-dir",
         default=os.environ.get("TEAM_PORTAL_DATA_DIR") or str(DEFAULT_PORTAL_DATA_DIR),
@@ -1650,11 +1709,17 @@ def main() -> int:
         return 0
     now = datetime.now(ZoneInfo("Asia/Singapore"))
     for report_id in report_ids:
+        snapshot_pt_date = args.snapshot_pt_date
+        if snapshot_pt_date == LATEST_SNAPSHOT:
+            snapshot_pt_date = resolve_snapshot_pt_date(
+                session, report_id, poll_seconds=args.poll_seconds, max_polls=args.max_polls
+            )
+            print(f"{report_id}: resolved latest snapshot pt_date={snapshot_pt_date}", flush=True)
         generate_report(
             session=session,
             portal_data_dir=portal_data_dir,
             report_id=report_id,
-            snapshot_pt_date=args.snapshot_pt_date,
+            snapshot_pt_date=snapshot_pt_date,
             now=now,
             skip_existing=args.skip_existing,
             poll_seconds=args.poll_seconds,

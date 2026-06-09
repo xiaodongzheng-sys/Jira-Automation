@@ -655,10 +655,12 @@ select
   f.challenge3_step,
   f.challenge4_step,
   f.challenge5_step
+-- The flow-config table stores scene/sub_scene/action by name (e.g. 'ActivateFaceID'),
+-- not by numeric code, so the dimension tables are joined on name.
 from {AF_SCENARIO_FLOW_CONFIG_TABLE} f
-left join {AF_SCENE_TABLE} s on s.code = f.scene and {scene_snap}
-left join {AF_SUB_SCENE_TABLE} ss on ss.code = f.sub_scene and {sub_scene_snap}
-left join {AF_ACTION_TABLE} a on a.code = f.action and {action_snap}
+left join {AF_SCENE_TABLE} s on s.name = f.scene and {scene_snap}
+left join {AF_SUB_SCENE_TABLE} ss on ss.name = f.sub_scene and {sub_scene_snap}
+left join {AF_ACTION_TABLE} a on a.name = f.action and {action_snap}
 where {flow_snap}
 order by f.scene, f.sub_scene, f.action;
 """
