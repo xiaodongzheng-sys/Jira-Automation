@@ -47,10 +47,10 @@ def build_business_insights_handlers(ctx: Any) -> Any:
         access_gate = ctx._require_business_insights_access(settings)
         if access_gate is not None:
             return access_gate
-        active_domain = str(request.args.get("domain") or "credit-risk").strip().lower()
+        active_domain = str(request.args.get("domain") or "anti-fraud").strip().lower()
         domain_keys = {domain["key"] for domain in _store().domains()}
         if active_domain not in domain_keys:
-            active_domain = "credit-risk"
+            active_domain = "anti-fraud"
         return render_template(
             "business_insights.html",
             page_title="Business Insights",

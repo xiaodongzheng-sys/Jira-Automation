@@ -826,7 +826,7 @@ def create_app() -> Flask:
         if project_tabs:
             site_tabs.append(_nav_group("Projects", project_tabs[0]["href"], project_tabs))
         if can_access_business_insights:
-            active_business_domain = str(request.args.get("domain") or "credit-risk").strip().lower()
+            active_business_domain = str(request.args.get("domain") or "anti-fraud").strip().lower()
             business_insights_tabs = [
                 {
                     "label": "Anti-fraud",
@@ -844,7 +844,7 @@ def create_app() -> Flask:
                     "active": current_endpoint == "business_insights_page" and active_business_domain == "ops-risk",
                 },
             ]
-            site_tabs.append(_nav_group("Business Insights", url_for("business_insights_page", domain="credit-risk"), business_insights_tabs))
+            site_tabs.append(_nav_group("Business Insights", url_for("business_insights_page", domain="anti-fraud"), business_insights_tabs))
         if show_admin_tool_entries and _can_access_vpn_connection(settings):
             site_tabs.append(
                 _nav_group(
