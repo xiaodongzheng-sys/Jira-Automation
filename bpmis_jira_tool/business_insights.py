@@ -789,7 +789,7 @@ select
   count(1) as reject_count,
   count(distinct r.uid) as distinct_users,
   count(distinct r.operation_scene) as distinct_scenes,
-  sum(coalesce(cast(r.transaction_amount as double), 0)) as rejected_amount_php
+  cast(round(sum(coalesce(cast(r.transaction_amount as double), 0)), 2) as decimal(20, 2)) as rejected_amount_php
 from {AF_IDENTIFY_REJECT_TABLE} r
 where {reject_snap}
   and r.operation_time >= {start_ms}
@@ -807,7 +807,7 @@ select
   coalesce(s.name, concat('scene_', cast(r.operation_scene as string))) as scene_name,
   count(1) as reject_count,
   count(distinct r.uid) as distinct_users,
-  sum(coalesce(cast(r.transaction_amount as double), 0)) as rejected_amount_php
+  cast(round(sum(coalesce(cast(r.transaction_amount as double), 0)), 2) as decimal(20, 2)) as rejected_amount_php
 from {AF_IDENTIFY_REJECT_TABLE} r
 left join {AF_SCENE_TABLE} s
   on s.code = cast(r.operation_scene as string)
