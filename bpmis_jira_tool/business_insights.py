@@ -107,6 +107,9 @@ AF_IDENTIFY_REJECT_TABLE = "ods.mbs_anti_fraud_identify_reject_tab_ss"
 AF_REQUEST_STATISTIC_TABLE = "ods.mbs_anti_fraud_request_statistic_tab_ss"
 AF_RULE_TRIGGER_STATISTIC_TABLE = "ods.mbs_anti_fraud_rule_trigger_statistic_tab_ss"
 AF_PUNISH_LIST_TABLE = "ods.mbs_anti_fraud_punish_list_tab_ss"
+# Feature-mart DWD layer: clean daily-incremental hit/action logs with scene names built in.
+AF_RULE_HIT_LOG_TABLE = "fmart_antifraud.dwd_antifraud_rule_hit_log_di"
+AF_ACTION_LOG_TABLE = "fmart_antifraud.dwd_antifraud_action_log_di"
 
 SEEDED_REPORTS: tuple[dict[str, str], ...] = (
     {
@@ -752,6 +755,8 @@ def build_af_rule_effectiveness_sql(*, snapshot_pt_date: str | None = None, now:
     end_ms = _date_to_epoch_millis(month_end_exclusive)
     start_key = _yyyymmdd(month_start)
     end_key_exclusive = _yyyymmdd(month_end_exclusive)
+    month_start_iso = month_start.isoformat()
+    month_end_iso = (month_end_exclusive - timedelta(days=1)).isoformat()
     request_snap = _aliased_snapshot_filter("rq", AF_REQUEST_STATISTIC_TABLE, snapshot_pt_date)
     reject_snap = _aliased_snapshot_filter("r", AF_IDENTIFY_REJECT_TABLE, snapshot_pt_date)
     punish_snap = _aliased_snapshot_filter("p", AF_PUNISH_LIST_TABLE, snapshot_pt_date)
@@ -855,7 +860,81 @@ where {punish_snap}
 group by p.punish_rule_id, p.scene, s.name
 order by p.punish_rule_id, punish_count desc;
 
--- 6. Daily Challenge/Reject/Punish
+-- 6. Challenge Rule Hit Summary
+-- Challenge rules (rule_config.outcome_type = 2) sourced from the DWD rule hit log, counting only
+-- effective hits (is_rule_triggered = 'Y'). trigger_rate_pct = challenge transactions / transactions
+-- in the scenes the rule operates in (from the DWD action log) - an exposure-adjusted hit rate.
+-- normalised_user_impact_pct applies the same denominator to distinct challenged users.
+with challenge_rules as (
+  select
+    rule_id,
+    rule_name,
+    case status when 1 then 'active' when 2 then 'collect data' when -1 then 'inactive' else 'other' end as rule_status,
+    review_priority
+  from {AF_RULE_CONFIG_TABLE}
+  where pt_date = (select max(pt_date) from {AF_RULE_CONFIG_TABLE})
+    and outcome_type = 2
+),
+challenge_hits as (
+  select h.rule_id, h.scene_name, h.bizflow_instance_id, h.uid
+  from {AF_RULE_HIT_LOG_TABLE} h
+  join challenge_rules c on c.rule_id = h.rule_id
+  where h.pt_date between '{month_start_iso}' and '{month_end_iso}'
+    and h.is_rule_triggered = 'Y'
+),
+triggers as (
+  select rule_id,
+    count(distinct bizflow_instance_id) as challenge_trxn,
+    count(distinct uid) as challenge_users,
+    count(distinct scene_name) as distinct_scenes
+  from challenge_hits group by rule_id
+),
+rule_scenes as (select distinct rule_id, scene_name from challenge_hits),
+scene_traffic as (
+  select scene_name, count(distinct bizflow_instance_id) as scene_trxn
+  from {AF_ACTION_LOG_TABLE}
+  where pt_date between '{month_start_iso}' and '{month_end_iso}'
+  group by scene_name
+),
+benchmark as (
+  select rs.rule_id, sum(st.scene_trxn) as benchmark_trxn
+  from rule_scenes rs join scene_traffic st on st.scene_name = rs.scene_name
+  group by rs.rule_id
+)
+select
+  c.rule_id,
+  c.rule_name,
+  c.rule_status,
+  c.review_priority,
+  t.challenge_trxn,
+  t.challenge_users,
+  t.distinct_scenes,
+  b.benchmark_trxn,
+  round(t.challenge_trxn / nullif(b.benchmark_trxn, 0) * 100, 3) as trigger_rate_pct,
+  round(t.challenge_users / nullif(b.benchmark_trxn, 0) * 100, 3) as normalised_user_impact_pct
+from challenge_rules c
+join triggers t on t.rule_id = c.rule_id
+left join benchmark b on b.rule_id = c.rule_id
+order by t.challenge_trxn desc;
+
+-- 7. Challenge Rule Scene Breakdown
+-- Per challenge rule x scene (scene name from the hit log). Powers the expandable scene breakdown.
+select
+  h.rule_id,
+  h.scene_name,
+  count(distinct h.bizflow_instance_id) as challenge_trxn,
+  count(distinct h.uid) as challenge_users
+from {AF_RULE_HIT_LOG_TABLE} h
+join {AF_RULE_CONFIG_TABLE} rc
+  on rc.rule_id = h.rule_id
+  and rc.pt_date = (select max(pt_date) from {AF_RULE_CONFIG_TABLE})
+where h.pt_date between '{month_start_iso}' and '{month_end_iso}'
+  and h.is_rule_triggered = 'Y'
+  and rc.outcome_type = 2
+group by h.rule_id, h.scene_name
+order by h.rule_id, challenge_trxn desc;
+
+-- 8. Daily Challenge/Reject/Punish
 select
   rs.date as trigger_date,
   sum(coalesce(rs.challenge_num, 0)) as challenge_num,

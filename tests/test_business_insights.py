@@ -13,10 +13,12 @@ from openpyxl import load_workbook
 
 from bpmis_jira_tool.business_insights import (
     AF_FEATURE_CONFIG_TABLE,
+    AF_ACTION_LOG_TABLE,
     AF_IDENTIFY_REJECT_TABLE,
     AF_PUNISH_LIST_TABLE,
     AF_REQUEST_STATISTIC_TABLE,
     AF_RULE_CONFIG_TABLE,
+    AF_RULE_HIT_LOG_TABLE,
     AF_RULE_EFFECTIVENESS_REPORT_ID,
     AF_RULES_FEATURES_REPORT_ID,
     AF_SCENARIOS_ACTIONS_REPORT_ID,
@@ -681,6 +683,8 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
                 "Reject Rule Scene Breakdown",
                 "Punishment Rule Hit Summary",
                 "Punishment Rule Scene Breakdown",
+                "Challenge Rule Hit Summary",
+                "Challenge Rule Scene Breakdown",
                 "Daily Challenge/Reject/Punish",
             ],
         )
@@ -688,6 +692,12 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
         self.assertIn(AF_IDENTIFY_REJECT_TABLE, sql)
         self.assertIn(AF_PUNISH_LIST_TABLE, sql)
         self.assertIn("punish_rule_id", sql)
+        # Challenge hit-rate from the DWD hit log + action log, classified by outcome_type=2.
+        self.assertIn(AF_RULE_HIT_LOG_TABLE, sql)
+        self.assertIn(AF_ACTION_LOG_TABLE, sql)
+        self.assertIn("outcome_type = 2", sql)
+        self.assertIn("trigger_rate_pct", sql)
+        self.assertIn("is_rule_triggered = 'Y'", sql)
         # identify_record is empty in ODS, so that table is not queried.
         self.assertNotIn("from ods.mbs_anti_fraud_identify_record", sql)
         self.assertNotIn("Identify Result by Scene", sql)
@@ -729,6 +739,8 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
                     ("Reject Rule Scene Breakdown", breakdown_headers, breakdown_rows),
                     ("Punishment Rule Hit Summary", ["period", "punish_rule_id", "punish_count", "distinct_targets", "distinct_scenes"], [["May 2026", "U0021", "18492", "12000", "1"]]),
                     ("Punishment Rule Scene Breakdown", ["punish_rule_id", "scene", "scene_name", "punish_count", "distinct_targets"], [["U0021", "1", "Login", "18492", "12000"]]),
+                    ("Challenge Rule Hit Summary", ["rule_id", "rule_name", "rule_status", "review_priority", "challenge_trxn", "challenge_users", "distinct_scenes", "benchmark_trxn", "trigger_rate_pct", "normalised_user_impact_pct"], [["C0116v2", "Device velocity", "active", "1", "513407", "257072", "4", "1744983", "29.422", "14.73"]]),
+                    ("Challenge Rule Scene Breakdown", ["rule_id", "scene_name", "challenge_trxn", "challenge_users"], [["C0116v2", "ApplyVirDCard", "300000", "150000"]]),
                     ("Daily Challenge/Reject/Punish", ["trigger_date", "challenge_num", "reject_num", "punish_num"], [["20260501", "1", "2", "3"]]),
                 ],
                 report_id=AF_RULE_EFFECTIVENESS_REPORT_ID,
@@ -756,8 +768,14 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
         self.assertNotIn("<h2>Punishment Rule Scene Breakdown</h2>", html)
         self.assertIn("punish_rule_id", html)
         self.assertIn("U0021", html)
-        # Two expandable rule panels now.
-        self.assertEqual(html.count('class="rule-table"'), 2)
+        # Challenge Rule Hit Summary with the trigger-rate metric, also expandable.
+        self.assertIn("<h2>Challenge Rule Hit Summary</h2>", html)
+        self.assertNotIn("<h2>Challenge Rule Scene Breakdown</h2>", html)
+        self.assertIn("trigger_rate_pct", html)
+        self.assertIn("29.422", html)  # trigger rate value
+        self.assertIn("ApplyVirDCard", html)  # nested challenge scene
+        # Three expandable rule panels now (reject, punishment, challenge).
+        self.assertEqual(html.count('class="rule-table"'), 3)
 
 
 if __name__ == "__main__":

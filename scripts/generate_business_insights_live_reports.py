@@ -1584,8 +1584,9 @@ def write_visualization(
         }
         reject_breakdown = eff_lookup.get("Reject Rule Scene Breakdown")
         punish_breakdown = eff_lookup.get("Punishment Rule Scene Breakdown")
+        challenge_breakdown = eff_lookup.get("Challenge Rule Scene Breakdown")
         # Breakdown sheets are nested into their summary panels, not rendered standalone.
-        nested_sheets = {"Reject Rule Scene Breakdown", "Punishment Rule Scene Breakdown"}
+        nested_sheets = {"Reject Rule Scene Breakdown", "Punishment Rule Scene Breakdown", "Challenge Rule Scene Breakdown"}
         panels = []
         for sheet_name, headers, rows in sheets:
             if sheet_name in nested_sheets:
@@ -1621,6 +1622,31 @@ def write_visualization(
                         key_columns=("punish_rule_id",),
                         main_columns=("punish_rule_id", "punish_count", "distinct_targets", "distinct_scenes"),
                         detail_columns=("scene_name", "punish_count", "distinct_targets"),
+                        name_column="scene_name",
+                    )
+                )
+                continue
+            if sheet_name == "Challenge Rule Hit Summary" and challenge_breakdown:
+                panels.append(
+                    _expandable_rule_panel(
+                        "Challenge Rule Hit Summary",
+                        "Search rule or scene…",
+                        (headers, rows),
+                        challenge_breakdown,
+                        key_columns=("rule_id",),
+                        main_columns=(
+                            "rule_id",
+                            "rule_name",
+                            "rule_status",
+                            "review_priority",
+                            "challenge_trxn",
+                            "challenge_users",
+                            "distinct_scenes",
+                            "benchmark_trxn",
+                            "trigger_rate_pct",
+                            "normalised_user_impact_pct",
+                        ),
+                        detail_columns=("scene_name", "challenge_trxn", "challenge_users"),
                         name_column="scene_name",
                     )
                 )
