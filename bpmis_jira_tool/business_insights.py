@@ -95,6 +95,7 @@ PRODUCT_LABEL_COLUMNS: set[str] = {"product", "product_code", "sub-product", "su
 #   ods.mbs_anti_fraud_<table>_ss                      (rule / feature config)
 AF_SCENARIOS_ACTIONS_REPORT_ID = "anti-fraud-ph-scenarios-actions-auth-steps"
 AF_RULES_FEATURES_REPORT_ID = "anti-fraud-ph-rules-features"
+AF_RULE_EFFECTIVENESS_REPORT_ID = "anti-fraud-ph-rule-effectiveness"
 
 AF_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_scene_tab_ss"
 AF_SUB_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_sub_scene_tab_ss"
@@ -102,6 +103,9 @@ AF_ACTION_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_action_tab_ss"
 AF_SCENARIO_FLOW_CONFIG_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_biz_scenario_flow_config_tab_df"
 AF_RULE_CONFIG_TABLE = "ods.mbs_anti_fraud_rule_config_tab_ss"
 AF_FEATURE_CONFIG_TABLE = "ods.mbs_anti_fraud_feature_config_tab_ss"
+AF_IDENTIFY_REJECT_TABLE = "ods.mbs_anti_fraud_identify_reject_tab_ss"
+AF_REQUEST_STATISTIC_TABLE = "ods.mbs_anti_fraud_request_statistic_tab_ss"
+AF_RULE_TRIGGER_STATISTIC_TABLE = "ods.mbs_anti_fraud_rule_trigger_statistic_tab_ss"
 
 SEEDED_REPORTS: tuple[dict[str, str], ...] = (
     {
@@ -144,6 +148,13 @@ SEEDED_REPORTS: tuple[dict[str, str], ...] = (
         "domain": "anti-fraud",
         "name": "Anti-fraud PH - Rules & Features",
         "type": "af_rules_features",
+        "status": "generator_ready",
+    },
+    {
+        "id": AF_RULE_EFFECTIVENESS_REPORT_ID,
+        "domain": "anti-fraud",
+        "name": "Anti-fraud PH - Rule Effectiveness / Hit-Rate",
+        "type": "af_rule_effectiveness",
         "status": "generator_ready",
     },
 )
@@ -730,6 +741,76 @@ order by case when fc.status = 1 then 0 else 1 end, fc.feature_id;
 """
 
 
+def build_af_rule_effectiveness_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    # Scope: the previous complete calendar month relative to `now` (e.g. May 2026 when run in June).
+    period = business_insights_period(now)
+    month_start = period.previous_month_start
+    month_end_exclusive = period.current_month_start
+    month_label = period.previous_month_label
+    start_ms = _date_to_epoch_millis(month_start)
+    end_ms = _date_to_epoch_millis(month_end_exclusive)
+    start_key = _yyyymmdd(month_start)
+    end_key_exclusive = _yyyymmdd(month_end_exclusive)
+    request_snap = _aliased_snapshot_filter("rq", AF_REQUEST_STATISTIC_TABLE, snapshot_pt_date)
+    reject_snap = _aliased_snapshot_filter("r", AF_IDENTIFY_REJECT_TABLE, snapshot_pt_date)
+    stat_snap = _aliased_snapshot_filter("rs", AF_RULE_TRIGGER_STATISTIC_TABLE, snapshot_pt_date)
+    header = _af_report_header("Anti-fraud PH - Rule Effectiveness / Hit-Rate", snapshot_pt_date)
+    return f"""{header}
+-- Scope: {month_label} (full calendar month, {month_start.isoformat()} to {month_end_exclusive.isoformat()} exclusive).
+-- rule_trigger_log_tab and identify_record_tab are empty in ODS; this uses request_statistic,
+-- identify_reject, and rule_trigger_statistic. Each pt_date is a cumulative snapshot, so a single
+-- (latest) snapshot is pinned and rows are scoped by date / operation_time to avoid double counting.
+-- Action rate uses pass+challenge+reject as the denominator (total_req_num is not populated).
+
+-- 1. Request Outcome Summary
+select
+  '{month_label}' as period,
+  sum(coalesce(rq.pass_num, 0)) + sum(coalesce(rq.challenge_num, 0)) + sum(coalesce(rq.reject_num, 0)) as total_outcomes,
+  sum(coalesce(rq.success_num, 0)) as successful_requests,
+  sum(coalesce(rq.fail_num, 0)) as failed_requests,
+  sum(coalesce(rq.pass_num, 0)) as pass_num,
+  sum(coalesce(rq.challenge_num, 0)) as challenge_num,
+  sum(coalesce(rq.reject_num, 0)) as reject_num,
+  round((sum(coalesce(rq.challenge_num, 0)) + sum(coalesce(rq.reject_num, 0)))
+        / nullif(sum(coalesce(rq.pass_num, 0)) + sum(coalesce(rq.challenge_num, 0)) + sum(coalesce(rq.reject_num, 0)), 0) * 100, 2) as action_rate_pct
+from {AF_REQUEST_STATISTIC_TABLE} rq
+where {request_snap}
+  and rq.date >= '{start_key}'
+  and rq.date < '{end_key_exclusive}';
+
+-- 2. Reject Rule Hit Summary
+-- Aggregated per reject_rule (+ reject_type): there are tens of rules but tens of thousands of
+-- rule x scene x position combinations, so a rule-level rollup is the complete hit-rate view.
+select
+  '{month_label}' as period,
+  r.reject_rule,
+  r.reject_type,
+  count(1) as reject_count,
+  count(distinct r.uid) as distinct_users,
+  count(distinct r.operation_scene) as distinct_scenes,
+  sum(coalesce(cast(r.transaction_amount as double), 0)) as rejected_transaction_amount
+from {AF_IDENTIFY_REJECT_TABLE} r
+where {reject_snap}
+  and r.operation_time >= {start_ms}
+  and r.operation_time < {end_ms}
+group by r.reject_rule, r.reject_type
+order by reject_count desc;
+
+-- 3. Daily Challenge/Reject/Punish
+select
+  rs.date as trigger_date,
+  sum(coalesce(rs.challenge_num, 0)) as challenge_num,
+  sum(coalesce(rs.reject_num, 0)) as reject_num,
+  sum(coalesce(rs.punish_num, 0)) as punish_num
+from {AF_RULE_TRIGGER_STATISTIC_TABLE} rs
+where {stat_snap}
+  and rs.date >= '{start_key}'
+  and rs.date < '{end_key_exclusive}'
+group by rs.date
+order by trigger_date;
+"""
+
+
 def _normalize_header(value: Any) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9]+", "_", str(value or "").strip().lower()).strip("_")
     return normalized
@@ -1105,6 +1186,7 @@ class BusinessInsightsStore:
             APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID: lambda: build_application_disbursement_funnel_sql(now=now),
             AF_SCENARIOS_ACTIONS_REPORT_ID: lambda: build_af_scenarios_actions_sql(now=now),
             AF_RULES_FEATURES_REPORT_ID: lambda: build_af_rules_features_sql(now=now),
+            AF_RULE_EFFECTIVENESS_REPORT_ID: lambda: build_af_rule_effectiveness_sql(now=now),
         }
         builder = builders.get(report_id)
         if builder is None:

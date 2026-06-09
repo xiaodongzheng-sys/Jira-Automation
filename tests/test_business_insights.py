@@ -13,7 +13,10 @@ from openpyxl import load_workbook
 
 from bpmis_jira_tool.business_insights import (
     AF_FEATURE_CONFIG_TABLE,
+    AF_IDENTIFY_REJECT_TABLE,
+    AF_REQUEST_STATISTIC_TABLE,
     AF_RULE_CONFIG_TABLE,
+    AF_RULE_EFFECTIVENESS_REPORT_ID,
     AF_RULES_FEATURES_REPORT_ID,
     AF_SCENARIOS_ACTIONS_REPORT_ID,
     AF_SCENE_TABLE,
@@ -23,6 +26,7 @@ from bpmis_jira_tool.business_insights import (
     PORTFOLIO_REPAYMENT_REPORT_ID,
     UNDERWRITING_FUNNEL_REPORT_ID,
     UNDERWRITING_FUNNEL_TABLE,
+    build_af_rule_effectiveness_sql,
     build_af_rules_features_sql,
     build_af_scenarios_actions_sql,
     build_application_disbursement_funnel_sql,
@@ -307,7 +311,8 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertIn("Credit Risk PH - Application to Disbursement Funnel", response.get_data(as_text=True))
         self.assertIn("Anti-fraud PH - L1+L2 Scenarios, Actions &amp; Auth Steps", response.get_data(as_text=True))
         self.assertIn("Anti-fraud PH - Rules &amp; Features", response.get_data(as_text=True))
-        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 6)
+        self.assertIn("Anti-fraud PH - Rule Effectiveness / Hit-Rate", response.get_data(as_text=True))
+        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 7)
         self.assertNotIn("Upload Export", response.get_data(as_text=True))
         self.assertIsNone(soup.select_one("[data-business-insights-upload]"))
 
@@ -574,7 +579,10 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
 
         self.assertEqual(reports_response.status_code, 200)
         returned_ids = {report["id"] for report in reports_response.get_json()["reports"]}
-        self.assertEqual(returned_ids, {AF_SCENARIOS_ACTIONS_REPORT_ID, AF_RULES_FEATURES_REPORT_ID})
+        self.assertEqual(
+            returned_ids,
+            {AF_SCENARIOS_ACTIONS_REPORT_ID, AF_RULES_FEATURES_REPORT_ID, AF_RULE_EFFECTIVENESS_REPORT_ID},
+        )
         self.assertEqual(page_response.status_code, 200)
         self.assertIn(
             "Anti-fraud PH - L1+L2 Scenarios, Actions &amp; Auth Steps",
@@ -650,6 +658,67 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
         # Search and per-column filters are combined (AND) in the same panel script.
         self.assertIn("colFilters", html)
         self.assertIn("row._cells", html)
+
+
+class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
+    def test_seeded_and_generator_registration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ids = {r["id"] for r in BusinessInsightsStore(Path(tmp)).reports("anti-fraud")}
+        self.assertIn(AF_RULE_EFFECTIVENESS_REPORT_ID, ids)
+        self.assertIn(AF_RULE_EFFECTIVENESS_REPORT_ID, REPORT_BUILDERS)
+        self.assertEqual(REPORT_BUILDERS[AF_RULE_EFFECTIVENESS_REPORT_ID][0], "Anti-fraud PH - Rule Effectiveness / Hit-Rate")
+
+    def test_sql_scopes_to_previous_full_month_and_fixes_action_rate(self):
+        # FIXED_NOW is May 2026, so the previous full month is April 2026.
+        sql = build_af_rule_effectiveness_sql(snapshot_pt_date="2026-06-08", now=FIXED_NOW)
+        sections = extract_sql_sections(sql)
+        self.assertEqual(
+            [s.sheet_name for s in sections],
+            ["Request Outcome Summary", "Reject Rule Hit Summary", "Daily Challenge/Reject/Punish"],
+        )
+        self.assertIn(AF_REQUEST_STATISTIC_TABLE, sql)
+        self.assertIn(AF_IDENTIFY_REJECT_TABLE, sql)
+        # identify_record is empty in ODS, so that table is not queried.
+        self.assertNotIn("from ods.mbs_anti_fraud_identify_record", sql)
+        self.assertNotIn("Identify Result by Scene", sql)
+        # Full previous calendar month (April 2026) bounded by exclusive upper key.
+        self.assertIn("Scope: Apr 2026", sql)
+        self.assertIn("rq.date >= '20260401'", sql)
+        self.assertIn("rq.date < '20260501'", sql)
+        # Action rate derived from pass+challenge+reject, not the unpopulated total_req_num column.
+        self.assertIn("total_outcomes", sql)
+        self.assertNotIn("rq.total_req_num", sql)
+        self.assertIn("action_rate_pct", sql)
+
+    def test_visualization_renders_kpis_plus_searchable_sections(self):
+        summary_headers = ["period", "total_outcomes", "pass_num", "challenge_num", "reject_num", "action_rate_pct"]
+        summary_rows = [["May 2026", "446218000", "427348342", "18070027", "849571", "4.23"]]
+        reject_headers = ["period", "reject_rule", "reject_type", "operation_scene", "reject_count"]
+        reject_rows = [["May 2026", "D0163v2", "1", "1037", "26568"], ["May 2026", "D0200", "2", "1040", "12000"]]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "viz.html"
+            write_visualization(
+                output_path,
+                report_title="Anti-fraud PH - Rule Effectiveness / Hit-Rate",
+                snapshot_pt_date="2026-06-08",
+                sheets=[
+                    ("Request Outcome Summary", summary_headers, summary_rows),
+                    ("Reject Rule Hit Summary", reject_headers, reject_rows),
+                ],
+                report_id=AF_RULE_EFFECTIVENESS_REPORT_ID,
+            )
+            html = output_path.read_text(encoding="utf-8")
+
+        # KPI cards derived from the summary row.
+        self.assertIn("Hit-Rate Summary", html)
+        self.assertIn("Action rate", html)
+        self.assertIn("4.23%", html)
+        self.assertIn('<div class="kpi">', html)
+        # Searchable, per-column-filterable section tables.
+        self.assertIn("<h2>Reject Rule Hit Summary</h2>", html)
+        self.assertIn('class="search-table"', html)
+        self.assertIn('class="col-filter"', html)
+        self.assertIn("D0163v2", html)
 
 
 if __name__ == "__main__":

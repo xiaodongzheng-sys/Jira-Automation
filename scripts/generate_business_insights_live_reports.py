@@ -39,7 +39,9 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from bpmis_jira_tool.business_insights import (  # noqa: E402
+    AF_REQUEST_STATISTIC_TABLE,
     AF_RULE_CONFIG_TABLE,
+    AF_RULE_EFFECTIVENESS_REPORT_ID,
     AF_RULES_FEATURES_REPORT_ID,
     AF_SCENARIO_FLOW_CONFIG_TABLE,
     AF_SCENARIOS_ACTIONS_REPORT_ID,
@@ -52,6 +54,7 @@ from bpmis_jira_tool.business_insights import (  # noqa: E402
     PORTFOLIO_REPAYMENT_REPORT_ID,
     REPAY_PLAN_TABLE,
     UNDERWRITING_FUNNEL_REPORT_ID,
+    build_af_rule_effectiveness_sql,
     build_af_rules_features_sql,
     build_af_scenarios_actions_sql,
     build_application_disbursement_funnel_sql,
@@ -79,6 +82,10 @@ REPORT_BUILDERS: dict[str, tuple[str, Callable[..., str]]] = {
         "Anti-fraud PH - Rules & Features",
         build_af_rules_features_sql,
     ),
+    AF_RULE_EFFECTIVENESS_REPORT_ID: (
+        "Anti-fraud PH - Rule Effectiveness / Hit-Rate",
+        build_af_rule_effectiveness_sql,
+    ),
 }
 
 # Anchor table per report used to resolve the latest available pt_date when the
@@ -90,6 +97,7 @@ REPORT_SNAPSHOT_ANCHOR_TABLE: dict[str, str] = {
     APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID: LOAN_APPLICATION_TABLE,
     AF_SCENARIOS_ACTIONS_REPORT_ID: AF_SCENARIO_FLOW_CONFIG_TABLE,
     AF_RULES_FEATURES_REPORT_ID: AF_RULE_CONFIG_TABLE,
+    AF_RULE_EFFECTIVENESS_REPORT_ID: AF_REQUEST_STATISTIC_TABLE,
 }
 
 LATEST_SNAPSHOT = "latest"
@@ -327,11 +335,16 @@ def style_sheet(sheet: Any) -> None:
     sheet.auto_filter.ref = sheet.dimensions
 
 
+def _excel_sheet_title(sheet_name: str) -> str:
+    # openpyxl rejects : \ / ? * [ ] in sheet titles, which are capped at 31 chars.
+    return re.sub(r"[:\\/?*\[\]]", " ", str(sheet_name)).strip()[:31] or "Sheet"
+
+
 def write_workbook(path: Path, sheets: list[tuple[str, list[str], list[list[Any]]]]) -> None:
     workbook = Workbook()
     workbook.remove(workbook.active)
     for sheet_name, schema, rows in sheets:
-        sheet = workbook.create_sheet(sheet_name[:31])
+        sheet = workbook.create_sheet(_excel_sheet_title(sheet_name))
         sheet.append(schema)
         for row in rows:
             sheet.append(row)
@@ -1194,9 +1207,25 @@ def _searchable_table_panel(
     )
 
 
-def _searchable_tables_document(report_title: str, snapshot_pt_date: str, panels: list[str]) -> str:
+def _kpi_cards_panel(title: str, pairs: list[tuple[str, str]]) -> str:
+    if not pairs:
+        return ""
+    cards = "".join(
+        f'<div class="kpi"><span>{html.escape(label)}</span><strong>{html.escape(value)}</strong></div>'
+        for label, value in pairs
+    )
+    return f'<section class="panel"><h2>{html.escape(title)}</h2><div class="kpi-grid">{cards}</div></section>'
+
+
+def _searchable_tables_document(
+    report_title: str,
+    snapshot_pt_date: str,
+    panels: list[str],
+    *,
+    intro_html: str = "",
+) -> str:
     generated_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
-    body = "".join(panels) or '<section class="panel"><p class="empty">No data was returned.</p></section>'
+    body = (intro_html + "".join(panels)) or '<section class="panel"><p class="empty">No data was returned.</p></section>'
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(report_title)} Visualization</title>
@@ -1213,6 +1242,10 @@ h2{{margin:0 0 14px;font-size:18px;}}
 .search-bar{{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap;}}
 .search-bar input{{flex:1;min-width:240px;height:40px;border:1px solid #cbd5e1;border-radius:6px;padding:0 12px;font-size:14px;}}
 .search-bar .count{{color:var(--muted);font-size:13px;white-space:nowrap;}}
+.kpi-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;}}
+.kpi{{border:1px solid #e4e7ec;border-radius:8px;padding:14px;background:#fafcff;}}
+.kpi span{{display:block;color:var(--muted);font-size:12px;margin-bottom:6px;}}
+.kpi strong{{display:block;font-size:22px;}}
 .table-wrap{{overflow:auto;border:1px solid #edf1f7;border-radius:6px;max-height:74vh;}}
 table{{width:100%;border-collapse:collapse;font-size:13px;}}
 th,td{{border-bottom:1px solid #edf1f7;padding:8px 10px;text-align:left;white-space:nowrap;vertical-align:top;}}
@@ -1388,6 +1421,54 @@ def write_visualization(
             )
         path.write_text(
             _searchable_tables_document(report_title, snapshot_pt_date, panels),
+            encoding="utf-8",
+        )
+        return
+    if report_id == AF_RULE_EFFECTIVENESS_REPORT_ID:
+        eff_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
+        # KPI summary cards from the single-row Request Outcome Summary sheet.
+        kpis: list[tuple[str, str]] = []
+        scope_label = ""
+        summary = eff_lookup.get("Request Outcome Summary")
+        if summary and summary[1]:
+            cols = {str(col): offset for offset, col in enumerate(summary[0])}
+            srow = summary[1][0]
+
+            def _v(col: str) -> Any:
+                return srow[cols[col]] if col in cols and cols[col] < len(srow) else None
+
+            scope_label = str(_v("period") or "").strip()
+
+            kpi_specs = [
+                ("Total outcomes", "total_outcomes", ""),
+                ("Pass", "pass_num", ""),
+                ("Challenge", "challenge_num", ""),
+                ("Reject", "reject_num", ""),
+                ("Action rate", "action_rate_pct", "%"),
+            ]
+            for label, col, suffix in kpi_specs:
+                value = _v(col)
+                if value in (None, ""):
+                    continue
+                text = f"{_format_number(value)}{suffix}" if _is_number(value) else f"{value}{suffix}"
+                kpis.append((label, text))
+        intro = _kpi_cards_panel(f"Hit-Rate Summary — {scope_label}" if scope_label else "Hit-Rate Summary", kpis)
+        placeholders = {
+            "Request Outcome Summary": "Filter…",
+            "Reject Rule Hit Summary": "Search rule, scene or type…",
+            "Daily Challenge/Reject/Punish": "Search date…",
+        }
+        panels = [
+            _searchable_table_panel(
+                sheet_name,
+                headers,
+                rows,
+                placeholder=placeholders.get(sheet_name, "Search…"),
+            )
+            for sheet_name, headers, rows in sheets
+        ]
+        path.write_text(
+            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),
             encoding="utf-8",
         )
         return
