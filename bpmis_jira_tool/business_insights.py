@@ -92,12 +92,16 @@ PRODUCT_LABEL_COLUMNS: set[str] = {"product", "product_code", "sub-product", "su
 # The AF lake uses two naming styles:
 #   ods.mbs_ph_seabank_anti_fraud_db_<table>_ss        (scene / sub_scene / action)
 #   ods.mbs_ph_seabank_anti_fraud_db_<table>_df        (scenario flow config)
+#   ods.mbs_anti_fraud_<table>_ss                      (rule / feature config)
 AF_SCENARIOS_ACTIONS_REPORT_ID = "anti-fraud-ph-scenarios-actions-auth-steps"
+AF_RULES_FEATURES_REPORT_ID = "anti-fraud-ph-rules-features"
 
 AF_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_scene_tab_ss"
 AF_SUB_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_sub_scene_tab_ss"
 AF_ACTION_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_action_tab_ss"
 AF_SCENARIO_FLOW_CONFIG_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_biz_scenario_flow_config_tab_df"
+AF_RULE_CONFIG_TABLE = "ods.mbs_anti_fraud_rule_config_tab_ss"
+AF_FEATURE_CONFIG_TABLE = "ods.mbs_anti_fraud_feature_config_tab_ss"
 
 SEEDED_REPORTS: tuple[dict[str, str], ...] = (
     {
@@ -133,6 +137,13 @@ SEEDED_REPORTS: tuple[dict[str, str], ...] = (
         "domain": "anti-fraud",
         "name": "Anti-fraud PH - L1+L2 Scenarios, Actions & Auth Steps",
         "type": "af_scenarios_actions",
+        "status": "generator_ready",
+    },
+    {
+        "id": AF_RULES_FEATURES_REPORT_ID,
+        "domain": "anti-fraud",
+        "name": "Anti-fraud PH - Rules & Features",
+        "type": "af_rules_features",
         "status": "generator_ready",
     },
 )
@@ -666,6 +677,59 @@ order by f.scene, f.sub_scene, f.action;
 """
 
 
+def build_af_rules_features_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    rule_snap = _aliased_snapshot_filter("rc", AF_RULE_CONFIG_TABLE, snapshot_pt_date)
+    feature_snap = _aliased_snapshot_filter("fc", AF_FEATURE_CONFIG_TABLE, snapshot_pt_date)
+    header = _af_report_header("Anti-fraud PH - Rules & Features", snapshot_pt_date)
+    return f"""{header}
+-- Full rule and feature catalogs. outcome_type: 1=Punish, 2=Challenge, 3=Reject.
+-- rule status > 0 = Active; feature status 1=Active / -1=Inactive.
+
+-- 1. Rules
+select
+  rc.rule_id,
+  rc.rule_name,
+  rc.feature_expr,
+  case when rc.status > 0 then 'Active' else 'Inactive/Draft' end as rule_status,
+  rc.status as status_code,
+  case rc.outcome_type when 1 then 'Punish' when 2 then 'Challenge' when 3 then 'Reject' else cast(rc.outcome_type as string) end as outcome_type,
+  case rc.real_time when 1 then 'Real-time' else 'Batch' end as execution_mode,
+  rc.risk_level,
+  rc.priority,
+  rc.review_priority,
+  rc.punish_action,
+  rc.punish_scene,
+  rc.punish_sub_scene,
+  rc.notice_template
+from {AF_RULE_CONFIG_TABLE} rc
+where {rule_snap}
+order by case when rc.status > 0 then 0 else 1 end, rc.rule_id;
+
+-- 2. Features
+select
+  fc.feature_id,
+  fc.feature_name,
+  fc.function_id,
+  case fc.status when 1 then 'Active' when -1 then 'Inactive' else cast(fc.status as string) end as feature_status,
+  fc.type as feature_type,
+  fc.base_obj,
+  fc.count_obj,
+  fc.time_range as count_window_seconds,
+  fc.operator,
+  fc.threshold,
+  case fc.consecutive when 1 then 'Y' else 'N' end as consecutive,
+  fc.scene,
+  fc.sub_scene,
+  fc.action,
+  fc.event_status,
+  fc.scenario_type,
+  fc.business_category
+from {AF_FEATURE_CONFIG_TABLE} fc
+where {feature_snap}
+order by case when fc.status = 1 then 0 else 1 end, fc.feature_id;
+"""
+
+
 def _normalize_header(value: Any) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9]+", "_", str(value or "").strip().lower()).strip("_")
     return normalized
@@ -1040,6 +1104,7 @@ class BusinessInsightsStore:
             LIMIT_UTILIZATION_REPORT_ID: lambda: build_limit_utilization_sql(now=now),
             APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID: lambda: build_application_disbursement_funnel_sql(now=now),
             AF_SCENARIOS_ACTIONS_REPORT_ID: lambda: build_af_scenarios_actions_sql(now=now),
+            AF_RULES_FEATURES_REPORT_ID: lambda: build_af_rules_features_sql(now=now),
         }
         builder = builders.get(report_id)
         if builder is None:

@@ -12,6 +12,9 @@ from bs4 import BeautifulSoup
 from openpyxl import load_workbook
 
 from bpmis_jira_tool.business_insights import (
+    AF_FEATURE_CONFIG_TABLE,
+    AF_RULE_CONFIG_TABLE,
+    AF_RULES_FEATURES_REPORT_ID,
     AF_SCENARIOS_ACTIONS_REPORT_ID,
     AF_SCENE_TABLE,
     APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID,
@@ -20,6 +23,7 @@ from bpmis_jira_tool.business_insights import (
     PORTFOLIO_REPAYMENT_REPORT_ID,
     UNDERWRITING_FUNNEL_REPORT_ID,
     UNDERWRITING_FUNNEL_TABLE,
+    build_af_rules_features_sql,
     build_af_scenarios_actions_sql,
     build_application_disbursement_funnel_sql,
     build_limit_utilization_sql,
@@ -302,7 +306,8 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertIn("Credit Risk PH - Limit Utilization", response.get_data(as_text=True))
         self.assertIn("Credit Risk PH - Application to Disbursement Funnel", response.get_data(as_text=True))
         self.assertIn("Anti-fraud PH - L1+L2 Scenarios, Actions &amp; Auth Steps", response.get_data(as_text=True))
-        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 5)
+        self.assertIn("Anti-fraud PH - Rules &amp; Features", response.get_data(as_text=True))
+        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 6)
         self.assertNotIn("Upload Export", response.get_data(as_text=True))
         self.assertIsNone(soup.select_one("[data-business-insights-upload]"))
 
@@ -401,8 +406,8 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
             store = BusinessInsightsStore(Path(tmp))
             reports = store.reports("anti-fraud")
         ids = {report["id"] for report in reports}
-        self.assertEqual(ids, {AF_SCENARIOS_ACTIONS_REPORT_ID})
-        report = reports[0]
+        self.assertIn(AF_SCENARIOS_ACTIONS_REPORT_ID, ids)
+        report = next(r for r in reports if r["id"] == AF_SCENARIOS_ACTIONS_REPORT_ID)
         self.assertEqual(report["domain"], "anti-fraud")
         self.assertEqual(report["status"], "generator_ready")
         self.assertIsNone(report["artifact"])
@@ -569,12 +574,75 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
 
         self.assertEqual(reports_response.status_code, 200)
         returned_ids = {report["id"] for report in reports_response.get_json()["reports"]}
-        self.assertEqual(returned_ids, {AF_SCENARIOS_ACTIONS_REPORT_ID})
+        self.assertEqual(returned_ids, {AF_SCENARIOS_ACTIONS_REPORT_ID, AF_RULES_FEATURES_REPORT_ID})
         self.assertEqual(page_response.status_code, 200)
         self.assertIn(
             "Anti-fraud PH - L1+L2 Scenarios, Actions &amp; Auth Steps",
             page_response.get_data(as_text=True),
         )
+
+
+class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
+    def test_seeded_reports_include_rules_features(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = BusinessInsightsStore(Path(tmp))
+            ids = {report["id"] for report in store.reports("anti-fraud")}
+        self.assertIn(AF_RULES_FEATURES_REPORT_ID, ids)
+
+    def test_store_returns_sql_for_rules_features(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = BusinessInsightsStore(Path(tmp))
+            sql = store.sql_for_report(AF_RULES_FEATURES_REPORT_ID, now=FIXED_NOW)
+        self.assertTrue(sql.strip())
+
+    def test_rules_features_sql_has_two_sections_on_granted_tables(self):
+        sql = build_af_rules_features_sql(snapshot_pt_date="2026-06-08", now=FIXED_NOW)
+        sections = extract_sql_sections(sql)
+        self.assertEqual([s.sheet_name for s in sections], ["Rules", "Features"])
+        self.assertIn(AF_RULE_CONFIG_TABLE, sql)
+        self.assertIn(AF_FEATURE_CONFIG_TABLE, sql)
+        self.assertEqual(AF_RULE_CONFIG_TABLE, "ods.mbs_anti_fraud_rule_config_tab_ss")
+        self.assertEqual(AF_FEATURE_CONFIG_TABLE, "ods.mbs_anti_fraud_feature_config_tab_ss")
+        self.assertIn("pt_date = '2026-06-08'", sql)
+        for column in ("rule_id", "rule_name", "feature_id", "feature_name"):
+            self.assertIn(column, sql)
+
+    def test_generator_report_builders_include_rules_features(self):
+        self.assertIn(AF_RULES_FEATURES_REPORT_ID, REPORT_BUILDERS)
+        title, builder = REPORT_BUILDERS[AF_RULES_FEATURES_REPORT_ID]
+        self.assertEqual(title, "Anti-fraud PH - Rules & Features")
+        self.assertTrue(callable(builder))
+
+    def test_visualization_renders_two_searchable_catalogs(self):
+        rule_headers = ["rule_id", "rule_name", "outcome_type", "rule_status"]
+        rule_rows = [["R1", "High Velocity Login", "Challenge", "Active"], ["R2", "Device Spoof", "Reject", "Active"]]
+        feature_headers = ["feature_id", "feature_name", "threshold", "feature_status"]
+        feature_rows = [["F1", "Login count 1h", "5", "Active"], ["F2", "Distinct device 24h", "3", "Inactive"]]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "viz.html"
+            write_visualization(
+                output_path,
+                report_title="Anti-fraud PH - Rules & Features",
+                snapshot_pt_date="2026-06-08",
+                sheets=[
+                    ("Rules", rule_headers, rule_rows),
+                    ("Features", feature_headers, feature_rows),
+                ],
+                report_id=AF_RULES_FEATURES_REPORT_ID,
+            )
+            html = output_path.read_text(encoding="utf-8")
+
+        # Two searchable catalog panels with distinct placeholders.
+        self.assertEqual(html.count('class="search-table"'), 2)
+        self.assertIn("<h2>Rules</h2>", html)
+        self.assertIn("<h2>Features</h2>", html)
+        self.assertIn("Search rule id or name", html)
+        self.assertIn("Search feature id or name", html)
+        self.assertIn("High Velocity Login", html)
+        self.assertIn("Distinct device 24h", html)
+        # Generic dashboard chrome is not used.
+        self.assertNotIn("data-product-filter", html)
+        self.assertNotIn("Data Quality Notes", html)
 
 
 if __name__ == "__main__":

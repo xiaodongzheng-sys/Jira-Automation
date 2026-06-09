@@ -39,6 +39,8 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from bpmis_jira_tool.business_insights import (  # noqa: E402
+    AF_RULE_CONFIG_TABLE,
+    AF_RULES_FEATURES_REPORT_ID,
     AF_SCENARIO_FLOW_CONFIG_TABLE,
     AF_SCENARIOS_ACTIONS_REPORT_ID,
     APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID,
@@ -50,6 +52,7 @@ from bpmis_jira_tool.business_insights import (  # noqa: E402
     PORTFOLIO_REPAYMENT_REPORT_ID,
     REPAY_PLAN_TABLE,
     UNDERWRITING_FUNNEL_REPORT_ID,
+    build_af_rules_features_sql,
     build_af_scenarios_actions_sql,
     build_application_disbursement_funnel_sql,
     build_limit_utilization_sql,
@@ -72,6 +75,10 @@ REPORT_BUILDERS: dict[str, tuple[str, Callable[..., str]]] = {
         "Anti-fraud PH - L1+L2 Scenarios, Actions & Auth Steps",
         build_af_scenarios_actions_sql,
     ),
+    AF_RULES_FEATURES_REPORT_ID: (
+        "Anti-fraud PH - Rules & Features",
+        build_af_rules_features_sql,
+    ),
 }
 
 # Anchor table per report used to resolve the latest available pt_date when the
@@ -82,6 +89,7 @@ REPORT_SNAPSHOT_ANCHOR_TABLE: dict[str, str] = {
     LIMIT_UTILIZATION_REPORT_ID: CREDIT_LIMIT_TABLE,
     APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID: LOAN_APPLICATION_TABLE,
     AF_SCENARIOS_ACTIONS_REPORT_ID: AF_SCENARIO_FLOW_CONFIG_TABLE,
+    AF_RULES_FEATURES_REPORT_ID: AF_RULE_CONFIG_TABLE,
 }
 
 LATEST_SNAPSHOT = "latest"
@@ -1144,6 +1152,95 @@ def _business_insights(report_title: str, lookup: dict[str, tuple[list[str], lis
     return _insights_panel(insights)
 
 
+def _searchable_table_panel(
+    title: str,
+    headers: list[str],
+    rows: list[list[Any]],
+    *,
+    placeholder: str,
+) -> str:
+    header_html = "".join(f"<th>{html.escape(str(header))}</th>" for header in headers)
+
+    def _cell(value: Any) -> str:
+        return "" if value is None else str(value)
+
+    body_rows = []
+    for row in rows:
+        cells = "".join(
+            f"<td>{html.escape(_cell(row[index] if index < len(row) else ''))}</td>"
+            for index in range(len(headers))
+        )
+        body_rows.append(f"<tr>{cells}</tr>")
+    table_html = (
+        f'<div class="table-wrap"><table class="search-table"><thead><tr>{header_html}</tr></thead>'
+        f'<tbody>{"".join(body_rows)}</tbody></table></div>'
+        if headers
+        else '<p class="empty">No rows were returned.</p>'
+    )
+    total = len(rows)
+    return (
+        f'<section class="panel"><h2>{html.escape(title)}</h2>'
+        '<div class="search-bar">'
+        f'<input type="search" data-search placeholder="{html.escape(placeholder)}" aria-label="{html.escape(placeholder)}">'
+        f'<span class="count" data-count>{total} of {total} rows</span>'
+        f"</div>{table_html}</section>"
+    )
+
+
+def _searchable_tables_document(report_title: str, snapshot_pt_date: str, panels: list[str]) -> str:
+    generated_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+    body = "".join(panels) or '<section class="panel"><p class="empty">No data was returned.</p></section>'
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(report_title)} Visualization</title>
+<style>
+:root{{--ink:#182230;--muted:#667085;--line:#d9e2ec;--bg:#f5f7fb;--blue:#1769e0;}}
+*{{box-sizing:border-box;}}
+body{{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}}
+header{{background:linear-gradient(135deg,#102a43,#173b5f);color:#fff;padding:30px 38px;}}
+header h1{{margin:0 0 8px;font-size:28px;overflow-wrap:anywhere;}} header p{{margin:0;color:#dbeafe;}}
+main{{padding:24px 34px 38px;}}
+.panel{{background:#fff;border:1px solid var(--line);border-radius:8px;padding:18px;box-shadow:0 1px 2px rgba(16,42,67,.06);}}
+.panel + .panel{{margin-top:18px;}}
+h2{{margin:0 0 14px;font-size:18px;}}
+.search-bar{{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap;}}
+.search-bar input{{flex:1;min-width:240px;height:40px;border:1px solid #cbd5e1;border-radius:6px;padding:0 12px;font-size:14px;}}
+.search-bar .count{{color:var(--muted);font-size:13px;white-space:nowrap;}}
+.table-wrap{{overflow:auto;border:1px solid #edf1f7;border-radius:6px;max-height:74vh;}}
+table{{width:100%;border-collapse:collapse;font-size:13px;}}
+th,td{{border-bottom:1px solid #edf1f7;padding:8px 10px;text-align:left;white-space:nowrap;vertical-align:top;}}
+th{{background:#f1f6ff;font-weight:700;color:#344054;position:sticky;top:0;}}
+tr.no-match{{display:none;}}
+.empty{{padding:18px;color:var(--muted);}}
+</style></head><body>
+<header><h1>{html.escape(report_title)}</h1><p>Snapshot {html.escape(snapshot_pt_date)}. Generated {generated_at} UTC from Data Workbench output.</p></header>
+<main>{body}</main>
+<script>
+(() => {{
+  document.querySelectorAll(".panel").forEach((panel) => {{
+    const input = panel.querySelector("[data-search]");
+    const counter = panel.querySelector("[data-count]");
+    const rows = Array.from(panel.querySelectorAll("table.search-table tbody tr"));
+    const total = rows.length;
+    rows.forEach((row) => {{ row.dataset.text = row.textContent.toLowerCase(); }});
+    const apply = () => {{
+      const query = (input?.value || "").trim().toLowerCase();
+      let visible = 0;
+      rows.forEach((row) => {{
+        const match = !query || row.dataset.text.includes(query);
+        row.classList.toggle("no-match", !match);
+        if (match) visible += 1;
+      }});
+      if (counter) counter.textContent = `${{visible}} of ${{total}} rows`;
+    }};
+    input?.addEventListener("input", apply);
+    apply();
+  }});
+}})();
+</script>
+</body></html>"""
+
+
 def _scenario_auth_flow_document(
     report_title: str,
     snapshot_pt_date: str,
@@ -1251,6 +1348,24 @@ def write_visualization(
     if report_id == AF_SCENARIOS_ACTIONS_REPORT_ID:
         path.write_text(
             _scenario_auth_flow_document(report_title, snapshot_pt_date, sheets),
+            encoding="utf-8",
+        )
+        return
+    if report_id == AF_RULES_FEATURES_REPORT_ID:
+        flow_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
+        panels: list[str] = []
+        rules = flow_lookup.get("Rules")
+        if rules:
+            panels.append(
+                _searchable_table_panel("Rules", rules[0], rules[1], placeholder="Search rule id or name…")
+            )
+        features = flow_lookup.get("Features")
+        if features:
+            panels.append(
+                _searchable_table_panel("Features", features[0], features[1], placeholder="Search feature id or name…")
+            )
+        path.write_text(
+            _searchable_tables_document(report_title, snapshot_pt_date, panels),
             encoding="utf-8",
         )
         return
