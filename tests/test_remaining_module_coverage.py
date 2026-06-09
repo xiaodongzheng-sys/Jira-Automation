@@ -156,7 +156,7 @@ class RemainingModuleCoverageTests(unittest.TestCase):
             with patch("bpmis_jira_tool.web_runtime_status.subprocess.run", side_effect=_clean_git_side_effect):
                 self.assertEqual(web_runtime_status.source_tree_revision(root), "clean123")
 
-            self.assertEqual(web_runtime_status.filtered_untracked_paths("\n.venv/x\nkeep.py\n.pytest_cache/y\n"), ["keep.py"])
+            self.assertEqual(web_runtime_status.filtered_untracked_paths("\n.venv/x\nkeep.py\n.pytest_cache/y\n.claude/scheduled_tasks.lock\n"), ["keep.py"])
             self.assertTrue(web_runtime_status.default_flask_session_secret(" dev-secret-key "))
             self.assertFalse(web_runtime_status.default_flask_session_secret("real-secret"))
 

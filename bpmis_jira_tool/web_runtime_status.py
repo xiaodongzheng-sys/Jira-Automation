@@ -9,7 +9,7 @@ from typing import Any
 
 
 DEFAULT_FLASK_SESSION_SECRET_VALUES = {"", "dev-secret-key", "local-dev-secret-change-me"}
-UNTRACKED_RELEASE_REVISION_EXCLUDES = (".venv", ".venv-", ".venv.", ".team-portal", ".pytest_cache")
+UNTRACKED_RELEASE_REVISION_EXCLUDES = (".venv", ".venv-", ".venv.", ".team-portal", ".pytest_cache", ".claude")
 
 
 @lru_cache(maxsize=1)
