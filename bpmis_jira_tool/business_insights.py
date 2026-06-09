@@ -106,6 +106,7 @@ AF_FEATURE_CONFIG_TABLE = "ods.mbs_anti_fraud_feature_config_tab_ss"
 AF_IDENTIFY_REJECT_TABLE = "ods.mbs_anti_fraud_identify_reject_tab_ss"
 AF_REQUEST_STATISTIC_TABLE = "ods.mbs_anti_fraud_request_statistic_tab_ss"
 AF_RULE_TRIGGER_STATISTIC_TABLE = "ods.mbs_anti_fraud_rule_trigger_statistic_tab_ss"
+AF_PUNISH_LIST_TABLE = "ods.mbs_anti_fraud_punish_list_tab_ss"
 
 SEEDED_REPORTS: tuple[dict[str, str], ...] = (
     {
@@ -753,6 +754,7 @@ def build_af_rule_effectiveness_sql(*, snapshot_pt_date: str | None = None, now:
     end_key_exclusive = _yyyymmdd(month_end_exclusive)
     request_snap = _aliased_snapshot_filter("rq", AF_REQUEST_STATISTIC_TABLE, snapshot_pt_date)
     reject_snap = _aliased_snapshot_filter("r", AF_IDENTIFY_REJECT_TABLE, snapshot_pt_date)
+    punish_snap = _aliased_snapshot_filter("p", AF_PUNISH_LIST_TABLE, snapshot_pt_date)
     stat_snap = _aliased_snapshot_filter("rs", AF_RULE_TRIGGER_STATISTIC_TABLE, snapshot_pt_date)
     header = _af_report_header("Anti-fraud PH - Rule Effectiveness / Hit-Rate", snapshot_pt_date)
     return f"""{header}
@@ -818,7 +820,42 @@ where {reject_snap}
 group by r.reject_rule, r.reject_type, r.operation_scene, s.name
 order by r.reject_rule, reject_count desc;
 
--- 4. Daily Challenge/Reject/Punish
+-- 4. Punishment Rule Hit Summary
+-- Per punish_rule_id from the punish list; start_time scopes the month. Punishments carry no
+-- transaction amount. Targets are distinct id_value (uid / device / phone number).
+select
+  '{month_label}' as period,
+  p.punish_rule_id,
+  count(1) as punish_count,
+  count(distinct p.id_value) as distinct_targets,
+  count(distinct p.scene) as distinct_scenes
+from {AF_PUNISH_LIST_TABLE} p
+where {punish_snap}
+  and p.start_time >= {start_ms}
+  and p.start_time < {end_ms}
+group by p.punish_rule_id
+order by punish_count desc;
+
+-- 5. Punishment Rule Scene Breakdown
+-- Per punish_rule_id x scene, with the scene name resolved from the scene config table.
+-- Powers the expandable per-rule scene breakdown for punishments.
+select
+  p.punish_rule_id,
+  p.scene,
+  coalesce(s.name, concat('scene_', cast(p.scene as string))) as scene_name,
+  count(1) as punish_count,
+  count(distinct p.id_value) as distinct_targets
+from {AF_PUNISH_LIST_TABLE} p
+left join {AF_SCENE_TABLE} s
+  on s.code = cast(p.scene as string)
+  and s.pt_date = (select max(pt_date) from {AF_SCENE_TABLE})
+where {punish_snap}
+  and p.start_time >= {start_ms}
+  and p.start_time < {end_ms}
+group by p.punish_rule_id, p.scene, s.name
+order by p.punish_rule_id, punish_count desc;
+
+-- 6. Daily Challenge/Reject/Punish
 select
   rs.date as trigger_date,
   sum(coalesce(rs.challenge_num, 0)) as challenge_num,

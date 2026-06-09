@@ -14,6 +14,7 @@ from openpyxl import load_workbook
 from bpmis_jira_tool.business_insights import (
     AF_FEATURE_CONFIG_TABLE,
     AF_IDENTIFY_REJECT_TABLE,
+    AF_PUNISH_LIST_TABLE,
     AF_REQUEST_STATISTIC_TABLE,
     AF_RULE_CONFIG_TABLE,
     AF_RULE_EFFECTIVENESS_REPORT_ID,
@@ -678,11 +679,15 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
                 "Request Outcome Summary",
                 "Reject Rule Hit Summary",
                 "Reject Rule Scene Breakdown",
+                "Punishment Rule Hit Summary",
+                "Punishment Rule Scene Breakdown",
                 "Daily Challenge/Reject/Punish",
             ],
         )
         self.assertIn(AF_REQUEST_STATISTIC_TABLE, sql)
         self.assertIn(AF_IDENTIFY_REJECT_TABLE, sql)
+        self.assertIn(AF_PUNISH_LIST_TABLE, sql)
+        self.assertIn("punish_rule_id", sql)
         # identify_record is empty in ODS, so that table is not queried.
         self.assertNotIn("from ods.mbs_anti_fraud_identify_record", sql)
         self.assertNotIn("Identify Result by Scene", sql)
@@ -722,6 +727,8 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
                     ("Request Outcome Summary", summary_headers, summary_rows),
                     ("Reject Rule Hit Summary", reject_headers, reject_rows),
                     ("Reject Rule Scene Breakdown", breakdown_headers, breakdown_rows),
+                    ("Punishment Rule Hit Summary", ["period", "punish_rule_id", "punish_count", "distinct_targets", "distinct_scenes"], [["May 2026", "U0021", "18492", "12000", "1"]]),
+                    ("Punishment Rule Scene Breakdown", ["punish_rule_id", "scene", "scene_name", "punish_count", "distinct_targets"], [["U0021", "1", "Login", "18492", "12000"]]),
                     ("Daily Challenge/Reject/Punish", ["trigger_date", "challenge_num", "reject_num", "punish_num"], [["20260501", "1", "2", "3"]]),
                 ],
                 report_id=AF_RULE_EFFECTIVENESS_REPORT_ID,
@@ -744,6 +751,13 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
         self.assertNotIn("<h2>Reject Rule Scene Breakdown</h2>", html)
         # The other sections remain plain searchable tables.
         self.assertIn('class="search-table"', html)
+        # Punishment Rule Hit Summary is also an expandable panel (nested breakdown, no amount).
+        self.assertIn("<h2>Punishment Rule Hit Summary</h2>", html)
+        self.assertNotIn("<h2>Punishment Rule Scene Breakdown</h2>", html)
+        self.assertIn("punish_rule_id", html)
+        self.assertIn("U0021", html)
+        # Two expandable rule panels now.
+        self.assertEqual(html.count('class="rule-table"'), 2)
 
 
 if __name__ == "__main__":

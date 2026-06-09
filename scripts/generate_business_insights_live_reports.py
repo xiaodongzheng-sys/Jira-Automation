@@ -1582,19 +1582,21 @@ def write_visualization(
             "Request Outcome Summary": "Filter…",
             "Daily Challenge/Reject/Punish": "Search date…",
         }
-        breakdown = eff_lookup.get("Reject Rule Scene Breakdown")
+        reject_breakdown = eff_lookup.get("Reject Rule Scene Breakdown")
+        punish_breakdown = eff_lookup.get("Punishment Rule Scene Breakdown")
+        # Breakdown sheets are nested into their summary panels, not rendered standalone.
+        nested_sheets = {"Reject Rule Scene Breakdown", "Punishment Rule Scene Breakdown"}
         panels = []
         for sheet_name, headers, rows in sheets:
-            if sheet_name == "Reject Rule Scene Breakdown":
-                # Consumed into the expandable Reject Rule Hit Summary panel.
+            if sheet_name in nested_sheets:
                 continue
-            if sheet_name == "Reject Rule Hit Summary" and breakdown:
+            if sheet_name == "Reject Rule Hit Summary" and reject_breakdown:
                 panels.append(
                     _expandable_rule_panel(
                         "Reject Rule Hit Summary",
                         "Search rule, type or scene…",
                         (headers, rows),
-                        breakdown,
+                        reject_breakdown,
                         key_columns=("reject_rule", "reject_type"),
                         main_columns=(
                             "reject_rule",
@@ -1605,6 +1607,20 @@ def write_visualization(
                             "rejected_amount_php",
                         ),
                         detail_columns=("scene_name", "reject_count", "distinct_users", "rejected_amount_php"),
+                        name_column="scene_name",
+                    )
+                )
+                continue
+            if sheet_name == "Punishment Rule Hit Summary" and punish_breakdown:
+                panels.append(
+                    _expandable_rule_panel(
+                        "Punishment Rule Hit Summary",
+                        "Search rule or scene…",
+                        (headers, rows),
+                        punish_breakdown,
+                        key_columns=("punish_rule_id",),
+                        main_columns=("punish_rule_id", "punish_count", "distinct_targets", "distinct_scenes"),
+                        detail_columns=("scene_name", "punish_count", "distinct_targets"),
                         name_column="scene_name",
                     )
                 )
