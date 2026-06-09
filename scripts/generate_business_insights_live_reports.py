@@ -1159,7 +1159,14 @@ def _searchable_table_panel(
     *,
     placeholder: str,
 ) -> str:
-    header_html = "".join(f"<th>{html.escape(str(header))}</th>" for header in headers)
+    header_html = "".join(
+        (
+            f'<th><span class="th-label">{html.escape(str(header))}</span>'
+            f'<input class="col-filter" type="text" data-col="{index}" '
+            f'placeholder="Filter" aria-label="Filter {html.escape(str(header))}"></th>'
+        )
+        for index, header in enumerate(headers)
+    )
 
     def _cell(value: Any) -> str:
         return "" if value is None else str(value)
@@ -1210,6 +1217,8 @@ h2{{margin:0 0 14px;font-size:18px;}}
 table{{width:100%;border-collapse:collapse;font-size:13px;}}
 th,td{{border-bottom:1px solid #edf1f7;padding:8px 10px;text-align:left;white-space:nowrap;vertical-align:top;}}
 th{{background:#f1f6ff;font-weight:700;color:#344054;position:sticky;top:0;}}
+th .th-label{{display:block;margin-bottom:6px;}}
+th .col-filter{{display:block;width:100%;min-width:90px;font-weight:400;font-size:12px;padding:3px 6px;border:1px solid #cbd5e1;border-radius:4px;background:#fff;}}
 tr.no-match{{display:none;}}
 .empty{{padding:18px;color:var(--muted);}}
 </style></head><body>
@@ -1220,20 +1229,33 @@ tr.no-match{{display:none;}}
   document.querySelectorAll(".panel").forEach((panel) => {{
     const input = panel.querySelector("[data-search]");
     const counter = panel.querySelector("[data-count]");
+    const colFilters = Array.from(panel.querySelectorAll(".col-filter"));
     const rows = Array.from(panel.querySelectorAll("table.search-table tbody tr"));
     const total = rows.length;
-    rows.forEach((row) => {{ row.dataset.text = row.textContent.toLowerCase(); }});
+    rows.forEach((row) => {{
+      row.dataset.text = row.textContent.toLowerCase();
+      row._cells = Array.from(row.cells).map((cell) => cell.textContent.toLowerCase());
+    }});
     const apply = () => {{
       const query = (input?.value || "").trim().toLowerCase();
+      const active = colFilters
+        .map((f) => [Number(f.dataset.col), (f.value || "").trim().toLowerCase()])
+        .filter((pair) => pair[1]);
       let visible = 0;
       rows.forEach((row) => {{
-        const match = !query || row.dataset.text.includes(query);
+        let match = !query || row.dataset.text.includes(query);
+        if (match) {{
+          for (const [col, val] of active) {{
+            if (!(row._cells[col] || "").includes(val)) {{ match = false; break; }}
+          }}
+        }}
         row.classList.toggle("no-match", !match);
         if (match) visible += 1;
       }});
       if (counter) counter.textContent = `${{visible}} of ${{total}} rows`;
     }};
     input?.addEventListener("input", apply);
+    colFilters.forEach((f) => f.addEventListener("input", apply));
     apply();
   }});
 }})();

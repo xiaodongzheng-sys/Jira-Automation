@@ -643,6 +643,13 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
         # Generic dashboard chrome is not used.
         self.assertNotIn("data-product-filter", html)
         self.assertNotIn("Data Quality Notes", html)
+        # Each column has its own filter input (4 rule cols + 4 feature cols).
+        self.assertEqual(html.count('class="col-filter"'), 8)
+        self.assertIn('data-col="0"', html)
+        self.assertIn('data-col="3"', html)
+        # Search and per-column filters are combined (AND) in the same panel script.
+        self.assertIn("colFilters", html)
+        self.assertIn("row._cells", html)
 
 
 if __name__ == "__main__":
