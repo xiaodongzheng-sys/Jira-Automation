@@ -786,79 +786,148 @@ where {request_snap}
   and rq.date < '{end_key_exclusive}';
 
 -- 2. Reject Rule Hit Summary
--- Aggregated per reject_rule (+ reject_type): there are tens of rules but tens of thousands of
--- rule x scene x position combinations, so a rule-level rollup is the complete hit-rate view.
--- transaction_amount is the banking account transaction amount in PHP.
-select
-  '{month_label}' as period,
-  r.reject_rule,
-  r.reject_type,
-  count(1) as reject_count,
-  count(distinct r.uid) as distinct_users,
-  count(distinct r.operation_scene) as distinct_scenes,
-  cast(round(sum(coalesce(cast(r.transaction_amount as double), 0)), 2) as decimal(20, 2)) as rejected_amount_php
-from {AF_IDENTIFY_REJECT_TABLE} r
-where {reject_snap}
-  and r.operation_time >= {start_ms}
-  and r.operation_time < {end_ms}
-group by r.reject_rule, r.reject_type
-order by reject_count desc;
+-- Per reject_rule (+ reject_type) from ODS identify_reject (counts and PHP amount). benchmark_trxn is
+-- the transactions in the scenes the rule fired in (fmart action log). trigger_rate_pct = reject events
+-- / benchmark; normalised_user_impact_pct = distinct rejected users / benchmark. Amount is in PHP.
+with scene_traffic as (
+  select scene_name, count(distinct bizflow_instance_id) as scene_trxn
+  from {AF_ACTION_LOG_TABLE}
+  where pt_date between '{month_start_iso}' and '{month_end_iso}'
+  group by scene_name
+),
+rej as (
+  select r.reject_rule, r.reject_type,
+    coalesce(s.name, concat('scene_', cast(r.operation_scene as string))) as scene_name,
+    r.uid, cast(r.transaction_amount as double) as amt
+  from {AF_IDENTIFY_REJECT_TABLE} r
+  left join {AF_SCENE_TABLE} s
+    on s.code = cast(r.operation_scene as string)
+    and s.pt_date = (select max(pt_date) from {AF_SCENE_TABLE})
+  where {reject_snap} and r.operation_time >= {start_ms} and r.operation_time < {end_ms}
+),
+rule_agg as (
+  select reject_rule, reject_type,
+    count(1) as reject_count, count(distinct uid) as distinct_users, count(distinct scene_name) as distinct_scenes,
+    cast(round(sum(coalesce(amt, 0)), 2) as decimal(20, 2)) as rejected_amount_php
+  from rej group by reject_rule, reject_type
+),
+rule_bench as (
+  select rs.reject_rule, rs.reject_type, sum(st.scene_trxn) as benchmark_trxn
+  from (select distinct reject_rule, reject_type, scene_name from rej) rs
+  join scene_traffic st on st.scene_name = rs.scene_name
+  group by rs.reject_rule, rs.reject_type
+)
+select '{month_label}' as period, a.reject_rule, a.reject_type,
+  a.reject_count, a.distinct_users, a.distinct_scenes, a.rejected_amount_php,
+  b.benchmark_trxn,
+  round(a.reject_count / nullif(b.benchmark_trxn, 0) * 100, 3) as trigger_rate_pct,
+  round(a.distinct_users / nullif(b.benchmark_trxn, 0) * 100, 3) as normalised_user_impact_pct
+from rule_agg a left join rule_bench b on b.reject_rule = a.reject_rule and b.reject_type = a.reject_type
+order by a.reject_count desc;
 
 -- 3. Reject Rule Scene Breakdown
--- Per reject_rule x operation_scene, with the scene name resolved from the scene config table.
--- Powers the expandable per-rule scene breakdown in the dashboard. Amount is in PHP.
-select
-  r.reject_rule,
-  r.reject_type,
-  r.operation_scene,
-  coalesce(s.name, concat('scene_', cast(r.operation_scene as string))) as scene_name,
-  count(1) as reject_count,
-  count(distinct r.uid) as distinct_users,
-  cast(round(sum(coalesce(cast(r.transaction_amount as double), 0)), 2) as decimal(20, 2)) as rejected_amount_php
-from {AF_IDENTIFY_REJECT_TABLE} r
-left join {AF_SCENE_TABLE} s
-  on s.code = cast(r.operation_scene as string)
-  and s.pt_date = (select max(pt_date) from {AF_SCENE_TABLE})
-where {reject_snap}
-  and r.operation_time >= {start_ms}
-  and r.operation_time < {end_ms}
-group by r.reject_rule, r.reject_type, r.operation_scene, s.name
-order by r.reject_rule, reject_count desc;
+-- Per reject_rule x scene with scene-level benchmark_trxn (scene transactions from the fmart action log)
+-- and the trigger_rate_pct / normalised_user_impact_pct for that scene. Amount is in PHP.
+with scene_traffic as (
+  select scene_name, count(distinct bizflow_instance_id) as scene_trxn
+  from {AF_ACTION_LOG_TABLE}
+  where pt_date between '{month_start_iso}' and '{month_end_iso}'
+  group by scene_name
+),
+rej as (
+  select r.reject_rule, r.reject_type,
+    coalesce(s.name, concat('scene_', cast(r.operation_scene as string))) as scene_name,
+    r.uid, cast(r.transaction_amount as double) as amt
+  from {AF_IDENTIFY_REJECT_TABLE} r
+  left join {AF_SCENE_TABLE} s
+    on s.code = cast(r.operation_scene as string)
+    and s.pt_date = (select max(pt_date) from {AF_SCENE_TABLE})
+  where {reject_snap} and r.operation_time >= {start_ms} and r.operation_time < {end_ms}
+),
+rule_scene as (
+  select reject_rule, reject_type, scene_name,
+    count(1) as reject_count, count(distinct uid) as distinct_users,
+    cast(round(sum(coalesce(amt, 0)), 2) as decimal(20, 2)) as rejected_amount_php
+  from rej group by reject_rule, reject_type, scene_name
+)
+select rsa.reject_rule, rsa.reject_type, rsa.scene_name,
+  rsa.reject_count, rsa.distinct_users, rsa.rejected_amount_php,
+  st.scene_trxn as benchmark_trxn,
+  round(rsa.reject_count / nullif(st.scene_trxn, 0) * 100, 3) as trigger_rate_pct,
+  round(rsa.distinct_users / nullif(st.scene_trxn, 0) * 100, 3) as normalised_user_impact_pct
+from rule_scene rsa left join scene_traffic st on st.scene_name = rsa.scene_name
+order by rsa.reject_rule, rsa.reject_count desc;
 
 -- 4. Punishment Rule Hit Summary
--- Per punish_rule_id from the punish list; start_time scopes the month. Punishments carry no
--- transaction amount. Targets are distinct id_value (uid / device / phone number).
-select
-  '{month_label}' as period,
-  p.punish_rule_id,
-  count(1) as punish_count,
-  count(distinct p.id_value) as distinct_targets,
-  count(distinct p.scene) as distinct_scenes
-from {AF_PUNISH_LIST_TABLE} p
-where {punish_snap}
-  and p.start_time >= {start_ms}
-  and p.start_time < {end_ms}
-group by p.punish_rule_id
-order by punish_count desc;
+-- Per punish_rule_id from the punish list; start_time scopes the month. Punishments carry no transaction
+-- amount; targets are distinct id_value (uid / device / phone). benchmark_trxn / trigger_rate_pct /
+-- normalised_user_impact_pct use scene transactions from the fmart action log.
+with scene_traffic as (
+  select scene_name, count(distinct bizflow_instance_id) as scene_trxn
+  from {AF_ACTION_LOG_TABLE}
+  where pt_date between '{month_start_iso}' and '{month_end_iso}'
+  group by scene_name
+),
+pun as (
+  select p.punish_rule_id,
+    coalesce(s.name, concat('scene_', cast(p.scene as string))) as scene_name,
+    p.id_value
+  from {AF_PUNISH_LIST_TABLE} p
+  left join {AF_SCENE_TABLE} s
+    on s.code = cast(p.scene as string)
+    and s.pt_date = (select max(pt_date) from {AF_SCENE_TABLE})
+  where {punish_snap} and p.start_time >= {start_ms} and p.start_time < {end_ms}
+),
+rule_agg as (
+  select punish_rule_id,
+    count(1) as punish_count, count(distinct id_value) as distinct_targets, count(distinct scene_name) as distinct_scenes
+  from pun group by punish_rule_id
+),
+rule_bench as (
+  select ps.punish_rule_id, sum(st.scene_trxn) as benchmark_trxn
+  from (select distinct punish_rule_id, scene_name from pun) ps
+  join scene_traffic st on st.scene_name = ps.scene_name
+  group by ps.punish_rule_id
+)
+select '{month_label}' as period, a.punish_rule_id,
+  a.punish_count, a.distinct_targets, a.distinct_scenes,
+  b.benchmark_trxn,
+  round(a.punish_count / nullif(b.benchmark_trxn, 0) * 100, 3) as trigger_rate_pct,
+  round(a.distinct_targets / nullif(b.benchmark_trxn, 0) * 100, 3) as normalised_user_impact_pct
+from rule_agg a left join rule_bench b on b.punish_rule_id = a.punish_rule_id
+order by a.punish_count desc;
 
 -- 5. Punishment Rule Scene Breakdown
--- Per punish_rule_id x scene, with the scene name resolved from the scene config table.
--- Powers the expandable per-rule scene breakdown for punishments.
-select
-  p.punish_rule_id,
-  p.scene,
-  coalesce(s.name, concat('scene_', cast(p.scene as string))) as scene_name,
-  count(1) as punish_count,
-  count(distinct p.id_value) as distinct_targets
-from {AF_PUNISH_LIST_TABLE} p
-left join {AF_SCENE_TABLE} s
-  on s.code = cast(p.scene as string)
-  and s.pt_date = (select max(pt_date) from {AF_SCENE_TABLE})
-where {punish_snap}
-  and p.start_time >= {start_ms}
-  and p.start_time < {end_ms}
-group by p.punish_rule_id, p.scene, s.name
-order by p.punish_rule_id, punish_count desc;
+-- Per punish_rule_id x scene with scene-level benchmark_trxn and rates (scene transactions from the
+-- fmart action log).
+with scene_traffic as (
+  select scene_name, count(distinct bizflow_instance_id) as scene_trxn
+  from {AF_ACTION_LOG_TABLE}
+  where pt_date between '{month_start_iso}' and '{month_end_iso}'
+  group by scene_name
+),
+pun as (
+  select p.punish_rule_id,
+    coalesce(s.name, concat('scene_', cast(p.scene as string))) as scene_name,
+    p.id_value
+  from {AF_PUNISH_LIST_TABLE} p
+  left join {AF_SCENE_TABLE} s
+    on s.code = cast(p.scene as string)
+    and s.pt_date = (select max(pt_date) from {AF_SCENE_TABLE})
+  where {punish_snap} and p.start_time >= {start_ms} and p.start_time < {end_ms}
+),
+rule_scene as (
+  select punish_rule_id, scene_name,
+    count(1) as punish_count, count(distinct id_value) as distinct_targets
+  from pun group by punish_rule_id, scene_name
+)
+select rsa.punish_rule_id, rsa.scene_name,
+  rsa.punish_count, rsa.distinct_targets,
+  st.scene_trxn as benchmark_trxn,
+  round(rsa.punish_count / nullif(st.scene_trxn, 0) * 100, 3) as trigger_rate_pct,
+  round(rsa.distinct_targets / nullif(st.scene_trxn, 0) * 100, 3) as normalised_user_impact_pct
+from rule_scene rsa left join scene_traffic st on st.scene_name = rsa.scene_name
+order by rsa.punish_rule_id, rsa.punish_count desc;
 
 -- 6. Challenge Rule Hit Summary
 -- Challenge rules (rule_config.outcome_type = 2) sourced from the DWD rule hit log, counting only
@@ -918,21 +987,34 @@ left join benchmark b on b.rule_id = c.rule_id
 order by t.challenge_trxn desc;
 
 -- 7. Challenge Rule Scene Breakdown
--- Per challenge rule x scene (scene name from the hit log). Powers the expandable scene breakdown.
-select
-  h.rule_id,
-  h.scene_name,
-  count(distinct h.bizflow_instance_id) as challenge_trxn,
-  count(distinct h.uid) as challenge_users
-from {AF_RULE_HIT_LOG_TABLE} h
-join {AF_RULE_CONFIG_TABLE} rc
-  on rc.rule_id = h.rule_id
-  and rc.pt_date = (select max(pt_date) from {AF_RULE_CONFIG_TABLE})
-where h.pt_date between '{month_start_iso}' and '{month_end_iso}'
-  and h.is_rule_triggered = 'Y'
-  and rc.outcome_type = 2
-group by h.rule_id, h.scene_name
-order by h.rule_id, challenge_trxn desc;
+-- Per challenge rule x scene (scene name from the hit log), with scene-level benchmark_trxn (scene
+-- transactions from the action log) and the trigger_rate_pct / normalised_user_impact_pct for that scene.
+with scene_traffic as (
+  select scene_name, count(distinct bizflow_instance_id) as scene_trxn
+  from {AF_ACTION_LOG_TABLE}
+  where pt_date between '{month_start_iso}' and '{month_end_iso}'
+  group by scene_name
+),
+rule_scene as (
+  select h.rule_id, h.scene_name,
+    count(distinct h.bizflow_instance_id) as challenge_trxn,
+    count(distinct h.uid) as challenge_users
+  from {AF_RULE_HIT_LOG_TABLE} h
+  join {AF_RULE_CONFIG_TABLE} rc
+    on rc.rule_id = h.rule_id
+    and rc.pt_date = (select max(pt_date) from {AF_RULE_CONFIG_TABLE})
+  where h.pt_date between '{month_start_iso}' and '{month_end_iso}'
+    and h.is_rule_triggered = 'Y'
+    and rc.outcome_type = 2
+  group by h.rule_id, h.scene_name
+)
+select rsa.rule_id, rsa.scene_name,
+  rsa.challenge_trxn, rsa.challenge_users,
+  st.scene_trxn as benchmark_trxn,
+  round(rsa.challenge_trxn / nullif(st.scene_trxn, 0) * 100, 3) as trigger_rate_pct,
+  round(rsa.challenge_users / nullif(st.scene_trxn, 0) * 100, 3) as normalised_user_impact_pct
+from rule_scene rsa left join scene_traffic st on st.scene_name = rsa.scene_name
+order by rsa.rule_id, rsa.challenge_trxn desc;
 
 -- 8. Daily Challenge/Reject/Punish
 select

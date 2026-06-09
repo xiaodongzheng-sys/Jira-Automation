@@ -704,6 +704,13 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
         # transaction amount is surfaced as PHP, and the breakdown resolves scene names.
         self.assertIn("rejected_amount_php", sql)
         self.assertIn("scene_name", sql)
+        # Reject and Punish now carry the fmart benchmark + trigger-rate metric (summary and scene level).
+        self.assertIn("benchmark_trxn", sql)
+        self.assertIn("trigger_rate_pct", sql)
+        self.assertIn("normalised_user_impact_pct", sql)
+        # The benchmark denominator comes from the fmart action log scene traffic.
+        self.assertIn("scene_traffic", sql)
+        self.assertGreaterEqual(sql.count(AF_ACTION_LOG_TABLE), 3)  # reject, punish, challenge sections
         # Full previous calendar month (April 2026) bounded by exclusive upper key.
         self.assertIn("Scope: Apr 2026", sql)
         self.assertIn("rq.date >= '20260401'", sql)
@@ -716,16 +723,16 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
     def test_visualization_renders_kpis_and_expandable_reject_scene_breakdown(self):
         summary_headers = ["period", "total_outcomes", "pass_num", "challenge_num", "reject_num", "action_rate_pct"]
         summary_rows = [["May 2026", "446218000", "427348342", "18070027", "849571", "4.23"]]
-        reject_headers = ["period", "reject_rule", "reject_type", "reject_count", "distinct_users", "distinct_scenes", "rejected_amount_php"]
+        reject_headers = ["period", "reject_rule", "reject_type", "reject_count", "distinct_users", "distinct_scenes", "rejected_amount_php", "benchmark_trxn", "trigger_rate_pct", "normalised_user_impact_pct"]
         reject_rows = [
-            ["May 2026", "U0059", "1", "33968", "20000", "2", "150000.5"],
-            ["May 2026", "D0191", "2", "12479", "9000", "1", "0"],
+            ["May 2026", "U0059", "1", "33968", "20000", "2", "150000.5", "5000000", "0.679", "0.4"],
+            ["May 2026", "D0191", "2", "12479", "9000", "1", "0", "2000000", "0.624", "0.45"],
         ]
-        breakdown_headers = ["reject_rule", "reject_type", "operation_scene", "scene_name", "reject_count", "distinct_users", "rejected_amount_php"]
+        breakdown_headers = ["reject_rule", "reject_type", "scene_name", "reject_count", "distinct_users", "rejected_amount_php", "benchmark_trxn", "trigger_rate_pct", "normalised_user_impact_pct"]
         breakdown_rows = [
-            ["U0059", "1", "1001", "Login", "18088", "12000", "100000.5"],
-            ["U0059", "1", "1092", "ShopeepaySeabankInactiveLogin", "15880", "8000", "50000"],
-            ["D0191", "2", "1101", "QRScan", "12479", "9000", "0"],
+            ["U0059", "1", "Login", "18088", "12000", "100000.5", "3000000", "0.603", "0.4"],
+            ["U0059", "1", "ShopeepaySeabankInactiveLogin", "15880", "8000", "50000", "2000000", "0.794", "0.4"],
+            ["D0191", "2", "QRScan", "12479", "9000", "0", "2000000", "0.624", "0.45"],
         ]
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = Path(temp_dir) / "viz.html"
@@ -737,10 +744,10 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
                     ("Request Outcome Summary", summary_headers, summary_rows),
                     ("Reject Rule Hit Summary", reject_headers, reject_rows),
                     ("Reject Rule Scene Breakdown", breakdown_headers, breakdown_rows),
-                    ("Punishment Rule Hit Summary", ["period", "punish_rule_id", "punish_count", "distinct_targets", "distinct_scenes"], [["May 2026", "U0021", "18492", "12000", "1"]]),
-                    ("Punishment Rule Scene Breakdown", ["punish_rule_id", "scene", "scene_name", "punish_count", "distinct_targets"], [["U0021", "1", "Login", "18492", "12000"]]),
+                    ("Punishment Rule Hit Summary", ["period", "punish_rule_id", "punish_count", "distinct_targets", "distinct_scenes", "benchmark_trxn", "trigger_rate_pct", "normalised_user_impact_pct"], [["May 2026", "U0021", "18492", "12000", "1", "4000000", "0.462", "0.3"]]),
+                    ("Punishment Rule Scene Breakdown", ["punish_rule_id", "scene_name", "punish_count", "distinct_targets", "benchmark_trxn", "trigger_rate_pct", "normalised_user_impact_pct"], [["U0021", "Login", "18492", "12000", "4000000", "0.462", "0.3"]]),
                     ("Challenge Rule Hit Summary", ["rule_id", "rule_name", "rule_status", "review_priority", "challenge_trxn", "challenge_users", "distinct_scenes", "benchmark_trxn", "trigger_rate_pct", "normalised_user_impact_pct"], [["C0116v2", "Device velocity", "active", "1", "513407", "257072", "4", "1744983", "29.422", "14.73"]]),
-                    ("Challenge Rule Scene Breakdown", ["rule_id", "scene_name", "challenge_trxn", "challenge_users"], [["C0116v2", "ApplyVirDCard", "300000", "150000"]]),
+                    ("Challenge Rule Scene Breakdown", ["rule_id", "scene_name", "challenge_trxn", "challenge_users", "benchmark_trxn", "trigger_rate_pct", "normalised_user_impact_pct"], [["C0116v2", "ApplyVirDCard", "300000", "150000", "1000000", "30.0", "15.0"]]),
                     ("Daily Challenge/Reject/Punish", ["trigger_date", "challenge_num", "reject_num", "punish_num"], [["20260501", "1", "2", "3"]]),
                 ],
                 report_id=AF_RULE_EFFECTIVENESS_REPORT_ID,
@@ -759,6 +766,10 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
         self.assertIn('class="detail-table"', html)
         self.assertIn("ShopeepaySeabankInactiveLogin", html)  # child scene name
         self.assertIn("rejected_amount_php", html)  # PHP-labelled column
+        # Reject now also carries the benchmark + trigger-rate metric (summary and scene level).
+        self.assertIn("benchmark_trxn", html)
+        self.assertIn("normalised_user_impact_pct", html)
+        self.assertIn("0.794", html)  # a scene-level reject trigger rate
         # The breakdown is nested, not rendered as its own standalone panel.
         self.assertNotIn("<h2>Reject Rule Scene Breakdown</h2>", html)
         # The other sections remain plain searchable tables.

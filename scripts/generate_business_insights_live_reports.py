@@ -1606,8 +1606,19 @@ def write_visualization(
                             "distinct_users",
                             "distinct_scenes",
                             "rejected_amount_php",
+                            "benchmark_trxn",
+                            "trigger_rate_pct",
+                            "normalised_user_impact_pct",
                         ),
-                        detail_columns=("scene_name", "reject_count", "distinct_users", "rejected_amount_php"),
+                        detail_columns=(
+                            "scene_name",
+                            "reject_count",
+                            "distinct_users",
+                            "rejected_amount_php",
+                            "benchmark_trxn",
+                            "trigger_rate_pct",
+                            "normalised_user_impact_pct",
+                        ),
                         name_column="scene_name",
                     )
                 )
@@ -1620,8 +1631,23 @@ def write_visualization(
                         (headers, rows),
                         punish_breakdown,
                         key_columns=("punish_rule_id",),
-                        main_columns=("punish_rule_id", "punish_count", "distinct_targets", "distinct_scenes"),
-                        detail_columns=("scene_name", "punish_count", "distinct_targets"),
+                        main_columns=(
+                            "punish_rule_id",
+                            "punish_count",
+                            "distinct_targets",
+                            "distinct_scenes",
+                            "benchmark_trxn",
+                            "trigger_rate_pct",
+                            "normalised_user_impact_pct",
+                        ),
+                        detail_columns=(
+                            "scene_name",
+                            "punish_count",
+                            "distinct_targets",
+                            "benchmark_trxn",
+                            "trigger_rate_pct",
+                            "normalised_user_impact_pct",
+                        ),
                         name_column="scene_name",
                     )
                 )
@@ -1646,7 +1672,14 @@ def write_visualization(
                             "trigger_rate_pct",
                             "normalised_user_impact_pct",
                         ),
-                        detail_columns=("scene_name", "challenge_trxn", "challenge_users"),
+                        detail_columns=(
+                            "scene_name",
+                            "challenge_trxn",
+                            "challenge_users",
+                            "benchmark_trxn",
+                            "trigger_rate_pct",
+                            "normalised_user_impact_pct",
+                        ),
                         name_column="scene_name",
                     )
                 )
