@@ -302,7 +302,7 @@ from prd_briefing import create_prd_briefing_blueprint
 from prd_briefing.confluence import ConfluenceConnector
 from prd_briefing.reviewer import PRDBriefingReviewRequest, PRDReviewRequest, PRDReviewService
 from prd_briefing.storage import BriefingStore
-from prd_briefing.text_generation import CodexTextGenerationClient
+from prd_briefing.text_generation import ClaudeFirstTextGenerationClient, CodexTextGenerationClient
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -1721,12 +1721,25 @@ def _build_calendar_meeting_service() -> GoogleCalendarMeetingService:
 
 
 def _build_meeting_processing_service(settings: Settings) -> MeetingProcessingService:
-    text_client = CodexTextGenerationClient(
-        settings=settings,
-        workspace_root=PROJECT_ROOT,
-        prompt_mode="meeting_recorder_minutes_codex",
-        codex_model=settings.prd_briefing_codex_model,
-    )
+    # Meeting minutes prefer the local Claude Code CLI (Opus 4.8) and fall back
+    # to Codex on any Claude failure, mirroring the daily brief, to avoid the
+    # spend-capped Codex backend. Set MEETING_RECORDER_INSIGHTS_LLM_PROVIDER=
+    # codex_cli_bridge to force Codex-only.
+    insights_provider = (os.getenv("MEETING_RECORDER_INSIGHTS_LLM_PROVIDER") or "claude_cli_bridge").strip().lower()
+    if insights_provider == "codex_cli_bridge":
+        text_client = CodexTextGenerationClient(
+            settings=settings,
+            workspace_root=PROJECT_ROOT,
+            prompt_mode="meeting_recorder_minutes_codex",
+            codex_model=settings.prd_briefing_codex_model,
+        )
+    else:
+        text_client = ClaudeFirstTextGenerationClient(
+            settings=settings,
+            workspace_root=PROJECT_ROOT,
+            prompt_mode="meeting_recorder_minutes_codex",
+            codex_model=settings.prd_briefing_codex_model,
+        )
     return MeetingProcessingService(
         store=_get_meeting_record_store(),
         config=_meeting_recorder_config(settings),

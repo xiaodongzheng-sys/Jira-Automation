@@ -211,5 +211,87 @@ class TextGenerationClientTests(unittest.TestCase):
         self.assertEqual(payload["codex_prompt_mode"], "prd_reviewer_test")
 
 
+class _FakeClaudeProvider:
+    instances = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.calls = []
+        _FakeClaudeProvider.instances.append(self)
+
+    def ready(self):
+        return True
+
+    def generate(self, *, payload, primary_model, fallback_model):
+        self.calls.append((payload, primary_model, fallback_model))
+        return type("Result", (), {"payload": {"text": "claude ok"}, "model": primary_model})()
+
+    def extract_text(self, payload):
+        return payload["text"]
+
+
+class _UnavailableClaudeProvider(_FakeClaudeProvider):
+    def generate(self, *, payload, primary_model, fallback_model):
+        raise ToolError("Claude Code CLI is unavailable.")
+
+
+class ClaudeFirstTextGenerationClientTests(unittest.TestCase):
+    def _make_client(self, *, claude_provider_cls, temp_dir):
+        from prd_briefing.text_generation import ClaudeFirstTextGenerationClient
+
+        return ClaudeFirstTextGenerationClient(
+            settings=Settings.from_env(),
+            workspace_root=Path(temp_dir),
+            prompt_mode="meeting_recorder_minutes_codex",
+            claude_model="claude-opus-4-8",
+        ), ClaudeFirstTextGenerationClient
+
+    def test_prefers_claude_when_available(self):
+        _FakeCodexProvider.instances.clear()
+        _FakeClaudeProvider.instances.clear()
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ, {}, clear=True
+        ), patch("bpmis_jira_tool.config.find_dotenv", return_value=""), patch(
+            "prd_briefing.text_generation.CodexCliBridgeSourceCodeQALLMProvider",
+            _FakeCodexProvider,
+        ), patch(
+            "prd_briefing.text_generation.ClaudeCliBridgeSourceCodeQALLMProvider",
+            _FakeClaudeProvider,
+        ):
+            client, _ = self._make_client(claude_provider_cls=_FakeClaudeProvider, temp_dir=temp_dir)
+            answer = client.create_answer(system_prompt="sys", user_prompt="user")
+
+        self.assertEqual(answer, "claude ok")
+        self.assertEqual(client.model_id, "claude:claude-opus-4-8")
+        # Claude was called; Codex fallback untouched.
+        self.assertEqual(len(_FakeClaudeProvider.instances[0].calls), 1)
+        self.assertEqual(_FakeCodexProvider.instances[0].calls, [])
+        payload, primary_model, _ = _FakeClaudeProvider.instances[0].calls[0]
+        self.assertEqual(primary_model, "claude-opus-4-8")
+        self.assertEqual(payload["systemInstruction"]["parts"][0]["text"], "sys")
+        self.assertEqual(payload["_llm_ledger_flow"], "meeting_recorder")
+
+    def test_falls_back_to_codex_on_claude_tool_error(self):
+        _FakeCodexProvider.instances.clear()
+        _UnavailableClaudeProvider.instances.clear()
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ, {}, clear=True
+        ), patch("bpmis_jira_tool.config.find_dotenv", return_value=""), patch(
+            "prd_briefing.text_generation.CodexCliBridgeSourceCodeQALLMProvider",
+            _FakeCodexProvider,
+        ), patch(
+            "prd_briefing.text_generation.ClaudeCliBridgeSourceCodeQALLMProvider",
+            _UnavailableClaudeProvider,
+        ):
+            client, _ = self._make_client(claude_provider_cls=_UnavailableClaudeProvider, temp_dir=temp_dir)
+            answer = client.create_answer(system_prompt="sys", user_prompt="user")
+
+        self.assertEqual(answer, "codex ok")
+        # Codex received the same payload after Claude failed.
+        self.assertEqual(len(_FakeCodexProvider.instances[0].calls), 1)
+        payload, _, _ = _FakeCodexProvider.instances[0].calls[0]
+        self.assertEqual(payload["contents"][0]["parts"][0]["text"], "user")
+
+
 if __name__ == "__main__":
     unittest.main()
