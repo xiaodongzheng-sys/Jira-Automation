@@ -17,6 +17,8 @@ from bpmis_jira_tool.business_insights import (
     AF_IDENTIFY_REJECT_TABLE,
     AF_PUNISH_LIST_TABLE,
     AF_REQUEST_STATISTIC_TABLE,
+    AF_REVIEW_CASE_TABLE,
+    AF_REVIEW_RECORD_TABLE,
     AF_RULE_CONFIG_TABLE,
     AF_RULE_HIT_LOG_TABLE,
     AF_RULE_EFFECTIVENESS_REPORT_ID,
@@ -686,12 +688,20 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
                 "Challenge Rule Hit Summary",
                 "Challenge Rule Scene Breakdown",
                 "Daily Challenge/Reject/Punish",
+                "Rule Precision / Catch Rate",
+                "Daily Rule Trigger Trend",
+                "Scene/Sub-scene/Action Usage",
             ],
         )
         self.assertIn(AF_REQUEST_STATISTIC_TABLE, sql)
         self.assertIn(AF_IDENTIFY_REJECT_TABLE, sql)
         self.assertIn(AF_PUNISH_LIST_TABLE, sql)
         self.assertIn("punish_rule_id", sql)
+        # Rule precision joins review records to fraud cases (confirmed fraud = fraud_mo_type not Not Fraud).
+        self.assertIn(AF_REVIEW_CASE_TABLE, sql)
+        self.assertIn(AF_REVIEW_RECORD_TABLE, sql)
+        self.assertIn("precision_pct", sql)
+        self.assertIn("'not fraud'", sql)
         # Challenge hit-rate from the DWD hit log + action log, classified by outcome_type=2.
         self.assertIn(AF_RULE_HIT_LOG_TABLE, sql)
         self.assertIn(AF_ACTION_LOG_TABLE, sql)
@@ -723,10 +733,10 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
     def test_visualization_renders_kpis_and_expandable_reject_scene_breakdown(self):
         summary_headers = ["period", "total_outcomes", "pass_num", "challenge_num", "reject_num", "action_rate_pct"]
         summary_rows = [["May 2026", "446218000", "427348342", "18070027", "849571", "4.23"]]
-        reject_headers = ["period", "reject_rule", "reject_type", "reject_count", "distinct_users", "distinct_scenes", "rejected_amount_php", "benchmark_trxn", "trigger_rate_pct", "normalised_user_impact_pct"]
+        reject_headers = ["period", "reject_rule", "rule_name", "reject_type", "reject_count", "distinct_users", "distinct_scenes", "rejected_amount_php", "benchmark_trxn", "trigger_rate_pct", "normalised_user_impact_pct"]
         reject_rows = [
-            ["May 2026", "U0059", "1", "33968", "20000", "2", "150000.5", "5000000", "0.679", "0.4"],
-            ["May 2026", "D0191", "2", "12479", "9000", "1", "0", "2000000", "0.624", "0.45"],
+            ["May 2026", "U0059", "PIN login velocity", "1", "33968", "20000", "2", "150000.5", "5000000", "0.679", "0.4"],
+            ["May 2026", "D0191", "QR scam block", "2", "12479", "9000", "1", "0", "2000000", "0.624", "0.45"],
         ]
         breakdown_headers = ["reject_rule", "reject_type", "scene_name", "reject_count", "distinct_users", "rejected_amount_php", "benchmark_trxn", "trigger_rate_pct", "normalised_user_impact_pct"]
         breakdown_rows = [
@@ -744,7 +754,7 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
                     ("Request Outcome Summary", summary_headers, summary_rows),
                     ("Reject Rule Hit Summary", reject_headers, reject_rows),
                     ("Reject Rule Scene Breakdown", breakdown_headers, breakdown_rows),
-                    ("Punishment Rule Hit Summary", ["period", "punish_rule_id", "punish_count", "distinct_targets", "distinct_scenes", "benchmark_trxn", "trigger_rate_pct", "normalised_user_impact_pct"], [["May 2026", "U0021", "18492", "12000", "1", "4000000", "0.462", "0.3"]]),
+                    ("Punishment Rule Hit Summary", ["period", "punish_rule_id", "rule_name", "punish_count", "distinct_targets", "distinct_scenes", "benchmark_trxn", "trigger_rate_pct", "normalised_user_impact_pct"], [["May 2026", "U0021", "Device block", "18492", "12000", "1", "4000000", "0.462", "0.3"]]),
                     ("Punishment Rule Scene Breakdown", ["punish_rule_id", "scene_name", "punish_count", "distinct_targets", "benchmark_trxn", "trigger_rate_pct", "normalised_user_impact_pct"], [["U0021", "Login", "18492", "12000", "4000000", "0.462", "0.3"]]),
                     ("Challenge Rule Hit Summary", ["rule_id", "rule_name", "rule_status", "review_priority", "challenge_trxn", "challenge_users", "distinct_scenes", "benchmark_trxn", "trigger_rate_pct", "normalised_user_impact_pct"], [["C0116v2", "Device velocity", "active", "1", "513407", "257072", "4", "1744983", "29.422", "14.73"]]),
                     ("Challenge Rule Scene Breakdown", ["rule_id", "scene_name", "challenge_trxn", "challenge_users", "benchmark_trxn", "trigger_rate_pct", "normalised_user_impact_pct"], [["C0116v2", "ApplyVirDCard", "300000", "150000", "1000000", "30.0", "15.0"]]),
@@ -779,6 +789,10 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
         self.assertNotIn("<h2>Punishment Rule Scene Breakdown</h2>", html)
         self.assertIn("punish_rule_id", html)
         self.assertIn("U0021", html)
+        # Reject and Punish now carry rule_name alongside the rule id.
+        self.assertIn("PIN login velocity", html)
+        self.assertIn("Device block", html)
+        self.assertEqual(html.count("<th>rule_name</th>"), 3)  # reject, punish, challenge summaries
         # Challenge Rule Hit Summary with the trigger-rate metric, also expandable.
         self.assertIn("<h2>Challenge Rule Hit Summary</h2>", html)
         self.assertNotIn("<h2>Challenge Rule Scene Breakdown</h2>", html)
@@ -787,6 +801,51 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
         self.assertIn("ApplyVirDCard", html)  # nested challenge scene
         # Three expandable rule panels now (reject, punishment, challenge).
         self.assertEqual(html.count('class="rule-table"'), 3)
+
+
+class RuleEffectivenessExtraSectionsTests(unittest.TestCase):
+    def _viz(self, extra_sheets):
+        base = [("Request Outcome Summary", ["period", "total_outcomes", "pass_num", "challenge_num", "reject_num", "action_rate_pct"], [["May 2026", "1", "1", "0", "0", "0"]])]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "viz.html"
+            write_visualization(
+                output_path,
+                report_title="Anti-fraud PH - Rule Effectiveness / Hit-Rate",
+                snapshot_pt_date="2026-06-08",
+                sheets=base + extra_sheets,
+                report_id=AF_RULE_EFFECTIVENESS_REPORT_ID,
+            )
+            return output_path.read_text(encoding="utf-8")
+
+    def test_precision_and_usage_render_as_searchable_tables(self):
+        html = self._viz([
+            ("Rule Precision / Catch Rate", ["rule_id", "rule_name", "reviewed_cases", "fraud_cases", "precision_pct", "fraud_loss_php"],
+             [["U0022v2", "New device transfer", "101", "10", "9.9", "0"]]),
+            ("Scene/Sub-scene/Action Usage", ["scene_name", "sub_scene_name", "action_name", "action_type", "transactions", "action_events", "distinct_users"],
+             [["Login", "PasswordLogin", "EnterLoginState", "Business", "6089791", "6100000", "1200000"]]),
+        ])
+        self.assertIn("<h2>Rule Precision / Catch Rate</h2>", html)
+        self.assertIn("precision_pct", html)
+        self.assertIn("New device transfer", html)
+        self.assertIn("<h2>Scene/Sub-scene/Action Usage</h2>", html)
+        self.assertIn("EnterLoginState", html)
+        # Searchable, per-column-filterable tables (Request Outcome Summary + precision + usage = 3).
+        self.assertEqual(html.count('class="search-table"'), 3)
+
+    def test_daily_trend_renders_filterable_chart(self):
+        html = self._viz([
+            ("Daily Rule Trigger Trend", ["rule_id", "trigger_date", "trigger_trxn"],
+             [["C0024v2", "2026-05-01", "1000"], ["C0024v2", "2026-05-02", "1500"], ["U0059", "2026-05-01", "500"]]),
+        ])
+        self.assertIn("<h2>Daily Rule Trigger Trend</h2>", html)
+        self.assertIn("trend-panel", html)
+        self.assertIn("data-trend-svg", html)
+        self.assertIn("data-trend-select", html)
+        # Rule selector lists the rules; data is embedded for client-side redraw.
+        self.assertIn("C0024v2", html)
+        self.assertIn("data-trend-data", html)
+        # Not rendered as a flat table.
+        self.assertNotIn('<th>trigger_trxn</th>', html)
 
 
 if __name__ == "__main__":

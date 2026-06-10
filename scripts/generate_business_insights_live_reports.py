@@ -1217,6 +1217,46 @@ def _kpi_cards_panel(title: str, pairs: list[tuple[str, str]]) -> str:
     return f'<section class="panel"><h2>{html.escape(title)}</h2><div class="kpi-grid">{cards}</div></section>'
 
 
+def _daily_trend_panel(
+    title: str,
+    headers: list[str],
+    rows: list[list[Any]],
+    *,
+    rule_column: str,
+    date_column: str,
+    value_column: str,
+) -> str:
+    """Render a filterable daily line chart: pick a rule, see its day-by-day trigger volume."""
+    idx = {str(col): offset for offset, col in enumerate(headers)}
+    r_i, d_i, v_i = idx.get(rule_column), idx.get(date_column), idx.get(value_column)
+    series: dict[str, list[list[Any]]] = {}
+    totals: dict[str, float] = {}
+    if None not in (r_i, d_i, v_i):
+        for row in rows:
+            rid = "" if row[r_i] is None else str(row[r_i])
+            day = "" if row[d_i] is None else str(row[d_i])
+            val = _number(row[v_i]) if v_i < len(row) else 0.0
+            series.setdefault(rid, []).append([day, val])
+            totals[rid] = totals.get(rid, 0.0) + val
+    ranked = sorted(totals, key=lambda k: totals[k], reverse=True)
+    if not ranked:
+        return f'<section class="panel"><h2>{html.escape(title)}</h2><p class="empty">No trend data was returned.</p></section>'
+    data_json = json.dumps({rid: sorted(series[rid]) for rid in ranked})
+    options = "".join(
+        f'<option value="{html.escape(rid, quote=True)}">{html.escape(rid)}</option>' for rid in ranked
+    )
+    return (
+        f'<section class="panel trend-panel"><h2>{html.escape(title)}</h2>'
+        '<div class="search-bar"><label>Rule '
+        f'<select data-trend-select>{options}</select></label>'
+        '<span class="count" data-trend-info></span></div>'
+        '<svg data-trend-svg viewBox="0 0 960 320" preserveAspectRatio="none" '
+        'style="width:100%;height:320px;background:#fff;border:1px solid #edf1f7;border-radius:6px;"></svg>'
+        f'<script type="application/json" data-trend-data>{data_json}</script>'
+        "</section>"
+    )
+
+
 def _expandable_rule_panel(
     title: str,
     placeholder: str,
@@ -1416,6 +1456,41 @@ tr.no-match{{display:none;}}
     input?.addEventListener("input", apply);
     apply();
   }});
+  document.querySelectorAll(".trend-panel").forEach((panel) => {{
+    const svg = panel.querySelector("[data-trend-svg]");
+    const dataNode = panel.querySelector("[data-trend-data]");
+    const select = panel.querySelector("[data-trend-select]");
+    const info = panel.querySelector("[data-trend-info]");
+    if (!svg || !dataNode) return;
+    const data = JSON.parse(dataNode.textContent || "{{}}");
+    const W = 960, H = 320, padL = 70, padR = 24, padT = 20, padB = 34;
+    const draw = (rid) => {{
+      const pts = data[rid] || [];
+      const maxV = Math.max(1, ...pts.map((p) => p[1]));
+      const n = pts.length;
+      const X = (i) => padL + (n <= 1 ? 0 : i * (W - padL - padR) / (n - 1));
+      const Y = (v) => H - padB - (v / maxV) * (H - padT - padB);
+      let s = `<line x1="${{padL}}" y1="${{H - padB}}" x2="${{W - padR}}" y2="${{H - padB}}" stroke="#cbd5e1"/>`;
+      s += `<line x1="${{padL}}" y1="${{padT}}" x2="${{padL}}" y2="${{H - padB}}" stroke="#cbd5e1"/>`;
+      s += `<text x="8" y="${{padT + 4}}" font-size="11" fill="#667085">${{maxV.toLocaleString()}}</text>`;
+      s += `<text x="8" y="${{H - padB}}" font-size="11" fill="#667085">0</text>`;
+      if (n) {{
+        s += `<polyline fill="none" stroke="#1769e0" stroke-width="2" points="${{pts.map((p, i) => `${{X(i)}},${{Y(p[1])}}`).join(" ")}}"/>`;
+        const step = Math.max(1, Math.ceil(n / 10));
+        pts.forEach((p, i) => {{
+          s += `<circle cx="${{X(i)}}" cy="${{Y(p[1])}}" r="2.5" fill="#1769e0"><title>${{p[0]}}: ${{p[1].toLocaleString()}}</title></circle>`;
+          if (i % step === 0 || i === n - 1) {{
+            s += `<text x="${{X(i)}}" y="${{H - padB + 16}}" font-size="10" fill="#667085" text-anchor="middle">${{String(p[0]).slice(5)}}</text>`;
+          }}
+        }});
+      }}
+      svg.innerHTML = s;
+      const total = pts.reduce((a, p) => a + p[1], 0);
+      if (info) info.textContent = `${{rid}}: ${{total.toLocaleString()}} triggers over ${{n}} days`;
+    }};
+    select?.addEventListener("change", () => draw(select.value));
+    draw(select ? select.value : Object.keys(data)[0]);
+  }});
 }})();
 </script>
 </body></html>"""
@@ -1581,6 +1656,8 @@ def write_visualization(
         placeholders = {
             "Request Outcome Summary": "Filter…",
             "Daily Challenge/Reject/Punish": "Search date…",
+            "Rule Precision / Catch Rate": "Search rule id or name…",
+            "Scene/Sub-scene/Action Usage": "Search scene, sub-scene or action…",
         }
         reject_breakdown = eff_lookup.get("Reject Rule Scene Breakdown")
         punish_breakdown = eff_lookup.get("Punishment Rule Scene Breakdown")
@@ -1601,6 +1678,7 @@ def write_visualization(
                         key_columns=("reject_rule", "reject_type"),
                         main_columns=(
                             "reject_rule",
+                            "rule_name",
                             "reject_type",
                             "reject_count",
                             "distinct_users",
@@ -1633,6 +1711,7 @@ def write_visualization(
                         key_columns=("punish_rule_id",),
                         main_columns=(
                             "punish_rule_id",
+                            "rule_name",
                             "punish_count",
                             "distinct_targets",
                             "distinct_scenes",
@@ -1681,6 +1760,18 @@ def write_visualization(
                             "normalised_user_impact_pct",
                         ),
                         name_column="scene_name",
+                    )
+                )
+                continue
+            if sheet_name == "Daily Rule Trigger Trend":
+                panels.append(
+                    _daily_trend_panel(
+                        "Daily Rule Trigger Trend",
+                        headers,
+                        rows,
+                        rule_column="rule_id",
+                        date_column="trigger_date",
+                        value_column="trigger_trxn",
                     )
                 )
                 continue

@@ -110,6 +110,8 @@ AF_PUNISH_LIST_TABLE = "ods.mbs_anti_fraud_punish_list_tab_ss"
 # Feature-mart DWD layer: clean daily-incremental hit/action logs with scene names built in.
 AF_RULE_HIT_LOG_TABLE = "fmart_antifraud.dwd_antifraud_rule_hit_log_di"
 AF_ACTION_LOG_TABLE = "fmart_antifraud.dwd_antifraud_action_log_di"
+AF_REVIEW_CASE_TABLE = "fmart_antifraud.dwd_antifraud_review_case_df"
+AF_REVIEW_RECORD_TABLE = "fmart_antifraud.dwd_antifraud_review_record_df"
 
 SEEDED_REPORTS: tuple[dict[str, str], ...] = (
     {
@@ -757,6 +759,7 @@ def build_af_rule_effectiveness_sql(*, snapshot_pt_date: str | None = None, now:
     end_key_exclusive = _yyyymmdd(month_end_exclusive)
     month_start_iso = month_start.isoformat()
     month_end_iso = (month_end_exclusive - timedelta(days=1)).isoformat()
+    next_month_iso = month_end_exclusive.isoformat()
     request_snap = _aliased_snapshot_filter("rq", AF_REQUEST_STATISTIC_TABLE, snapshot_pt_date)
     reject_snap = _aliased_snapshot_filter("r", AF_IDENTIFY_REJECT_TABLE, snapshot_pt_date)
     punish_snap = _aliased_snapshot_filter("p", AF_PUNISH_LIST_TABLE, snapshot_pt_date)
@@ -816,13 +819,21 @@ rule_bench as (
   from (select distinct reject_rule, reject_type, scene_name from rej) rs
   join scene_traffic st on st.scene_name = rs.scene_name
   group by rs.reject_rule, rs.reject_type
+),
+rule_dim as (
+  select rule_id, max(rule_name) as rule_name
+  from {AF_RULE_CONFIG_TABLE}
+  where pt_date = (select max(pt_date) from {AF_RULE_CONFIG_TABLE})
+  group by rule_id
 )
-select '{month_label}' as period, a.reject_rule, a.reject_type,
+select '{month_label}' as period, a.reject_rule, coalesce(rn.rule_name, '') as rule_name, a.reject_type,
   a.reject_count, a.distinct_users, a.distinct_scenes, a.rejected_amount_php,
   b.benchmark_trxn,
   round(a.reject_count / nullif(b.benchmark_trxn, 0) * 100, 3) as trigger_rate_pct,
   round(a.distinct_users / nullif(b.benchmark_trxn, 0) * 100, 3) as normalised_user_impact_pct
-from rule_agg a left join rule_bench b on b.reject_rule = a.reject_rule and b.reject_type = a.reject_type
+from rule_agg a
+left join rule_bench b on b.reject_rule = a.reject_rule and b.reject_type = a.reject_type
+left join rule_dim rn on rn.rule_id = a.reject_rule
 order by a.reject_count desc;
 
 -- 3. Reject Rule Scene Breakdown
@@ -888,13 +899,21 @@ rule_bench as (
   from (select distinct punish_rule_id, scene_name from pun) ps
   join scene_traffic st on st.scene_name = ps.scene_name
   group by ps.punish_rule_id
+),
+rule_dim as (
+  select rule_id, max(rule_name) as rule_name
+  from {AF_RULE_CONFIG_TABLE}
+  where pt_date = (select max(pt_date) from {AF_RULE_CONFIG_TABLE})
+  group by rule_id
 )
-select '{month_label}' as period, a.punish_rule_id,
+select '{month_label}' as period, a.punish_rule_id, coalesce(rn.rule_name, '') as rule_name,
   a.punish_count, a.distinct_targets, a.distinct_scenes,
   b.benchmark_trxn,
   round(a.punish_count / nullif(b.benchmark_trxn, 0) * 100, 3) as trigger_rate_pct,
   round(a.distinct_targets / nullif(b.benchmark_trxn, 0) * 100, 3) as normalised_user_impact_pct
-from rule_agg a left join rule_bench b on b.punish_rule_id = a.punish_rule_id
+from rule_agg a
+left join rule_bench b on b.punish_rule_id = a.punish_rule_id
+left join rule_dim rn on rn.rule_id = a.punish_rule_id
 order by a.punish_count desc;
 
 -- 5. Punishment Rule Scene Breakdown
@@ -1028,6 +1047,68 @@ where {stat_snap}
   and rs.date < '{end_key_exclusive}'
 group by rs.date
 order by trigger_date;
+
+-- 9. Rule Precision / Catch Rate
+-- For each rule that flagged cases for review (review_record), the share of those cases later confirmed
+-- as fraud. Confirmed fraud = review_case.fraud_mo_type not in ('Not Fraud','Pending',''). Scoped to
+-- cases opened in the month. precision_pct = fraud_cases / reviewed_cases; loss is in PHP.
+with cases as (
+  select case_id,
+    case when lower(trim(coalesce(fraud_mo_type, ''))) not in ('not fraud', 'pending', '') then 1 else 0 end as is_fraud,
+    coalesce(loss_total_amt, 0) as loss
+  from {AF_REVIEW_CASE_TABLE}
+  where pt_date = (select max(pt_date) from {AF_REVIEW_CASE_TABLE})
+    and case_open_datetime >= '{month_start_iso}' and case_open_datetime < '{next_month_iso}'
+),
+rr as (
+  select rule_id, max(rule_name) as rule_name, case_id
+  from {AF_REVIEW_RECORD_TABLE}
+  where pt_date = (select max(pt_date) from {AF_REVIEW_RECORD_TABLE})
+    and review_status = 'REVIEWED' and rule_id is not null and trim(rule_id) <> ''
+  group by rule_id, case_id
+)
+select
+  rr.rule_id,
+  max(rr.rule_name) as rule_name,
+  count(distinct rr.case_id) as reviewed_cases,
+  count(distinct case when c.is_fraud = 1 then rr.case_id end) as fraud_cases,
+  round(count(distinct case when c.is_fraud = 1 then rr.case_id end) / nullif(count(distinct rr.case_id), 0) * 100, 2) as precision_pct,
+  cast(round(sum(case when c.is_fraud = 1 then c.loss else 0 end), 2) as decimal(20, 2)) as fraud_loss_php
+from rr join cases c on c.case_id = rr.case_id
+group by rr.rule_id
+order by fraud_cases desc, reviewed_cases desc;
+
+-- 10. Daily Rule Trigger Trend
+-- Daily effective-hit transactions per rule for the top 50 rules by monthly volume (the result API caps
+-- at 2000 rows). Powers the filterable daily trend chart.
+with daily as (
+  select rule_id, pt_date as trigger_date, count(distinct bizflow_instance_id) as trigger_trxn
+  from {AF_RULE_HIT_LOG_TABLE}
+  where pt_date between '{month_start_iso}' and '{month_end_iso}' and is_rule_triggered = 'Y'
+  group by rule_id, pt_date
+),
+top_rules as (
+  select rule_id from daily group by rule_id order by sum(trigger_trxn) desc limit 50
+)
+select d.rule_id, d.trigger_date, d.trigger_trxn
+from daily d join top_rules t on t.rule_id = d.rule_id
+order by d.rule_id, d.trigger_date;
+
+-- 11. Scene/Sub-scene/Action Usage
+-- Actual transaction volume per scene / sub-scene / action from the action log (all traffic, not just
+-- rule hits). Shows which configured scenes and actions are actually exercised.
+select
+  scene_name,
+  sub_scene_name,
+  action_name,
+  case action_type when '1' then 'Business' when '2' then 'Authentication' else action_type end as action_type,
+  count(distinct bizflow_instance_id) as transactions,
+  count(1) as action_events,
+  count(distinct uid) as distinct_users
+from {AF_ACTION_LOG_TABLE}
+where pt_date between '{month_start_iso}' and '{month_end_iso}'
+group by scene_name, sub_scene_name, action_name, action_type
+order by transactions desc;
 """
 
 
