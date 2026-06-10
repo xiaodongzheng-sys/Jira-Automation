@@ -2383,8 +2383,10 @@ class LocalAgentServerTests(unittest.TestCase):
 
     def test_local_agent_service_builders_wire_expected_dependencies(self):
         settings = self.app.config["SETTINGS"]
+        # Meeting minutes default to Claude-first (Codex fallback); PRD briefing
+        # below still wires the Codex client.
         with self.app.app_context(), patch(
-            "bpmis_jira_tool.local_agent_server.CodexTextGenerationClient",
+            "bpmis_jira_tool.local_agent_server.ClaudeFirstTextGenerationClient",
             side_effect=lambda **kwargs: {"text_client": kwargs},
         ) as text_client, patch(
             "bpmis_jira_tool.local_agent_server.MeetingProcessingService",

@@ -68,7 +68,7 @@ from prd_briefing.confluence import ConfluenceConnector
 from prd_briefing.reviewer import PRDBriefingReviewRequest, PRDReviewRequest, PRDReviewService
 from prd_briefing.service import PRDBriefingService, VoiceService
 from prd_briefing.storage import BriefingStore
-from prd_briefing.text_generation import CodexTextGenerationClient
+from prd_briefing.text_generation import ClaudeFirstTextGenerationClient, CodexTextGenerationClient
 
 
 BPMIS_PROXY_SLOW_OPERATION_SECONDS = 5.0
@@ -2403,7 +2403,12 @@ def _sse_events(events: Any):
 
 
 def _build_meeting_processing_service(settings: Settings) -> MeetingProcessingService:
-    text_client = CodexTextGenerationClient(
+    # Meeting minutes prefer the local Claude Code CLI (Opus 4.8) and fall back
+    # to Codex on any Claude failure, to avoid the spend-capped Codex backend.
+    # Set MEETING_RECORDER_INSIGHTS_LLM_PROVIDER=codex_cli_bridge to force Codex.
+    insights_provider = (os.getenv("MEETING_RECORDER_INSIGHTS_LLM_PROVIDER") or "claude_cli_bridge").strip().lower()
+    text_client_cls = CodexTextGenerationClient if insights_provider == "codex_cli_bridge" else ClaudeFirstTextGenerationClient
+    text_client = text_client_cls(
         settings=settings,
         workspace_root=Path(__file__).resolve().parent.parent,
         prompt_mode="meeting_recorder_minutes_codex",
