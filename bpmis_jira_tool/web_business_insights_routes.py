@@ -40,7 +40,8 @@ def build_business_insights_handlers(ctx: Any) -> Any:
                 item["artifact"] = artifact
         item["sql_url"] = url_for("business_insights_report_sql", report_id=item["id"])
         item["ingest_url"] = url_for("business_insights_report_ingest", report_id=item["id"])
-        item["can_generate"] = item["id"] in GENERATOR_REPORT_IDS
+        # The on-demand "Refresh data" button re-runs the Data Workbench generator; admins only.
+        item["can_generate"] = item["id"] in GENERATOR_REPORT_IDS and bool(ctx._can_refresh_business_insights(settings))
         if item["can_generate"]:
             item["generate_url"] = url_for("business_insights_report_generate", report_id=item["id"])
             item["generate_status_url"] = url_for("business_insights_report_generate_status", report_id=item["id"])
@@ -110,7 +111,7 @@ def build_business_insights_handlers(ctx: Any) -> Any:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 
     def business_insights_report_generate(report_id: str):
-        access_gate = ctx._require_business_insights_access(settings, api=True)
+        access_gate = ctx._require_business_insights_admin(settings, api=True)
         if access_gate is not None:
             return access_gate
         if report_id not in GENERATOR_REPORT_IDS:
@@ -122,7 +123,7 @@ def build_business_insights_handlers(ctx: Any) -> Any:
         return jsonify({"status": "ok", "report_id": report_id, "job": job})
 
     def business_insights_report_generate_status(report_id: str):
-        access_gate = ctx._require_business_insights_access(settings, api=True)
+        access_gate = ctx._require_business_insights_admin(settings, api=True)
         if access_gate is not None:
             return access_gate
         if report_id not in GENERATOR_REPORT_IDS:

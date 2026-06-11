@@ -1063,6 +1063,12 @@ class BusinessInsightsGenerationRouteTests(unittest.TestCase):
             session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
             session["google_credentials"] = {"token": "x"}
 
+    def _portal_user_session(self, client):
+        # A non-admin portal user (any @npt.sg address that is not the admin).
+        with client.session_transaction() as session:
+            session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+            session["google_credentials"] = {"token": "x"}
+
     def test_refresh_button_renders_for_generator_reports(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, self._client_env(temp_dir), clear=True):
             app = create_app()
@@ -1122,6 +1128,34 @@ class BusinessInsightsGenerationRouteTests(unittest.TestCase):
                     session["google_credentials"] = {"token": "x"}
                 response = client.post(f"/api/business-insights/reports/{AF_RULE_EFFECTIVENESS_REPORT_ID}/generate")
         self.assertEqual(response.status_code, 403)
+
+    def test_generate_denies_non_admin_portal_user(self):
+        report_id = AF_RULE_EFFECTIVENESS_REPORT_ID
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, self._client_env(temp_dir), clear=True):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                self._portal_user_session(client)
+                generate = client.post(f"/api/business-insights/reports/{report_id}/generate")
+                status = client.get(f"/api/business-insights/reports/{report_id}/generate/status")
+        self.assertEqual(generate.status_code, 403)
+        self.assertEqual(status.status_code, 403)
+
+    def test_refresh_button_hidden_for_non_admin_portal_user(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, self._client_env(temp_dir), clear=True):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                self._portal_user_session(client)
+                page = client.get("/business-insights?domain=anti-fraud")
+                reports = client.get("/api/business-insights/reports?domain=anti-fraud").get_json()
+        # A non-admin can view the reports but must not see the on-demand refresh control.
+        self.assertEqual(page.status_code, 200)
+        soup = BeautifulSoup(page.get_data(as_text=True), "html.parser")
+        self.assertFalse(soup.select("[data-business-insights-generate]"))
+        rule_eff = next(r for r in reports["reports"] if r["id"] == AF_RULE_EFFECTIVENESS_REPORT_ID)
+        self.assertFalse(rule_eff["can_generate"])
+        self.assertNotIn("generate_url", rule_eff)
 
 
 if __name__ == "__main__":

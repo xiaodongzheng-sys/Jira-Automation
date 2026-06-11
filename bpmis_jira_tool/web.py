@@ -1580,6 +1580,8 @@ def create_app() -> Flask:
             SimpleNamespace(
                 settings=settings,
                 _require_business_insights_access=lambda *args, **kwargs: _require_business_insights_access(*args, **kwargs),
+                _require_business_insights_admin=lambda *args, **kwargs: _require_business_insights_admin(*args, **kwargs),
+                _can_refresh_business_insights=lambda *args, **kwargs: _can_refresh_business_insights(*args, **kwargs),
                 _get_user_identity=lambda *args, **kwargs: _get_user_identity(*args, **kwargs),
                 _get_business_insights_store=lambda *args, **kwargs: _get_business_insights_store(*args, **kwargs),
                 _current_release_revision=lambda *args, **kwargs: _current_release_revision(*args, **kwargs),
@@ -2931,6 +2933,24 @@ def _require_business_insights_access(settings: Settings, *, api: bool = False):
 
 def _can_access_business_insights(settings: Settings) -> bool:
     return _is_portal_user()
+
+
+def _can_refresh_business_insights(settings: Settings) -> bool:
+    # The on-demand "Refresh data" action re-runs the Data Workbench generator; restrict it to admins.
+    return _is_portal_admin()
+
+
+def _require_business_insights_admin(settings: Settings, *, api: bool = False):
+    login_gate = _require_google_login(settings, api=api)
+    if login_gate is not None:
+        return login_gate
+    if _can_refresh_business_insights(settings):
+        return None
+    message = f"Refreshing Business Insights data is restricted to {PORTAL_ADMIN_EMAIL}."
+    if api:
+        return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
+    flash(message, "error")
+    return redirect(url_for("access_denied"))
 
 
 def _validate_config_security(settings: Settings, config_data: dict[str, Any]) -> None:
