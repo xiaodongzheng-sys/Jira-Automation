@@ -62,6 +62,11 @@ class VPNProfileStore:
         if not username:
             raise ToolError("VPN username is required.")
 
+        if not profile_id:
+            # Re-saving the same (display_name, vpn_host, username) updates the
+            # existing profile instead of minting a duplicate row.
+            profile_id = self._find_existing_profile_id(display_name, vpn_host, username)
+
         existing_password = self._encrypted_password_for_profile(profile_id) if profile_id else ""
         password_encrypted = existing_password
         if password:
@@ -147,6 +152,21 @@ class VPNProfileStore:
                 """
             )
             connection.commit()
+
+    def _find_existing_profile_id(self, display_name: str, vpn_host: str, username: str) -> str:
+        with sqlite3.connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT id FROM vpn_profiles
+                WHERE LOWER(display_name) = LOWER(?)
+                  AND LOWER(vpn_host) = LOWER(?)
+                  AND LOWER(username) = LOWER(?)
+                ORDER BY updated_at
+                LIMIT 1
+                """,
+                (display_name, vpn_host, username),
+            ).fetchone()
+        return str(row[0]) if row else ""
 
     def _encrypted_password_for_profile(self, profile_id: str) -> str:
         with sqlite3.connect(self.db_path) as connection:

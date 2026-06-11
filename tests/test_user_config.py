@@ -569,6 +569,46 @@ class UserConfigStoreTests(unittest.TestCase):
             self.assertEqual(loaded["password"], "vpn-secret")
             self.assertEqual(loaded["display_name"], "Shopee VPN SG")
 
+    def test_vpn_profile_resave_without_id_updates_instead_of_duplicating(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            key = Fernet.generate_key().decode("utf-8")
+            store = VPNProfileStore(Path(temp_dir) / "team_portal.db", encryption_key=key)
+
+            first = store.save_profile(
+                {
+                    "display_name": "Shopee VPN",
+                    "vpn_host": "ShopeeVPN",
+                    "username": "vpn-user",
+                    "password": "vpn-secret",
+                }
+            )
+            # Same profile saved again with no id (e.g. a fresh form / replayed
+            # script) must not create a second row, and a blank password keeps
+            # the existing one.
+            second = store.save_profile(
+                {
+                    "display_name": "Shopee VPN",
+                    "vpn_host": "ShopeeVPN",
+                    "username": "vpn-user",
+                    "password": "",
+                }
+            )
+
+            self.assertEqual(first["id"], second["id"])
+            self.assertEqual(len(store.list_profiles()), 1)
+            self.assertEqual(store.get_profile(second["id"], include_password=True)["password"], "vpn-secret")
+
+            # A different display name is treated as a distinct profile.
+            store.save_profile(
+                {
+                    "display_name": "Shopee VPN SG",
+                    "vpn_host": "ShopeeVPN",
+                    "username": "vpn-user",
+                    "password": "vpn-secret",
+                }
+            )
+            self.assertEqual(len(store.list_profiles()), 2)
+
     def test_vpn_profile_rejects_plaintext_password_without_encryption_key(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = VPNProfileStore(Path(temp_dir) / "team_portal.db")
