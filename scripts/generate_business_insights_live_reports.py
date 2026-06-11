@@ -1225,6 +1225,88 @@ def _kpi_cards_panel(title: str, pairs: list[tuple[str, str]]) -> str:
     return f'<section class="panel"><h2>{html.escape(title)}</h2><div class="kpi-grid">{cards}</div></section>'
 
 
+def _insight_panel(title: str, cards: list[tuple[str, str, str]]) -> str:
+    """Auto-insight strip. Each card is (label, value, level) where level in '', bad, warn, good."""
+    cards = [(label, value, level) for label, value, level in cards if value not in (None, "")]
+    if not cards:
+        return ""
+    html_cards = "".join(
+        f'<div class="insight-card {html.escape(level)}"><span class="label">{html.escape(label)}</span>'
+        f'<span class="value">{html.escape(value)}</span></div>'
+        for label, value, level in cards
+    )
+    return f'<section class="panel"><h2>{html.escape(title)}</h2><div class="insights">{html_cards}</div></section>'
+
+
+def _echart_id(title: str) -> str:
+    return "ec-" + (re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "chart")
+
+
+def _js_data(value: Any) -> str:
+    # JSON safe to embed inside an inline <script> (avoid closing the tag).
+    return json.dumps(value).replace("</", "<\\/")
+
+
+# ECharts init templates. Placeholders (__ID__/__DATA__/__XLABEL__/__YLABEL__) are filled via
+# str.replace so the JS braces don't collide with Python f-strings.
+_TREND_JS = r"""
+(function(){
+  if(!window.echarts){return;}
+  var el=document.getElementById('__ID__'); if(!el){return;}
+  var series=__DATA__; var keys=Object.keys(series);
+  if(!keys.length){el.innerHTML='<p class="empty">No data.</p>';return;}
+  var dset={}; keys.forEach(function(k){series[k].forEach(function(pt){dset[pt[0]]=1;});});
+  var dates=Object.keys(dset).sort();
+  var totals=keys.map(function(k){return [k,series[k].reduce(function(a,p){return a+p[1];},0)];})
+                 .sort(function(a,b){return b[1]-a[1];});
+  var sel={}; totals.forEach(function(t,i){sel[t[0]]=i<5;});
+  var chart=echarts.init(el);
+  chart.setOption({
+    tooltip:{trigger:'axis'},
+    legend:{type:'scroll',top:0,selected:sel,data:totals.map(function(t){return t[0];})},
+    grid:{left:70,right:24,top:38,bottom:64},
+    xAxis:{type:'category',data:dates},
+    yAxis:{type:'value'},
+    dataZoom:[{type:'slider',start:0,end:100},{type:'inside'}],
+    series:keys.map(function(k){var m={}; series[k].forEach(function(p){m[p[0]]=p[1];});
+      return {name:k,type:'line',showSymbol:false,connectNulls:true,
+        data:dates.map(function(d){return m[d]!=null?m[d]:null;})};})
+  });
+  window.addEventListener('resize',function(){chart.resize();});
+})();
+"""
+
+_SCATTER_JS = r"""
+(function(){
+  if(!window.echarts){return;}
+  var el=document.getElementById('__ID__'); if(!el){return;}
+  var pts=__DATA__; if(!pts.length){el.innerHTML='<p class="empty">No data.</p>';return;}
+  var med=function(a){var s=a.slice().sort(function(x,y){return x-y;});var m=Math.floor(s.length/2);
+    return s.length%2?s[m]:(s[m-1]+s[m])/2;};
+  var xmed=med(pts.map(function(p){return p.x;})), ymed=med(pts.map(function(p){return p.y;}));
+  var smax=Math.max.apply(null,pts.map(function(p){return p.size||0;}).concat([1]));
+  var chart=echarts.init(el);
+  chart.setOption({
+    tooltip:{formatter:function(pa){var d=pa.data;return '<b>'+d.label+'</b><br/>'+(d.name2?d.name2+'<br/>':'')
+      +'__XLABEL__: '+d.value[0]+'<br/>__YLABEL__: '+d.value[1]+'<br/>volume: '+(d.size||0).toLocaleString();}},
+    grid:{left:66,right:28,top:24,bottom:58},
+    xAxis:{name:'__XLABEL__',nameLocation:'middle',nameGap:32,type:'value',scale:true},
+    yAxis:{name:'__YLABEL__',nameLocation:'middle',nameGap:48,type:'value',scale:true},
+    dataZoom:[{type:'inside',xAxisIndex:0},{type:'inside',yAxisIndex:0}],
+    series:[{type:'scatter',
+      symbolSize:function(v,p){return 8+Math.sqrt((p.data.size||0)/smax)*34;},
+      itemStyle:{opacity:0.65,color:function(p){return (p.data.value[0]>=xmed&&p.data.value[1]<ymed)?'#b42318'
+        :(p.data.value[1]>=ymed?'#087443':'#1769e0');}},
+      data:pts.map(function(p){return {value:[p.x,p.y],label:p.label,name2:p.name,size:p.size};}),
+      markLine:{silent:true,symbol:'none',lineStyle:{color:'#e4a11b',type:'dashed'},
+        data:[{xAxis:xmed},{yAxis:ymed}]}
+    }]
+  });
+  window.addEventListener('resize',function(){chart.resize();});
+})();
+"""
+
+
 def _daily_trend_panel(
     title: str,
     headers: list[str],
@@ -1234,34 +1316,26 @@ def _daily_trend_panel(
     date_column: str,
     value_column: str,
 ) -> str:
-    """Render a filterable daily line chart: pick a rule, see its day-by-day trigger volume."""
+    """Interactive multi-line daily trend (ECharts): legend toggle + time brushing (dataZoom)."""
     idx = {str(col): offset for offset, col in enumerate(headers)}
     r_i, d_i, v_i = idx.get(rule_column), idx.get(date_column), idx.get(value_column)
     series: dict[str, list[list[Any]]] = {}
-    totals: dict[str, float] = {}
     if None not in (r_i, d_i, v_i):
         for row in rows:
             rid = "" if row[r_i] is None else str(row[r_i])
             day = "" if row[d_i] is None else str(row[d_i])
             val = _number(row[v_i]) if v_i < len(row) else 0.0
             series.setdefault(rid, []).append([day, val])
-            totals[rid] = totals.get(rid, 0.0) + val
-    ranked = sorted(totals, key=lambda k: totals[k], reverse=True)
-    if not ranked:
+    if not series:
         return f'<section class="panel"><h2>{html.escape(title)}</h2><p class="empty">No trend data was returned.</p></section>'
-    data_json = json.dumps({rid: sorted(series[rid]) for rid in ranked})
-    options = "".join(
-        f'<option value="{html.escape(rid, quote=True)}">{html.escape(rid)}</option>' for rid in ranked
-    )
+    chart_id = _echart_id(title)
+    data_json = _js_data({rid: sorted(pts) for rid, pts in series.items()})
+    script = _TREND_JS.replace("__ID__", chart_id).replace("__DATA__", data_json)
     return (
-        f'<section class="panel trend-panel"><h2>{html.escape(title)}</h2>'
-        '<div class="search-bar"><label>Rule '
-        f'<select data-trend-select>{options}</select></label>'
-        '<span class="count" data-trend-info></span></div>'
-        '<svg data-trend-svg viewBox="0 0 960 320" preserveAspectRatio="none" '
-        'style="width:100%;height:320px;background:#fff;border:1px solid #edf1f7;border-radius:6px;"></svg>'
-        f'<script type="application/json" data-trend-data>{data_json}</script>'
-        "</section>"
+        f'<section class="panel"><h2>{html.escape(title)}</h2>'
+        '<p class="note">Toggle series in the legend; drag the slider to zoom the date range.</p>'
+        f'<div id="{chart_id}" class="echart" style="height:360px"></div>'
+        f"<script>{script}</script></section>"
     )
 
 
@@ -1277,7 +1351,7 @@ def _scatter_quadrant_panel(
     x_label: str,
     y_label: str,
 ) -> str:
-    """Render a precision x trigger-rate quadrant scatter. Only points with both axes are plotted."""
+    """Interactive precision x trigger-rate quadrant scatter (ECharts): zoom, tooltips, median lines."""
     idx = {str(col): offset for offset, col in enumerate(headers)}
 
     def cell(row: list[Any], col: str) -> Any:
@@ -1299,17 +1373,19 @@ def _scatter_quadrant_panel(
         )
     if not pts:
         return f'<section class="panel"><h2>{html.escape(title)}</h2><p class="empty">No scorecard data was returned.</p></section>'
-    data_json = json.dumps(pts)
+    chart_id = _echart_id(title)
+    script = (
+        _SCATTER_JS.replace("__ID__", chart_id)
+        .replace("__DATA__", _js_data(pts))
+        .replace("__XLABEL__", x_label.replace("'", ""))
+        .replace("__YLABEL__", y_label.replace("'", ""))
+    )
     return (
-        f'<section class="panel scatter-panel"><h2>{html.escape(title)}</h2>'
-        f'<p class="note">Bubble size = trigger volume. Dashed lines = medians. '
-        f'Bottom-right (high {html.escape(x_label.lower())}, low {html.escape(y_label.lower())}) = noisy rules to tune.</p>'
-        '<svg data-scatter-svg viewBox="0 0 960 420" preserveAspectRatio="none" '
-        'style="width:100%;height:420px;background:#fff;border:1px solid #edf1f7;border-radius:6px;"></svg>'
-        f'<script type="application/json" data-scatter-x>{json.dumps(x_label)}</script>'
-        f'<script type="application/json" data-scatter-y>{json.dumps(y_label)}</script>'
-        f'<script type="application/json" data-scatter-data>{data_json}</script>'
-        "</section>"
+        f'<section class="panel"><h2>{html.escape(title)}</h2>'
+        f'<p class="note">Bubble size = volume; dashed lines = medians. '
+        f'Red = high {html.escape(x_label.lower())} / low {html.escape(y_label.lower())} (tune); green = high {html.escape(y_label.lower())}.</p>'
+        f'<div id="{chart_id}" class="echart" style="height:440px"></div>'
+        f"<script>{script}</script></section>"
     )
 
 
@@ -1436,7 +1512,15 @@ td.detail-cell{{padding:0;background:#f8fbff;}}
 .detail-table th,.detail-table td{{border-bottom:1px solid #e6eefb;}}
 tr.no-match{{display:none;}}
 .empty{{padding:18px;color:var(--muted);}}
+.echart{{width:100%;}}
+.note{{margin:0 0 12px;color:var(--muted);font-size:12px;}}
+.insights{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;}}
+.insight-card{{border:1px solid #e4e7ec;border-left:4px solid var(--blue);border-radius:8px;padding:12px 14px;background:#fafcff;}}
+.insight-card.bad{{border-left-color:var(--red,#b42318);}} .insight-card.warn{{border-left-color:#b54708;}} .insight-card.good{{border-left-color:#087443;}}
+.insight-card .label{{display:block;color:var(--muted);font-size:12px;margin-bottom:4px;}}
+.insight-card .value{{display:block;font-size:15px;font-weight:650;overflow-wrap:anywhere;}}
 </style></head><body>
+<script src="/static/vendor/echarts.min.js"></script>
 <header><h1>{html.escape(report_title)}</h1><p>Snapshot {html.escape(snapshot_pt_date)}. Generated {generated_at} UTC from Data Workbench output.</p></header>
 <main>{body}</main>
 <script>
@@ -1740,7 +1824,39 @@ def write_visualization(
                     continue
                 text = f"{_format_number(value)}{suffix}" if _is_number(value) else f"{value}{suffix}"
                 kpis.append((label, text))
-        intro = _kpi_cards_panel(f"Hit-Rate Summary — {scope_label}" if scope_label else "Hit-Rate Summary", kpis)
+        kpi_panel = _kpi_cards_panel(f"Hit-Rate Summary — {scope_label}" if scope_label else "Hit-Rate Summary", kpis)
+        # Auto-insight highlights from the scorecard (most over-firing rule, lowest precision).
+        insight_cards: list[tuple[str, str, str]] = []
+        scorecard = eff_lookup.get("Rule Scorecard")
+        if scorecard and scorecard[1]:
+            sc_cols = {str(c): i for i, c in enumerate(scorecard[0])}
+
+            def _scell(row, col):
+                return row[sc_cols[col]] if col in sc_cols and sc_cols[col] < len(row) else None
+
+            scored = [r for r in scorecard[1] if _scell(r, "trigger_rate_pct") not in (None, "")]
+            if scored:
+                top = max(scored, key=lambda r: _number(_scell(r, "trigger_rate_pct")))
+                tr = _number(_scell(top, "trigger_rate_pct"))
+                insight_cards.append((
+                    "Most over-firing rule",
+                    f"{_scell(top, 'rule_id')} — {tr}% of scene traffic",
+                    "bad" if tr >= 20 else ("warn" if tr >= 5 else ""),
+                ))
+            reviewed = [r for r in scorecard[1] if _number(_scell(r, "reviewed_cases")) >= 50 and _scell(r, "precision_pct") not in (None, "")]
+            if reviewed:
+                worst = min(reviewed, key=lambda r: _number(_scell(r, "precision_pct")))
+                pp = _number(_scell(worst, "precision_pct"))
+                insight_cards.append((
+                    "Lowest precision (≥50 reviews)",
+                    f"{_scell(worst, 'rule_id')} — {pp}% fraud-confirmed",
+                    "bad" if pp < 1 else ("warn" if pp < 5 else "good"),
+                ))
+        action_rate = _v("action_rate_pct") if summary and summary[1] else None
+        if action_rate not in (None, ""):
+            ar = _number(action_rate)
+            insight_cards.append(("Action rate (challenge+reject)", f"{action_rate}%", "warn" if ar >= 10 else ""))
+        intro = _insight_panel("Highlights", insight_cards) + kpi_panel
         placeholders = {
             "Request Outcome Summary": "Filter…",
             "Daily Challenge/Reject/Punish": "Search date…",

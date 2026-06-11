@@ -842,12 +842,10 @@ class RuleEffectivenessExtraSectionsTests(unittest.TestCase):
              [["C0024v2", "2026-05-01", "1000"], ["C0024v2", "2026-05-02", "1500"], ["U0059", "2026-05-01", "500"]]),
         ])
         self.assertIn("<h2>Daily Rule Trigger Trend</h2>", html)
-        self.assertIn("trend-panel", html)
-        self.assertIn("data-trend-svg", html)
-        self.assertIn("data-trend-select", html)
-        # Rule selector lists the rules; data is embedded for client-side redraw.
+        # ECharts line chart: a container div + an inline echarts.init script with embedded data.
+        self.assertIn('id="ec-daily-rule-trigger-trend" class="echart"', html)
+        self.assertIn("echarts.init", html)
         self.assertIn("C0024v2", html)
-        self.assertIn("data-trend-data", html)
         # Not rendered as a flat table.
         self.assertNotIn('<th>trigger_trxn</th>', html)
 
@@ -862,9 +860,8 @@ class RuleEffectivenessExtraSectionsTests(unittest.TestCase):
         ])
         # Quadrant scatter (precision x trigger-rate) plus a searchable detail table.
         self.assertIn("<h2>Rule Scorecard</h2>", html)
-        self.assertIn("scatter-panel", html)
-        self.assertIn("data-scatter-svg", html)
-        self.assertIn("data-scatter-data", html)
+        self.assertIn('id="ec-rule-scorecard" class="echart"', html)
+        self.assertIn("echarts.init", html)
         self.assertIn("Rule Scorecard — Detail", html)
         self.assertIn("precision_pct", html)
         self.assertIn("New device transfer", html)
@@ -943,7 +940,10 @@ class FraudLossBusinessInsightsTests(unittest.TestCase):
         self.assertNotIn("<h2>Fraud MO Subtype Breakdown</h2>", html)  # nested, not standalone
         self.assertIn("<h2>Case Status &amp; SLA</h2>", html)
         self.assertIn("<h2>Daily Fraud Loss Trend</h2>", html)
-        self.assertIn("data-trend-svg", html)
+        self.assertIn('id="ec-daily-fraud-loss-trend" class="echart"', html)
+        self.assertIn("echarts.init", html)
+        # ECharts is loaded from the vendored local asset (no external CDN).
+        self.assertIn('/static/vendor/echarts.min.js', html)
         # Current review-pool backlog renders as a searchable table.
         self.assertIn("<h2>Review Pool / Backlog (current)</h2>", html)
         self.assertIn("IHCS", html)
