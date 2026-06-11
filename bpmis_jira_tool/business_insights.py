@@ -1494,9 +1494,11 @@ def build_af_detection_effectiveness_sql(*, snapshot_pt_date: str | None = None,
     p1_label, p2_label, p3_label = (p[0] for p in win.periods)
     case_snap = _aliased_snapshot_filter("c", AF_REVIEW_CASE_TABLE, snapshot_pt_date)
     window = f"c.case_open_datetime >= '{span_start_iso}' and c.case_open_datetime < '{span_end_iso}'"
+    # NB: period_case is evaluated in the final SELECT over the `flagged` CTE (which has no `c` alias),
+    # so it references the bare column name rather than c.case_open_datetime.
     period_case = (
-        f"case when c.case_open_datetime < '{p2_iso}' then '{p1_label}' "
-        f"when c.case_open_datetime < '{p3_iso}' then '{p2_label}' else '{p3_label}' end"
+        f"case when case_open_datetime < '{p2_iso}' then '{p1_label}' "
+        f"when case_open_datetime < '{p3_iso}' then '{p2_label}' else '{p3_label}' end"
     )
     fraud_expr = "lower(trim(coalesce(c.fraud_mo_type, ''))) not in ('not fraud', 'pending', '')"
     mo_expr = "case when trim(coalesce(c.fraud_mo_type, '')) = '' then 'Unspecified' else c.fraud_mo_type end"
