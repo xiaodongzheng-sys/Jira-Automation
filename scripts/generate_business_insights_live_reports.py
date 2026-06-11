@@ -39,11 +39,11 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from bpmis_jira_tool.business_insights import (  # noqa: E402
-    AF_DETECTION_EFFECTIVENESS_REPORT_ID,
+    AF_FACIAL_VERIFICATION_REPORT_ID,
+    AF_FACIAL_VERIFICATION_TABLE,
     AF_FRAUD_LOSS_REPORT_ID,
     AF_REQUEST_STATISTIC_TABLE,
     AF_REVIEW_CASE_TABLE,
-    AF_RULE_CHANGE_LOG_REPORT_ID,
     AF_RULE_CONFIG_TABLE,
     AF_RULE_EFFECTIVENESS_REPORT_ID,
     AF_RULES_FEATURES_REPORT_ID,
@@ -58,9 +58,8 @@ from bpmis_jira_tool.business_insights import (  # noqa: E402
     PORTFOLIO_REPAYMENT_REPORT_ID,
     REPAY_PLAN_TABLE,
     UNDERWRITING_FUNNEL_REPORT_ID,
-    build_af_detection_effectiveness_sql,
+    build_af_facial_verification_sql,
     build_af_fraud_loss_sql,
-    build_af_rule_change_log_sql,
     build_af_rule_effectiveness_sql,
     build_af_rules_features_sql,
     build_af_scenarios_actions_sql,
@@ -97,13 +96,9 @@ REPORT_BUILDERS: dict[str, tuple[str, Callable[..., str]]] = {
         "Anti-fraud PH - Fraud Loss & Case Outcomes",
         build_af_fraud_loss_sql,
     ),
-    AF_DETECTION_EFFECTIVENESS_REPORT_ID: (
-        "Anti-fraud PH - Detection Effectiveness & Loss Prevented",
-        build_af_detection_effectiveness_sql,
-    ),
-    AF_RULE_CHANGE_LOG_REPORT_ID: (
-        "Anti-fraud PH - Rule Change Log & Governance",
-        build_af_rule_change_log_sql,
+    AF_FACIAL_VERIFICATION_REPORT_ID: (
+        "Anti-fraud PH - Facial Verification / Liveness & Deepfake",
+        build_af_facial_verification_sql,
     ),
 }
 
@@ -118,8 +113,7 @@ REPORT_SNAPSHOT_ANCHOR_TABLE: dict[str, str] = {
     AF_RULES_FEATURES_REPORT_ID: AF_RULE_CONFIG_TABLE,
     AF_RULE_EFFECTIVENESS_REPORT_ID: AF_REQUEST_STATISTIC_TABLE,
     AF_FRAUD_LOSS_REPORT_ID: AF_REVIEW_CASE_TABLE,
-    AF_DETECTION_EFFECTIVENESS_REPORT_ID: AF_REVIEW_CASE_TABLE,
-    AF_RULE_CHANGE_LOG_REPORT_ID: AF_RULE_CONFIG_TABLE,
+    AF_FACIAL_VERIFICATION_REPORT_ID: AF_FACIAL_VERIFICATION_TABLE,
 }
 
 LATEST_SNAPSHOT = "latest"
@@ -1963,37 +1957,112 @@ def write_visualization(
     report_id: str = "",
 ) -> None:
     if report_id == AF_SCENARIOS_ACTIONS_REPORT_ID:
-        flow_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
-        flow = flow_lookup.get("Scenario Action Auth Flow")
-        if flow is None and sheets:
-            _name, fheaders, frows = sheets[-1]
-            flow = (fheaders, frows)
-        headers, rows = flow if flow else ([], [])
-        step_cols = {i for i, h in enumerate(headers) if str(h).strip().lower().endswith("_step")}
+        sc_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
+        flow = sc_lookup.get("Scenario Action Auth Flow")
+        fheaders, frows = flow if flow else ([], [])
 
         def _distinct(col: str):
-            idx = next((i for i, h in enumerate(headers) if str(h) == col), None)
+            idx = next((i for i, h in enumerate(fheaders) if str(h) == col), None)
             if idx is None:
                 return None
-            return len({str(r[idx]) for r in rows if idx < len(r) and r[idx] not in (None, "")})
+            return len({str(r[idx]) for r in frows if idx < len(r) and r[idx] not in (None, "")})
 
-        kpis: list[tuple] = []
-        if rows:
-            kpis.append(("Flow mappings", _format_number(len(rows))))
+        # Authentication-outcome KPIs (period-switchable) lead; scenario-coverage KPIs follow.
+        auth_summary = sc_lookup.get("Authentication Outcome Summary")
+        auth_kpi = _period_kpi_panel(
+            "Authentication Outcomes",
+            auth_summary,
+            [
+                ("Actions", "actions", "num"), ("Pass", "pass_actions", "num"),
+                ("Reject", "reject_actions", "num"), ("Reject rate", "reject_rate_pct", "pct"),
+                ("Flows", "flows", "num"), ("Users", "distinct_users", "num"),
+            ],
+        )
+        coverage_kpis: list[tuple] = []
+        if frows:
+            coverage_kpis.append(("Flow mappings", _format_number(len(frows))))
         for label, col in (("L1 scenes", "l1_scene_name"), ("L2 sub-scenes", "l2_sub_scene_name"), ("Actions", "action_name")):
             distinct = _distinct(col)
             if distinct:
-                kpis.append((label, _format_number(distinct)))
-        intro = _kpi_cards_panel("Scenario Coverage", kpis)
-        panel = _searchable_table_panel(
+                coverage_kpis.append((label, _format_number(distinct)))
+        # Auto-insights: highest reject-rate scene/auth-type, step-up challenge load, worst drop-off.
+        insight_cards: list[tuple[str, str, str]] = []
+        by_scene = sc_lookup.get("Auth Outcome by Scene & Type")
+        if by_scene and by_scene[1]:
+            bc = {str(c): i for i, c in enumerate(by_scene[0])}
+            if {"scene_name", "authentication_type", "reject_rate_pct", "actions"} <= set(bc):
+                sized = [r for r in by_scene[1] if _number(r[bc["actions"]] if bc["actions"] < len(r) else 0) >= 1000]
+                if sized:
+                    worst = max(sized, key=lambda r: _number(r[bc["reject_rate_pct"]] if bc["reject_rate_pct"] < len(r) else 0))
+                    rr = _number(worst[bc["reject_rate_pct"]])
+                    insight_cards.append((
+                        "Highest reject scene (≥1k actions)",
+                        f"{worst[bc['scene_name']]} / {worst[bc['authentication_type']]} — {rr}%",
+                        "bad" if rr >= 5 else ("warn" if rr >= 1 else ""),
+                    ))
+        friction = sc_lookup.get("Challenge Friction by Auth Type")
+        if friction and friction[1]:
+            fc = {str(c): i for i, c in enumerate(friction[0])}
+            if "authentication_type" in fc and "action_share_pct" in fc:
+                challenge = sum(
+                    _number(r[fc["action_share_pct"]]) for r in friction[1]
+                    if fc["action_share_pct"] < len(r) and str(r[fc["authentication_type"]]).upper().startswith("CHALLENGE")
+                )
+                if challenge > 0:
+                    insight_cards.append(("Step-up challenge load", f"{round(challenge, 2)}% of actions", "warn" if challenge >= 10 else ""))
+        dropoff = sc_lookup.get("Auth Drop-off by Scene")
+        if dropoff and dropoff[1]:
+            dc = {str(c): i for i, c in enumerate(dropoff[0])}
+            if {"scene_name", "drop_off_rate_pct", "flows_started"} <= set(dc):
+                sized = [r for r in dropoff[1] if _number(r[dc["flows_started"]] if dc["flows_started"] < len(r) else 0) >= 1000]
+                if sized:
+                    worst = max(sized, key=lambda r: _number(r[dc["drop_off_rate_pct"]] if dc["drop_off_rate_pct"] < len(r) else 0))
+                    dr = _number(worst[dc["drop_off_rate_pct"]])
+                    insight_cards.append(("Worst drop-off scene", f"{worst[dc['scene_name']]} — {dr}%", "warn" if dr >= 20 else ""))
+        intro = _insight_panel("Highlights", insight_cards) + auth_kpi + _kpi_cards_panel("Scenario Coverage", coverage_kpis)
+        # Funnel panels first (the new authentication view), then the scenario flow + config catalogs.
+        panels: list[str] = []
+        placeholders = {
+            "Auth Outcome by Scene & Type": "Search scene or auth type…",
+            "Auth Drop-off by Scene": "Search scene…",
+            "L1 Scenarios": "Search scene…",
+            "L2 Sub-Scenarios": "Search sub-scene…",
+            "Actions and Auth Steps": "Search action…",
+        }
+        ordered = [
+            "Auth Outcome by Scene & Type",
+            "Challenge Friction by Auth Type",
+            "Auth Drop-off by Scene",
             "Scenario Action Auth Flow",
-            headers,
-            rows,
-            placeholder="Search scene name or step…",
-            step_columns=step_cols,
-        )
+            "L1 Scenarios",
+            "L2 Sub-Scenarios",
+            "Actions and Auth Steps",
+        ]
+        for sheet_name in ordered:
+            table = sc_lookup.get(sheet_name)
+            if not table:
+                continue
+            headers, rows = table
+            if sheet_name == "Challenge Friction by Auth Type":
+                fc = {str(c): i for i, c in enumerate(headers)}
+                if "authentication_type" in fc and "reject_rate_pct" in fc:
+                    pairs = [
+                        (str(r[fc["authentication_type"]]), r[fc["reject_rate_pct"]])
+                        for r in rows
+                        if fc["authentication_type"] < len(r) and fc["reject_rate_pct"] < len(r)
+                    ]
+                    bar = _bar_panel("Reject Rate by Auth Type (%)", pairs, note="Reject rate per authentication tier (DEFAULT vs step-up challenges).")
+                    if bar:
+                        panels.append(bar)
+                panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Search auth type…"))
+                continue
+            if sheet_name == "Scenario Action Auth Flow":
+                step_cols = {i for i, h in enumerate(headers) if str(h).strip().lower().endswith("_step")}
+                panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Search scene name or step…", step_columns=step_cols))
+                continue
+            panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder=placeholders.get(sheet_name, "Search…")))
         path.write_text(
-            _searchable_tables_document(report_title, snapshot_pt_date, [panel], intro_html=intro),
+            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),
             encoding="utf-8",
         )
         return
@@ -2028,6 +2097,30 @@ def write_visualization(
             if fstatus.get("Active"):
                 kpis.append(("Active features", _format_number(fstatus["Active"])))
         intro = _kpi_cards_panel("Catalog Summary", kpis)
+        # Governance (folded-in rule change log): KPIs + highlights from the rule_config snapshot diff.
+        chg_counts: dict[str, float] = {}
+        chg_summary = flow_lookup.get("Change Summary")
+        if chg_summary and chg_summary[1]:
+            sc = {str(c): i for i, c in enumerate(chg_summary[0])}
+            if "change_type" in sc and "rules" in sc:
+                for r in chg_summary[1]:
+                    if sc["change_type"] < len(r) and sc["rules"] < len(r):
+                        chg_counts[str(r[sc["change_type"]])] = _number(r[sc["rules"]])
+        chg_insights: list[tuple[str, str, str]] = []
+        net = (chg_counts.get("Added", 0) + chg_counts.get("Activated", 0)) - (chg_counts.get("Removed", 0) + chg_counts.get("Deactivated", 0))
+        if chg_counts:
+            sign = "+" if net >= 0 else ""
+            chg_insights.append(("Net change in active rules", f"{sign}{_format_number(net)}", "good" if net > 0 else ("warn" if net < 0 else "")))
+        if chg_counts.get("Deactivated"):
+            chg_insights.append(("Rules deactivated", _format_number(chg_counts["Deactivated"]), "warn"))
+        if chg_counts.get("Logic changed"):
+            chg_insights.append(("Rules re-logicked", _format_number(chg_counts["Logic changed"]), "warn"))
+        chg_kpis = [
+            (label, _format_number(chg_counts[label]))
+            for label in ("Added", "Activated", "Deactivated", "Removed", "Outcome changed", "Risk level changed", "Logic changed", "Priority changed")
+            if chg_counts.get(label)
+        ]
+        intro = intro + _insight_panel("Rule Change Highlights", chg_insights) + _kpi_cards_panel("Rule Change Summary", chg_kpis)
 
         chart_panels: list[str] = []
         outcome = _count_by(rules, "outcome_type")
@@ -2067,9 +2160,34 @@ def write_visualization(
             table_panels.append(
                 _searchable_table_panel("Features", features[0], features[1], placeholder="Search feature id or name…")
             )
+        # Governance panels (folded-in rule change log): current-inventory bar + change-log tables.
+        governance_panels: list[str] = []
+        inventory = flow_lookup.get("Current Rule Inventory")
+        if inventory and inventory[1]:
+            ih, ir = inventory
+            ic = {str(c): i for i, c in enumerate(ih)}
+            if "outcome_type" in ic and "rules" in ic:
+                agg: dict[str, float] = {}
+                for r in ir:
+                    key = str(r[ic["outcome_type"]]) if ic["outcome_type"] < len(r) else ""
+                    agg[key] = agg.get(key, 0.0) + _number(r[ic["rules"]] if ic["rules"] < len(r) else 0)
+                inv_bar = _bar_panel(
+                    "Current Rules by Outcome Type",
+                    sorted(agg.items(), key=lambda kv: kv[1], reverse=True),
+                    note="Active + inactive rule count per outcome type in the current snapshot.",
+                )
+                if inv_bar:
+                    governance_panels.append(inv_bar)
+        for chg_sheet in ("Change Summary", "Rule Change Detail", "Current Rule Inventory"):
+            sec = flow_lookup.get(chg_sheet)
+            if sec:
+                placeholder = "Search rule id, name or change type…" if chg_sheet == "Rule Change Detail" else (
+                    "Search outcome, status or risk…" if chg_sheet == "Current Rule Inventory" else "Filter…"
+                )
+                governance_panels.append(_searchable_table_panel(chg_sheet, sec[0], sec[1], placeholder=placeholder))
         path.write_text(
             _searchable_tables_document(
-                report_title, snapshot_pt_date, chart_panels + table_panels, intro_html=intro
+                report_title, snapshot_pt_date, chart_panels + table_panels + governance_panels, intro_html=intro
             ),
             encoding="utf-8",
         )
@@ -2124,11 +2242,52 @@ def write_visualization(
             ar = _number(cur_action_rate)
             insight_cards.append(("Action rate (challenge+reject)", f"{cur_action_rate}%", "warn" if ar >= 10 else ""))
         intro = _insight_panel("Highlights", insight_cards) + kpi_panel
+        # Detection effectiveness (folded in): coverage KPIs + blind-spot / top-rule highlights.
+        det_summary = eff_lookup.get("Detection Coverage Summary")
+        det_kpi = _period_kpi_panel(
+            "Detection Coverage",
+            det_summary,
+            [
+                ("Detection rate", "detection_rate_pct", "pct"),
+                ("Fraud loss", "fraud_loss_php", "money"),
+                ("Loss rule-detected", "loss_rule_detected_php", "money"),
+                ("Loss leaked", "loss_leaked_php", "money"),
+                ("Loss detected share", "loss_detected_share_pct", "pct"),
+            ],
+        ) if det_summary else ""
+        det_insights: list[tuple[str, str, str]] = []
+        if det_summary and det_summary[1]:
+            d_cur, _dp, d_label, _dpl, _dm, _ds = _period_rows(det_summary)
+            dcols = {str(c): i for i, c in enumerate(det_summary[0])}
+            dr = d_cur[dcols["detection_rate_pct"]] if d_cur is not None and "detection_rate_pct" in dcols and dcols["detection_rate_pct"] < len(d_cur) else None
+            if dr not in (None, ""):
+                drn = _number(dr)
+                det_insights.append((f"Detection rate ({d_label})", f"{dr}%", "good" if drn >= 80 else ("warn" if drn >= 60 else "bad")))
+        det_by_mo = eff_lookup.get("Detection by Fraud MO Type")
+        if det_by_mo and det_by_mo[1]:
+            mc = {str(c): i for i, c in enumerate(det_by_mo[0])}
+            if "fraud_mo_type" in mc and "loss_leaked_php" in mc:
+                worst = max(det_by_mo[1], key=lambda r: _number(r[mc["loss_leaked_php"]] if mc["loss_leaked_php"] < len(r) else 0))
+                lv = _number(worst[mc["loss_leaked_php"]])
+                if lv > 0:
+                    det_insights.append(("Biggest blind spot", f"{worst[mc['fraud_mo_type']]} — ₱{_format_number(lv)} leaked", "bad"))
+        det_top = eff_lookup.get("Top Detecting Rules")
+        if det_top and det_top[1]:
+            tc = {str(c): i for i, c in enumerate(det_top[0])}
+            if "rule_id" in tc and "loss_caught_php" in tc:
+                best = det_top[1][0]
+                cv = _number(best[tc["loss_caught_php"]] if tc["loss_caught_php"] < len(best) else 0)
+                if cv > 0:
+                    det_insights.append(("Top detecting rule", f"{best[tc['rule_id']]} — ₱{_format_number(cv)} caught", "good"))
+        intro = intro + _insight_panel("Detection Highlights", det_insights) + det_kpi
         placeholders = {
             "Request Outcome Summary": "Filter…",
             "Daily Challenge/Reject/Punish": "Search date…",
             "Rule Precision / Catch Rate": "Search rule id or name…",
             "Scene/Sub-scene/Action Usage": "Search scene, sub-scene or action…",
+            "Top Detecting Rules": "Search rule id or name…",
+            "Missed Fraud (Blind Spots)": "Search fraud type…",
+            "Detection Coverage Summary": "Filter…",
         }
         reject_breakdown = eff_lookup.get("Reject Rule Scene Breakdown")
         punish_breakdown = eff_lookup.get("Punishment Rule Scene Breakdown")
@@ -2295,6 +2454,36 @@ def write_visualization(
                         panels.append(bar)
                 panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder=placeholders.get(sheet_name, "Search…")))
                 continue
+            if sheet_name == "Detection by Fraud MO Type":
+                mo_col = {str(c): i for i, c in enumerate(headers)}
+                if "fraud_mo_type" in mo_col and "loss_leaked_php" in mo_col:
+                    pairs = [
+                        (str(r[mo_col["fraud_mo_type"]]), r[mo_col["loss_leaked_php"]])
+                        for r in rows
+                        if mo_col["fraud_mo_type"] < len(r) and mo_col["loss_leaked_php"] < len(r)
+                    ]
+                    bar = _bar_panel(
+                        "Leaked Loss by Fraud Type (PHP)",
+                        sorted(pairs, key=lambda kv: _number(kv[1]), reverse=True)[:12],
+                        note="Confirmed fraud loss the rule engine did not flag, by modus operandi.",
+                        prefix="₱",
+                    )
+                    if bar:
+                        panels.append(bar)
+                panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Search fraud type…"))
+                continue
+            if sheet_name == "Daily Detection Trend":
+                panels.append(
+                    _daily_trend_panel(
+                        "Daily Detection Trend",
+                        headers,
+                        rows,
+                        rule_column="series",
+                        date_column="case_open_date",
+                        value_column="daily_loss_php",
+                    )
+                )
+                continue
             panels.append(
                 _searchable_table_panel(
                     sheet_name,
@@ -2387,25 +2576,22 @@ def write_visualization(
             encoding="utf-8",
         )
         return
-    if report_id == AF_DETECTION_EFFECTIVENESS_REPORT_ID:
-        det_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
-        summary = det_lookup.get("Detection Coverage Summary")
+    if report_id == AF_FACIAL_VERIFICATION_REPORT_ID:
+        fv_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
+        summary = fv_lookup.get("Verification Outcome Summary")
         cur = cur_label = None
-        kpi_panel = ""
         if summary and summary[1]:
-            cur, _prev, cur_label, _prev_label, _mtd, _scope = _period_rows(summary)
-            kpi_panel = _period_kpi_panel(
-                "Detection Coverage",
-                summary,
-                [
-                    ("Detection rate", "detection_rate_pct", "pct"),
-                    ("Fraud loss", "fraud_loss_php", "money"),
-                    ("Loss rule-detected", "loss_rule_detected_php", "money"),
-                    ("Loss leaked", "loss_leaked_php", "money"),
-                    ("Loss detected share", "loss_detected_share_pct", "pct"),
-                ],
-            )
-        # Auto-insights: overall detection rate, biggest blind spot, top detecting rule.
+            cur, _p, cur_label, _pl, _m, _s = _period_rows(summary)
+        kpi_panel = _period_kpi_panel(
+            "Verification Outcomes",
+            summary,
+            [
+                ("Checks", "checks", "num"), ("Liveness pass", "liveness_pass_rate_pct", "pct"),
+                ("Anti-spoof pass", "antispoof_pass_rate_pct", "pct"), ("Match pass", "match_pass_rate_pct", "pct"),
+                ("Overall pass", "overall_pass_rate_pct", "pct"), ("Spoof attacks", "spoof_attack_checks", "num"),
+            ],
+        )
+        # Auto-insights: overall pass rate, spoof-attack volume, worst-friction scene.
         insight_cards: list[tuple[str, str, str]] = []
         if summary and summary[1]:
             scols = {str(c): i for i, c in enumerate(summary[0])}
@@ -2413,113 +2599,60 @@ def write_visualization(
             def _cv(row, col):
                 return row[scols[col]] if row is not None and col in scols and scols[col] < len(row) else None
 
-            dr = _cv(cur, "detection_rate_pct")
-            if dr not in (None, ""):
-                drn = _number(dr)
-                insight_cards.append((f"Detection rate ({cur_label})", f"{dr}%", "good" if drn >= 80 else ("warn" if drn >= 60 else "bad")))
-        by_mo = det_lookup.get("Detection by Fraud MO Type")
-        if by_mo and by_mo[1]:
-            mc = {str(c): i for i, c in enumerate(by_mo[0])}
-            if "fraud_mo_type" in mc and "loss_leaked_php" in mc:
-                worst = max(by_mo[1], key=lambda r: _number(r[mc["loss_leaked_php"]] if mc["loss_leaked_php"] < len(r) else 0))
-                lv = _number(worst[mc["loss_leaked_php"]])
-                if lv > 0:
-                    insight_cards.append(("Biggest blind spot", f"{worst[mc['fraud_mo_type']]} — ₱{_format_number(lv)} leaked", "bad"))
-        top_rules = det_lookup.get("Top Detecting Rules")
-        if top_rules and top_rules[1]:
-            tc = {str(c): i for i, c in enumerate(top_rules[0])}
-            if "rule_id" in tc and "loss_caught_php" in tc:
-                best = top_rules[1][0]
-                cv = _number(best[tc["loss_caught_php"]] if tc["loss_caught_php"] < len(best) else 0)
-                if cv > 0:
-                    insight_cards.append(("Top detecting rule", f"{best[tc['rule_id']]} — ₱{_format_number(cv)} caught", "good"))
+            op = _cv(cur, "overall_pass_rate_pct")
+            if op not in (None, ""):
+                opn = _number(op)
+                insight_cards.append((f"Overall pass rate ({cur_label})", f"{op}%", "good" if opn >= 90 else ("warn" if opn >= 80 else "bad")))
+            sa = _cv(cur, "spoof_attack_checks")
+            if sa not in (None, ""):
+                insight_cards.append((f"Spoof attacks ({cur_label})", _format_number(sa), "warn" if _number(sa) > 0 else ""))
+        by_scene = fv_lookup.get("Pass Rates by Scene")
+        if by_scene and by_scene[1]:
+            bc = {str(c): i for i, c in enumerate(by_scene[0])}
+            if {"scene_name", "overall_pass_rate_pct", "checks"} <= set(bc):
+                sized = [r for r in by_scene[1] if _number(r[bc["checks"]] if bc["checks"] < len(r) else 0) >= 1000]
+                if sized:
+                    worst = min(sized, key=lambda r: _number(r[bc["overall_pass_rate_pct"]] if bc["overall_pass_rate_pct"] < len(r) else 100))
+                    wp = _number(worst[bc["overall_pass_rate_pct"]])
+                    insight_cards.append(("Lowest-pass scene (≥1k checks)", f"{worst[bc['scene_name']]} — {wp}%", "bad" if wp < 80 else ("warn" if wp < 90 else "")))
         intro = _insight_panel("Highlights", insight_cards) + kpi_panel
         panels = []
         for sheet_name, headers, rows in sheets:
-            if sheet_name == "Detection by Fraud MO Type":
-                mo_col = {str(c): i for i, c in enumerate(headers)}
-                if "fraud_mo_type" in mo_col and "loss_leaked_php" in mo_col:
+            if sheet_name == "Verification Outcome Summary":
+                continue  # -> KPI cards
+            if sheet_name == "Deepfake Score Distribution":
+                dc = {str(c): i for i, c in enumerate(headers)}
+                if "deepfake_score_band" in dc and "checks" in dc:
                     pairs = [
-                        (str(r[mo_col["fraud_mo_type"]]), r[mo_col["loss_leaked_php"]])
+                        (str(r[dc["deepfake_score_band"]]), r[dc["checks"]])
                         for r in rows
-                        if mo_col["fraud_mo_type"] < len(r) and mo_col["loss_leaked_php"] < len(r)
+                        if dc["deepfake_score_band"] < len(r) and dc["checks"] < len(r)
                     ]
-                    bar = _bar_panel(
-                        "Leaked Loss by Fraud Type (PHP)",
-                        sorted(pairs, key=lambda kv: _number(kv[1]), reverse=True)[:12],
-                        note="Confirmed fraud loss the rule engine did not flag, by modus operandi.",
-                        prefix="₱",
-                    )
+                    bar = _bar_panel("Deepfake Score Distribution", pairs, note="Facial checks by deepfake_spoof_score band (higher band = more deepfake-like).")
                     if bar:
                         panels.append(bar)
-                panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Search fraud type…"))
+                panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Search score band…"))
                 continue
-            if sheet_name == "Daily Detection Trend":
+            if sheet_name == "Daily Verification Trend":
                 panels.append(
                     _daily_trend_panel(
-                        "Daily Detection Trend",
+                        "Daily Verification Trend",
                         headers,
                         rows,
                         rule_column="series",
-                        date_column="case_open_date",
-                        value_column="daily_loss_php",
+                        date_column="check_date",
+                        value_column="checks",
                     )
                 )
                 continue
-            placeholder = "Search rule id or name…" if sheet_name == "Top Detecting Rules" else (
-                "Search fraud type…" if sheet_name == "Missed Fraud (Blind Spots)" else "Filter…"
-            )
-            panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder=placeholder))
-        path.write_text(
-            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),
-            encoding="utf-8",
-        )
-        return
-    if report_id == AF_RULE_CHANGE_LOG_REPORT_ID:
-        chg_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
-        counts: dict[str, float] = {}
-        summary = chg_lookup.get("Change Summary")
-        if summary and summary[1]:
-            sc = {str(c): i for i, c in enumerate(summary[0])}
-            if "change_type" in sc and "rules" in sc:
-                for r in summary[1]:
-                    if sc["change_type"] < len(r) and sc["rules"] < len(r):
-                        counts[str(r[sc["change_type"]])] = _number(r[sc["rules"]])
-        kpis = [
-            (label, _format_number(counts[label]))
-            for label in ("Added", "Activated", "Deactivated", "Removed", "Outcome changed", "Risk level changed", "Logic changed", "Priority changed")
-            if counts.get(label)
-        ]
-        insight_cards = []
-        net = (counts.get("Added", 0) + counts.get("Activated", 0)) - (counts.get("Removed", 0) + counts.get("Deactivated", 0))
-        if counts:
-            sign = "+" if net >= 0 else ""
-            insight_cards.append(("Net change in active rules", f"{sign}{_format_number(net)}", "good" if net > 0 else ("warn" if net < 0 else "")))
-        if counts.get("Deactivated"):
-            insight_cards.append(("Rules deactivated", _format_number(counts["Deactivated"]), "warn"))
-        if counts.get("Logic changed"):
-            insight_cards.append(("Rules re-logicked", _format_number(counts["Logic changed"]), "warn"))
-        intro = _insight_panel("Highlights", insight_cards) + _kpi_cards_panel("Change Summary", kpis)
-        panels = []
-        for sheet_name, headers, rows in sheets:
-            if sheet_name == "Current Rule Inventory":
-                ic = {str(c): i for i, c in enumerate(headers)}
-                if "outcome_type" in ic and "rules" in ic:
-                    agg: dict[str, float] = {}
-                    for r in rows:
-                        key = str(r[ic["outcome_type"]]) if ic["outcome_type"] < len(r) else ""
-                        agg[key] = agg.get(key, 0.0) + _number(r[ic["rules"]] if ic["rules"] < len(r) else 0)
-                    bar = _bar_panel(
-                        "Current Rules by Outcome Type",
-                        sorted(agg.items(), key=lambda kv: kv[1], reverse=True),
-                        note="Active + inactive rule count per outcome type in the current snapshot.",
-                    )
-                    if bar:
-                        panels.append(bar)
-                panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Search outcome, status or risk…"))
-                continue
-            placeholder = "Search rule id, name or change type…" if sheet_name == "Rule Change Detail" else "Filter…"
-            panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder=placeholder))
+            placeholders = {
+                "Liveness Result Breakdown": "Search liveness result…",
+                "Anti-Spoofing QC Breakdown": "Search QC result…",
+                "Facial Match Result Breakdown": "Search match result…",
+                "Pass Rates by Scene": "Search scene…",
+                "Fraud Review Outcomes": "Search review status…",
+            }
+            panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder=placeholders.get(sheet_name, "Search…")))
         path.write_text(
             _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),
             encoding="utf-8",

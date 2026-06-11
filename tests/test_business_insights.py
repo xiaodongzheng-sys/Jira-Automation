@@ -15,6 +15,8 @@ from bpmis_jira_tool.business_insights import (
     AF_FEATURE_CONFIG_TABLE,
     AF_ACTION_LOG_TABLE,
     AF_DETECTION_EFFECTIVENESS_REPORT_ID,
+    AF_FACIAL_VERIFICATION_REPORT_ID,
+    AF_FACIAL_VERIFICATION_TABLE,
     AF_FRAUD_LOSS_REPORT_ID,
     AF_IDENTIFY_REJECT_TABLE,
     AF_RULE_CHANGE_LOG_REPORT_ID,
@@ -35,6 +37,7 @@ from bpmis_jira_tool.business_insights import (
     UNDERWRITING_FUNNEL_REPORT_ID,
     UNDERWRITING_FUNNEL_TABLE,
     build_af_detection_effectiveness_sql,
+    build_af_facial_verification_sql,
     build_af_fraud_loss_sql,
     build_af_rule_change_log_sql,
     build_af_rule_effectiveness_sql,
@@ -324,9 +327,11 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertIn("Anti-fraud PH - Rules &amp; Features", response.get_data(as_text=True))
         self.assertIn("Anti-fraud PH - Rule Effectiveness / Hit-Rate", response.get_data(as_text=True))
         self.assertIn("Anti-fraud PH - Fraud Loss &amp; Case Outcomes", response.get_data(as_text=True))
-        self.assertIn("Anti-fraud PH - Detection Effectiveness &amp; Loss Prevented", response.get_data(as_text=True))
-        self.assertIn("Anti-fraud PH - Rule Change Log &amp; Governance", response.get_data(as_text=True))
-        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 10)
+        self.assertIn("Anti-fraud PH - Facial Verification / Liveness &amp; Deepfake", response.get_data(as_text=True))
+        # Detection-effectiveness and rule-change-log are folded into other reports, not standalone.
+        self.assertNotIn("Anti-fraud PH - Detection Effectiveness &amp; Loss Prevented", response.get_data(as_text=True))
+        self.assertNotIn("Anti-fraud PH - Rule Change Log &amp; Governance", response.get_data(as_text=True))
+        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 9)
         self.assertNotIn("Upload Export", response.get_data(as_text=True))
         self.assertIsNone(soup.select_one("[data-business-insights-upload]"))
 
@@ -480,7 +485,25 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
         self.assertIn("a.name = f.action", flow_section.query)
         self.assertNotIn("s.code = f.scene", flow_section.query)
 
-    def test_scenarios_visualization_is_world_class_single_flow_table(self):
+    def test_scenarios_actions_sql_has_authentication_funnel_sections(self):
+        sql = build_af_scenarios_actions_sql(snapshot_pt_date="2026-05-25", now=FIXED_NOW)
+        names = [s.sheet_name for s in extract_sql_sections(sql)]
+        for name in (
+            "Authentication Outcome Summary",
+            "Auth Outcome by Scene & Type",
+            "Challenge Friction by Auth Type",
+            "Auth Drop-off by Scene",
+        ):
+            self.assertIn(name, names)
+        # Funnel reads the DWD action log, scoped by pt_date over the window; risk_result drives pass/reject.
+        self.assertIn(AF_ACTION_LOG_TABLE, sql)
+        self.assertIn("al.pt_date between '2026-03-01' and '2026-05-26'", sql)
+        self.assertIn("al.risk_result = '1'", sql)
+        self.assertIn("al.risk_result = '0'", sql)
+        self.assertIn("is_final_action_in_flow_of_the_day", sql)
+        self.assertIn("'May 2026 MTD'", sql)
+
+    def test_scenarios_visualization_renders_auth_funnel_and_flow_table(self):
         flow_headers = [
             "l1_scene_name",
             "l1_enum_name",
@@ -508,33 +531,47 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
                 sheets=[
                     ("L1 Scenarios", ["l1_scene_code", "l1_scene_name"], [["100", "Login"]]),
                     ("Scenario Action Auth Flow", flow_headers, flow_rows),
+                    ("Authentication Outcome Summary",
+                     ["period", "actions", "distinct_users", "flows", "pass_actions", "reject_actions", "not_evaluated_actions", "reject_rate_pct"],
+                     [["Mar 2026", "200000000", "1", "1", "199000000", "400000", "600000", "0.2"],
+                      ["Apr 2026", "210000000", "1", "1", "209000000", "420000", "580000", "0.2"],
+                      ["May 2026 MTD", "60000000", "1", "1", "59800000", "110000", "90000", "0.18"]]),
+                    ("Auth Outcome by Scene & Type",
+                     ["scene_name", "authentication_type", "actions", "distinct_users", "pass_actions", "reject_actions", "reject_rate_pct"],
+                     [["Transfer", "CHALLENGE_2", "5000000", "1", "4900000", "100000", "2.0"]]),
+                    ("Challenge Friction by Auth Type",
+                     ["authentication_type", "actions", "distinct_users", "flows", "action_share_pct", "pass_actions", "reject_actions", "reject_rate_pct"],
+                     [["DEFAULT", "180000000", "1", "1", "90", "179000000", "1000000", "0.55"],
+                      ["CHALLENGE_2", "15000000", "1", "1", "7.5", "14800000", "200000", "1.33"]]),
+                    ("Auth Drop-off by Scene",
+                     ["scene_name", "flows_started", "flows_reached_final", "drop_off_rate_pct"],
+                     [["Transfer", "1000000", "850000", "15.0"]]),
                 ],
                 report_id=AF_SCENARIOS_ACTIONS_REPORT_ID,
             )
             html = output_path.read_text(encoding="utf-8")
 
-        # The flow table now uses the world-class interactive shell (searchable, sortable,
-        # per-column filters, CSV export via the shared dashboard JS) instead of the bare table.
-        self.assertEqual(html.count('class="search-table"'), 1)  # single flow table
-        self.assertIn("data-search", html)
-        self.assertIn("Search scene name or step", html)
-        self.assertIn("enhanceTable", html)
-        self.assertIn("sortable", html)
-        self.assertIn('class="col-filter"', html)
-        # Step columns are tagged for 50ch wrapping; non-step columns are not.
-        self.assertIn('<th class="step"><span class="th-label">default_step</span>', html)
-        self.assertIn('<th class="step"><span class="th-label">challenge5_step</span>', html)
-        self.assertIn('<td class="step">step_a</td>', html)
-        self.assertIn('<th><span class="th-label">l1_scene_name</span>', html)
-        self.assertIn("th.step,td.step{width:50ch;min-width:50ch;max-width:50ch;white-space:normal;", html)
-        self.assertIn("Password Login", html)
-        self.assertIn("P2P_TRANSFER", html)
-        # KPI coverage cards are rendered above the table.
+        # Authentication-outcome KPIs are period-switchable (month selector) and coverage KPIs follow.
+        self.assertIn("Authentication Outcomes", html)
+        self.assertIn("data-period-kpi", html)
+        self.assertIn('<script type="application/json" data-period-json>', html)
         self.assertIn("Scenario Coverage", html)
         self.assertIn("Flow mappings", html)
-        # The legacy bare-table shell, catalog sheets, and generic dashboard chrome are gone.
-        self.assertNotIn("data-flow-table", html)
-        self.assertNotIn("l1_scene_code", html)
+        # The new authentication funnel panels render.
+        self.assertIn("<h2>Auth Outcome by Scene &amp; Type</h2>", html)
+        self.assertIn("<h2>Challenge Friction by Auth Type</h2>", html)
+        self.assertIn("<h2>Reject Rate by Auth Type (%)</h2>", html)  # bar chart
+        self.assertIn("<h2>Auth Drop-off by Scene</h2>", html)
+        self.assertIn("CHALLENGE_2", html)
+        # The scenario flow table keeps the 50ch step-column rendering.
+        self.assertIn('<th class="step"><span class="th-label">default_step</span>', html)
+        self.assertIn('<td class="step">step_a</td>', html)
+        self.assertIn("th.step,td.step{width:50ch;min-width:50ch;max-width:50ch;white-space:normal;", html)
+        self.assertIn("Password Login", html)
+        # Interactive shell + CSV export are shared across every panel.
+        self.assertIn("enhanceTable", html)
+        self.assertIn('class="col-filter"', html)
+        # No generic credit-risk dashboard chrome.
         self.assertNotIn("data-product-filter", html)
         self.assertNotIn("Data Quality Notes", html)
 
@@ -604,10 +641,12 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
                 AF_RULES_FEATURES_REPORT_ID,
                 AF_RULE_EFFECTIVENESS_REPORT_ID,
                 AF_FRAUD_LOSS_REPORT_ID,
-                AF_DETECTION_EFFECTIVENESS_REPORT_ID,
-                AF_RULE_CHANGE_LOG_REPORT_ID,
+                AF_FACIAL_VERIFICATION_REPORT_ID,
             },
         )
+        # Detection-effectiveness and rule-change-log are folded into the reports above, not standalone.
+        self.assertNotIn(AF_DETECTION_EFFECTIVENESS_REPORT_ID, returned_ids)
+        self.assertNotIn(AF_RULE_CHANGE_LOG_REPORT_ID, returned_ids)
         self.assertEqual(page_response.status_code, 200)
         self.assertIn(
             "Anti-fraud PH - L1+L2 Scenarios, Actions &amp; Auth Steps",
@@ -628,10 +667,14 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
             sql = store.sql_for_report(AF_RULES_FEATURES_REPORT_ID, now=FIXED_NOW)
         self.assertTrue(sql.strip())
 
-    def test_rules_features_sql_has_two_sections_on_granted_tables(self):
+    def test_rules_features_sql_has_catalog_and_governance_sections(self):
         sql = build_af_rules_features_sql(snapshot_pt_date="2026-06-08", now=FIXED_NOW)
         sections = extract_sql_sections(sql)
-        self.assertEqual([s.sheet_name for s in sections], ["Rules", "Features"])
+        # Catalogs (1-2) plus the folded-in rule change-log governance sections (3-5).
+        self.assertEqual(
+            [s.sheet_name for s in sections],
+            ["Rules", "Features", "Change Summary", "Rule Change Detail", "Current Rule Inventory"],
+        )
         self.assertIn(AF_RULE_CONFIG_TABLE, sql)
         self.assertIn(AF_FEATURE_CONFIG_TABLE, sql)
         self.assertEqual(AF_RULE_CONFIG_TABLE, "ods.mbs_anti_fraud_rule_config_tab_ss")
@@ -639,6 +682,10 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
         self.assertIn("pt_date = '2026-06-08'", sql)
         for column in ("rule_id", "rule_name", "feature_id", "feature_name"):
             self.assertIn(column, sql)
+        # Governance diff present (added/deactivated/logic-changed classification).
+        self.assertIn("full outer join", sql)
+        self.assertIn("'Added'", sql)
+        self.assertIn("Logic changed", sql)
 
     def test_generator_report_builders_include_rules_features(self):
         self.assertIn(AF_RULES_FEATURES_REPORT_ID, REPORT_BUILDERS)
@@ -721,6 +768,12 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
                 "Daily Rule Trigger Trend",
                 "Scene/Sub-scene/Action Usage",
                 "Rule Scorecard",
+                # Folded-in detection effectiveness sections (13-17).
+                "Detection Coverage Summary",
+                "Detection by Fraud MO Type",
+                "Top Detecting Rules",
+                "Missed Fraud (Blind Spots)",
+                "Daily Detection Trend",
             ],
         )
         self.assertIn(AF_REQUEST_STATISTIC_TABLE, sql)
@@ -996,15 +1049,16 @@ class FraudLossBusinessInsightsTests(unittest.TestCase):
 
 
 class DetectionEffectivenessBusinessInsightsTests(unittest.TestCase):
-    def test_seeded_and_generator_registration(self):
+    def test_folded_into_rule_effectiveness_not_standalone(self):
         with tempfile.TemporaryDirectory() as tmp:
             ids = {r["id"] for r in BusinessInsightsStore(Path(tmp)).reports("anti-fraud")}
-        self.assertIn(AF_DETECTION_EFFECTIVENESS_REPORT_ID, ids)
-        self.assertIn(AF_DETECTION_EFFECTIVENESS_REPORT_ID, REPORT_BUILDERS)
-        self.assertEqual(
-            REPORT_BUILDERS[AF_DETECTION_EFFECTIVENESS_REPORT_ID][0],
-            "Anti-fraud PH - Detection Effectiveness & Loss Prevented",
-        )
+        # Detection effectiveness is no longer a standalone report; it is folded into Rule Effectiveness.
+        self.assertNotIn(AF_DETECTION_EFFECTIVENESS_REPORT_ID, ids)
+        self.assertNotIn(AF_DETECTION_EFFECTIVENESS_REPORT_ID, REPORT_BUILDERS)
+        names = [s.sheet_name for s in extract_sql_sections(build_af_rule_effectiveness_sql(now=FIXED_NOW))]
+        for sheet in ("Detection Coverage Summary", "Detection by Fraud MO Type", "Top Detecting Rules",
+                      "Missed Fraud (Blind Spots)", "Daily Detection Trend"):
+            self.assertIn(sheet, names)
 
     def test_sql_sections_and_scope(self):
         sql = build_af_detection_effectiveness_sql(snapshot_pt_date="2026-06-08", now=FIXED_NOW)
@@ -1030,7 +1084,7 @@ class DetectionEffectivenessBusinessInsightsTests(unittest.TestCase):
         self.assertIn("case_open_datetime < '2026-05-27'", sql)
         self.assertIn("'May 2026 MTD'", sql)
 
-    def test_visualization_renders_kpis_blind_spots_and_period_selector(self):
+    def test_detection_panels_render_within_rule_effectiveness(self):
         sheets = [
             ("Detection Coverage Summary",
              ["period", "fraud_cases", "rule_detected_cases", "detection_rate_pct", "fraud_loss_php",
@@ -1055,19 +1109,17 @@ class DetectionEffectivenessBusinessInsightsTests(unittest.TestCase):
             output_path = Path(temp_dir) / "viz.html"
             write_visualization(
                 output_path,
-                report_title="Anti-fraud PH - Detection Effectiveness & Loss Prevented",
+                report_title="Anti-fraud PH - Rule Effectiveness / Hit-Rate",
                 snapshot_pt_date="2026-06-08",
                 sheets=sheets,
-                report_id=AF_DETECTION_EFFECTIVENESS_REPORT_ID,
+                report_id=AF_RULE_EFFECTIVENESS_REPORT_ID,
             )
             html = output_path.read_text(encoding="utf-8")
-        # Period-switchable KPI panel with embedded per-period data drives the month selector.
+        # Detection coverage KPIs (period-switchable) + highlights fold into the Rule Effectiveness page.
         self.assertIn("Detection Coverage", html)
+        self.assertIn("Detection Highlights", html)
         self.assertIn("data-period-kpi", html)
-        self.assertIn('<script type="application/json" data-period-json>', html)
         self.assertIn("May 2026 MTD", html)
-        # Auto-insight highlights + leaked-loss bar + blind-spot table + trend.
-        self.assertIn("<h2>Highlights</h2>", html)
         self.assertIn("<h2>Leaked Loss by Fraud Type (PHP)</h2>", html)
         self.assertIn("<h2>Missed Fraud (Blind Spots)</h2>", html)
         self.assertIn("SIM swap", html)
@@ -1075,15 +1127,15 @@ class DetectionEffectivenessBusinessInsightsTests(unittest.TestCase):
 
 
 class RuleChangeLogBusinessInsightsTests(unittest.TestCase):
-    def test_seeded_and_generator_registration(self):
+    def test_folded_into_rules_features_not_standalone(self):
         with tempfile.TemporaryDirectory() as tmp:
             ids = {r["id"] for r in BusinessInsightsStore(Path(tmp)).reports("anti-fraud")}
-        self.assertIn(AF_RULE_CHANGE_LOG_REPORT_ID, ids)
-        self.assertIn(AF_RULE_CHANGE_LOG_REPORT_ID, REPORT_BUILDERS)
-        self.assertEqual(
-            REPORT_BUILDERS[AF_RULE_CHANGE_LOG_REPORT_ID][0],
-            "Anti-fraud PH - Rule Change Log & Governance",
-        )
+        # Rule change log is no longer a standalone report; it is folded into Rules & Features.
+        self.assertNotIn(AF_RULE_CHANGE_LOG_REPORT_ID, ids)
+        self.assertNotIn(AF_RULE_CHANGE_LOG_REPORT_ID, REPORT_BUILDERS)
+        names = [s.sheet_name for s in extract_sql_sections(build_af_rules_features_sql(now=FIXED_NOW))]
+        for sheet in ("Change Summary", "Rule Change Detail", "Current Rule Inventory"):
+            self.assertIn(sheet, names)
 
     def test_sql_sections_and_baseline(self):
         sql = build_af_rule_change_log_sql(snapshot_pt_date="2026-06-08", now=FIXED_NOW)
@@ -1102,8 +1154,11 @@ class RuleChangeLogBusinessInsightsTests(unittest.TestCase):
         self.assertIn("'Deactivated'", sql)
         self.assertIn("Logic changed", sql)
 
-    def test_visualization_renders_change_kpis_and_no_period_selector(self):
+    def test_change_log_panels_render_within_rules_features(self):
         sheets = [
+            ("Rules", ["rule_id", "rule_name", "outcome_type", "rule_status", "risk_level"],
+             [["R1", "Velocity", "Reject", "Active", "high"]]),
+            ("Features", ["feature_id", "feature_name", "feature_status"], [["F1", "cnt 1h", "Active"]]),
             ("Change Summary", ["change_type", "rules"],
              [["Added", "5"], ["Deactivated", "3"], ["Logic changed", "4"], ["Unchanged", "900"]]),
             ("Rule Change Detail",
@@ -1117,27 +1172,104 @@ class RuleChangeLogBusinessInsightsTests(unittest.TestCase):
             output_path = Path(temp_dir) / "viz.html"
             write_visualization(
                 output_path,
-                report_title="Anti-fraud PH - Rule Change Log & Governance",
+                report_title="Anti-fraud PH - Rules & Features",
                 snapshot_pt_date="2026-06-08",
                 sheets=sheets,
-                report_id=AF_RULE_CHANGE_LOG_REPORT_ID,
+                report_id=AF_RULES_FEATURES_REPORT_ID,
             )
             html = output_path.read_text(encoding="utf-8")
-        self.assertIn("Change Summary", html)
-        self.assertIn("<h2>Highlights</h2>", html)
+        # Change-log governance folds into the Rules & Features page.
+        self.assertIn("Rule Change Summary", html)
+        self.assertIn("Rule Change Highlights", html)
         self.assertIn("<h2>Current Rules by Outcome Type</h2>", html)
         self.assertIn("<h2>Rule Change Detail</h2>", html)
         self.assertIn("New scam rule", html)
-        # No period summary -> the plain (non-switchable) KPI panel, no embedded period data.
-        self.assertNotIn("data-period-kpi", _strip_dashboard_js(html))
 
 
-def _strip_dashboard_js(html: str) -> str:
-    """Drop the trailing inline <script> blocks so attribute assertions test rendered markup, not the
-    shared dashboard JS (which references selectors like data-period-kpi by name)."""
-    marker = "<script>"
-    index = html.find(marker)
-    return html[:index] if index != -1 else html
+class FacialVerificationBusinessInsightsTests(unittest.TestCase):
+    def test_seeded_and_generator_registration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ids = {r["id"] for r in BusinessInsightsStore(Path(tmp)).reports("anti-fraud")}
+        self.assertIn(AF_FACIAL_VERIFICATION_REPORT_ID, ids)
+        self.assertIn(AF_FACIAL_VERIFICATION_REPORT_ID, REPORT_BUILDERS)
+        self.assertEqual(
+            REPORT_BUILDERS[AF_FACIAL_VERIFICATION_REPORT_ID][0],
+            "Anti-fraud PH - Facial Verification / Liveness & Deepfake",
+        )
+
+    def test_sql_sections_and_scope(self):
+        sql = build_af_facial_verification_sql(snapshot_pt_date="2026-06-08", now=FIXED_NOW)
+        sections = extract_sql_sections(sql)
+        self.assertEqual(
+            [s.sheet_name for s in sections],
+            [
+                "Verification Outcome Summary",
+                "Liveness Result Breakdown",
+                "Anti-Spoofing QC Breakdown",
+                "Facial Match Result Breakdown",
+                "Deepfake Score Distribution",
+                "Pass Rates by Scene",
+                "Fraud Review Outcomes",
+                "Daily Verification Trend",
+            ],
+        )
+        self.assertIn(AF_FACIAL_VERIFICATION_TABLE, sql)
+        # 3-step funnel result columns + spoof / deepfake signals.
+        self.assertIn("liveness_check_result = 'LC_SUCCESS'", sql)
+        self.assertIn("selfie_qc_anti_spoofing_result = 'SQA_SUCCESS'", sql)
+        self.assertIn("facial_matching_result = 'FM_SUCCESS'", sql)
+        self.assertIn("SQA_REJECT_FACE_DEEPFAKE", sql)
+        self.assertIn("deepfake_spoof_score", sql)
+        # Scoped by create_datetime over the window (Mar 1 -> May 27 under the fixed clock).
+        self.assertIn("create_datetime >= '2026-03-01'", sql)
+        self.assertIn("create_datetime < '2026-05-27'", sql)
+        self.assertIn("'May 2026 MTD'", sql)
+
+    def test_visualization_renders_kpis_deepfake_bar_and_period_selector(self):
+        sheets = [
+            ("Verification Outcome Summary",
+             ["period", "checks", "distinct_users", "liveness_pass_rate_pct", "antispoof_pass_rate_pct",
+              "match_pass_rate_pct", "overall_pass_rate_pct", "spoof_attack_checks", "deepfake_reject_checks"],
+             [["Mar 2026", "1577166", "890554", "96.62", "96.81", "98.22", "91.87", "25823", "8509"],
+              ["Apr 2026", "1600729", "935814", "96.83", "97.46", "98.19", "92.67", "20854", "8633"],
+              ["May 2026 MTD", "1656245", "981678", "96.75", "97.55", "98.13", "92.61", "18898", "8710"]]),
+            ("Liveness Result Breakdown", ["liveness_check_result", "checks", "distinct_users", "share_pct"],
+             [["LC_SUCCESS", "21846498", "1", "88.0"], ["LC_AURORA_SPOOF", "182935", "1", "0.7"]]),
+            ("Anti-Spoofing QC Breakdown", ["selfie_qc_anti_spoofing_result", "checks", "distinct_users", "share_pct"],
+             [["SQA_SUCCESS", "21000000", "1", "95"], ["SQA_REJECT_FACE_DEEPFAKE", "54409", "1", "0.2"]]),
+            ("Facial Match Result Breakdown", ["facial_matching_result", "checks", "distinct_users", "avg_match_score", "share_pct"],
+             [["FM_SUCCESS", "20000000", "1", "0.82", "98"]]),
+            ("Deepfake Score Distribution", ["deepfake_score_band", "checks", "spoof_rejects", "avg_score"],
+             [["1. 0.0-0.2", "100", "0", "0.1"], ["5. 0.8-1.0", "5000", "4800", "0.95"]]),
+            ("Pass Rates by Scene",
+             ["scene_name", "checks", "distinct_users", "liveness_pass_rate_pct", "antispoof_pass_rate_pct", "overall_pass_rate_pct", "spoof_attack_checks"],
+             [["UnlockCard", "20000", "1", "70", "95", "62", "500"]]),
+            ("Fraud Review Outcomes", ["fraud_review_status", "fraud_review_result", "checks", "distinct_users"],
+             [["REVIEWED", "3", "26482", "1"]]),
+            ("Daily Verification Trend", ["series", "check_date", "checks"],
+             [["Checks", "2026-05-01", "50000"], ["Spoof attacks", "2026-05-01", "800"]]),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "viz.html"
+            write_visualization(
+                output_path,
+                report_title="Anti-fraud PH - Facial Verification / Liveness & Deepfake",
+                snapshot_pt_date="2026-06-08",
+                sheets=sheets,
+                report_id=AF_FACIAL_VERIFICATION_REPORT_ID,
+            )
+            html = output_path.read_text(encoding="utf-8")
+        # Period-switchable verification KPIs drive the month selector.
+        self.assertIn("Verification Outcomes", html)
+        self.assertIn("data-period-kpi", html)
+        self.assertIn('<script type="application/json" data-period-json>', html)
+        self.assertIn("May 2026 MTD", html)
+        # Highlights + deepfake distribution bar + scene/QC/match tables + trend.
+        self.assertIn("<h2>Highlights</h2>", html)
+        self.assertIn("<h2>Deepfake Score Distribution</h2>", html)
+        self.assertIn("<h2>Anti-Spoofing QC Breakdown</h2>", html)
+        self.assertIn("SQA_REJECT_FACE_DEEPFAKE", html)
+        self.assertIn('id="ec-daily-verification-trend" class="echart"', html)
 
 
 class BusinessInsightsGenerationJobTests(unittest.TestCase):

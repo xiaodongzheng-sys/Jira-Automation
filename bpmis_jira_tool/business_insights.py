@@ -99,6 +99,7 @@ AF_RULE_EFFECTIVENESS_REPORT_ID = "anti-fraud-ph-rule-effectiveness"
 AF_FRAUD_LOSS_REPORT_ID = "anti-fraud-ph-fraud-loss-cases"
 AF_DETECTION_EFFECTIVENESS_REPORT_ID = "anti-fraud-ph-detection-effectiveness"
 AF_RULE_CHANGE_LOG_REPORT_ID = "anti-fraud-ph-rule-change-log"
+AF_FACIAL_VERIFICATION_REPORT_ID = "anti-fraud-ph-facial-verification"
 
 AF_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_scene_tab_ss"
 AF_SUB_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_sub_scene_tab_ss"
@@ -115,6 +116,8 @@ AF_RULE_HIT_LOG_TABLE = "fmart_antifraud.dwd_antifraud_rule_hit_log_di"
 AF_ACTION_LOG_TABLE = "fmart_antifraud.dwd_antifraud_action_log_di"
 AF_REVIEW_CASE_TABLE = "fmart_antifraud.dwd_antifraud_review_case_df"
 AF_REVIEW_RECORD_TABLE = "fmart_antifraud.dwd_antifraud_review_record_df"
+# Facial verification / liveness / deepfake authentication checks (cumulative daily _df snapshot).
+AF_FACIAL_VERIFICATION_TABLE = "fmart_antifraud.dwd_authentication_facial_verification_df"
 
 SEEDED_REPORTS: tuple[dict[str, str], ...] = (
     {
@@ -174,17 +177,10 @@ SEEDED_REPORTS: tuple[dict[str, str], ...] = (
         "status": "generator_ready",
     },
     {
-        "id": AF_DETECTION_EFFECTIVENESS_REPORT_ID,
+        "id": AF_FACIAL_VERIFICATION_REPORT_ID,
         "domain": "anti-fraud",
-        "name": "Anti-fraud PH - Detection Effectiveness & Loss Prevented",
-        "type": "af_detection_effectiveness",
-        "status": "generator_ready",
-    },
-    {
-        "id": AF_RULE_CHANGE_LOG_REPORT_ID,
-        "domain": "anti-fraud",
-        "name": "Anti-fraud PH - Rule Change Log & Governance",
-        "type": "af_rule_change_log",
+        "name": "Anti-fraud PH - Facial Verification / Liveness & Deepfake",
+        "type": "af_facial_verification",
         "status": "generator_ready",
     },
 )
@@ -203,8 +199,7 @@ GENERATOR_REPORT_IDS: frozenset[str] = frozenset(
         AF_RULES_FEATURES_REPORT_ID,
         AF_RULE_EFFECTIVENESS_REPORT_ID,
         AF_FRAUD_LOSS_REPORT_ID,
-        AF_DETECTION_EFFECTIVENESS_REPORT_ID,
-        AF_RULE_CHANGE_LOG_REPORT_ID,
+        AF_FACIAL_VERIFICATION_REPORT_ID,
     }
 )
 
@@ -703,9 +698,26 @@ def build_af_scenarios_actions_sql(*, snapshot_pt_date: str | None = None, now: 
     sub_scene_snap = _aliased_snapshot_filter("ss", AF_SUB_SCENE_TABLE, snapshot_pt_date)
     action_snap = _aliased_snapshot_filter("a", AF_ACTION_TABLE, snapshot_pt_date)
     flow_snap = _aliased_snapshot_filter("f", AF_SCENARIO_FLOW_CONFIG_TABLE, snapshot_pt_date)
+    # Authentication funnel sections use the DWD action log (daily-incremental), scoped by pt_date over
+    # the report window. risk_result: '1' = pass, '0' = reject, '' = not risk-evaluated.
+    win = business_insights_window(now)
+    span_label = win.span_label
+    al_start = win.span_start.isoformat()
+    al_end_incl = (win.span_end_exclusive - timedelta(days=1)).isoformat()
+    p2_iso, p3_iso = win.periods[1][1].isoformat(), win.periods[2][1].isoformat()
+    p1_label, p2_label, p3_label = (p[0] for p in win.periods)
+    al_window = f"al.pt_date between '{al_start}' and '{al_end_incl}'"
+    al_period = (
+        f"case when al.pt_date < '{p2_iso}' then '{p1_label}' "
+        f"when al.pt_date < '{p3_iso}' then '{p2_label}' else '{p3_label}' end"
+    )
+    al_pass = "al.risk_result = '1'"
+    al_reject = "al.risk_result = '0'"
+    al_evaluated = "al.risk_result in ('0', '1')"
     header = _af_report_header("Anti-fraud PH - L1+L2 Scenarios, Actions & Auth Steps", snapshot_pt_date)
     return f"""{header}
--- Scenario flow config provides the live scene/sub-scene/action/auth-step mapping.
+-- Scenario flow config provides the live scene/sub-scene/action/auth-step mapping. Sections 5-8 add the
+-- live authentication funnel / customer-friction view from the DWD action log over {span_label}.
 
 -- 1. L1 Scenarios
 select
@@ -763,14 +775,96 @@ left join {AF_SUB_SCENE_TABLE} ss on ss.name = f.sub_scene and {sub_scene_snap}
 left join {AF_ACTION_TABLE} a on a.name = f.action and {action_snap}
 where {flow_snap}
 order by f.scene, f.sub_scene, f.action;
+
+-- 5. Authentication Outcome Summary
+-- One row per period (last two full months + current MTD) from the action log. pass/reject use the risk
+-- decision (risk_result); not_evaluated = actions with no risk decision. flows = distinct bizflow_instance.
+select
+  {al_period} as period,
+  count(1) as actions,
+  count(distinct al.uid) as distinct_users,
+  count(distinct al.bizflow_instance_id) as flows,
+  sum(case when {al_pass} then 1 else 0 end) as pass_actions,
+  sum(case when {al_reject} then 1 else 0 end) as reject_actions,
+  sum(case when al.risk_result is null or al.risk_result not in ('0', '1') then 1 else 0 end) as not_evaluated_actions,
+  round(sum(case when {al_reject} then 1 else 0 end)
+        / nullif(sum(case when {al_evaluated} then 1 else 0 end), 0) * 100, 3) as reject_rate_pct
+from {AF_ACTION_LOG_TABLE} al
+where {al_window}
+group by {al_period}
+order by min(al.pt_date);
+
+-- 6. Auth Outcome by Scene & Type
+-- Outcome funnel by scene and authentication type (DEFAULT = no step-up; CHALLENGE_1/2/3 = step-up
+-- tiers). Limited to risk-evaluated actions so the reject rate is clean.
+select
+  coalesce(nullif(trim(al.scene_name), ''), 'Unspecified') as scene_name,
+  coalesce(nullif(trim(al.authentication_type), ''), 'Unspecified') as authentication_type,
+  count(1) as actions,
+  count(distinct al.uid) as distinct_users,
+  sum(case when {al_pass} then 1 else 0 end) as pass_actions,
+  sum(case when {al_reject} then 1 else 0 end) as reject_actions,
+  round(sum(case when {al_reject} then 1 else 0 end) / nullif(count(1), 0) * 100, 3) as reject_rate_pct
+from {AF_ACTION_LOG_TABLE} al
+where {al_window} and {al_evaluated}
+group by coalesce(nullif(trim(al.scene_name), ''), 'Unspecified'),
+  coalesce(nullif(trim(al.authentication_type), ''), 'Unspecified')
+order by actions desc;
+
+-- 7. Challenge Friction by Auth Type
+-- How much friction each authentication tier adds: volume share, reject rate, and the users/flows it
+-- touched. Step-up (CHALLENGE_*) tiers are the added customer friction.
+select
+  coalesce(nullif(trim(al.authentication_type), ''), 'Unspecified') as authentication_type,
+  count(1) as actions,
+  count(distinct al.uid) as distinct_users,
+  count(distinct al.bizflow_instance_id) as flows,
+  round(count(1) / nullif(sum(count(1)) over (), 0) * 100, 2) as action_share_pct,
+  sum(case when {al_pass} then 1 else 0 end) as pass_actions,
+  sum(case when {al_reject} then 1 else 0 end) as reject_actions,
+  round(sum(case when {al_reject} then 1 else 0 end) / nullif(count(1), 0) * 100, 3) as reject_rate_pct
+from {AF_ACTION_LOG_TABLE} al
+where {al_window} and {al_evaluated}
+group by coalesce(nullif(trim(al.authentication_type), ''), 'Unspecified')
+order by actions desc;
+
+-- 8. Auth Drop-off by Scene
+-- Flows started vs flows that reached a final action that day (is_final_action_in_flow_of_the_day).
+-- drop_off_rate_pct approximates abandonment mid-flow (started but no final action recorded).
+select
+  coalesce(nullif(trim(al.scene_name), ''), 'Unspecified') as scene_name,
+  count(distinct al.bizflow_instance_id) as flows_started,
+  count(distinct case when al.is_final_action_in_flow_of_the_day = 'Y' then al.bizflow_instance_id end) as flows_reached_final,
+  round((count(distinct al.bizflow_instance_id)
+         - count(distinct case when al.is_final_action_in_flow_of_the_day = 'Y' then al.bizflow_instance_id end))
+        / nullif(count(distinct al.bizflow_instance_id), 0) * 100, 2) as drop_off_rate_pct
+from {AF_ACTION_LOG_TABLE} al
+where {al_window}
+group by coalesce(nullif(trim(al.scene_name), ''), 'Unspecified')
+order by flows_started desc;
 """
+
+
+def _merge_report_sections(sql: str, *, start_number: int) -> str:
+    """Strip a builder's header/preamble (everything before its first ``-- 1.`` marker) and renumber its
+    ``-- N. Title`` section markers to continue from ``start_number``, so the sections can be appended
+    into another report's combined SQL. Section titles (which become Excel sheet names) are preserved."""
+    match = re.search(r"^--\s+1\.\s", sql, flags=re.M)
+    body = sql[match.start():] if match else sql
+    counter = [start_number - 1]
+
+    def _bump(m: "re.Match[str]") -> str:
+        counter[0] += 1
+        return f"-- {counter[0]}. {m.group(1)}"
+
+    return re.sub(r"^--\s+\d+\.\s+(.+?)\s*$", _bump, body, flags=re.M)
 
 
 def build_af_rules_features_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
     rule_snap = _aliased_snapshot_filter("rc", AF_RULE_CONFIG_TABLE, snapshot_pt_date)
     feature_snap = _aliased_snapshot_filter("fc", AF_FEATURE_CONFIG_TABLE, snapshot_pt_date)
     header = _af_report_header("Anti-fraud PH - Rules & Features", snapshot_pt_date)
-    return f"""{header}
+    base = f"""{header}
 -- Full rule and feature catalogs. outcome_type: 1=Punish, 2=Challenge, 3=Reject.
 -- rule status > 0 = Active; feature status 1=Active / -1=Inactive.
 
@@ -817,6 +911,12 @@ from {AF_FEATURE_CONFIG_TABLE} fc
 where {feature_snap}
 order by case when fc.status = 1 then 0 else 1 end, fc.feature_id;
 """
+    # Governance: fold in the rule change-log sections (Change Summary / Detail / Current Inventory)
+    # from the same rule_config snapshots, renumbered to follow Rules (1) and Features (2).
+    governance = _merge_report_sections(
+        build_af_rule_change_log_sql(snapshot_pt_date=snapshot_pt_date, now=now), start_number=3
+    )
+    return base + "\n" + governance
 
 
 def build_af_rule_effectiveness_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
@@ -841,7 +941,7 @@ def build_af_rule_effectiveness_sql(*, snapshot_pt_date: str | None = None, now:
     punish_snap = _aliased_snapshot_filter("p", AF_PUNISH_LIST_TABLE, snapshot_pt_date)
     stat_snap = _aliased_snapshot_filter("rs", AF_RULE_TRIGGER_STATISTIC_TABLE, snapshot_pt_date)
     header = _af_report_header("Anti-fraud PH - Rule Effectiveness / Hit-Rate", snapshot_pt_date)
-    return f"""{header}
+    base = f"""{header}
 -- Scope: {span_label} ({span_start.isoformat()} to {span_end_exclusive.isoformat()} exclusive).
 -- Detail and trend sections aggregate over the whole span; the summary breaks it out per period.
 -- rule_trigger_log_tab and identify_record_tab are empty in ODS; this uses request_statistic,
@@ -1247,6 +1347,13 @@ left join triggers t on t.rule_id = p.rule_id
 left join benchmark b on b.rule_id = p.rule_id
 order by p.fraud_cases desc, trigger_rate_pct desc;
 """
+    # Detection effectiveness: fold the rule-hits -> confirmed-fraud-loss sections in as 13-17. Pass
+    # snapshot_pt_date=None so the review_case/review_record sections self-resolve their own latest
+    # partition (this report's snapshot anchor is request_statistic, a different table).
+    detection = _merge_report_sections(
+        build_af_detection_effectiveness_sql(snapshot_pt_date=None, now=now), start_number=13
+    )
+    return base + "\n" + detection
 
 
 def build_af_fraud_loss_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
@@ -1638,6 +1745,164 @@ order by outcome_type, rule_status, risk_level;
 """
 
 
+def build_af_facial_verification_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    # Facial verification is a 3-step funnel per check: liveness (liveness_check_result LC_*) -> selfie
+    # anti-spoofing QC (selfie_qc_anti_spoofing_result SQA_*) -> facial matching (facial_matching_result
+    # FM_*). Each step only runs if the prior one passed, so the QC/match columns are blank when liveness
+    # failed. Scope: checks created in the last two full months + current MTD (create_datetime). The _df
+    # table is a cumulative daily snapshot, so the latest pt_date is pinned and rows are date-scoped.
+    win = business_insights_window(now)
+    span_label = win.span_label
+    span_start_iso = win.span_start.isoformat()
+    span_end_iso = win.span_end_exclusive.isoformat()
+    p2_iso, p3_iso = win.periods[1][1].isoformat(), win.periods[2][1].isoformat()
+    p1_label, p2_label, p3_label = (p[0] for p in win.periods)
+    fv_snap = _aliased_snapshot_filter("fv", AF_FACIAL_VERIFICATION_TABLE, snapshot_pt_date)
+    window = f"fv.create_datetime >= '{span_start_iso}' and fv.create_datetime < '{span_end_iso}'"
+    period_case = (
+        f"case when fv.create_datetime < '{p2_iso}' then '{p1_label}' "
+        f"when fv.create_datetime < '{p3_iso}' then '{p2_label}' else '{p3_label}' end"
+    )
+    # Step outcomes.
+    liveness_pass = "fv.liveness_check_result = 'LC_SUCCESS'"
+    antispoof_pass = "fv.selfie_qc_anti_spoofing_result = 'SQA_SUCCESS'"
+    match_pass = "fv.facial_matching_result = 'FM_SUCCESS'"
+    spoof_attack = (
+        "(fv.liveness_check_result = 'LC_AURORA_SPOOF' "
+        "or fv.selfie_qc_anti_spoofing_result in ('SQA_REJECT_FACE_SPOOFING', 'SQA_REJECT_FACE_DEEPFAKE'))"
+    )
+    deepfake_reject = "fv.selfie_qc_anti_spoofing_result = 'SQA_REJECT_FACE_DEEPFAKE'"
+    header = _af_report_header("Anti-fraud PH - Facial Verification / Liveness & Deepfake", snapshot_pt_date)
+    return f"""{header}
+-- Source: DWD authentication_facial_verification. Scope: checks created in {span_label}. 3-step funnel:
+-- liveness (LC_SUCCESS) -> anti-spoofing QC (SQA_SUCCESS) -> facial match (FM_SUCCESS); QC/match are
+-- blank when the prior step failed, so pass rates use the prior-step-passed count as the denominator.
+-- Spoofing attack = LC_AURORA_SPOOF or an SQA face-spoofing / deepfake reject. deepfake_spoof_score in
+-- [-1, 1] (<0 = not scored). All rates are %.
+
+-- 1. Verification Outcome Summary
+-- One row per period (last two full months + current MTD). Pass rates are conditional on reaching the
+-- step: anti-spoof over liveness-passed, match over anti-spoof-passed; overall = full pass / all checks.
+select
+  {period_case} as period,
+  count(1) as checks,
+  count(distinct fv.uid) as distinct_users,
+  round(sum(case when {liveness_pass} then 1 else 0 end) / nullif(count(1), 0) * 100, 2) as liveness_pass_rate_pct,
+  round(sum(case when {antispoof_pass} then 1 else 0 end) / nullif(sum(case when {liveness_pass} then 1 else 0 end), 0) * 100, 2) as antispoof_pass_rate_pct,
+  round(sum(case when {match_pass} then 1 else 0 end) / nullif(sum(case when {antispoof_pass} then 1 else 0 end), 0) * 100, 2) as match_pass_rate_pct,
+  round(sum(case when {match_pass} then 1 else 0 end) / nullif(count(1), 0) * 100, 2) as overall_pass_rate_pct,
+  sum(case when {spoof_attack} then 1 else 0 end) as spoof_attack_checks,
+  sum(case when {deepfake_reject} then 1 else 0 end) as deepfake_reject_checks
+from {AF_FACIAL_VERIFICATION_TABLE} fv
+where {fv_snap} and {window}
+group by {period_case}
+order by min(fv.create_datetime);
+
+-- 2. Liveness Result Breakdown
+-- Why liveness checks pass or fail (customer friction + liveness spoof attempts).
+select
+  fv.liveness_check_result,
+  count(1) as checks,
+  count(distinct fv.uid) as distinct_users,
+  round(count(1) / nullif(sum(count(1)) over (), 0) * 100, 2) as share_pct
+from {AF_FACIAL_VERIFICATION_TABLE} fv
+where {fv_snap} and {window}
+group by fv.liveness_check_result
+order by checks desc;
+
+-- 3. Anti-Spoofing QC Breakdown
+-- Outcomes of the selfie anti-spoofing QC (only runs after liveness passed). Surfaces deepfake /
+-- face-spoofing rejects and QC friction (eye-close, blur, dark).
+select
+  fv.selfie_qc_anti_spoofing_result,
+  count(1) as checks,
+  count(distinct fv.uid) as distinct_users,
+  round(count(1) / nullif(sum(count(1)) over (), 0) * 100, 2) as share_pct
+from {AF_FACIAL_VERIFICATION_TABLE} fv
+where {fv_snap} and {window} and {liveness_pass}
+group by fv.selfie_qc_anti_spoofing_result
+order by checks desc;
+
+-- 4. Facial Match Result Breakdown
+-- Outcomes of the facial matching step (only runs after anti-spoofing passed), with the average score.
+select
+  fv.facial_matching_result,
+  count(1) as checks,
+  count(distinct fv.uid) as distinct_users,
+  cast(round(avg(fv.facial_matching_score), 4) as decimal(10, 4)) as avg_match_score,
+  round(count(1) / nullif(sum(count(1)) over (), 0) * 100, 2) as share_pct
+from {AF_FACIAL_VERIFICATION_TABLE} fv
+where {fv_snap} and {window} and {antispoof_pass}
+group by fv.facial_matching_result
+order by checks desc;
+
+-- 5. Deepfake Score Distribution
+-- deepfake_spoof_score banded; spoof_rejects = how many in each band the anti-spoofing QC rejected as
+-- deepfake / spoofing. High bands with low reject counts are the monitoring blind spots.
+select
+  case
+    when fv.deepfake_spoof_score < 0 then '0. not scored (<0)'
+    when fv.deepfake_spoof_score < 0.2 then '1. 0.0-0.2'
+    when fv.deepfake_spoof_score < 0.4 then '2. 0.2-0.4'
+    when fv.deepfake_spoof_score < 0.6 then '3. 0.4-0.6'
+    when fv.deepfake_spoof_score < 0.8 then '4. 0.6-0.8'
+    else '5. 0.8-1.0'
+  end as deepfake_score_band,
+  count(1) as checks,
+  sum(case when {spoof_attack} then 1 else 0 end) as spoof_rejects,
+  cast(round(avg(fv.deepfake_spoof_score), 4) as decimal(10, 4)) as avg_score
+from {AF_FACIAL_VERIFICATION_TABLE} fv
+where {fv_snap} and {window}
+group by 1
+order by deepfake_score_band;
+
+-- 6. Pass Rates by Scene
+-- Where friction and spoofing attacks concentrate. Conditional pass rates as in the summary.
+select
+  coalesce(nullif(trim(fv.scene_name), ''), 'Unspecified') as scene_name,
+  count(1) as checks,
+  count(distinct fv.uid) as distinct_users,
+  round(sum(case when {liveness_pass} then 1 else 0 end) / nullif(count(1), 0) * 100, 2) as liveness_pass_rate_pct,
+  round(sum(case when {antispoof_pass} then 1 else 0 end) / nullif(sum(case when {liveness_pass} then 1 else 0 end), 0) * 100, 2) as antispoof_pass_rate_pct,
+  round(sum(case when {match_pass} then 1 else 0 end) / nullif(count(1), 0) * 100, 2) as overall_pass_rate_pct,
+  sum(case when {spoof_attack} then 1 else 0 end) as spoof_attack_checks
+from {AF_FACIAL_VERIFICATION_TABLE} fv
+where {fv_snap} and {window}
+group by coalesce(nullif(trim(fv.scene_name), ''), 'Unspecified')
+order by checks desc;
+
+-- 7. Fraud Review Outcomes
+-- Post-hoc fraud review of facial-verification checks (fraud_review_result is a numeric verdict code;
+-- non-empty fraud_review_status = the check was pulled for review).
+select
+  coalesce(nullif(trim(fv.fraud_review_status), ''), 'Not reviewed') as fraud_review_status,
+  coalesce(nullif(trim(fv.fraud_review_result), ''), '-') as fraud_review_result,
+  count(1) as checks,
+  count(distinct fv.uid) as distinct_users
+from {AF_FACIAL_VERIFICATION_TABLE} fv
+where {fv_snap} and {window}
+group by coalesce(nullif(trim(fv.fraud_review_status), ''), 'Not reviewed'),
+  coalesce(nullif(trim(fv.fraud_review_result), ''), '-')
+order by checks desc;
+
+-- 8. Daily Verification Trend
+-- Daily check volume, spoof-attack volume, and liveness failures; powers the filterable trend chart.
+with base as (
+  select substr(fv.create_datetime, 1, 10) as check_date,
+    case when {spoof_attack} then 1 else 0 end as is_spoof,
+    case when {liveness_pass} then 0 else 1 end as is_liveness_fail
+  from {AF_FACIAL_VERIFICATION_TABLE} fv
+  where {fv_snap} and {window}
+)
+select 'Checks' as series, check_date, count(1) as checks from base group by check_date
+union all
+select 'Spoof attacks' as series, check_date, sum(is_spoof) as checks from base group by check_date
+union all
+select 'Liveness failures' as series, check_date, sum(is_liveness_fail) as checks from base group by check_date
+order by series, check_date;
+"""
+
+
 def _normalize_header(value: Any) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9]+", "_", str(value or "").strip().lower()).strip("_")
     return normalized
@@ -2015,8 +2280,7 @@ class BusinessInsightsStore:
             AF_RULES_FEATURES_REPORT_ID: lambda: build_af_rules_features_sql(now=now),
             AF_RULE_EFFECTIVENESS_REPORT_ID: lambda: build_af_rule_effectiveness_sql(now=now),
             AF_FRAUD_LOSS_REPORT_ID: lambda: build_af_fraud_loss_sql(now=now),
-            AF_DETECTION_EFFECTIVENESS_REPORT_ID: lambda: build_af_detection_effectiveness_sql(now=now),
-            AF_RULE_CHANGE_LOG_REPORT_ID: lambda: build_af_rule_change_log_sql(now=now),
+            AF_FACIAL_VERIFICATION_REPORT_ID: lambda: build_af_facial_verification_sql(now=now),
         }
         builder = builders.get(report_id)
         if builder is None:
