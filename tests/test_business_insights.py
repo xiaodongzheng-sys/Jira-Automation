@@ -694,6 +694,7 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
                 "Rule Precision / Catch Rate",
                 "Daily Rule Trigger Trend",
                 "Scene/Sub-scene/Action Usage",
+                "Rule Scorecard",
             ],
         )
         self.assertIn(AF_REQUEST_STATISTIC_TABLE, sql)
@@ -850,6 +851,24 @@ class RuleEffectivenessExtraSectionsTests(unittest.TestCase):
         # Not rendered as a flat table.
         self.assertNotIn('<th>trigger_trxn</th>', html)
 
+    def test_rule_scorecard_renders_scatter_and_table(self):
+        html = self._viz([
+            ("Rule Scorecard",
+             ["rule_id", "rule_name", "trigger_trxn", "benchmark_trxn", "trigger_rate_pct", "reviewed_cases", "fraud_cases", "precision_pct"],
+             [
+                 ["U0022v2", "New device transfer", "50000", "1000000", "5.0", "101", "10", "9.9"],
+                 ["D0123v2", "Recipient query limit", "144425", "19265700", "0.75", "1330", "3", "0.23"],
+             ]),
+        ])
+        # Quadrant scatter (precision x trigger-rate) plus a searchable detail table.
+        self.assertIn("<h2>Rule Scorecard</h2>", html)
+        self.assertIn("scatter-panel", html)
+        self.assertIn("data-scatter-svg", html)
+        self.assertIn("data-scatter-data", html)
+        self.assertIn("Rule Scorecard — Detail", html)
+        self.assertIn("precision_pct", html)
+        self.assertIn("New device transfer", html)
+
 
 class FraudLossBusinessInsightsTests(unittest.TestCase):
     def test_seeded_and_generator_registration(self):
@@ -870,9 +889,14 @@ class FraudLossBusinessInsightsTests(unittest.TestCase):
                 "Fraud MO Subtype Breakdown",
                 "Case Status & SLA",
                 "Daily Fraud Loss Trend",
+                "Review Pool / Backlog (current)",
             ],
         )
         self.assertIn(AF_REVIEW_CASE_TABLE, sql)
+        # Backlog = current pending review-pool records (not yet a case).
+        self.assertIn(AF_REVIEW_RECORD_TABLE, sql)
+        self.assertIn("review_status = 'PENDING'", sql)
+        self.assertIn("pending_records", sql)
         # Scoped to the previous full month (April 2026 under the fixed clock), confirmed-fraud definition.
         self.assertIn("case_open_datetime >= '2026-04-01'", sql)
         self.assertIn("case_open_datetime < '2026-05-01'", sql)
@@ -895,6 +919,8 @@ class FraudLossBusinessInsightsTests(unittest.TestCase):
              [["CLOSED", "7562", "16124651.25", "24.1"], ["OPEN", "280", "2044988.21", ""]]),
             ("Daily Fraud Loss Trend", ["fraud_mo_type", "case_open_date", "daily_loss_php", "daily_cases"],
              [["All", "2026-05-01", "500000", "260"], ["Scam", "2026-05-01", "480000", "30"]]),
+            ("Review Pool / Backlog (current)", ["source", "pending_records", "distinct_rules", "distinct_users", "oldest_pending", "avg_age_days"],
+             [["IHCS", "7698", "1", "5366", "2025-02-21 21:58:02", "186"]]),
         ]
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = Path(temp_dir) / "viz.html"
@@ -918,8 +944,165 @@ class FraudLossBusinessInsightsTests(unittest.TestCase):
         self.assertIn("<h2>Case Status &amp; SLA</h2>", html)
         self.assertIn("<h2>Daily Fraud Loss Trend</h2>", html)
         self.assertIn("data-trend-svg", html)
+        # Current review-pool backlog renders as a searchable table.
+        self.assertIn("<h2>Review Pool / Backlog (current)</h2>", html)
+        self.assertIn("IHCS", html)
         # The single-row summary is shown as KPIs, not a table panel.
         self.assertNotIn("<h2>Case &amp; Loss Summary</h2>", html)
+
+
+class BusinessInsightsGenerationJobTests(unittest.TestCase):
+    def _root(self, temp_dir):
+        return Path(temp_dir)
+
+    def test_status_is_idle_without_state(self):
+        from bpmis_jira_tool import business_insights_jobs as jobs
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            status = jobs.generation_job_status(root_dir=self._root(temp_dir), report_id=AF_RULE_EFFECTIVENESS_REPORT_ID)
+        self.assertEqual(status["status"], "idle")
+
+    def test_running_then_completed_via_exit_marker(self):
+        from bpmis_jira_tool import business_insights_jobs as jobs
+
+        report_id = AF_RULE_EFFECTIVENESS_REPORT_ID
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = self._root(temp_dir)
+            with patch("bpmis_jira_tool.business_insights_jobs.subprocess.Popen") as popen:
+                popen.return_value = type("Proc", (), {"pid": os.getpid()})()
+                started = jobs.start_generation_job(root_dir=root, report_id=report_id, script_path="/tmp/fake.py")
+            self.assertEqual(started["status"], "running")
+            self.assertTrue(popen.called)
+
+            log_path = root / jobs.JOBS_DIRNAME / f"{report_id}.log"
+            log_path.write_text(f"{report_id}: rows=42\n{jobs.EXIT_MARKER}0\n", encoding="utf-8")
+            status = jobs.generation_job_status(root_dir=root, report_id=report_id)
+        self.assertEqual(status["status"], "completed")
+        self.assertEqual(status["exit_code"], 0)
+
+    def test_nonzero_exit_marks_failed_with_session_hint(self):
+        from bpmis_jira_tool import business_insights_jobs as jobs
+
+        report_id = AF_RULES_FEATURES_REPORT_ID
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = self._root(temp_dir)
+            (root / jobs.JOBS_DIRNAME).mkdir(parents=True)
+            (root / jobs.JOBS_DIRNAME / f"{report_id}.json").write_text(
+                json.dumps({"report_id": report_id, "pid": os.getpid(), "status": "running"}), encoding="utf-8"
+            )
+            (root / jobs.JOBS_DIRNAME / f"{report_id}.log").write_text(
+                f"Data Admin session is not valid: HTTP 401\n{jobs.EXIT_MARKER}1\n", encoding="utf-8"
+            )
+            status = jobs.generation_job_status(root_dir=root, report_id=report_id)
+        self.assertEqual(status["status"], "failed")
+        self.assertIn("data-admin.ph.seabank.io", status["error"])
+
+    def test_dead_process_without_marker_is_failed(self):
+        from bpmis_jira_tool import business_insights_jobs as jobs
+
+        report_id = PORTFOLIO_REPAYMENT_REPORT_ID
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = self._root(temp_dir)
+            (root / jobs.JOBS_DIRNAME).mkdir(parents=True)
+            (root / jobs.JOBS_DIRNAME / f"{report_id}.json").write_text(
+                json.dumps({"report_id": report_id, "pid": 999_999_999, "status": "running"}), encoding="utf-8"
+            )
+            (root / jobs.JOBS_DIRNAME / f"{report_id}.log").write_text("partial work...\n", encoding="utf-8")
+            status = jobs.generation_job_status(root_dir=root, report_id=report_id)
+        self.assertEqual(status["status"], "failed")
+
+    def test_start_is_idempotent_while_running(self):
+        from bpmis_jira_tool import business_insights_jobs as jobs
+
+        report_id = LIMIT_UTILIZATION_REPORT_ID
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = self._root(temp_dir)
+            (root / jobs.JOBS_DIRNAME).mkdir(parents=True)
+            (root / jobs.JOBS_DIRNAME / f"{report_id}.json").write_text(
+                json.dumps({"report_id": report_id, "pid": os.getpid(), "status": "running"}), encoding="utf-8"
+            )
+            with patch("bpmis_jira_tool.business_insights_jobs.subprocess.Popen") as popen:
+                result = jobs.start_generation_job(root_dir=root, report_id=report_id, script_path="/tmp/fake.py")
+            self.assertFalse(popen.called)
+            self.assertTrue(result.get("already_running"))
+
+
+class BusinessInsightsGenerationRouteTests(unittest.TestCase):
+    def _client_env(self, temp_dir):
+        return {
+            "ENV_FILE": os.devnull,
+            "FLASK_SECRET_KEY": "test-secret",
+            "TEAM_PORTAL_DATA_DIR": temp_dir,
+            "TEAM_PORTAL_BASE_URL": "",
+            "TEAM_ALLOWED_EMAILS": "",
+            "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+            "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+        }
+
+    def _admin_session(self, client):
+        with client.session_transaction() as session:
+            session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
+            session["google_credentials"] = {"token": "x"}
+
+    def test_refresh_button_renders_for_generator_reports(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, self._client_env(temp_dir), clear=True):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                self._admin_session(client)
+                page = client.get("/business-insights?domain=anti-fraud")
+                reports = client.get("/api/business-insights/reports?domain=anti-fraud").get_json()
+        soup = BeautifulSoup(page.get_data(as_text=True), "html.parser")
+        self.assertTrue(soup.select("[data-business-insights-generate]"))
+        rule_eff = next(r for r in reports["reports"] if r["id"] == AF_RULE_EFFECTIVENESS_REPORT_ID)
+        self.assertTrue(rule_eff["can_generate"])
+        self.assertIn("/generate", rule_eff["generate_url"])
+        funnel = next((r for r in reports["reports"] if r["id"] == UNDERWRITING_FUNNEL_REPORT_ID), None)
+        if funnel is not None:
+            self.assertFalse(funnel["can_generate"])
+
+    def test_generate_rejects_non_generator_report(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, self._client_env(temp_dir), clear=True):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                self._admin_session(client)
+                response = client.post(f"/api/business-insights/reports/{UNDERWRITING_FUNNEL_REPORT_ID}/generate")
+        self.assertEqual(response.status_code, 404)
+
+    def test_generate_starts_job_and_status_reports_completion(self):
+        report_id = AF_RULE_EFFECTIVENESS_REPORT_ID
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, self._client_env(temp_dir), clear=True):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                self._admin_session(client)
+                with patch(
+                    "bpmis_jira_tool.web_business_insights_routes.start_generation_job",
+                    return_value={"report_id": report_id, "status": "running", "pid": 4321},
+                ) as start:
+                    generate = client.post(f"/api/business-insights/reports/{report_id}/generate")
+                with patch(
+                    "bpmis_jira_tool.web_business_insights_routes.generation_job_status",
+                    return_value={"report_id": report_id, "status": "completed", "exit_code": 0},
+                ):
+                    status = client.get(f"/api/business-insights/reports/{report_id}/generate/status")
+        self.assertTrue(start.called)
+        self.assertEqual(generate.status_code, 200)
+        self.assertEqual(generate.get_json()["job"]["status"], "running")
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(status.get_json()["job"]["status"], "completed")
+
+    def test_generate_denies_non_portal_user(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, self._client_env(temp_dir), clear=True):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "outsider@example.com", "name": "Outsider"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.post(f"/api/business-insights/reports/{AF_RULE_EFFECTIVENESS_REPORT_ID}/generate")
+        self.assertEqual(response.status_code, 403)
 
 
 if __name__ == "__main__":

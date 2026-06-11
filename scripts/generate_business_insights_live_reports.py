@@ -1265,6 +1265,54 @@ def _daily_trend_panel(
     )
 
 
+def _scatter_quadrant_panel(
+    title: str,
+    headers: list[str],
+    rows: list[list[Any]],
+    *,
+    x_column: str,
+    y_column: str,
+    label_column: str,
+    size_column: str,
+    x_label: str,
+    y_label: str,
+) -> str:
+    """Render a precision x trigger-rate quadrant scatter. Only points with both axes are plotted."""
+    idx = {str(col): offset for offset, col in enumerate(headers)}
+
+    def cell(row: list[Any], col: str) -> Any:
+        return row[idx[col]] if col in idx and idx[col] < len(row) else None
+
+    pts = []
+    for row in rows:
+        xv, yv = cell(row, x_column), cell(row, y_column)
+        if xv in (None, "") or yv in (None, ""):
+            continue
+        label = cell(row, label_column)
+        pts.append(
+            {
+                "label": "" if label is None else str(label),
+                "x": _number(xv),
+                "y": _number(yv),
+                "size": _number(cell(row, size_column)),
+            }
+        )
+    if not pts:
+        return f'<section class="panel"><h2>{html.escape(title)}</h2><p class="empty">No scorecard data was returned.</p></section>'
+    data_json = json.dumps(pts)
+    return (
+        f'<section class="panel scatter-panel"><h2>{html.escape(title)}</h2>'
+        f'<p class="note">Bubble size = trigger volume. Dashed lines = medians. '
+        f'Bottom-right (high {html.escape(x_label.lower())}, low {html.escape(y_label.lower())}) = noisy rules to tune.</p>'
+        '<svg data-scatter-svg viewBox="0 0 960 420" preserveAspectRatio="none" '
+        'style="width:100%;height:420px;background:#fff;border:1px solid #edf1f7;border-radius:6px;"></svg>'
+        f'<script type="application/json" data-scatter-x>{json.dumps(x_label)}</script>'
+        f'<script type="application/json" data-scatter-y>{json.dumps(y_label)}</script>'
+        f'<script type="application/json" data-scatter-data>{data_json}</script>'
+        "</section>"
+    )
+
+
 def _expandable_rule_panel(
     title: str,
     placeholder: str,
@@ -1498,6 +1546,38 @@ tr.no-match{{display:none;}}
     }};
     select?.addEventListener("change", () => draw(select.value));
     draw(select ? select.value : Object.keys(data)[0]);
+  }});
+  document.querySelectorAll(".scatter-panel").forEach((panel) => {{
+    const svg = panel.querySelector("[data-scatter-svg]");
+    const node = panel.querySelector("[data-scatter-data]");
+    if (!svg || !node) return;
+    const pts = JSON.parse(node.textContent || "[]");
+    if (!pts.length) return;
+    const xLabel = JSON.parse(panel.querySelector("[data-scatter-x]")?.textContent || '"x"');
+    const yLabel = JSON.parse(panel.querySelector("[data-scatter-y]")?.textContent || '"y"');
+    const W = 960, H = 420, padL = 70, padR = 24, padT = 20, padB = 46;
+    const xmax = Math.max(1, ...pts.map((p) => p.x)) * 1.1;
+    const ymax = Math.max(1, ...pts.map((p) => p.y)) * 1.1;
+    const smax = Math.max(1, ...pts.map((p) => p.size || 0));
+    const X = (v) => padL + (v / xmax) * (W - padL - padR);
+    const Y = (v) => H - padB - (v / ymax) * (H - padT - padB);
+    const med = (arr) => {{ const s = [...arr].sort((a, b) => a - b); const m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; }};
+    const xmed = med(pts.map((p) => p.x)), ymed = med(pts.map((p) => p.y));
+    let s = `<line x1="${{padL}}" y1="${{H - padB}}" x2="${{W - padR}}" y2="${{H - padB}}" stroke="#cbd5e1"/>`;
+    s += `<line x1="${{padL}}" y1="${{padT}}" x2="${{padL}}" y2="${{H - padB}}" stroke="#cbd5e1"/>`;
+    s += `<line x1="${{X(xmed)}}" y1="${{padT}}" x2="${{X(xmed)}}" y2="${{H - padB}}" stroke="#e4a11b" stroke-dasharray="4 3"/>`;
+    s += `<line x1="${{padL}}" y1="${{Y(ymed)}}" x2="${{W - padR}}" y2="${{Y(ymed)}}" stroke="#e4a11b" stroke-dasharray="4 3"/>`;
+    s += `<text x="${{(padL + W - padR) / 2}}" y="${{H - 12}}" font-size="12" fill="#475467" text-anchor="middle">${{xLabel}}</text>`;
+    s += `<text x="18" y="${{(padT + H - padB) / 2}}" font-size="12" fill="#475467" text-anchor="middle" transform="rotate(-90 18 ${{(padT + H - padB) / 2}})">${{yLabel}}</text>`;
+    s += `<text x="${{W - padR}}" y="${{H - padB + 16}}" font-size="10" fill="#98a2b3" text-anchor="end">${{xmax.toFixed(1)}}</text>`;
+    s += `<text x="${{padL - 6}}" y="${{padT + 8}}" font-size="10" fill="#98a2b3" text-anchor="end">${{ymax.toFixed(1)}}</text>`;
+    s += `<text x="${{W - padR - 6}}" y="${{padT + 14}}" font-size="10" fill="#087443" text-anchor="end">high vol / high precision</text>`;
+    s += `<text x="${{W - padR - 6}}" y="${{H - padB - 6}}" font-size="10" fill="#b42318" text-anchor="end">high vol / low precision — tune</text>`;
+    pts.forEach((p) => {{
+      const r = 4 + Math.sqrt((p.size || 0) / smax) * 14;
+      s += `<circle cx="${{X(p.x)}}" cy="${{Y(p.y)}}" r="${{r.toFixed(1)}}" fill="rgba(23,105,224,.4)" stroke="#1769e0"><title>${{p.label}}: ${{p.x}}% ${{xLabel}}, ${{p.y}}% ${{yLabel}} (vol ${{Math.round(p.size || 0).toLocaleString()}})</title></circle>`;
+    }});
+    svg.innerHTML = s;
   }});
 }})();
 </script>
@@ -1783,6 +1863,26 @@ def write_visualization(
                     )
                 )
                 continue
+            if sheet_name == "Rule Scorecard":
+                panels.append(
+                    _scatter_quadrant_panel(
+                        "Rule Scorecard",
+                        headers,
+                        rows,
+                        x_column="trigger_rate_pct",
+                        y_column="precision_pct",
+                        label_column="rule_id",
+                        size_column="trigger_trxn",
+                        x_label="Trigger rate %",
+                        y_label="Precision %",
+                    )
+                )
+                panels.append(
+                    _searchable_table_panel(
+                        "Rule Scorecard — Detail", headers, rows, placeholder="Search rule id or name…"
+                    )
+                )
+                continue
             panels.append(
                 _searchable_table_panel(
                     sheet_name,
@@ -1831,7 +1931,10 @@ def write_visualization(
         intro = _kpi_cards_panel(f"Fraud Loss Summary — {scope_label}" if scope_label else "Fraud Loss Summary", kpis)
         subtype_breakdown = loss_lookup.get("Fraud MO Subtype Breakdown")
         nested_sheets = {"Fraud MO Subtype Breakdown"}
-        placeholders = {"Case Status & SLA": "Search status…"}
+        placeholders = {
+            "Case Status & SLA": "Search status…",
+            "Review Pool / Backlog (current)": "Search source…",
+        }
         panels = []
         for sheet_name, headers, rows in sheets:
             if sheet_name == "Case & Loss Summary" or sheet_name in nested_sheets:

@@ -7,7 +7,12 @@ from typing import Any, Callable
 
 from flask import Response, jsonify, redirect, render_template, request, send_file, url_for
 
-from bpmis_jira_tool.business_insights import BusinessInsightsStore, UNDERWRITING_FUNNEL_REPORT_ID
+from bpmis_jira_tool.business_insights import (
+    BusinessInsightsStore,
+    GENERATOR_REPORT_IDS,
+    UNDERWRITING_FUNNEL_REPORT_ID,
+)
+from bpmis_jira_tool.business_insights_jobs import generation_job_status, start_generation_job
 from bpmis_jira_tool.errors import ToolError
 
 
@@ -35,6 +40,10 @@ def build_business_insights_handlers(ctx: Any) -> Any:
                 item["artifact"] = artifact
         item["sql_url"] = url_for("business_insights_report_sql", report_id=item["id"])
         item["ingest_url"] = url_for("business_insights_report_ingest", report_id=item["id"])
+        item["can_generate"] = item["id"] in GENERATOR_REPORT_IDS
+        if item["can_generate"]:
+            item["generate_url"] = url_for("business_insights_report_generate", report_id=item["id"])
+            item["generate_status_url"] = url_for("business_insights_report_generate_status", report_id=item["id"])
         return item
 
     def _reports_by_domain() -> dict[str, list[dict[str, Any]]]:
@@ -100,6 +109,32 @@ def build_business_insights_handlers(ctx: Any) -> Any:
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 
+    def business_insights_report_generate(report_id: str):
+        access_gate = ctx._require_business_insights_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        if report_id not in GENERATOR_REPORT_IDS:
+            return jsonify({"status": "error", "message": "On-demand refresh is not available for this report."}), HTTPStatus.NOT_FOUND
+        try:
+            job = start_generation_job(root_dir=_store().root_dir, report_id=report_id)
+        except (OSError, ValueError) as error:
+            return jsonify({"status": "error", "message": f"Could not start refresh: {error}"}), HTTPStatus.INTERNAL_SERVER_ERROR
+        return jsonify({"status": "ok", "report_id": report_id, "job": job})
+
+    def business_insights_report_generate_status(report_id: str):
+        access_gate = ctx._require_business_insights_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        if report_id not in GENERATOR_REPORT_IDS:
+            return jsonify({"status": "error", "message": "On-demand refresh is not available for this report."}), HTTPStatus.NOT_FOUND
+        job = generation_job_status(root_dir=_store().root_dir, report_id=report_id)
+        payload: dict[str, Any] = {"status": "ok", "report_id": report_id, "job": job}
+        if job.get("status") == "completed":
+            report = _store().report(report_id)
+            if report is not None:
+                payload["report"] = _report_payload(report)
+        return jsonify(payload)
+
     def business_insights_artifact(artifact_id: str):
         access_gate = ctx._require_business_insights_access(settings)
         if access_gate is not None:
@@ -135,6 +170,8 @@ def build_business_insights_handlers(ctx: Any) -> Any:
         business_insights_reports_api=business_insights_reports_api,
         business_insights_report_sql=business_insights_report_sql,
         business_insights_report_ingest=business_insights_report_ingest,
+        business_insights_report_generate=business_insights_report_generate,
+        business_insights_report_generate_status=business_insights_report_generate_status,
         business_insights_artifact=business_insights_artifact,
         business_insights_visualization=business_insights_visualization,
     )
@@ -145,5 +182,7 @@ def register_business_insights_routes(app: Any, handlers: Any) -> None:
     _add_route(app, "/api/business-insights/reports", handlers.business_insights_reports_api)
     _add_route(app, "/api/business-insights/reports/<report_id>/sql", handlers.business_insights_report_sql)
     _add_route(app, "/api/business-insights/reports/<report_id>/ingest", handlers.business_insights_report_ingest, methods=["POST"])
+    _add_route(app, "/api/business-insights/reports/<report_id>/generate", handlers.business_insights_report_generate, methods=["POST"])
+    _add_route(app, "/api/business-insights/reports/<report_id>/generate/status", handlers.business_insights_report_generate_status)
     _add_route(app, "/business-insights/artifacts/<artifact_id>.xlsx", handlers.business_insights_artifact)
     _add_route(app, "/business-insights/visualizations/<artifact_id>.html", handlers.business_insights_visualization)

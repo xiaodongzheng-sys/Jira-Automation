@@ -19,6 +19,7 @@ tmp/
 !evals/effort_assessment/crms_golden.jsonl
 jira_web_config.json
 team_portal.db
+prd_briefing/prd_briefing.db
 .team-portal/
 .team-portal-uat/
 .DS_Store

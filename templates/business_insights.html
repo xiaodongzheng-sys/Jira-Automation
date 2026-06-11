@@ -72,6 +72,15 @@
 
                         {% if report.status == "generator_ready" %}
                           <div class="business-insights-actions">
+                            {% if report.can_generate %}
+                              <button
+                                type="button"
+                                class="button button-primary"
+                                data-business-insights-generate
+                                data-generate-url="{{ report.generate_url }}"
+                                data-status-url="{{ report.generate_status_url }}"
+                              >Refresh data</button>
+                            {% endif %}
                             <a
                               class="button button-secondary"
                               data-business-insights-sql

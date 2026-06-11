@@ -186,6 +186,7 @@ GENERATOR_REPORT_IDS: frozenset[str] = frozenset(
         AF_SCENARIOS_ACTIONS_REPORT_ID,
         AF_RULES_FEATURES_REPORT_ID,
         AF_RULE_EFFECTIVENESS_REPORT_ID,
+        AF_FRAUD_LOSS_REPORT_ID,
     }
 )
 
@@ -1133,6 +1134,63 @@ from {AF_ACTION_LOG_TABLE}
 where pt_date between '{month_start_iso}' and '{month_end_iso}'
 group by scene_name, sub_scene_name, action_name, action_type
 order by transactions desc;
+
+-- 12. Rule Scorecard
+-- Precision x trigger-rate quadrant. Combines, per rule, the trigger rate (hit log: effective
+-- triggers / scene traffic) with precision
+-- (review records -> confirmed-fraud cases). Limited to rules that flagged cases for review, so both
+-- axes are present - the quadrant for tuning: high trigger rate + low precision = noisy / retire.
+with review_cases as (
+  select case_id,
+    case when lower(trim(coalesce(fraud_mo_type, ''))) not in ('not fraud', 'pending', '') then 1 else 0 end as is_fraud
+  from {AF_REVIEW_CASE_TABLE}
+  where pt_date = (select max(pt_date) from {AF_REVIEW_CASE_TABLE})
+    and case_open_datetime >= '{month_start_iso}' and case_open_datetime < '{next_month_iso}'
+),
+precision_rules as (
+  select rr.rule_id, max(rr.rule_name) as rule_name,
+    count(distinct rr.case_id) as reviewed_cases,
+    count(distinct case when c.is_fraud = 1 then rr.case_id end) as fraud_cases
+  from {AF_REVIEW_RECORD_TABLE} rr
+  join review_cases c on c.case_id = rr.case_id
+  where rr.pt_date = (select max(pt_date) from {AF_REVIEW_RECORD_TABLE})
+    and rr.review_status = 'REVIEWED' and rr.rule_id is not null and trim(rr.rule_id) <> ''
+  group by rr.rule_id
+),
+triggers as (
+  select rule_id, count(distinct bizflow_instance_id) as trigger_trxn, count(distinct uid) as trigger_users
+  from {AF_RULE_HIT_LOG_TABLE}
+  where pt_date between '{month_start_iso}' and '{month_end_iso}' and is_rule_triggered = 'Y'
+  group by rule_id
+),
+rule_scenes as (
+  select distinct rule_id, scene_name from {AF_RULE_HIT_LOG_TABLE}
+  where pt_date between '{month_start_iso}' and '{month_end_iso}' and is_rule_triggered = 'Y'
+),
+scene_traffic as (
+  select scene_name, count(distinct bizflow_instance_id) as scene_trxn
+  from {AF_ACTION_LOG_TABLE}
+  where pt_date between '{month_start_iso}' and '{month_end_iso}'
+  group by scene_name
+),
+benchmark as (
+  select rs.rule_id, sum(st.scene_trxn) as benchmark_trxn
+  from rule_scenes rs join scene_traffic st on st.scene_name = rs.scene_name
+  group by rs.rule_id
+)
+select
+  p.rule_id,
+  p.rule_name,
+  t.trigger_trxn,
+  b.benchmark_trxn,
+  round(t.trigger_trxn / nullif(b.benchmark_trxn, 0) * 100, 3) as trigger_rate_pct,
+  p.reviewed_cases,
+  p.fraud_cases,
+  round(p.fraud_cases / nullif(p.reviewed_cases, 0) * 100, 2) as precision_pct
+from precision_rules p
+left join triggers t on t.rule_id = p.rule_id
+left join benchmark b on b.rule_id = p.rule_id
+order by p.fraud_cases desc, trigger_rate_pct desc;
 """
 
 
@@ -1230,6 +1288,22 @@ select 'All' as fraud_mo_type, case_open_date,
   count(1) as daily_cases
 from base group by case_open_date
 order by fraud_mo_type, case_open_date;
+
+-- 6. Review Pool / Backlog (current)
+-- Pending review records not yet linked to a case, as of the latest snapshot. This is the CURRENT
+-- backlog (not month-scoped). avg_age_days = days since the upstream event.
+select
+  coalesce(nullif(trim(rr.source), ''), 'Unspecified') as source,
+  count(1) as pending_records,
+  count(distinct rr.rule_id) as distinct_rules,
+  count(distinct rr.uid) as distinct_users,
+  min(rr.upstream_event_datetime) as oldest_pending,
+  round(avg((unix_timestamp(current_timestamp()) - rr.upstream_event_timestamp / 1000) / 86400.0), 1) as avg_age_days
+from {AF_REVIEW_RECORD_TABLE} rr
+where rr.pt_date = (select max(pt_date) from {AF_REVIEW_RECORD_TABLE})
+  and rr.review_status = 'PENDING'
+group by coalesce(nullif(trim(rr.source), ''), 'Unspecified')
+order by pending_records desc;
 """
 
 
