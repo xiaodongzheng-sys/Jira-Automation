@@ -802,29 +802,34 @@ order by case when fc.status = 1 then 0 else 1 end, fc.feature_id;
 
 
 def build_af_rule_effectiveness_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
-    # Scope: the last two full calendar months + the current month-to-date (e.g. Apr+May full, Jun MTD).
-    # Detail/trend sections aggregate over the whole span; the summary breaks it out per period.
+    # Scope: last two full calendar months + current MTD. The summary, daily totals, and trend span all
+    # three periods; the per-rule detail sections use the latest full month (keeps the action-log scans
+    # within the session-token TTL, and a single complete month is the clearer deep-dive grain).
     window = business_insights_window(now)
     span_label = window.span_label
     span_start, span_end_exclusive = window.span_start, window.span_end_exclusive
-    p2_start, p3_start = window.periods[1][1], window.periods[2][1]
     p1_label, p2_label, p3_label = (p[0] for p in window.periods)
-    # Span-wide bounds reused by every detail/trend section below.
-    start_ms = _date_to_epoch_millis(span_start)
-    end_ms = _date_to_epoch_millis(span_end_exclusive)
+    latest_full_label, month_start, month_end_exclusive = window.periods[1]
+    # Detail bounds = latest full month.
+    start_ms = _date_to_epoch_millis(month_start)
+    end_ms = _date_to_epoch_millis(month_end_exclusive)
+    month_start_iso = month_start.isoformat()
+    month_end_iso = (month_end_exclusive - timedelta(days=1)).isoformat()
+    next_month_iso = month_end_exclusive.isoformat()
+    # Span bounds = full three-period range (summary / daily / trend).
     start_key = _yyyymmdd(span_start)
     end_key_exclusive = _yyyymmdd(span_end_exclusive)
-    p2_key, p3_key = _yyyymmdd(p2_start), _yyyymmdd(p3_start)
-    month_start_iso = span_start.isoformat()
-    month_end_iso = (span_end_exclusive - timedelta(days=1)).isoformat()
-    next_month_iso = span_end_exclusive.isoformat()
+    p2_key, p3_key = _yyyymmdd(window.periods[1][1]), _yyyymmdd(window.periods[2][1])
+    span_start_iso = span_start.isoformat()
+    span_end_iso = (span_end_exclusive - timedelta(days=1)).isoformat()
     request_snap = _aliased_snapshot_filter("rq", AF_REQUEST_STATISTIC_TABLE, snapshot_pt_date)
     reject_snap = _aliased_snapshot_filter("r", AF_IDENTIFY_REJECT_TABLE, snapshot_pt_date)
     punish_snap = _aliased_snapshot_filter("p", AF_PUNISH_LIST_TABLE, snapshot_pt_date)
     stat_snap = _aliased_snapshot_filter("rs", AF_RULE_TRIGGER_STATISTIC_TABLE, snapshot_pt_date)
     header = _af_report_header("Anti-fraud PH - Rule Effectiveness / Hit-Rate", snapshot_pt_date)
     return f"""{header}
--- Scope: {span_label} ({span_start.isoformat()} to {span_end_exclusive.isoformat()} exclusive).
+-- Scope: {span_label}. Summary / daily totals / trend span all three periods; per-rule detail sections
+-- (reject / punish / challenge / scorecard / scene usage / precision) reflect the latest full month ({latest_full_label}).
 -- rule_trigger_log_tab and identify_record_tab are empty in ODS; this uses request_statistic,
 -- identify_reject, and rule_trigger_statistic. Each pt_date is a cumulative snapshot, so a single
 -- (latest) snapshot is pinned and rows are scoped by date / operation_time to avoid double counting.
@@ -887,7 +892,7 @@ rule_dim as (
   where pt_date = (select max(pt_date) from {AF_RULE_CONFIG_TABLE})
   group by rule_id
 )
-select '{span_label}' as period, a.reject_rule, coalesce(rn.rule_name, '') as rule_name, a.reject_type,
+select '{latest_full_label}' as period, a.reject_rule, coalesce(rn.rule_name, '') as rule_name, a.reject_type,
   a.reject_count, a.distinct_users, a.distinct_scenes, a.rejected_amount_php,
   b.benchmark_trxn,
   round(a.reject_count / nullif(b.benchmark_trxn, 0) * 100, 3) as trigger_rate_pct,
@@ -967,7 +972,7 @@ rule_dim as (
   where pt_date = (select max(pt_date) from {AF_RULE_CONFIG_TABLE})
   group by rule_id
 )
-select '{span_label}' as period, a.punish_rule_id, coalesce(rn.rule_name, '') as rule_name,
+select '{latest_full_label}' as period, a.punish_rule_id, coalesce(rn.rule_name, '') as rule_name,
   a.punish_count, a.distinct_targets, a.distinct_scenes,
   b.benchmark_trxn,
   round(a.punish_count / nullif(b.benchmark_trxn, 0) * 100, 3) as trigger_rate_pct,
@@ -1145,7 +1150,7 @@ order by fraud_cases desc, reviewed_cases desc;
 with daily as (
   select rule_id, pt_date as trigger_date, count(distinct bizflow_instance_id) as trigger_trxn
   from {AF_RULE_HIT_LOG_TABLE}
-  where pt_date between '{month_start_iso}' and '{month_end_iso}' and is_rule_triggered = 'Y'
+  where pt_date between '{span_start_iso}' and '{span_end_iso}' and is_rule_triggered = 'Y'
   group by rule_id, pt_date
 ),
 top_rules as (
