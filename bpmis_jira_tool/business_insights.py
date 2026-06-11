@@ -2064,14 +2064,14 @@ def build_af_card_3ds_sql(*, snapshot_pt_date: str | None = None, now: datetime 
     span_end = win.span_end_exclusive.isoformat()
     (l1, _s1, _e1), (l2, p2, _e2), (l3, p3, _e3) = win.periods
     p2_iso, p3_iso = p2.isoformat(), p3.isoformat()
-    trans, rba, cf = AF_THREEDS_TRANS_TABLE, AF_THREEDS_RBA_LOG_TABLE, AF_CARD_FRAUD_CASE_TABLE
+    trans, cf = AF_THREEDS_TRANS_TABLE, AF_CARD_FRAUD_CASE_TABLE
     pt = f"pt_date >= '{span_start}' and pt_date < '{span_end}'"
     period_expr = (
         f"case when pt_date < '{p2_iso}' then '{l1}' when pt_date < '{p3_iso}' then '{l2}' else '{l3}' end"
     )
     header = _af_report_header("Anti-fraud PH - Card Fraud & 3DS Authentication", snapshot_pt_date)
     return f"""{header}
--- Source: {trans} (3DS ACS auth), {rba} (risk-based-auth scoring), {cf} (card fraud cases).
+-- Source: {trans} (3DS ACS auth), {cf} (card fraud cases).
 -- Scope: {win.span_label}. trans_status Y=authenticated / N=not auth / C=challenge / R=rejected / U=unavailable.
 -- purchase_amount is in minor units; /100 approximates PHP.
 
@@ -2120,20 +2120,7 @@ where {pt}
 group by 1
 order by threeds_txns desc;
 
--- 4. RBA Risk Distribution
--- Risk-based-authentication evaluations by risk level (and average risk score).
-select
-  coalesce(nullif(trim(risk_level), ''), '(none)') as risk_level,
-  count(1) as risk_evaluations,
-  cast(round(avg(risk_score), 1) as decimal(20, 1)) as avg_risk_score,
-  min(risk_score) as min_score,
-  max(risk_score) as max_score
-from {rba}
-where {pt}
-group by 1
-order by risk_evaluations desc;
-
--- 5. 3DS by Merchant Category (MCC)
+-- 4. 3DS by Merchant Category (MCC)
 select
   coalesce(nullif(trim(mcc), ''), '(none)') as mcc,
   count(1) as threeds_txns,
@@ -2146,7 +2133,7 @@ group by 1
 order by threeds_txns desc
 limit 100;
 
--- 6. Card Fraud Cases by MO
+-- 5. Card Fraud Cases by MO
 select
   coalesce(nullif(trim(mo_reason), ''), 'Unspecified') as mo_reason,
   coalesce(nullif(trim(sub_mo_reason), ''), 'Unspecified') as sub_mo_reason,
@@ -2157,7 +2144,7 @@ group by 1, 2
 order by cases desc
 limit 100;
 
--- 7. Daily 3DS Trend
+-- 6. Daily 3DS Trend
 with d as (
   select pt_date,
     sum(case when trans_status = 'Y' then 1 else 0 end) as authenticated,

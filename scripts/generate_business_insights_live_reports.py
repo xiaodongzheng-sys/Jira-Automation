@@ -2793,18 +2793,6 @@ def write_visualization(
                         panels.append(donut)
                 panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Search status…"))
                 continue
-            if sheet_name == "RBA Risk Distribution":
-                col = {str(c): i for i, c in enumerate(headers)}
-                if "risk_level" in col and "risk_evaluations" in col:
-                    bar = _bar_panel(
-                        "RBA Evaluations by Risk Level",
-                        [(str(r[col["risk_level"]]), r[col["risk_evaluations"]]) for r in rows
-                         if col["risk_level"] < len(r) and col["risk_evaluations"] < len(r)],
-                        note="Risk-based-authentication evaluations by risk level.")
-                    if bar:
-                        panels.append(bar)
-                panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Filter…"))
-                continue
             if sheet_name == "Card Fraud Cases by MO":
                 col = {str(c): i for i, c in enumerate(headers)}
                 if "sub_mo_reason" in col and "cases" in col:

@@ -1537,10 +1537,9 @@ class Card3dsBusinessInsightsTests(unittest.TestCase):
         self.assertEqual(
             [s.sheet_name for s in sections],
             ["3DS Authentication Summary", "Outcome by Auth Status", "Frictionless vs Challenge",
-             "RBA Risk Distribution", "3DS by Merchant Category (MCC)", "Card Fraud Cases by MO", "Daily 3DS Trend"],
+             "3DS by Merchant Category (MCC)", "Card Fraud Cases by MO", "Daily 3DS Trend"],
         )
         self.assertIn("pmt_threeds_acs_t_threeds_trans_ss_d", sql)
-        self.assertIn("pmt_threeds_acs_t_threeds_trans_rba_log_ss_d", sql)
         self.assertIn("mbs_card_fraud_case_ss_d", sql)
         self.assertIn("trans_status = 'Y'", sql)
         self.assertIn("auth_rate_pct", sql)
@@ -1559,8 +1558,6 @@ class Card3dsBusinessInsightsTests(unittest.TestCase):
              [["Authenticated", "4808715", "79.8"], ["Not authenticated", "1207508", "20.0"]]),
             ("Frictionless vs Challenge", ["challenge_indicator", "threeds_txns", "resulted_in_challenge", "authenticated"],
              [["01 No preference", "5000000", "8000", "4500000"]]),
-            ("RBA Risk Distribution", ["risk_level", "risk_evaluations", "avg_risk_score", "min_score", "max_score"],
-             [["LOW", "12000", "12.0", "0", "40"], ["HIGH", "800", "78.0", "60", "99"]]),
             ("3DS by Merchant Category (MCC)", ["mcc", "threeds_txns", "authenticated", "auth_rate_pct", "purchase_amount_php"],
              [["5399", "900000", "800000", "88.9", "12500000.00"]]),
             ("Card Fraud Cases by MO", ["mo_reason", "sub_mo_reason", "cases"], [["Cards", "Card Not Present Fraud", "42"]]),
@@ -1575,7 +1572,6 @@ class Card3dsBusinessInsightsTests(unittest.TestCase):
         self.assertIn("3DS Authentication", html)
         self.assertIn("data-period-kpi", html)
         self.assertIn("<h2>3DS Outcome Mix</h2>", html)
-        self.assertIn("<h2>RBA Evaluations by Risk Level</h2>", html)
         self.assertIn("<h2>Card Fraud Cases by Sub-MO</h2>", html)
         self.assertIn('id="ec-daily-3ds-trend" class="echart"', html)
         self.assertIn("Card Not Present Fraud", html)
