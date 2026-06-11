@@ -15,6 +15,8 @@ from bpmis_jira_tool.business_insights import (
     AF_FEATURE_CONFIG_TABLE,
     AF_ACTION_LOG_TABLE,
     AF_DETECTION_EFFECTIVENESS_REPORT_ID,
+    AF_CARD_3DS_REPORT_ID,
+    AF_DEVICE_RISK_REPORT_ID,
     AF_FACIAL_VERIFICATION_REPORT_ID,
     AF_FACIAL_VERIFICATION_TABLE,
     AF_FRAUD_LOSS_REPORT_ID,
@@ -37,6 +39,8 @@ from bpmis_jira_tool.business_insights import (
     UNDERWRITING_FUNNEL_REPORT_ID,
     UNDERWRITING_FUNNEL_TABLE,
     build_af_detection_effectiveness_sql,
+    build_af_card_3ds_sql,
+    build_af_device_risk_sql,
     build_af_facial_verification_sql,
     build_af_fraud_loss_sql,
     build_af_rule_change_log_sql,
@@ -328,10 +332,12 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertIn("Anti-fraud PH - Rule Effectiveness / Hit-Rate", response.get_data(as_text=True))
         self.assertIn("Anti-fraud PH - Fraud Loss &amp; Case Outcomes", response.get_data(as_text=True))
         self.assertIn("Anti-fraud PH - Facial Verification / Liveness &amp; Deepfake", response.get_data(as_text=True))
+        self.assertIn("Anti-fraud PH - Device &amp; Identity Risk", response.get_data(as_text=True))
+        self.assertIn("Anti-fraud PH - Card Fraud &amp; 3DS Authentication", response.get_data(as_text=True))
         # Detection-effectiveness and rule-change-log are folded into other reports, not standalone.
         self.assertNotIn("Anti-fraud PH - Detection Effectiveness &amp; Loss Prevented", response.get_data(as_text=True))
         self.assertNotIn("Anti-fraud PH - Rule Change Log &amp; Governance", response.get_data(as_text=True))
-        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 9)
+        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 11)
         self.assertNotIn("Upload Export", response.get_data(as_text=True))
         self.assertIsNone(soup.select_one("[data-business-insights-upload]"))
 
@@ -642,6 +648,8 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
                 AF_RULE_EFFECTIVENESS_REPORT_ID,
                 AF_FRAUD_LOSS_REPORT_ID,
                 AF_FACIAL_VERIFICATION_REPORT_ID,
+                AF_DEVICE_RISK_REPORT_ID,
+                AF_CARD_3DS_REPORT_ID,
             },
         )
         # Detection-effectiveness and rule-change-log are folded into the reports above, not standalone.
@@ -1458,6 +1466,119 @@ class BusinessInsightsGenerationRouteTests(unittest.TestCase):
         rule_eff = next(r for r in reports["reports"] if r["id"] == AF_RULE_EFFECTIVENESS_REPORT_ID)
         self.assertFalse(rule_eff["can_generate"])
         self.assertNotIn("generate_url", rule_eff)
+
+
+class DeviceRiskBusinessInsightsTests(unittest.TestCase):
+    def test_seeded_and_generator_registration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ids = {r["id"] for r in BusinessInsightsStore(Path(tmp)).reports("anti-fraud")}
+        self.assertIn(AF_DEVICE_RISK_REPORT_ID, ids)
+        self.assertIn(AF_DEVICE_RISK_REPORT_ID, REPORT_BUILDERS)
+        self.assertEqual(REPORT_BUILDERS[AF_DEVICE_RISK_REPORT_ID][0], "Anti-fraud PH - Device & Identity Risk")
+
+    def test_sql_sections_recompute_farming_and_window_by_pt_date(self):
+        sql = build_af_device_risk_sql(now=FIXED_NOW)
+        sections = extract_sql_sections(sql)
+        self.assertEqual(
+            [s.sheet_name for s in sections],
+            ["Account Farming Summary", "Top Multi-Account Devices", "Multi-Device Accounts",
+             "Risk Signal Prevalence", "Risk Signals by Scene", "Multi-Account Device Trend"],
+        )
+        self.assertIn("dwd_antifraud_action_log_ext_di", sql)
+        # Account farming is recomputed (precomputed link columns are encrypted), windowed by pt_date range.
+        self.assertIn("count(distinct uid)", sql)
+        self.assertIn("count(distinct deviceuuid)", sql)
+        self.assertIn("pt_date >=", sql)
+        self.assertNotIn("max(pt_date)", sql)  # never scan max() on this 64k-partition table
+        # Flag prevalence treats encrypted/clear positives alike via the known-negative exclusion set.
+        self.assertIn("cfcd208495d565ef66e7dff9f98764da", sql)
+
+    def test_visualization_renders_farming_kpis_and_signal_bar(self):
+        sheets = [
+            ("Account Farming Summary",
+             ["devices_seen", "devices_5plus_accounts", "devices_10plus_accounts",
+              "max_accounts_on_one_device", "pct_devices_5plus_accounts"],
+             [["1714805", "320", "48", "66", "0.0187"]]),
+            ("Top Multi-Account Devices", ["deviceuuid", "distinct_accounts", "distinct_scenes", "events"],
+             [["d25760e5", "66", "4", "210"]]),
+            ("Multi-Device Accounts", ["uid", "distinct_devices", "distinct_scenes", "events"], [["uidA", "12", "3", "40"]]),
+            ("Risk Signal Prevalence",
+             ["total_events", "rooted", "emulator", "vpn", "new_deviceid", "autoclicker"],
+             [["23419734", "2", "15", "0", "120000", "6"]]),
+            ("Risk Signals by Scene", ["scene_name", "events", "distinct_accounts", "risky_events"],
+             [["Login", "900000", "800000", "120"]]),
+            ("Multi-Account Device Trend", ["series", "event_date", "value"],
+             [["Multi-account devices (>=5)", "2026-06-05", "40"]]),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "viz.html"
+            write_visualization(output_path, report_title="Anti-fraud PH - Device & Identity Risk",
+                                snapshot_pt_date="2026-06-10", sheets=sheets, report_id=AF_DEVICE_RISK_REPORT_ID)
+            html = output_path.read_text(encoding="utf-8")
+        self.assertIn("Account Farming", html)
+        self.assertIn("Most-shared device", html)
+        self.assertIn("<h2>Top Device Risk Signals (events)</h2>", html)
+        self.assertIn("<h2>Risk Signal Prevalence</h2>", html)
+        self.assertIn('id="ec-multi-account-device-trend" class="echart"', html)
+        self.assertIn("d25760e5", html)
+
+
+class Card3dsBusinessInsightsTests(unittest.TestCase):
+    def test_seeded_and_generator_registration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ids = {r["id"] for r in BusinessInsightsStore(Path(tmp)).reports("anti-fraud")}
+        self.assertIn(AF_CARD_3DS_REPORT_ID, ids)
+        self.assertIn(AF_CARD_3DS_REPORT_ID, REPORT_BUILDERS)
+        self.assertEqual(REPORT_BUILDERS[AF_CARD_3DS_REPORT_ID][0], "Anti-fraud PH - Card Fraud & 3DS Authentication")
+
+    def test_sql_sections_and_sources(self):
+        sql = build_af_card_3ds_sql(now=FIXED_NOW)
+        sections = extract_sql_sections(sql)
+        self.assertEqual(
+            [s.sheet_name for s in sections],
+            ["3DS Authentication Summary", "Outcome by Auth Status", "Frictionless vs Challenge",
+             "RBA Risk Distribution", "3DS by Merchant Category (MCC)", "Card Fraud Cases by MO", "Daily 3DS Trend"],
+        )
+        self.assertIn("pmt_threeds_acs_t_threeds_trans_ss_d", sql)
+        self.assertIn("pmt_threeds_acs_t_threeds_trans_rba_log_ss_d", sql)
+        self.assertIn("mbs_card_fraud_case_ss_d", sql)
+        self.assertIn("trans_status = 'Y'", sql)
+        self.assertIn("auth_rate_pct", sql)
+        # Spans the last two full months + current MTD (Mar 1 -> May 27 under the fixed clock; period bucketed).
+        self.assertIn("pt_date >= '2026-03-01'", sql)
+
+    def test_visualization_renders_auth_kpis_and_outcome_donut(self):
+        sheets = [
+            ("3DS Authentication Summary",
+             ["period", "threeds_txns", "authenticated", "not_authenticated", "challenged", "rejected",
+              "unavailable", "auth_rate_pct", "challenge_rate_pct"],
+             [["Apr 2026", "5000000", "4000000", "800000", "120000", "50000", "30000", "80.0", "2.4"],
+              ["May 2026", "5200000", "4300000", "700000", "130000", "45000", "25000", "82.7", "2.5"],
+              ["Jun 2026 MTD", "1800000", "1500000", "220000", "50000", "18000", "12000", "83.3", "2.8"]]),
+            ("Outcome by Auth Status", ["auth_status", "threeds_txns", "share_pct"],
+             [["Authenticated", "4808715", "79.8"], ["Not authenticated", "1207508", "20.0"]]),
+            ("Frictionless vs Challenge", ["challenge_indicator", "threeds_txns", "resulted_in_challenge", "authenticated"],
+             [["01 No preference", "5000000", "8000", "4500000"]]),
+            ("RBA Risk Distribution", ["risk_level", "risk_evaluations", "avg_risk_score", "min_score", "max_score"],
+             [["LOW", "12000", "12.0", "0", "40"], ["HIGH", "800", "78.0", "60", "99"]]),
+            ("3DS by Merchant Category (MCC)", ["mcc", "threeds_txns", "authenticated", "auth_rate_pct", "purchase_amount_php"],
+             [["5399", "900000", "800000", "88.9", "12500000.00"]]),
+            ("Card Fraud Cases by MO", ["mo_reason", "sub_mo_reason", "cases"], [["Cards", "Card Not Present Fraud", "42"]]),
+            ("Daily 3DS Trend", ["series", "txn_date", "txns"],
+             [["Authenticated", "2026-06-01", "150000"], ["Challenge", "2026-06-01", "5000"]]),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "viz.html"
+            write_visualization(output_path, report_title="Anti-fraud PH - Card Fraud & 3DS Authentication",
+                                snapshot_pt_date="2026-06-10", sheets=sheets, report_id=AF_CARD_3DS_REPORT_ID)
+            html = output_path.read_text(encoding="utf-8")
+        self.assertIn("3DS Authentication", html)
+        self.assertIn("data-period-kpi", html)
+        self.assertIn("<h2>3DS Outcome Mix</h2>", html)
+        self.assertIn("<h2>RBA Evaluations by Risk Level</h2>", html)
+        self.assertIn("<h2>Card Fraud Cases by Sub-MO</h2>", html)
+        self.assertIn('id="ec-daily-3ds-trend" class="echart"', html)
+        self.assertIn("Card Not Present Fraud", html)
 
 
 if __name__ == "__main__":

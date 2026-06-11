@@ -100,6 +100,8 @@ AF_FRAUD_LOSS_REPORT_ID = "anti-fraud-ph-fraud-loss-cases"
 AF_DETECTION_EFFECTIVENESS_REPORT_ID = "anti-fraud-ph-detection-effectiveness"
 AF_RULE_CHANGE_LOG_REPORT_ID = "anti-fraud-ph-rule-change-log"
 AF_FACIAL_VERIFICATION_REPORT_ID = "anti-fraud-ph-facial-verification"
+AF_DEVICE_RISK_REPORT_ID = "anti-fraud-ph-device-identity-risk"
+AF_CARD_3DS_REPORT_ID = "anti-fraud-ph-card-3ds"
 
 AF_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_scene_tab_ss"
 AF_SUB_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_sub_scene_tab_ss"
@@ -118,6 +120,14 @@ AF_REVIEW_CASE_TABLE = "fmart_antifraud.dwd_antifraud_review_case_df"
 AF_REVIEW_RECORD_TABLE = "fmart_antifraud.dwd_antifraud_review_record_df"
 # Facial verification / liveness / deepfake authentication checks (cumulative daily _df snapshot).
 AF_FACIAL_VERIFICATION_TABLE = "fmart_antifraud.dwd_authentication_facial_verification_df"
+# Extended device/identity action log (daily-incremental, event-level; pt_date = event day).
+# is_* flags are clear text ('1'/''); precomputed distinct_uid_num_link_* are encrypted/constant, so
+# account-farming is recomputed via count(distinct uid) per device/scene. Huge table -> window by pt_date.
+AF_ACTION_LOG_EXT_TABLE = "fmart_antifraud.dwd_antifraud_action_log_ext_di"
+# Card 3DS (ACS) authentication + risk-based-auth log, and card fraud cases. pt_date = event day.
+AF_THREEDS_TRANS_TABLE = "ods.pmt_threeds_acs_t_threeds_trans_ss_d"
+AF_THREEDS_RBA_LOG_TABLE = "ods.pmt_threeds_acs_t_threeds_trans_rba_log_ss_d"
+AF_CARD_FRAUD_CASE_TABLE = "dm.mbs_card_fraud_case_ss_d"
 
 SEEDED_REPORTS: tuple[dict[str, str], ...] = (
     {
@@ -183,6 +193,20 @@ SEEDED_REPORTS: tuple[dict[str, str], ...] = (
         "type": "af_facial_verification",
         "status": "generator_ready",
     },
+    {
+        "id": AF_DEVICE_RISK_REPORT_ID,
+        "domain": "anti-fraud",
+        "name": "Anti-fraud PH - Device & Identity Risk",
+        "type": "af_device_risk",
+        "status": "generator_ready",
+    },
+    {
+        "id": AF_CARD_3DS_REPORT_ID,
+        "domain": "anti-fraud",
+        "name": "Anti-fraud PH - Card Fraud & 3DS Authentication",
+        "type": "af_card_3ds",
+        "status": "generator_ready",
+    },
 )
 
 # Reports whose artifacts can be regenerated on demand by running the live
@@ -200,6 +224,8 @@ GENERATOR_REPORT_IDS: frozenset[str] = frozenset(
         AF_RULE_EFFECTIVENESS_REPORT_ID,
         AF_FRAUD_LOSS_REPORT_ID,
         AF_FACIAL_VERIFICATION_REPORT_ID,
+        AF_DEVICE_RISK_REPORT_ID,
+        AF_CARD_3DS_REPORT_ID,
     }
 )
 
@@ -1905,6 +1931,249 @@ order by series, check_date;
 """
 
 
+def build_af_device_risk_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    # Device & identity risk from the extended action log (event-level). Account farming is recomputed
+    # as count(distinct uid) per device/account because the precomputed distinct_uid_num_link_* columns
+    # are encrypted to a constant. Flag prevalence treats any value that is not a known-negative
+    # (''/'0'/their md5 forms) as a positive, so it counts both clear ('1') and encrypted flags.
+    # Scope: rolling last 7 days (the table has 64k+ daily partitions; a snapshot max(pt_date) scan is
+    # prohibitively slow, and count(distinct) over months would risk the session TTL).
+    win = business_insights_window(now)
+    end = win.span_end_exclusive
+    start = end - timedelta(days=7)
+    pt = f"pt_date >= '{start.isoformat()}' and pt_date < '{end.isoformat()}'"
+    neg = "('', '0', 'cfcd208495d565ef66e7dff9f98764da', 'd41d8cd98f00b204e9800998ecf8427e')"
+    ext = AF_ACTION_LOG_EXT_TABLE
+    header = _af_report_header("Anti-fraud PH - Device & Identity Risk", snapshot_pt_date)
+    return f"""{header}
+-- Source: {ext} (event-level device/identity signals). Scope: {start.isoformat()} to {end.isoformat()}
+-- (rolling last 7 days). Account farming = one device (deviceuuid) or account (uid) tied to many
+-- distinct counterparties. Risk-flag prevalence counts events where the flag is set (clear or encrypted).
+
+-- 1. Account Farming Summary
+with dev as (
+  select deviceuuid, count(distinct uid) as accounts
+  from {ext}
+  where {pt} and deviceuuid is not null and trim(deviceuuid) <> ''
+  group by deviceuuid
+)
+select
+  count(1) as devices_seen,
+  sum(case when accounts >= 5 then 1 else 0 end) as devices_5plus_accounts,
+  sum(case when accounts >= 10 then 1 else 0 end) as devices_10plus_accounts,
+  max(accounts) as max_accounts_on_one_device,
+  cast(round(sum(case when accounts >= 5 then 1 else 0 end) / nullif(count(1), 0) * 100, 4) as decimal(20, 4)) as pct_devices_5plus_accounts
+from dev;
+
+-- 2. Top Multi-Account Devices
+-- Devices used by 5+ distinct accounts in the window - synthetic-identity / account-farming candidates.
+select
+  deviceuuid,
+  count(distinct uid) as distinct_accounts,
+  count(distinct scene_name) as distinct_scenes,
+  count(1) as events
+from {ext}
+where {pt} and deviceuuid is not null and trim(deviceuuid) <> ''
+group by deviceuuid
+having count(distinct uid) >= 5
+order by distinct_accounts desc
+limit 300;
+
+-- 3. Multi-Device Accounts
+-- Accounts that hop across 5+ distinct devices in the window - account-takeover / device-churn signal.
+select
+  uid,
+  count(distinct deviceuuid) as distinct_devices,
+  count(distinct scene_name) as distinct_scenes,
+  count(1) as events
+from {ext}
+where {pt} and uid is not null and trim(uid) <> ''
+group by uid
+having count(distinct deviceuuid) >= 5
+order by distinct_devices desc
+limit 300;
+
+-- 4. Risk Signal Prevalence
+-- One wide row: events flagged for each device-risk signal. Flag set = value not in known-negatives.
+select
+  count(1) as total_events,
+  sum(rooted) as rooted, sum(emulator) as emulator, sum(vpn) as vpn, sum(http_proxy) as http_proxy,
+  sum(gps_modified) as gps_modified, sum(fake_identity) as fake_identity, sum(fake_deviceinfo) as fake_deviceinfo,
+  sum(illegal_imei) as illegal_imei, sum(new_deviceid) as new_deviceid, sum(magisk) as magisk,
+  sum(system_debuggable) as system_debuggable, sum(risk_app_root) as risk_app_root,
+  sum(risk_app_vpn) as risk_app_vpn, sum(risk_app_fake_gps) as risk_app_fake_gps,
+  sum(risk_app_hook) as risk_app_hook, sum(remote_control) as remote_control, sum(autoclicker) as autoclicker
+from (
+  select
+    case when is_root not in {neg} then 1 else 0 end as rooted,
+    case when is_emulator not in {neg} then 1 else 0 end as emulator,
+    case when is_vpn not in {neg} then 1 else 0 end as vpn,
+    case when is_http_proxy not in {neg} then 1 else 0 end as http_proxy,
+    case when is_gps_modified not in {neg} then 1 else 0 end as gps_modified,
+    case when is_fake_identity not in {neg} then 1 else 0 end as fake_identity,
+    case when is_fake_deviceinfo not in {neg} then 1 else 0 end as fake_deviceinfo,
+    case when is_illegal_imei not in {neg} then 1 else 0 end as illegal_imei,
+    case when is_new_deviceid not in {neg} then 1 else 0 end as new_deviceid,
+    case when is_running_magisk not in {neg} then 1 else 0 end as magisk,
+    case when is_system_debuggable not in {neg} then 1 else 0 end as system_debuggable,
+    case when is_risk_app_install_root not in {neg} then 1 else 0 end as risk_app_root,
+    case when is_risk_app_install_vpn not in {neg} then 1 else 0 end as risk_app_vpn,
+    case when is_risk_app_install_fake_gps not in {neg} then 1 else 0 end as risk_app_fake_gps,
+    case when is_risk_app_install_hook not in {neg} then 1 else 0 end as risk_app_hook,
+    case when is_remote_control_acc_enable not in {neg} then 1 else 0 end as remote_control,
+    case when is_autoclicker_enable not in {neg} then 1 else 0 end as autoclicker
+  from {ext} where {pt}
+) f;
+
+-- 5. Risk Signals by Scene
+select
+  scene_name,
+  count(1) as events,
+  count(distinct uid) as distinct_accounts,
+  sum(case when (is_root not in {neg} or is_emulator not in {neg} or is_vpn not in {neg}
+    or is_http_proxy not in {neg} or is_gps_modified not in {neg} or is_fake_identity not in {neg}
+    or is_illegal_imei not in {neg} or is_risk_app_install_root not in {neg}) then 1 else 0 end) as risky_events
+from {ext}
+where {pt} and scene_name is not null and trim(scene_name) <> ''
+group by scene_name
+order by risky_events desc, events desc
+limit 100;
+
+-- 6. Multi-Account Device Trend
+select 'Multi-account devices (>=5)' as series, event_date, multi_account_devices as value
+from (
+  select pt_date as event_date, count(1) as multi_account_devices from (
+    select pt_date, deviceuuid, count(distinct uid) as accounts
+    from {ext}
+    where {pt} and deviceuuid is not null and trim(deviceuuid) <> ''
+    group by pt_date, deviceuuid
+    having count(distinct uid) >= 5
+  ) d group by pt_date
+) t
+order by event_date;
+"""
+
+
+def build_af_card_3ds_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    # Card-not-present fraud controls: 3DS (ACS) authentication outcomes + risk-based-auth scoring, plus
+    # card fraud cases by modus operandi. trans_status: Y=authenticated, N=not authenticated,
+    # C=challenge, R=rejected, U=unavailable, I=info. Amounts are minor units (/100 = PHP).
+    # Scope: last two full months + current MTD (pt_date = event day, partition-pruned).
+    win = business_insights_window(now)
+    span_start = win.span_start.isoformat()
+    span_end = win.span_end_exclusive.isoformat()
+    (l1, _s1, _e1), (l2, p2, _e2), (l3, p3, _e3) = win.periods
+    p2_iso, p3_iso = p2.isoformat(), p3.isoformat()
+    trans, rba, cf = AF_THREEDS_TRANS_TABLE, AF_THREEDS_RBA_LOG_TABLE, AF_CARD_FRAUD_CASE_TABLE
+    pt = f"pt_date >= '{span_start}' and pt_date < '{span_end}'"
+    period_expr = (
+        f"case when pt_date < '{p2_iso}' then '{l1}' when pt_date < '{p3_iso}' then '{l2}' else '{l3}' end"
+    )
+    header = _af_report_header("Anti-fraud PH - Card Fraud & 3DS Authentication", snapshot_pt_date)
+    return f"""{header}
+-- Source: {trans} (3DS ACS auth), {rba} (risk-based-auth scoring), {cf} (card fraud cases).
+-- Scope: {win.span_label}. trans_status Y=authenticated / N=not auth / C=challenge / R=rejected / U=unavailable.
+-- purchase_amount is in minor units; /100 approximates PHP.
+
+-- 1. 3DS Authentication Summary
+-- One row per period (last two full months + current MTD).
+select
+  {period_expr} as period,
+  count(1) as threeds_txns,
+  sum(case when trans_status = 'Y' then 1 else 0 end) as authenticated,
+  sum(case when trans_status = 'N' then 1 else 0 end) as not_authenticated,
+  sum(case when trans_status = 'C' then 1 else 0 end) as challenged,
+  sum(case when trans_status = 'R' then 1 else 0 end) as rejected,
+  sum(case when trans_status = 'U' then 1 else 0 end) as unavailable,
+  cast(round(sum(case when trans_status = 'Y' then 1 else 0 end) / nullif(count(1), 0) * 100, 2) as decimal(20, 2)) as auth_rate_pct,
+  cast(round(sum(case when trans_status = 'C' then 1 else 0 end) / nullif(count(1), 0) * 100, 2) as decimal(20, 2)) as challenge_rate_pct
+from {trans}
+where {pt}
+group by {period_expr}
+order by min(pt_date);
+
+-- 2. Outcome by Auth Status
+select
+  case trans_status when 'Y' then 'Authenticated' when 'N' then 'Not authenticated' when 'C' then 'Challenge'
+    when 'R' then 'Rejected' when 'U' then 'Unavailable' when 'I' then 'Info only' when 'A' then 'Attempted'
+    else concat('status_', coalesce(nullif(trim(trans_status), ''), '(blank)')) end as auth_status,
+  count(1) as threeds_txns,
+  cast(round(count(1) * 100.0 / sum(count(1)) over (), 2) as decimal(20, 2)) as share_pct
+from {trans}
+where {pt}
+group by 1
+order by threeds_txns desc;
+
+-- 3. Frictionless vs Challenge
+-- By the 3DS Requestor challenge indicator: how often a challenge was requested vs frictionless flow.
+select
+  case threeds_requestor_chlg_ind
+    when '01' then '01 No preference' when '02' then '02 No challenge requested'
+    when '03' then '03 Challenge requested' when '04' then '04 Challenge mandated'
+    when '05' then '05 No challenge (data share)' when '06' then '06 No challenge (risk analysis)'
+    else concat('ind_', coalesce(nullif(trim(threeds_requestor_chlg_ind), ''), '(blank)')) end as challenge_indicator,
+  count(1) as threeds_txns,
+  sum(case when trans_status = 'C' then 1 else 0 end) as resulted_in_challenge,
+  sum(case when trans_status = 'Y' then 1 else 0 end) as authenticated
+from {trans}
+where {pt}
+group by 1
+order by threeds_txns desc;
+
+-- 4. RBA Risk Distribution
+-- Risk-based-authentication evaluations by risk level (and average risk score).
+select
+  coalesce(nullif(trim(risk_level), ''), '(none)') as risk_level,
+  count(1) as risk_evaluations,
+  cast(round(avg(risk_score), 1) as decimal(20, 1)) as avg_risk_score,
+  min(risk_score) as min_score,
+  max(risk_score) as max_score
+from {rba}
+where {pt}
+group by 1
+order by risk_evaluations desc;
+
+-- 5. 3DS by Merchant Category (MCC)
+select
+  coalesce(nullif(trim(mcc), ''), '(none)') as mcc,
+  count(1) as threeds_txns,
+  sum(case when trans_status = 'Y' then 1 else 0 end) as authenticated,
+  cast(round(sum(case when trans_status = 'Y' then 1 else 0 end) / nullif(count(1), 0) * 100, 2) as decimal(20, 2)) as auth_rate_pct,
+  cast(round(sum(cast(purchase_amount as double)) / 100, 2) as decimal(20, 2)) as purchase_amount_php
+from {trans}
+where {pt}
+group by 1
+order by threeds_txns desc
+limit 100;
+
+-- 6. Card Fraud Cases by MO
+select
+  coalesce(nullif(trim(mo_reason), ''), 'Unspecified') as mo_reason,
+  coalesce(nullif(trim(sub_mo_reason), ''), 'Unspecified') as sub_mo_reason,
+  count(distinct case_id) as cases
+from {cf}
+where {pt}
+group by 1, 2
+order by cases desc
+limit 100;
+
+-- 7. Daily 3DS Trend
+with d as (
+  select pt_date,
+    sum(case when trans_status = 'Y' then 1 else 0 end) as authenticated,
+    sum(case when trans_status = 'C' then 1 else 0 end) as challenged,
+    sum(case when trans_status = 'R' then 1 else 0 end) as rejected
+  from {trans} where {pt} group by pt_date
+)
+select 'Authenticated' as series, pt_date as txn_date, authenticated as txns from d
+union all
+select 'Challenge' as series, pt_date as txn_date, challenged as txns from d
+union all
+select 'Rejected' as series, pt_date as txn_date, rejected as txns from d
+order by series, txn_date;
+"""
+
+
 def _normalize_header(value: Any) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9]+", "_", str(value or "").strip().lower()).strip("_")
     return normalized
@@ -2283,6 +2552,8 @@ class BusinessInsightsStore:
             AF_RULE_EFFECTIVENESS_REPORT_ID: lambda: build_af_rule_effectiveness_sql(now=now),
             AF_FRAUD_LOSS_REPORT_ID: lambda: build_af_fraud_loss_sql(now=now),
             AF_FACIAL_VERIFICATION_REPORT_ID: lambda: build_af_facial_verification_sql(now=now),
+            AF_DEVICE_RISK_REPORT_ID: lambda: build_af_device_risk_sql(now=now),
+            AF_CARD_3DS_REPORT_ID: lambda: build_af_card_3ds_sql(now=now),
         }
         builder = builders.get(report_id)
         if builder is None:

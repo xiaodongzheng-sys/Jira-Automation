@@ -39,6 +39,8 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from bpmis_jira_tool.business_insights import (  # noqa: E402
+    AF_CARD_3DS_REPORT_ID,
+    AF_DEVICE_RISK_REPORT_ID,
     AF_FACIAL_VERIFICATION_REPORT_ID,
     AF_FACIAL_VERIFICATION_TABLE,
     AF_FRAUD_LOSS_REPORT_ID,
@@ -58,6 +60,8 @@ from bpmis_jira_tool.business_insights import (  # noqa: E402
     PORTFOLIO_REPAYMENT_REPORT_ID,
     REPAY_PLAN_TABLE,
     UNDERWRITING_FUNNEL_REPORT_ID,
+    build_af_card_3ds_sql,
+    build_af_device_risk_sql,
     build_af_facial_verification_sql,
     build_af_fraud_loss_sql,
     build_af_rule_effectiveness_sql,
@@ -99,6 +103,14 @@ REPORT_BUILDERS: dict[str, tuple[str, Callable[..., str]]] = {
     AF_FACIAL_VERIFICATION_REPORT_ID: (
         "Anti-fraud PH - Facial Verification / Liveness & Deepfake",
         build_af_facial_verification_sql,
+    ),
+    AF_DEVICE_RISK_REPORT_ID: (
+        "Anti-fraud PH - Device & Identity Risk",
+        build_af_device_risk_sql,
+    ),
+    AF_CARD_3DS_REPORT_ID: (
+        "Anti-fraud PH - Card Fraud & 3DS Authentication",
+        build_af_card_3ds_sql,
     ),
 }
 
@@ -2653,6 +2665,170 @@ def write_visualization(
                 "Fraud Review Outcomes": "Search review status…",
             }
             panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder=placeholders.get(sheet_name, "Search…")))
+        path.write_text(
+            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),
+            encoding="utf-8",
+        )
+        return
+    if report_id == AF_DEVICE_RISK_REPORT_ID:
+        dr_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
+        kpis: list[tuple] = []
+        farming = dr_lookup.get("Account Farming Summary")
+        if farming and farming[1]:
+            fh, fr = farming
+            fc = {str(c): i for i, c in enumerate(fh)}
+            row0 = fr[0]
+
+            def _fv(col):
+                return row0[fc[col]] if col in fc and fc[col] < len(row0) else None
+
+            for label, col, suf in [
+                ("Devices w/ 5+ accounts", "devices_5plus_accounts", ""),
+                ("Devices w/ 10+ accounts", "devices_10plus_accounts", ""),
+                ("Max accounts on one device", "max_accounts_on_one_device", ""),
+                ("% devices 5+ accounts", "pct_devices_5plus_accounts", "%"),
+            ]:
+                v = _fv(col)
+                if v not in (None, ""):
+                    kpis.append((label, f"{_format_number(v)}{suf}" if _is_number(v) else f"{v}{suf}"))
+        insight_cards: list[tuple[str, str, str]] = []
+        top_dev = dr_lookup.get("Top Multi-Account Devices")
+        if top_dev and top_dev[1]:
+            tc = {str(c): i for i, c in enumerate(top_dev[0])}
+            if "distinct_accounts" in tc:
+                n = _number(top_dev[1][0][tc["distinct_accounts"]])
+                if n > 0:
+                    insight_cards.append(("Most-shared device", f"{int(n)} accounts on one device", "bad" if n >= 20 else "warn"))
+        multi_dev = dr_lookup.get("Multi-Device Accounts")
+        if multi_dev and multi_dev[1]:
+            mc = {str(c): i for i, c in enumerate(multi_dev[0])}
+            if "distinct_devices" in mc:
+                n = _number(multi_dev[1][0][mc["distinct_devices"]])
+                if n > 0:
+                    insight_cards.append(("Most device-hopping account", f"{int(n)} devices for one account", "bad" if n >= 20 else "warn"))
+        intro = _insight_panel("Highlights", insight_cards) + _kpi_cards_panel("Account Farming — last 7 days", kpis)
+        panels = []
+        for sheet_name, headers, rows in sheets:
+            if sheet_name == "Account Farming Summary":
+                continue
+            if sheet_name == "Risk Signal Prevalence":
+                if rows:
+                    rc = {str(c): i for i, c in enumerate(headers)}
+                    total = _number(rows[0][rc["total_events"]]) if "total_events" in rc else 0
+                    sig_rows = []
+                    for col in headers:
+                        c = str(col)
+                        if c == "total_events":
+                            continue
+                        v = _number(rows[0][rc[c]] if rc[c] < len(rows[0]) else 0)
+                        pct = round(v / total * 100, 4) if total else 0
+                        sig_rows.append([c.replace("_", " "), int(v), pct])
+                    sig_rows.sort(key=lambda r: r[1], reverse=True)
+                    bar = _bar_panel(
+                        "Top Device Risk Signals (events)",
+                        [(r[0], r[1]) for r in sig_rows[:12] if r[1] > 0],
+                        note="Events flagged for each device-risk signal in the window.",
+                    )
+                    if bar:
+                        panels.append(bar)
+                    panels.append(_searchable_table_panel(
+                        "Risk Signal Prevalence", ["risk_signal", "events", "share_of_events_pct"], sig_rows,
+                        placeholder="Search signal…"))
+                continue
+            if sheet_name == "Multi-Account Device Trend":
+                panels.append(_daily_trend_panel(
+                    "Multi-Account Device Trend", headers, rows,
+                    rule_column="series", date_column="event_date", value_column="value"))
+                continue
+            placeholder = {
+                "Top Multi-Account Devices": "Search device…",
+                "Multi-Device Accounts": "Search account…",
+                "Risk Signals by Scene": "Search scene…",
+            }.get(sheet_name, "Search…")
+            panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder=placeholder))
+        path.write_text(
+            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),
+            encoding="utf-8",
+        )
+        return
+    if report_id == AF_CARD_3DS_REPORT_ID:
+        c3_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
+        summary = c3_lookup.get("3DS Authentication Summary")
+        kpi_panel = _period_kpi_panel(
+            "3DS Authentication",
+            summary,
+            [
+                ("3DS txns", "threeds_txns", "num"), ("Authenticated", "authenticated", "num"),
+                ("Auth rate", "auth_rate_pct", "pct"), ("Challenged", "challenged", "num"),
+                ("Challenge rate", "challenge_rate_pct", "pct"),
+            ],
+        ) if summary else ""
+        insight_cards = []
+        if summary and summary[1]:
+            cur, _p, cur_label, _pl, _m, _s = _period_rows(summary)
+            sc = {str(c): i for i, c in enumerate(summary[0])}
+
+            def _cv3(col):
+                return cur[sc[col]] if cur is not None and col in sc and sc[col] < len(cur) else None
+
+            ar = _cv3("auth_rate_pct")
+            if ar not in (None, ""):
+                arn = _number(ar)
+                insight_cards.append((f"Auth rate ({cur_label})", f"{ar}%", "good" if arn >= 90 else ("warn" if arn >= 75 else "bad")))
+            cr = _cv3("challenge_rate_pct")
+            if cr not in (None, ""):
+                insight_cards.append((f"Challenge rate ({cur_label})", f"{cr}%", "warn" if _number(cr) >= 20 else ""))
+        intro = _insight_panel("Highlights", insight_cards) + kpi_panel
+        panels = []
+        for sheet_name, headers, rows in sheets:
+            if sheet_name == "Outcome by Auth Status":
+                col = {str(c): i for i, c in enumerate(headers)}
+                if "auth_status" in col and "threeds_txns" in col:
+                    donut = _donut_panel(
+                        "3DS Outcome Mix",
+                        [(str(r[col["auth_status"]]), r[col["threeds_txns"]]) for r in rows
+                         if col["auth_status"] < len(r) and col["threeds_txns"] < len(r)],
+                        note="Share of 3DS authentication outcomes over the span.")
+                    if donut:
+                        panels.append(donut)
+                panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Search status…"))
+                continue
+            if sheet_name == "RBA Risk Distribution":
+                col = {str(c): i for i, c in enumerate(headers)}
+                if "risk_level" in col and "risk_evaluations" in col:
+                    bar = _bar_panel(
+                        "RBA Evaluations by Risk Level",
+                        [(str(r[col["risk_level"]]), r[col["risk_evaluations"]]) for r in rows
+                         if col["risk_level"] < len(r) and col["risk_evaluations"] < len(r)],
+                        note="Risk-based-authentication evaluations by risk level.")
+                    if bar:
+                        panels.append(bar)
+                panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Filter…"))
+                continue
+            if sheet_name == "Card Fraud Cases by MO":
+                col = {str(c): i for i, c in enumerate(headers)}
+                if "sub_mo_reason" in col and "cases" in col:
+                    bar = _bar_panel(
+                        "Card Fraud Cases by Sub-MO",
+                        sorted([(str(r[col["sub_mo_reason"]]), r[col["cases"]]) for r in rows
+                                if col["sub_mo_reason"] < len(r) and col["cases"] < len(r)],
+                               key=lambda kv: _number(kv[1]), reverse=True)[:12],
+                        note="Confirmed card fraud cases by modus operandi.")
+                    if bar:
+                        panels.append(bar)
+                panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Search MO…"))
+                continue
+            if sheet_name == "Daily 3DS Trend":
+                panels.append(_daily_trend_panel(
+                    "Daily 3DS Trend", headers, rows,
+                    rule_column="series", date_column="txn_date", value_column="txns"))
+                continue
+            placeholder = {
+                "3DS Authentication Summary": "Filter…",
+                "Frictionless vs Challenge": "Filter…",
+                "3DS by Merchant Category (MCC)": "Search MCC…",
+            }.get(sheet_name, "Search…")
+            panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder=placeholder))
         path.write_text(
             _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),
             encoding="utf-8",
