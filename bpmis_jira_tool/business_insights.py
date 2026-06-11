@@ -96,6 +96,7 @@ PRODUCT_LABEL_COLUMNS: set[str] = {"product", "product_code", "sub-product", "su
 AF_SCENARIOS_ACTIONS_REPORT_ID = "anti-fraud-ph-scenarios-actions-auth-steps"
 AF_RULES_FEATURES_REPORT_ID = "anti-fraud-ph-rules-features"
 AF_RULE_EFFECTIVENESS_REPORT_ID = "anti-fraud-ph-rule-effectiveness"
+AF_FRAUD_LOSS_REPORT_ID = "anti-fraud-ph-fraud-loss-cases"
 
 AF_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_scene_tab_ss"
 AF_SUB_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_sub_scene_tab_ss"
@@ -163,6 +164,29 @@ SEEDED_REPORTS: tuple[dict[str, str], ...] = (
         "type": "af_rule_effectiveness",
         "status": "generator_ready",
     },
+    {
+        "id": AF_FRAUD_LOSS_REPORT_ID,
+        "domain": "anti-fraud",
+        "name": "Anti-fraud PH - Fraud Loss & Case Outcomes",
+        "type": "af_fraud_loss",
+        "status": "generator_ready",
+    },
+)
+
+# Reports whose artifacts can be regenerated on demand by running the live
+# generation CLI (`scripts/generate_business_insights_live_reports.py`) against
+# Data Workbench. Keep in sync with that script's REPORT_BUILDERS. Excludes the
+# underwriting funnel (ingested via manual Excel upload) and any seeded report
+# that has no SQL generator yet.
+GENERATOR_REPORT_IDS: frozenset[str] = frozenset(
+    {
+        PORTFOLIO_REPAYMENT_REPORT_ID,
+        LIMIT_UTILIZATION_REPORT_ID,
+        APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID,
+        AF_SCENARIOS_ACTIONS_REPORT_ID,
+        AF_RULES_FEATURES_REPORT_ID,
+        AF_RULE_EFFECTIVENESS_REPORT_ID,
+    }
 )
 
 
@@ -1112,6 +1136,103 @@ order by transactions desc;
 """
 
 
+def build_af_fraud_loss_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    # Scope: cases opened in the previous complete calendar month (e.g. May 2026 when run in June).
+    period = business_insights_period(now)
+    month_label = period.previous_month_label
+    month_start_iso = period.previous_month_start.isoformat()
+    next_month_iso = period.current_month_start.isoformat()
+    case_snap = _aliased_snapshot_filter("c", AF_REVIEW_CASE_TABLE, snapshot_pt_date)
+    window = f"c.case_open_datetime >= '{month_start_iso}' and c.case_open_datetime < '{next_month_iso}'"
+    # Confirmed fraud = a fraud modus operandi was assigned (not the 'Not Fraud'/'Pending' verdicts).
+    fraud_expr = "lower(trim(coalesce(c.fraud_mo_type, ''))) not in ('not fraud', 'pending', '')"
+    mo_expr = "case when trim(coalesce(c.fraud_mo_type, '')) = '' then 'Unspecified' else c.fraud_mo_type end"
+    subtype_expr = "case when trim(coalesce(c.fraud_mo_subtype, '')) = '' then 'Unspecified' else c.fraud_mo_subtype end"
+    review_hours = (
+        "round(avg(case when c.case_status = 'CLOSED' and c.case_closed_timestamp is not null "
+        "and c.case_open_timestamp is not null then (c.case_closed_timestamp - c.case_open_timestamp) / 3600000.0 end), 1)"
+    )
+    header = _af_report_header("Anti-fraud PH - Fraud Loss & Case Outcomes", snapshot_pt_date)
+    return f"""{header}
+-- Source: DWD review_case (fraud case management). Scope: cases opened in {month_label}.
+-- Confirmed fraud = fraud_mo_type not in ('Not Fraud','Pending',''). All amounts are in PHP; the loss
+-- split uses the loss_amt_borne_by_* columns (loss_borne_by text is not populated). Review hours use
+-- (case_closed_timestamp - case_open_timestamp) for closed cases.
+
+-- 1. Case & Loss Summary
+select
+  '{month_label}' as period,
+  count(1) as cases_opened,
+  sum(case when {fraud_expr} then 1 else 0 end) as fraud_cases,
+  round(sum(case when {fraud_expr} then 1 else 0 end) / nullif(count(1), 0) * 100, 2) as fraud_rate_pct,
+  cast(round(sum(coalesce(c.loss_total_amt, 0)), 2) as decimal(20, 2)) as total_loss_php,
+  cast(round(sum(coalesce(c.loss_amt_borne_by_customer, 0)), 2) as decimal(20, 2)) as loss_customer_php,
+  cast(round(sum(coalesce(c.loss_amt_borne_by_bank, 0)), 2) as decimal(20, 2)) as loss_bank_php,
+  cast(round(sum(coalesce(c.loss_amt_borne_by_third_party, 0)), 2) as decimal(20, 2)) as loss_third_party_php,
+  cast(round(sum(coalesce(c.loss_recovered_amt, 0)), 2) as decimal(20, 2)) as recovered_php,
+  sum(case when c.case_status = 'CLOSED' then 1 else 0 end) as closed_cases,
+  sum(case when c.case_status = 'OPEN' then 1 else 0 end) as open_cases,
+  {review_hours} as avg_review_hours
+from {AF_REVIEW_CASE_TABLE} c
+where {case_snap} and {window};
+
+-- 2. Loss by Fraud MO Type
+select
+  {mo_expr} as fraud_mo_type,
+  count(1) as cases,
+  count(distinct case when trim(coalesce(c.fraud_mo_subtype, '')) <> '' then c.fraud_mo_subtype end) as distinct_subtypes,
+  cast(round(sum(coalesce(c.loss_total_amt, 0)), 2) as decimal(20, 2)) as total_loss_php,
+  cast(round(avg(coalesce(c.loss_total_amt, 0)), 2) as decimal(20, 2)) as avg_loss_php,
+  cast(round(sum(coalesce(c.loss_recovered_amt, 0)), 2) as decimal(20, 2)) as recovered_php
+from {AF_REVIEW_CASE_TABLE} c
+where {case_snap} and {window}
+group by {mo_expr}
+order by total_loss_php desc, cases desc;
+
+-- 3. Fraud MO Subtype Breakdown
+select
+  {mo_expr} as fraud_mo_type,
+  {subtype_expr} as fraud_mo_subtype,
+  count(1) as cases,
+  cast(round(sum(coalesce(c.loss_total_amt, 0)), 2) as decimal(20, 2)) as total_loss_php,
+  cast(round(sum(coalesce(c.loss_recovered_amt, 0)), 2) as decimal(20, 2)) as recovered_php
+from {AF_REVIEW_CASE_TABLE} c
+where {case_snap} and {window}
+group by {mo_expr}, {subtype_expr}
+order by {mo_expr}, total_loss_php desc;
+
+-- 4. Case Status & SLA
+select
+  coalesce(nullif(trim(c.case_status), ''), 'Unspecified') as case_status,
+  count(1) as cases,
+  cast(round(sum(coalesce(c.loss_total_amt, 0)), 2) as decimal(20, 2)) as total_loss_php,
+  {review_hours} as avg_review_hours
+from {AF_REVIEW_CASE_TABLE} c
+where {case_snap} and {window}
+group by coalesce(nullif(trim(c.case_status), ''), 'Unspecified')
+order by cases desc;
+
+-- 5. Daily Fraud Loss Trend
+-- Daily total loss per fraud MO type plus an 'All' series; powers the filterable trend chart.
+with base as (
+  select {mo_expr} as fraud_mo_type, substr(c.case_open_datetime, 1, 10) as case_open_date,
+    coalesce(c.loss_total_amt, 0) as loss
+  from {AF_REVIEW_CASE_TABLE} c
+  where {case_snap} and {window}
+)
+select fraud_mo_type, case_open_date,
+  cast(round(sum(loss), 2) as decimal(20, 2)) as daily_loss_php,
+  count(1) as daily_cases
+from base group by fraud_mo_type, case_open_date
+union all
+select 'All' as fraud_mo_type, case_open_date,
+  cast(round(sum(loss), 2) as decimal(20, 2)) as daily_loss_php,
+  count(1) as daily_cases
+from base group by case_open_date
+order by fraud_mo_type, case_open_date;
+"""
+
+
 def _normalize_header(value: Any) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9]+", "_", str(value or "").strip().lower()).strip("_")
     return normalized
@@ -1488,6 +1609,7 @@ class BusinessInsightsStore:
             AF_SCENARIOS_ACTIONS_REPORT_ID: lambda: build_af_scenarios_actions_sql(now=now),
             AF_RULES_FEATURES_REPORT_ID: lambda: build_af_rules_features_sql(now=now),
             AF_RULE_EFFECTIVENESS_REPORT_ID: lambda: build_af_rule_effectiveness_sql(now=now),
+            AF_FRAUD_LOSS_REPORT_ID: lambda: build_af_fraud_loss_sql(now=now),
         }
         builder = builders.get(report_id)
         if builder is None:

@@ -39,7 +39,9 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from bpmis_jira_tool.business_insights import (  # noqa: E402
+    AF_FRAUD_LOSS_REPORT_ID,
     AF_REQUEST_STATISTIC_TABLE,
+    AF_REVIEW_CASE_TABLE,
     AF_RULE_CONFIG_TABLE,
     AF_RULE_EFFECTIVENESS_REPORT_ID,
     AF_RULES_FEATURES_REPORT_ID,
@@ -54,6 +56,7 @@ from bpmis_jira_tool.business_insights import (  # noqa: E402
     PORTFOLIO_REPAYMENT_REPORT_ID,
     REPAY_PLAN_TABLE,
     UNDERWRITING_FUNNEL_REPORT_ID,
+    build_af_fraud_loss_sql,
     build_af_rule_effectiveness_sql,
     build_af_rules_features_sql,
     build_af_scenarios_actions_sql,
@@ -86,6 +89,10 @@ REPORT_BUILDERS: dict[str, tuple[str, Callable[..., str]]] = {
         "Anti-fraud PH - Rule Effectiveness / Hit-Rate",
         build_af_rule_effectiveness_sql,
     ),
+    AF_FRAUD_LOSS_REPORT_ID: (
+        "Anti-fraud PH - Fraud Loss & Case Outcomes",
+        build_af_fraud_loss_sql,
+    ),
 }
 
 # Anchor table per report used to resolve the latest available pt_date when the
@@ -98,6 +105,7 @@ REPORT_SNAPSHOT_ANCHOR_TABLE: dict[str, str] = {
     AF_SCENARIOS_ACTIONS_REPORT_ID: AF_SCENARIO_FLOW_CONFIG_TABLE,
     AF_RULES_FEATURES_REPORT_ID: AF_RULE_CONFIG_TABLE,
     AF_RULE_EFFECTIVENESS_REPORT_ID: AF_REQUEST_STATISTIC_TABLE,
+    AF_FRAUD_LOSS_REPORT_ID: AF_REVIEW_CASE_TABLE,
 }
 
 LATEST_SNAPSHOT = "latest"
@@ -1782,6 +1790,87 @@ def write_visualization(
                     rows,
                     placeholder=placeholders.get(sheet_name, "Search…"),
                 )
+            )
+        path.write_text(
+            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),
+            encoding="utf-8",
+        )
+        return
+    if report_id == AF_FRAUD_LOSS_REPORT_ID:
+        loss_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
+        kpis: list[tuple[str, str]] = []
+        scope_label = ""
+        summary = loss_lookup.get("Case & Loss Summary")
+        if summary and summary[1]:
+            cols = {str(col): offset for offset, col in enumerate(summary[0])}
+            srow = summary[1][0]
+
+            def _v(col: str) -> Any:
+                return srow[cols[col]] if col in cols and cols[col] < len(srow) else None
+
+            def _money(col: str) -> str:
+                value = _v(col)
+                return "" if value in (None, "") else f"₱{_format_number(value)}"
+
+            def _plain(col: str) -> str:
+                value = _v(col)
+                return "" if value in (None, "") else _format_number(value)
+
+            scope_label = str(_v("period") or "").strip()
+            kpis = [
+                ("Cases opened", _plain("cases_opened")),
+                ("Confirmed fraud", _plain("fraud_cases")),
+                ("Fraud rate", f"{_v('fraud_rate_pct')}%" if _v("fraud_rate_pct") not in (None, "") else ""),
+                ("Total loss", _money("total_loss_php")),
+                ("Borne by customer", _money("loss_customer_php")),
+                ("Borne by bank", _money("loss_bank_php")),
+                ("Recovered", _money("recovered_php")),
+                ("Avg review time", f"{_v('avg_review_hours')}h" if _v("avg_review_hours") not in (None, "") else ""),
+            ]
+            kpis = [(label, value) for label, value in kpis if value not in (None, "")]
+        intro = _kpi_cards_panel(f"Fraud Loss Summary — {scope_label}" if scope_label else "Fraud Loss Summary", kpis)
+        subtype_breakdown = loss_lookup.get("Fraud MO Subtype Breakdown")
+        nested_sheets = {"Fraud MO Subtype Breakdown"}
+        placeholders = {"Case Status & SLA": "Search status…"}
+        panels = []
+        for sheet_name, headers, rows in sheets:
+            if sheet_name == "Case & Loss Summary" or sheet_name in nested_sheets:
+                continue  # summary -> KPI cards; subtype breakdown -> nested under the MO panel
+            if sheet_name == "Loss by Fraud MO Type" and subtype_breakdown:
+                panels.append(
+                    _expandable_rule_panel(
+                        "Loss by Fraud MO Type",
+                        "Search fraud type or subtype…",
+                        (headers, rows),
+                        subtype_breakdown,
+                        key_columns=("fraud_mo_type",),
+                        main_columns=(
+                            "fraud_mo_type",
+                            "cases",
+                            "distinct_subtypes",
+                            "total_loss_php",
+                            "avg_loss_php",
+                            "recovered_php",
+                        ),
+                        detail_columns=("fraud_mo_subtype", "cases", "total_loss_php", "recovered_php"),
+                        name_column="fraud_mo_subtype",
+                    )
+                )
+                continue
+            if sheet_name == "Daily Fraud Loss Trend":
+                panels.append(
+                    _daily_trend_panel(
+                        "Daily Fraud Loss Trend",
+                        headers,
+                        rows,
+                        rule_column="fraud_mo_type",
+                        date_column="case_open_date",
+                        value_column="daily_loss_php",
+                    )
+                )
+                continue
+            panels.append(
+                _searchable_table_panel(sheet_name, headers, rows, placeholder=placeholders.get(sheet_name, "Search…"))
             )
         path.write_text(
             _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),

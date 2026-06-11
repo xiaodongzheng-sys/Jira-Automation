@@ -14,6 +14,7 @@ from openpyxl import load_workbook
 from bpmis_jira_tool.business_insights import (
     AF_FEATURE_CONFIG_TABLE,
     AF_ACTION_LOG_TABLE,
+    AF_FRAUD_LOSS_REPORT_ID,
     AF_IDENTIFY_REJECT_TABLE,
     AF_PUNISH_LIST_TABLE,
     AF_REQUEST_STATISTIC_TABLE,
@@ -31,6 +32,7 @@ from bpmis_jira_tool.business_insights import (
     PORTFOLIO_REPAYMENT_REPORT_ID,
     UNDERWRITING_FUNNEL_REPORT_ID,
     UNDERWRITING_FUNNEL_TABLE,
+    build_af_fraud_loss_sql,
     build_af_rule_effectiveness_sql,
     build_af_rules_features_sql,
     build_af_scenarios_actions_sql,
@@ -317,7 +319,8 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertIn("Anti-fraud PH - L1+L2 Scenarios, Actions &amp; Auth Steps", response.get_data(as_text=True))
         self.assertIn("Anti-fraud PH - Rules &amp; Features", response.get_data(as_text=True))
         self.assertIn("Anti-fraud PH - Rule Effectiveness / Hit-Rate", response.get_data(as_text=True))
-        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 7)
+        self.assertIn("Anti-fraud PH - Fraud Loss &amp; Case Outcomes", response.get_data(as_text=True))
+        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 8)
         self.assertNotIn("Upload Export", response.get_data(as_text=True))
         self.assertIsNone(soup.select_one("[data-business-insights-upload]"))
 
@@ -586,7 +589,7 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
         returned_ids = {report["id"] for report in reports_response.get_json()["reports"]}
         self.assertEqual(
             returned_ids,
-            {AF_SCENARIOS_ACTIONS_REPORT_ID, AF_RULES_FEATURES_REPORT_ID, AF_RULE_EFFECTIVENESS_REPORT_ID},
+            {AF_SCENARIOS_ACTIONS_REPORT_ID, AF_RULES_FEATURES_REPORT_ID, AF_RULE_EFFECTIVENESS_REPORT_ID, AF_FRAUD_LOSS_REPORT_ID},
         )
         self.assertEqual(page_response.status_code, 200)
         self.assertIn(
@@ -846,6 +849,77 @@ class RuleEffectivenessExtraSectionsTests(unittest.TestCase):
         self.assertIn("data-trend-data", html)
         # Not rendered as a flat table.
         self.assertNotIn('<th>trigger_trxn</th>', html)
+
+
+class FraudLossBusinessInsightsTests(unittest.TestCase):
+    def test_seeded_and_generator_registration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ids = {r["id"] for r in BusinessInsightsStore(Path(tmp)).reports("anti-fraud")}
+        self.assertIn(AF_FRAUD_LOSS_REPORT_ID, ids)
+        self.assertIn(AF_FRAUD_LOSS_REPORT_ID, REPORT_BUILDERS)
+        self.assertEqual(REPORT_BUILDERS[AF_FRAUD_LOSS_REPORT_ID][0], "Anti-fraud PH - Fraud Loss & Case Outcomes")
+
+    def test_sql_sections_and_scope(self):
+        sql = build_af_fraud_loss_sql(snapshot_pt_date="2026-06-08", now=FIXED_NOW)
+        sections = extract_sql_sections(sql)
+        self.assertEqual(
+            [s.sheet_name for s in sections],
+            [
+                "Case & Loss Summary",
+                "Loss by Fraud MO Type",
+                "Fraud MO Subtype Breakdown",
+                "Case Status & SLA",
+                "Daily Fraud Loss Trend",
+            ],
+        )
+        self.assertIn(AF_REVIEW_CASE_TABLE, sql)
+        # Scoped to the previous full month (April 2026 under the fixed clock), confirmed-fraud definition.
+        self.assertIn("case_open_datetime >= '2026-04-01'", sql)
+        self.assertIn("case_open_datetime < '2026-05-01'", sql)
+        self.assertIn("not in ('not fraud', 'pending', '')", sql)
+        self.assertIn("loss_amt_borne_by_customer", sql)
+        self.assertIn("total_loss_php", sql)
+
+    def test_visualization_renders_kpis_mo_expand_and_trend(self):
+        sheets = [
+            ("Case & Loss Summary",
+             ["period", "cases_opened", "fraud_cases", "fraud_rate_pct", "total_loss_php", "loss_customer_php", "loss_bank_php", "loss_third_party_php", "recovered_php", "closed_cases", "open_cases", "avg_review_hours"],
+             [["May 2026", "7842", "1330", "16.96", "18169639.46", "17993073.06", "139", "176427.4", "52947.11", "7562", "280", "25.6"]]),
+            ("Loss by Fraud MO Type",
+             ["fraud_mo_type", "cases", "distinct_subtypes", "total_loss_php", "avg_loss_php", "recovered_php"],
+             [["Scam", "881", "5", "15000000", "17026.1", "40000"], ["Not Fraud", "6156", "0", "0", "0", "0"]]),
+            ("Fraud MO Subtype Breakdown",
+             ["fraud_mo_type", "fraud_mo_subtype", "cases", "total_loss_php", "recovered_php"],
+             [["Scam", "Investment Scam", "400", "9000000", "20000"], ["Scam", "Romance Scam", "200", "6000000", "20000"]]),
+            ("Case Status & SLA", ["case_status", "cases", "total_loss_php", "avg_review_hours"],
+             [["CLOSED", "7562", "16124651.25", "24.1"], ["OPEN", "280", "2044988.21", ""]]),
+            ("Daily Fraud Loss Trend", ["fraud_mo_type", "case_open_date", "daily_loss_php", "daily_cases"],
+             [["All", "2026-05-01", "500000", "260"], ["Scam", "2026-05-01", "480000", "30"]]),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "viz.html"
+            write_visualization(
+                output_path,
+                report_title="Anti-fraud PH - Fraud Loss & Case Outcomes",
+                snapshot_pt_date="2026-06-08",
+                sheets=sheets,
+                report_id=AF_FRAUD_LOSS_REPORT_ID,
+            )
+            html = output_path.read_text(encoding="utf-8")
+
+        # KPI cards (loss formatted with peso sign), MO expandable, status table, trend chart.
+        self.assertIn("Fraud Loss Summary", html)
+        self.assertIn("Total loss", html)
+        self.assertIn("₱", html)  # peso sign
+        self.assertIn("<h2>Loss by Fraud MO Type</h2>", html)
+        self.assertIn('class="rule-table"', html)
+        self.assertIn("Investment Scam", html)  # nested subtype
+        self.assertNotIn("<h2>Fraud MO Subtype Breakdown</h2>", html)  # nested, not standalone
+        self.assertIn("<h2>Case Status &amp; SLA</h2>", html)
+        self.assertIn("<h2>Daily Fraud Loss Trend</h2>", html)
+        self.assertIn("data-trend-svg", html)
+        # The single-row summary is shown as KPIs, not a table panel.
+        self.assertNotIn("<h2>Case &amp; Loss Summary</h2>", html)
 
 
 if __name__ == "__main__":
