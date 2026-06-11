@@ -729,10 +729,13 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
         # The benchmark denominator comes from the fmart action log scene traffic.
         self.assertIn("scene_traffic", sql)
         self.assertGreaterEqual(sql.count(AF_ACTION_LOG_TABLE), 3)  # reject, punish, challenge sections
-        # Full previous calendar month (April 2026) bounded by exclusive upper key.
-        self.assertIn("Scope: Apr 2026", sql)
-        self.assertIn("rq.date >= '20260401'", sql)
-        self.assertIn("rq.date < '20260501'", sql)
+        # Spans the last two full months + current MTD (Mar+Apr full, May MTD under the fixed clock).
+        self.assertIn("Scope: Mar 2026 – May 2026 MTD", sql)
+        self.assertIn("rq.date >= '20260301'", sql)
+        self.assertIn("rq.date < '20260527'", sql)
+        # Summary is per-period (Mar / Apr / May MTD).
+        self.assertIn("'May 2026 MTD'", sql)
+        self.assertIn("then 'Mar 2026'", sql)
         # Action rate derived from pass+challenge+reject, not the unpopulated total_req_num column.
         self.assertIn("total_outcomes", sql)
         self.assertNotIn("rq.total_req_num", sql)
@@ -907,9 +910,11 @@ class FraudLossBusinessInsightsTests(unittest.TestCase):
         self.assertIn(AF_REVIEW_RECORD_TABLE, sql)
         self.assertIn("review_status = 'PENDING'", sql)
         self.assertIn("pending_records", sql)
-        # Scoped to the previous full month (April 2026 under the fixed clock), confirmed-fraud definition.
-        self.assertIn("case_open_datetime >= '2026-04-01'", sql)
-        self.assertIn("case_open_datetime < '2026-05-01'", sql)
+        # Spans the last two full months + current MTD (Mar 1 -> May 27 under the fixed clock).
+        self.assertIn("case_open_datetime >= '2026-03-01'", sql)
+        self.assertIn("case_open_datetime < '2026-05-27'", sql)
+        # Summary is per-period.
+        self.assertIn("'May 2026 MTD'", sql)
         self.assertIn("not in ('not fraud', 'pending', '')", sql)
         self.assertIn("loss_amt_borne_by_customer", sql)
         self.assertIn("total_loss_php", sql)

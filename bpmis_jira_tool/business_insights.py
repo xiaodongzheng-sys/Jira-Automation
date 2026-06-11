@@ -230,6 +230,35 @@ def business_insights_period(now: datetime | None = None) -> BusinessInsightsPer
     )
 
 
+@dataclass(frozen=True)
+class ReportWindow:
+    """The last two full calendar months plus the current month-to-date."""
+
+    periods: tuple[tuple[str, date, date], ...]  # (label, start, end_exclusive) per period
+    span_start: date
+    span_end_exclusive: date
+    span_label: str
+
+
+def business_insights_window(now: datetime | None = None) -> ReportWindow:
+    period = business_insights_period(now)
+    current_month_start = period.current_month_start
+    previous_month_start = period.previous_month_start
+    prev2_month_start = (previous_month_start - timedelta(days=1)).replace(day=1)
+    end_exclusive = period.end_exclusive
+    periods = (
+        (prev2_month_start.strftime("%b %Y"), prev2_month_start, previous_month_start),
+        (previous_month_start.strftime("%b %Y"), previous_month_start, current_month_start),
+        (current_month_start.strftime("%b %Y") + " MTD", current_month_start, end_exclusive),
+    )
+    return ReportWindow(
+        periods=periods,
+        span_start=prev2_month_start,
+        span_end_exclusive=end_exclusive,
+        span_label=f"{prev2_month_start.strftime('%b %Y')} – {current_month_start.strftime('%b %Y')} MTD",
+    )
+
+
 def _date_to_epoch_millis(value: date) -> int:
     instant = datetime.combine(value, time.min, tzinfo=BUSINESS_INSIGHTS_TIMEZONE)
     return int(instant.timestamp() * 1000)
@@ -773,33 +802,38 @@ order by case when fc.status = 1 then 0 else 1 end, fc.feature_id;
 
 
 def build_af_rule_effectiveness_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
-    # Scope: the previous complete calendar month relative to `now` (e.g. May 2026 when run in June).
-    period = business_insights_period(now)
-    month_start = period.previous_month_start
-    month_end_exclusive = period.current_month_start
-    month_label = period.previous_month_label
-    start_ms = _date_to_epoch_millis(month_start)
-    end_ms = _date_to_epoch_millis(month_end_exclusive)
-    start_key = _yyyymmdd(month_start)
-    end_key_exclusive = _yyyymmdd(month_end_exclusive)
-    month_start_iso = month_start.isoformat()
-    month_end_iso = (month_end_exclusive - timedelta(days=1)).isoformat()
-    next_month_iso = month_end_exclusive.isoformat()
+    # Scope: the last two full calendar months + the current month-to-date (e.g. Apr+May full, Jun MTD).
+    # Detail/trend sections aggregate over the whole span; the summary breaks it out per period.
+    window = business_insights_window(now)
+    span_label = window.span_label
+    span_start, span_end_exclusive = window.span_start, window.span_end_exclusive
+    p2_start, p3_start = window.periods[1][1], window.periods[2][1]
+    p1_label, p2_label, p3_label = (p[0] for p in window.periods)
+    # Span-wide bounds reused by every detail/trend section below.
+    start_ms = _date_to_epoch_millis(span_start)
+    end_ms = _date_to_epoch_millis(span_end_exclusive)
+    start_key = _yyyymmdd(span_start)
+    end_key_exclusive = _yyyymmdd(span_end_exclusive)
+    p2_key, p3_key = _yyyymmdd(p2_start), _yyyymmdd(p3_start)
+    month_start_iso = span_start.isoformat()
+    month_end_iso = (span_end_exclusive - timedelta(days=1)).isoformat()
+    next_month_iso = span_end_exclusive.isoformat()
     request_snap = _aliased_snapshot_filter("rq", AF_REQUEST_STATISTIC_TABLE, snapshot_pt_date)
     reject_snap = _aliased_snapshot_filter("r", AF_IDENTIFY_REJECT_TABLE, snapshot_pt_date)
     punish_snap = _aliased_snapshot_filter("p", AF_PUNISH_LIST_TABLE, snapshot_pt_date)
     stat_snap = _aliased_snapshot_filter("rs", AF_RULE_TRIGGER_STATISTIC_TABLE, snapshot_pt_date)
     header = _af_report_header("Anti-fraud PH - Rule Effectiveness / Hit-Rate", snapshot_pt_date)
     return f"""{header}
--- Scope: {month_label} (full calendar month, {month_start.isoformat()} to {month_end_exclusive.isoformat()} exclusive).
+-- Scope: {span_label} ({span_start.isoformat()} to {span_end_exclusive.isoformat()} exclusive).
 -- rule_trigger_log_tab and identify_record_tab are empty in ODS; this uses request_statistic,
 -- identify_reject, and rule_trigger_statistic. Each pt_date is a cumulative snapshot, so a single
 -- (latest) snapshot is pinned and rows are scoped by date / operation_time to avoid double counting.
 -- Action rate uses pass+challenge+reject as the denominator (total_req_num is not populated).
 
 -- 1. Request Outcome Summary
+-- One row per period (last two full months + current MTD) for comparison.
 select
-  '{month_label}' as period,
+  case when rq.date < '{p2_key}' then '{p1_label}' when rq.date < '{p3_key}' then '{p2_label}' else '{p3_label}' end as period,
   sum(coalesce(rq.pass_num, 0)) + sum(coalesce(rq.challenge_num, 0)) + sum(coalesce(rq.reject_num, 0)) as total_outcomes,
   sum(coalesce(rq.success_num, 0)) as successful_requests,
   sum(coalesce(rq.fail_num, 0)) as failed_requests,
@@ -811,7 +845,9 @@ select
 from {AF_REQUEST_STATISTIC_TABLE} rq
 where {request_snap}
   and rq.date >= '{start_key}'
-  and rq.date < '{end_key_exclusive}';
+  and rq.date < '{end_key_exclusive}'
+group by case when rq.date < '{p2_key}' then '{p1_label}' when rq.date < '{p3_key}' then '{p2_label}' else '{p3_label}' end
+order by min(rq.date);
 
 -- 2. Reject Rule Hit Summary
 -- Per reject_rule (+ reject_type) from ODS identify_reject (counts and PHP amount). benchmark_trxn is
@@ -851,7 +887,7 @@ rule_dim as (
   where pt_date = (select max(pt_date) from {AF_RULE_CONFIG_TABLE})
   group by rule_id
 )
-select '{month_label}' as period, a.reject_rule, coalesce(rn.rule_name, '') as rule_name, a.reject_type,
+select '{span_label}' as period, a.reject_rule, coalesce(rn.rule_name, '') as rule_name, a.reject_type,
   a.reject_count, a.distinct_users, a.distinct_scenes, a.rejected_amount_php,
   b.benchmark_trxn,
   round(a.reject_count / nullif(b.benchmark_trxn, 0) * 100, 3) as trigger_rate_pct,
@@ -931,7 +967,7 @@ rule_dim as (
   where pt_date = (select max(pt_date) from {AF_RULE_CONFIG_TABLE})
   group by rule_id
 )
-select '{month_label}' as period, a.punish_rule_id, coalesce(rn.rule_name, '') as rule_name,
+select '{span_label}' as period, a.punish_rule_id, coalesce(rn.rule_name, '') as rule_name,
   a.punish_count, a.distinct_targets, a.distinct_scenes,
   b.benchmark_trxn,
   round(a.punish_count / nullif(b.benchmark_trxn, 0) * 100, 3) as trigger_rate_pct,
@@ -1195,13 +1231,22 @@ order by p.fraud_cases desc, trigger_rate_pct desc;
 
 
 def build_af_fraud_loss_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
-    # Scope: cases opened in the previous complete calendar month (e.g. May 2026 when run in June).
-    period = business_insights_period(now)
-    month_label = period.previous_month_label
-    month_start_iso = period.previous_month_start.isoformat()
-    next_month_iso = period.current_month_start.isoformat()
+    # Scope: cases opened in the last two full calendar months + the current month-to-date.
+    win = business_insights_window(now)
+    span_label = win.span_label
+    span_start_iso = win.span_start.isoformat()
+    span_end_iso = win.span_end_exclusive.isoformat()
+    p2_iso, p3_iso = win.periods[1][1].isoformat(), win.periods[2][1].isoformat()
+    p1_label, p2_label, p3_label = (p[0] for p in win.periods)
     case_snap = _aliased_snapshot_filter("c", AF_REVIEW_CASE_TABLE, snapshot_pt_date)
-    window = f"c.case_open_datetime >= '{month_start_iso}' and c.case_open_datetime < '{next_month_iso}'"
+    window = f"c.case_open_datetime >= '{span_start_iso}' and c.case_open_datetime < '{span_end_iso}'"
+    period_case = (
+        f"case when c.case_open_datetime < '{p2_iso}' then '{p1_label}' "
+        f"when c.case_open_datetime < '{p3_iso}' then '{p2_label}' else '{p3_label}' end"
+    )
+    # Used by per-period sections that need an ISO span for the DWD action/review tables.
+    month_start_iso = span_start_iso
+    next_month_iso = span_end_iso
     # Confirmed fraud = a fraud modus operandi was assigned (not the 'Not Fraud'/'Pending' verdicts).
     fraud_expr = "lower(trim(coalesce(c.fraud_mo_type, ''))) not in ('not fraud', 'pending', '')"
     mo_expr = "case when trim(coalesce(c.fraud_mo_type, '')) = '' then 'Unspecified' else c.fraud_mo_type end"
@@ -1212,14 +1257,15 @@ def build_af_fraud_loss_sql(*, snapshot_pt_date: str | None = None, now: datetim
     )
     header = _af_report_header("Anti-fraud PH - Fraud Loss & Case Outcomes", snapshot_pt_date)
     return f"""{header}
--- Source: DWD review_case (fraud case management). Scope: cases opened in {month_label}.
+-- Source: DWD review_case (fraud case management). Scope: cases opened in {span_label}.
 -- Confirmed fraud = fraud_mo_type not in ('Not Fraud','Pending',''). All amounts are in PHP; the loss
 -- split uses the loss_amt_borne_by_* columns (loss_borne_by text is not populated). Review hours use
 -- (case_closed_timestamp - case_open_timestamp) for closed cases.
 
 -- 1. Case & Loss Summary
+-- One row per period (last two full months + current MTD) for comparison.
 select
-  '{month_label}' as period,
+  {period_case} as period,
   count(1) as cases_opened,
   sum(case when {fraud_expr} then 1 else 0 end) as fraud_cases,
   round(sum(case when {fraud_expr} then 1 else 0 end) / nullif(count(1), 0) * 100, 2) as fraud_rate_pct,
@@ -1232,7 +1278,9 @@ select
   sum(case when c.case_status = 'OPEN' then 1 else 0 end) as open_cases,
   {review_hours} as avg_review_hours
 from {AF_REVIEW_CASE_TABLE} c
-where {case_snap} and {window};
+where {case_snap} and {window}
+group by {period_case}
+order by min(c.case_open_datetime);
 
 -- 2. Loss by Fraud MO Type
 select

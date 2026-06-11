@@ -1215,14 +1215,52 @@ def _searchable_table_panel(
     )
 
 
-def _kpi_cards_panel(title: str, pairs: list[tuple[str, str]]) -> str:
+def _period_label(summary, row) -> str:
+    headers, _ = summary
+    cols = {str(c): i for i, c in enumerate(headers)}
+    i = cols.get("period")
+    return str(row[i]) if row is not None and i is not None and i < len(row) else ""
+
+
+def _period_rows(summary):
+    """For a per-period summary (rows ordered Apr, May, Jun-MTD), return
+    (cur_full, prev_full, cur_label, prev_label, mtd_row, scope_label)."""
+    headers, rows = summary
+    labels = [_period_label(summary, r) for r in rows]
+    fulls = [(label, r) for label, r in zip(labels, rows) if "MTD" not in label]
+    mtds = [r for label, r in zip(labels, rows) if "MTD" in label]
+    cur_label, cur = fulls[-1] if fulls else ((labels[-1] if labels else ""), (rows[-1] if rows else None))
+    prev_label, prev = fulls[-2] if len(fulls) >= 2 else ("", None)
+    scope_label = f"{labels[0]} – {labels[-1]}" if labels else ""
+    return cur, prev, cur_label, prev_label, (mtds[-1] if mtds else None), scope_label
+
+
+def _delta_vs(cur_val, prev_val, prev_label: str) -> tuple[str, str]:
+    if prev_val in (None, "") or cur_val in (None, ""):
+        return ("", "")
+    prev_n = _number(prev_val)
+    if prev_n == 0:
+        return ("", "")
+    pct = round((_number(cur_val) - prev_n) / prev_n * 100, 1)
+    direction = "up" if pct > 0 else ("down" if pct < 0 else "")
+    return (f"{abs(pct)}% vs {prev_label}", direction)
+
+
+def _kpi_cards_panel(title: str, pairs: list[tuple]) -> str:
+    """Each card is (label, value) or (label, value, delta_text, delta_dir) where delta_dir in up/down/''."""
     if not pairs:
         return ""
-    cards = "".join(
-        f'<div class="kpi"><span>{html.escape(label)}</span><strong>{html.escape(value)}</strong></div>'
-        for label, value in pairs
-    )
-    return f'<section class="panel"><h2>{html.escape(title)}</h2><div class="kpi-grid">{cards}</div></section>'
+    parts = []
+    for item in pairs:
+        label, value = item[0], item[1]
+        delta_text = item[2] if len(item) > 2 else ""
+        delta_dir = item[3] if len(item) > 3 else ""
+        arrow = "&#9650; " if delta_dir == "up" else ("&#9660; " if delta_dir == "down" else "")
+        delta_html = f'<small class="delta {html.escape(delta_dir)}">{arrow}{html.escape(delta_text)}</small>' if delta_text else ""
+        parts.append(
+            f'<div class="kpi"><span>{html.escape(label)}</span><strong>{html.escape(value)}</strong>{delta_html}</div>'
+        )
+    return f'<section class="panel"><h2>{html.escape(title)}</h2><div class="kpi-grid">{"".join(parts)}</div></section>'
 
 
 def _insight_panel(title: str, cards: list[tuple[str, str, str]]) -> str:
@@ -1690,6 +1728,8 @@ h2{{margin:0 0 14px;font-size:18px;}}
 .kpi{{border:1px solid #e4e7ec;border-radius:8px;padding:14px;background:#fafcff;}}
 .kpi span{{display:block;color:var(--muted);font-size:12px;margin-bottom:6px;}}
 .kpi strong{{display:block;font-size:22px;}}
+.kpi .delta{{display:block;margin-top:4px;font-size:12px;color:var(--muted);}}
+.kpi .delta.up{{color:#087443;}} .kpi .delta.down{{color:#b42318;}}
 .table-wrap{{overflow:auto;border:1px solid #edf1f7;border-radius:6px;max-height:74vh;}}
 table{{width:100%;border-collapse:collapse;font-size:13px;}}
 th,td{{border-bottom:1px solid #edf1f7;padding:8px 10px;text-align:left;white-space:nowrap;vertical-align:top;}}
@@ -1864,32 +1904,34 @@ def write_visualization(
         return
     if report_id == AF_RULE_EFFECTIVENESS_REPORT_ID:
         eff_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
-        # KPI summary cards from the single-row Request Outcome Summary sheet.
-        kpis: list[tuple[str, str]] = []
+        # KPI cards: latest full month headline + delta vs the prior full month, plus an MTD card.
+        kpis: list[tuple] = []
         scope_label = ""
+        cur = None
+        cur_action_rate = None
         summary = eff_lookup.get("Request Outcome Summary")
         if summary and summary[1]:
-            cols = {str(col): offset for offset, col in enumerate(summary[0])}
-            srow = summary[1][0]
+            cur, prev, cur_label, prev_label, mtd, scope_label = _period_rows(summary)
 
-            def _v(col: str) -> Any:
-                return srow[cols[col]] if col in cols and cols[col] < len(srow) else None
+            def _cv(row, col):
+                cols = {str(c): i for i, c in enumerate(summary[0])}
+                return row[cols[col]] if row is not None and col in cols and cols[col] < len(row) else None
 
-            scope_label = str(_v("period") or "").strip()
-
-            kpi_specs = [
-                ("Total outcomes", "total_outcomes", ""),
-                ("Pass", "pass_num", ""),
-                ("Challenge", "challenge_num", ""),
-                ("Reject", "reject_num", ""),
-                ("Action rate", "action_rate_pct", "%"),
-            ]
-            for label, col, suffix in kpi_specs:
-                value = _v(col)
+            cur_action_rate = _cv(cur, "action_rate_pct")
+            for label, col, suffix in [
+                ("Total outcomes", "total_outcomes", ""), ("Pass", "pass_num", ""),
+                ("Challenge", "challenge_num", ""), ("Reject", "reject_num", ""), ("Action rate", "action_rate_pct", "%"),
+            ]:
+                value = _cv(cur, col)
                 if value in (None, ""):
                     continue
                 text = f"{_format_number(value)}{suffix}" if _is_number(value) else f"{value}{suffix}"
-                kpis.append((label, text))
+                dtext, ddir = _delta_vs(_cv(cur, col), _cv(prev, col), prev_label)
+                kpis.append((f"{label} ({cur_label})", text, dtext, ddir))
+            if mtd is not None:
+                mv = _cv(mtd, "total_outcomes")
+                if mv not in (None, ""):
+                    kpis.append((f"Outcomes ({_period_label(summary, mtd)})", _format_number(mv)))
         kpi_panel = _kpi_cards_panel(f"Hit-Rate Summary — {scope_label}" if scope_label else "Hit-Rate Summary", kpis)
         # Auto-insight highlights from the scorecard (most over-firing rule, lowest precision).
         insight_cards: list[tuple[str, str, str]] = []
@@ -1918,10 +1960,9 @@ def write_visualization(
                     f"{_scell(worst, 'rule_id')} — {pp}% fraud-confirmed",
                     "bad" if pp < 1 else ("warn" if pp < 5 else "good"),
                 ))
-        action_rate = _v("action_rate_pct") if summary and summary[1] else None
-        if action_rate not in (None, ""):
-            ar = _number(action_rate)
-            insight_cards.append(("Action rate (challenge+reject)", f"{action_rate}%", "warn" if ar >= 10 else ""))
+        if cur_action_rate not in (None, ""):
+            ar = _number(cur_action_rate)
+            insight_cards.append(("Action rate (challenge+reject)", f"{cur_action_rate}%", "warn" if ar >= 10 else ""))
         intro = _insight_panel("Highlights", insight_cards) + kpi_panel
         placeholders = {
             "Request Outcome Summary": "Filter…",
@@ -2067,11 +2108,16 @@ def write_visualization(
                 continue
             if sheet_name == "Request Outcome Summary":
                 panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Filter…"))
-                if summary and summary[1]:
+                if cur is not None:
+                    scols = {str(c): i for i, c in enumerate(headers)}
+
+                    def _cg(col):
+                        return cur[scols[col]] if col in scols and scols[col] < len(cur) else None
+
                     donut = _donut_panel(
                         "Outcome Mix",
-                        [("Pass", _v("pass_num")), ("Challenge", _v("challenge_num")), ("Reject", _v("reject_num"))],
-                        note="Share of antifraud outcomes (pass / challenge / reject) for the month.",
+                        [("Pass", _cg("pass_num")), ("Challenge", _cg("challenge_num")), ("Reject", _cg("reject_num"))],
+                        note="Share of antifraud outcomes (pass / challenge / reject) for the latest full month.",
                     )
                     if donut:
                         panels.append(donut)
@@ -2104,36 +2150,44 @@ def write_visualization(
         return
     if report_id == AF_FRAUD_LOSS_REPORT_ID:
         loss_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
-        kpis: list[tuple[str, str]] = []
+        kpis: list[tuple] = []
         scope_label = ""
         summary = loss_lookup.get("Case & Loss Summary")
         if summary and summary[1]:
-            cols = {str(col): offset for offset, col in enumerate(summary[0])}
-            srow = summary[1][0]
+            cur, prev, cur_label, prev_label, mtd, scope_label = _period_rows(summary)
+            cols = {str(c): i for i, c in enumerate(summary[0])}
 
-            def _v(col: str) -> Any:
-                return srow[cols[col]] if col in cols and cols[col] < len(srow) else None
+            def _cv(row, col):
+                return row[cols[col]] if row is not None and col in cols and cols[col] < len(row) else None
 
-            def _money(col: str) -> str:
-                value = _v(col)
-                return "" if value in (None, "") else f"₱{_format_number(value)}"
+            def _kpi(label, col, fmt):
+                value = _cv(cur, col)
+                if value in (None, ""):
+                    return None
+                if fmt == "money":
+                    text = f"₱{_format_number(value)}"
+                elif fmt == "pct":
+                    text = f"{value}%"
+                elif fmt == "hours":
+                    text = f"{value}h"
+                else:
+                    text = _format_number(value)
+                dtext, ddir = _delta_vs(value, _cv(prev, col), prev_label)
+                return (f"{label} ({cur_label})", text, dtext, ddir)
 
-            def _plain(col: str) -> str:
-                value = _v(col)
-                return "" if value in (None, "") else _format_number(value)
-
-            scope_label = str(_v("period") or "").strip()
-            kpis = [
-                ("Cases opened", _plain("cases_opened")),
-                ("Confirmed fraud", _plain("fraud_cases")),
-                ("Fraud rate", f"{_v('fraud_rate_pct')}%" if _v("fraud_rate_pct") not in (None, "") else ""),
-                ("Total loss", _money("total_loss_php")),
-                ("Borne by customer", _money("loss_customer_php")),
-                ("Borne by bank", _money("loss_bank_php")),
-                ("Recovered", _money("recovered_php")),
-                ("Avg review time", f"{_v('avg_review_hours')}h" if _v("avg_review_hours") not in (None, "") else ""),
-            ]
-            kpis = [(label, value) for label, value in kpis if value not in (None, "")]
+            for spec in [
+                ("Cases opened", "cases_opened", "num"), ("Confirmed fraud", "fraud_cases", "num"),
+                ("Fraud rate", "fraud_rate_pct", "pct"), ("Total loss", "total_loss_php", "money"),
+                ("Borne by customer", "loss_customer_php", "money"), ("Recovered", "recovered_php", "money"),
+                ("Avg review time", "avg_review_hours", "hours"),
+            ]:
+                card = _kpi(*spec)
+                if card:
+                    kpis.append(card)
+            if mtd is not None:
+                mv = _cv(mtd, "total_loss_php")
+                if mv not in (None, ""):
+                    kpis.append((f"Loss ({_period_label(summary, mtd)})", f"₱{_format_number(mv)}"))
         intro = _kpi_cards_panel(f"Fraud Loss Summary — {scope_label}" if scope_label else "Fraud Loss Summary", kpis)
         subtype_breakdown = loss_lookup.get("Fraud MO Subtype Breakdown")
         nested_sheets = {"Fraud MO Subtype Breakdown"}
