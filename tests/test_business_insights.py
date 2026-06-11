@@ -663,9 +663,13 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
         self.assertEqual(html.count('class="col-filter"'), 8)
         self.assertIn('data-col="0"', html)
         self.assertIn('data-col="3"', html)
-        # Search and per-column filters are combined (AND) in the same panel script.
+        # Search and per-column filters are combined (AND) in the shared dashboard script.
         self.assertIn("colFilters", html)
-        self.assertIn("row._cells", html)
+        self.assertIn("._cells", html)
+        # Tables are now sortable + value-formatted + threshold-highlighted.
+        self.assertIn("enhanceTable", html)
+        self.assertIn("flag-bad", html)
+        self.assertIn("sortable", html)
 
 
 class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
@@ -833,6 +837,12 @@ class RuleEffectivenessExtraSectionsTests(unittest.TestCase):
         self.assertIn("New device transfer", html)
         self.assertIn("<h2>Scene/Sub-scene/Action Usage</h2>", html)
         self.assertIn("EnterLoginState", html)
+        # New charts: outcome donut + top-scenes bar.
+        self.assertIn("<h2>Outcome Mix</h2>", html)
+        self.assertIn("<h2>Top Scenes by Transactions</h2>", html)
+        # In-page TOC is built client-side for multi-panel reports.
+        self.assertIn('nav.className', html)
+        self.assertIn("'toc'", html)
         # Searchable, per-column-filterable tables (Request Outcome Summary + precision + usage = 3).
         self.assertEqual(html.count('class="search-table"'), 3)
 
@@ -863,6 +873,9 @@ class RuleEffectivenessExtraSectionsTests(unittest.TestCase):
         self.assertIn('id="ec-rule-scorecard" class="echart"', html)
         self.assertIn("echarts.init", html)
         self.assertIn("Rule Scorecard — Detail", html)
+        # Cross-filter: scatter click highlights the rule across tables.
+        self.assertIn("__afHighlight", html)
+        self.assertIn("cross-hit", html)
         self.assertIn("precision_pct", html)
         self.assertIn("New device transfer", html)
 
@@ -935,6 +948,7 @@ class FraudLossBusinessInsightsTests(unittest.TestCase):
         self.assertIn("Total loss", html)
         self.assertIn("₱", html)  # peso sign
         self.assertIn("<h2>Loss by Fraud MO Type</h2>", html)
+        self.assertIn("<h2>Loss by Fraud Type (PHP)</h2>", html)  # MO loss bar chart
         self.assertIn('class="rule-table"', html)
         self.assertIn("Investment Scam", html)  # nested subtype
         self.assertNotIn("<h2>Fraud MO Subtype Breakdown</h2>", html)  # nested, not standalone

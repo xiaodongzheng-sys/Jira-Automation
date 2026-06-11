@@ -1302,6 +1302,7 @@ _SCATTER_JS = r"""
         data:[{xAxis:xmed},{yAxis:ymed}]}
     }]
   });
+  chart.on('click',function(pa){ if(window.__afHighlight && pa.data && pa.data.label){ window.__afHighlight(pa.data.label); } });
   window.addEventListener('resize',function(){chart.resize();});
 })();
 """
@@ -1389,6 +1390,62 @@ def _scatter_quadrant_panel(
     )
 
 
+_DONUT_JS = r"""
+(function(){ if(!window.echarts){return;} var el=document.getElementById('__ID__'); if(!el){return;}
+  var data=__DATA__; if(!data.length){el.innerHTML='<p class="empty">No data.</p>';return;}
+  var chart=echarts.init(el);
+  chart.setOption({tooltip:{trigger:'item',formatter:function(p){return p.name+': '+(p.value||0).toLocaleString()+' ('+p.percent+'%)';}},
+    legend:{bottom:0},
+    series:[{type:'pie',radius:['45%','72%'],avoidLabelOverlap:true,label:{formatter:'{b}\n{d}%'},
+      data:data}]});
+  window.addEventListener('resize',function(){chart.resize();});
+})();
+"""
+
+_BAR_JS = r"""
+(function(){ if(!window.echarts){return;} var el=document.getElementById('__ID__'); if(!el){return;}
+  var data=__DATA__; if(!data.length){el.innerHTML='<p class="empty">No data.</p>';return;}
+  var cats=data.map(function(d){return d.name;}).reverse();
+  var vals=data.map(function(d){return d.value;}).reverse();
+  var chart=echarts.init(el);
+  chart.setOption({tooltip:{trigger:'axis',axisPointer:{type:'shadow'},
+      valueFormatter:function(v){return '__PREFIX__'+(v||0).toLocaleString();}},
+    grid:{left:8,right:60,top:12,bottom:24,containLabel:true},
+    xAxis:{type:'value'}, yAxis:{type:'category',data:cats,axisLabel:{width:210,overflow:'truncate'}},
+    series:[{type:'bar',data:vals,itemStyle:{color:'#1769e0'},
+      label:{show:true,position:'right',formatter:function(p){return '__PREFIX__'+(p.value||0).toLocaleString();}}}]});
+  window.addEventListener('resize',function(){chart.resize();});
+})();
+"""
+
+
+def _donut_panel(title: str, pairs: list[tuple[str, Any]], *, note: str = "") -> str:
+    data = [{"name": str(name), "value": _number(value)} for name, value in pairs if _number(value) > 0]
+    if not data:
+        return ""
+    chart_id = _echart_id(title)
+    script = _DONUT_JS.replace("__ID__", chart_id).replace("__DATA__", _js_data(data))
+    note_html = f'<p class="note">{html.escape(note)}</p>' if note else ""
+    return (
+        f'<section class="panel"><h2>{html.escape(title)}</h2>{note_html}'
+        f'<div id="{chart_id}" class="echart" style="height:320px"></div><script>{script}</script></section>'
+    )
+
+
+def _bar_panel(title: str, pairs: list[tuple[str, Any]], *, note: str = "", prefix: str = "") -> str:
+    data = [{"name": str(name), "value": _number(value)} for name, value in pairs if _number(value) > 0]
+    if not data:
+        return ""
+    chart_id = _echart_id(title)
+    script = _BAR_JS.replace("__ID__", chart_id).replace("__DATA__", _js_data(data)).replace("__PREFIX__", prefix)
+    note_html = f'<p class="note">{html.escape(note)}</p>' if note else ""
+    height = max(220, 30 * len(data) + 60)
+    return (
+        f'<section class="panel"><h2>{html.escape(title)}</h2>{note_html}'
+        f'<div id="{chart_id}" class="echart" style="height:{height}px"></div><script>{script}</script></section>'
+    )
+
+
 def _expandable_rule_panel(
     title: str,
     placeholder: str,
@@ -1469,6 +1526,141 @@ def _expandable_rule_panel(
     )
 
 
+# Shared dashboard interaction JS (plain string -> no f-string brace escaping). Handles table search,
+# per-column filters, expand/collapse, click-to-sort, number formatting, and threshold highlighting.
+_DASHBOARD_JS = r"""
+(function () {
+  function parseNum(s){ if(s==null) return null; var t=String(s).replace(/[,₱%\s]/g,''); if(t===''||isNaN(Number(t))) return null; return Number(t); }
+  function fmt(n, dec){ if(dec==null){ dec = (n%1!==0)?2:0; } return n.toLocaleString(undefined,{minimumFractionDigits:0,maximumFractionDigits:dec}); }
+  function idLike(h){ return /(^id$|_id$|_code$|date|status_code|trigger_date)/.test(h); }
+  function colKind(h){ if(h.slice(-4)==='_pct') return 'pct'; if(h.slice(-4)==='_php') return 'php'; return 'num'; }
+  function flagClass(h,v){ if(v==null) return '';
+    if(h.indexOf('trigger_rate_pct')>=0){ if(v>=20) return 'flag-bad'; if(v>=5) return 'flag-warn'; }
+    else if(h.indexOf('precision_pct')>=0){ if(v<1) return 'flag-bad'; if(v<5) return 'flag-warn'; }
+    else if(h.indexOf('avg_age_days')>=0){ if(v>=90) return 'flag-bad'; if(v>=30) return 'flag-warn'; }
+    return ''; }
+  function headerLabels(table){ var hr = table.tHead ? table.tHead.rows[table.tHead.rows.length-1] : null; if(!hr) return [];
+    return Array.prototype.map.call(hr.cells, function(th){ var l=th.querySelector('.th-label'); return (l?l.textContent:th.textContent).trim().toLowerCase(); }); }
+  function enhanceTable(table, sortable){
+    var headers = headerLabels(table); if(!headers.length) return;
+    var tb = table.tBodies[0]; if(!tb) return;
+    Array.prototype.forEach.call(tb.rows, function(tr){
+      var raws=[];
+      Array.prototype.forEach.call(tr.cells, function(td,i){
+        var header = headers[i]||'';
+        var raw = td.getAttribute('data-raw'); if(raw==null){ raw=td.textContent.trim(); td.setAttribute('data-raw',raw); }
+        raws.push(raw.toLowerCase());
+        var num = (header && !idLike(header)) ? parseNum(raw) : null;
+        if(num!=null){
+          td.setAttribute('data-sort', String(num));
+          var k = colKind(header);
+          td.textContent = k==='pct' ? (fmt(num,3)+'%') : (k==='php' ? ('₱'+fmt(num,2)) : fmt(num));
+          var fc = flagClass(header,num); if(fc) td.classList.add(fc);
+        } else { td.setAttribute('data-sort', raw.toLowerCase()); }
+      });
+      tr._cells = raws;
+      if(!tr.dataset.text){ tr.dataset.text = raws.join(' '); }
+    });
+    if(sortable){
+      var hr = table.tHead.rows[table.tHead.rows.length-1];
+      Array.prototype.forEach.call(hr.cells, function(th,i){
+        th.classList.add('sortable');
+        th.addEventListener('click', function(e){
+          if(e.target && e.target.classList && e.target.classList.contains('col-filter')) return;
+          var asc = th.getAttribute('data-dir')!=='asc';
+          Array.prototype.forEach.call(hr.cells, function(o){ o.removeAttribute('data-dir'); o.classList.remove('sort-asc','sort-desc'); });
+          th.setAttribute('data-dir', asc?'asc':'desc'); th.classList.add(asc?'sort-asc':'sort-desc');
+          var rows = Array.prototype.slice.call(tb.rows);
+          rows.sort(function(a,b){
+            var av=a.cells[i]?a.cells[i].getAttribute('data-sort'):''; var bv=b.cells[i]?b.cells[i].getAttribute('data-sort'):'';
+            var an=parseFloat(av), bn=parseFloat(bv); var both=!isNaN(an)&&!isNaN(bn);
+            var c = both ? an-bn : String(av).localeCompare(String(bv)); return asc?c:-c;
+          });
+          rows.forEach(function(r){ tb.appendChild(r); });
+        });
+      });
+    }
+  }
+  document.querySelectorAll('.panel').forEach(function(panel){
+    var table = panel.querySelector('table.search-table'); if(!table) return;
+    enhanceTable(table, true);
+    var input = panel.querySelector('[data-search]'); var counter = panel.querySelector('[data-count]');
+    var colFilters = Array.prototype.slice.call(panel.querySelectorAll('.col-filter'));
+    var tb = table.tBodies[0]; var rows = Array.prototype.slice.call(tb.rows); var total = rows.length;
+    var apply = function(){
+      var q = ((input&&input.value)||'').trim().toLowerCase();
+      var active = colFilters.map(function(f){ return [Number(f.dataset.col),(f.value||'').trim().toLowerCase()]; }).filter(function(p){ return p[1]; });
+      var vis=0;
+      rows.forEach(function(r){ var m = !q || (r.dataset.text||'').indexOf(q)>=0;
+        if(m){ for(var k=0;k<active.length;k++){ if(((r._cells||[])[active[k][0]]||'').indexOf(active[k][1])<0){ m=false; break; } } }
+        r.classList.toggle('no-match', !m); if(m) vis++; });
+      if(counter) counter.textContent = vis+' of '+total+' rows';
+    };
+    if(input) input.addEventListener('input', apply); colFilters.forEach(function(f){ f.addEventListener('input', apply); }); apply();
+  });
+  document.querySelectorAll('.rule-panel').forEach(function(panel){
+    var table = panel.querySelector('table.rule-table'); if(!table) return;
+    enhanceTable(table, false);
+    Array.prototype.forEach.call(table.querySelectorAll('.detail-table'), function(dt){ enhanceTable(dt, false); });
+    var input = panel.querySelector('[data-search]'); var counter = panel.querySelector('[data-count]');
+    var mainRows = Array.prototype.slice.call(table.querySelectorAll('tr.rule-row'));
+    var details = {}; table.querySelectorAll('tr.detail-row').forEach(function(d){ details[d.dataset.key]=d; });
+    var total = mainRows.length;
+    table.querySelectorAll('.expander').forEach(function(btn){
+      btn.addEventListener('click', function(){ var tr=btn.closest('tr'); var d=details[tr.dataset.key];
+        var open = btn.getAttribute('aria-expanded')==='true'; btn.setAttribute('aria-expanded', String(!open)); btn.innerHTML = open?'&#9654;':'&#9660;'; if(d) d.hidden=open; });
+    });
+    var apply = function(){ var q=((input&&input.value)||'').trim().toLowerCase(); var vis=0;
+      mainRows.forEach(function(tr){ var m = !q || (tr.dataset.text||'').indexOf(q)>=0; tr.hidden=!m;
+        var d=details[tr.dataset.key]; if(d&&!m){ d.hidden=true; var b=tr.querySelector('.expander'); if(b){ b.setAttribute('aria-expanded','false'); b.innerHTML='&#9654;'; } } if(m) vis++; });
+      if(counter) counter.textContent = vis+' of '+total+' rules'; };
+    if(input) input.addEventListener('input', apply); apply();
+    // Cross-filter: clicking a rule row (not the expander) highlights that rule everywhere.
+    mainRows.forEach(function(tr){ tr.addEventListener('click', function(e){
+      if(e.target && e.target.closest && e.target.closest('.expander')) return;
+      var firstData = tr.querySelector('td:not(.exp-cell)'); if(firstData && window.__afHighlight){ window.__afHighlight(firstData.getAttribute('data-raw')||firstData.textContent.trim()); }
+    }); });
+  });
+  // ---- cross-filter / linked highlight across panels ----
+  var current=null, chip=null;
+  function ruleCells(){ return document.querySelectorAll('table.search-table tbody td:first-child, table.rule-table tbody tr.rule-row td:nth-child(2)'); }
+  function clearHighlight(){ current=null;
+    document.querySelectorAll('.cross-hit').forEach(function(el){ el.classList.remove('cross-hit'); });
+    if(chip){ chip.style.display='none'; } }
+  window.__afHighlight = function(ruleId){
+    ruleId = (ruleId||'').trim(); if(!ruleId){ return; }
+    if(current===ruleId){ clearHighlight(); return; }
+    document.querySelectorAll('.cross-hit').forEach(function(el){ el.classList.remove('cross-hit'); });
+    current=ruleId; var key=ruleId.toLowerCase(); var first=null; var hits=0;
+    document.querySelectorAll('table.rule-table tbody tr.rule-row').forEach(function(tr){
+      var k=(tr.dataset.key||'').toLowerCase();
+      if(k===key || k.indexOf(key+'|')===0){ tr.classList.add('cross-hit'); hits++; if(!first) first=tr; }
+    });
+    document.querySelectorAll('table.search-table tbody tr').forEach(function(tr){
+      var c=tr.cells[0]; var v=c?((c.getAttribute('data-raw')||c.textContent).trim().toLowerCase()):'';
+      if(v===key){ tr.classList.add('cross-hit'); hits++; if(!first) first=tr; }
+    });
+    if(!chip){ chip=document.createElement('div'); chip.className='xfilter-chip'; document.body.appendChild(chip);
+      chip.addEventListener('click', clearHighlight); }
+    chip.innerHTML='Highlighting <b>'+ruleId+'</b> ('+hits+') &times;'; chip.style.display='block';
+    if(first){ first.scrollIntoView({behavior:'smooth', block:'center'}); }
+  };
+})();
+(function(){
+  // In-page table of contents for multi-panel reports.
+  var main=document.querySelector('main'); if(!main){return;}
+  var panels=Array.prototype.filter.call(main.children, function(el){ return el.classList && el.classList.contains('panel'); });
+  var heads=[];
+  panels.forEach(function(p){ var h=p.querySelector(':scope > h2'); if(h){ heads.push({panel:p, h:h}); } });
+  if(heads.length<3){return;}
+  var nav=document.createElement('nav'); nav.className='toc';
+  heads.forEach(function(o,i){ if(!o.panel.id){ o.panel.id='panel-'+i; }
+    var a=document.createElement('a'); a.href='#'+o.panel.id; a.textContent=o.h.textContent; nav.appendChild(a); });
+  main.insertBefore(nav, main.firstChild);
+})();
+"""
+
+
 def _searchable_tables_document(
     report_title: str,
     snapshot_pt_date: str,
@@ -1478,7 +1670,7 @@ def _searchable_tables_document(
 ) -> str:
     generated_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
     body = (intro_html + "".join(panels)) or '<section class="panel"><p class="empty">No data was returned.</p></section>'
-    return f"""<!doctype html>
+    body_html = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(report_title)} Visualization</title>
 <style>
@@ -1519,153 +1711,27 @@ tr.no-match{{display:none;}}
 .insight-card.bad{{border-left-color:var(--red,#b42318);}} .insight-card.warn{{border-left-color:#b54708;}} .insight-card.good{{border-left-color:#087443;}}
 .insight-card .label{{display:block;color:var(--muted);font-size:12px;margin-bottom:4px;}}
 .insight-card .value{{display:block;font-size:15px;font-weight:650;overflow-wrap:anywhere;}}
+td.num,td[data-sort]{{font-variant-numeric:tabular-nums;}}
+td.flag-bad{{background:#fde7e6;color:#912018;font-weight:650;}} td.flag-warn{{background:#fdf0e3;color:#9c4a16;}}
+th.sortable{{cursor:pointer;user-select:none;}} th.sortable:hover{{background:#e4eefb;}}
+th.sort-asc .th-label::after,th.sort-desc .th-label::after{{font-size:10px;color:var(--blue);margin-left:4px;}}
+th.sort-asc .th-label::after{{content:"\\25B2";}} th.sort-desc .th-label::after{{content:"\\25BC";}}
+th.sort-asc::after{{content:" \\25B2";font-size:10px;color:var(--blue);}} th.sort-desc::after{{content:" \\25BC";font-size:10px;color:var(--blue);}}
+tr.cross-hit > td{{background:#eaf2ff !important;box-shadow:inset 3px 0 0 var(--blue);}}
+table.rule-table tbody tr.rule-row{{cursor:pointer;}}
+.xfilter-chip{{display:none;position:fixed;right:18px;bottom:18px;z-index:50;background:#102a43;color:#fff;
+padding:9px 14px;border-radius:18px;font-size:13px;cursor:pointer;box-shadow:0 2px 8px rgba(16,42,67,.3);}}
+.xfilter-chip b{{font-weight:700;}}
+.toc{{position:sticky;top:0;z-index:40;display:flex;gap:8px;overflow-x:auto;white-space:nowrap;
+padding:10px 4px;margin:-8px 0 6px;background:rgba(245,247,251,.96);backdrop-filter:blur(3px);border-bottom:1px solid var(--line);}}
+.toc a{{flex:0 0 auto;font-size:12px;color:#344054;text-decoration:none;padding:5px 10px;border:1px solid var(--line);border-radius:14px;background:#fff;}}
+.toc a:hover{{border-color:var(--blue);color:var(--blue);}}
+.panel{{scroll-margin-top:52px;}}
 </style></head><body>
 <script src="/static/vendor/echarts.min.js"></script>
 <header><h1>{html.escape(report_title)}</h1><p>Snapshot {html.escape(snapshot_pt_date)}. Generated {generated_at} UTC from Data Workbench output.</p></header>
-<main>{body}</main>
-<script>
-(() => {{
-  document.querySelectorAll(".panel").forEach((panel) => {{
-    if (!panel.querySelector("table.search-table")) return;
-    const input = panel.querySelector("[data-search]");
-    const counter = panel.querySelector("[data-count]");
-    const colFilters = Array.from(panel.querySelectorAll(".col-filter"));
-    const rows = Array.from(panel.querySelectorAll("table.search-table tbody tr"));
-    const total = rows.length;
-    rows.forEach((row) => {{
-      row.dataset.text = row.textContent.toLowerCase();
-      row._cells = Array.from(row.cells).map((cell) => cell.textContent.toLowerCase());
-    }});
-    const apply = () => {{
-      const query = (input?.value || "").trim().toLowerCase();
-      const active = colFilters
-        .map((f) => [Number(f.dataset.col), (f.value || "").trim().toLowerCase()])
-        .filter((pair) => pair[1]);
-      let visible = 0;
-      rows.forEach((row) => {{
-        let match = !query || row.dataset.text.includes(query);
-        if (match) {{
-          for (const [col, val] of active) {{
-            if (!(row._cells[col] || "").includes(val)) {{ match = false; break; }}
-          }}
-        }}
-        row.classList.toggle("no-match", !match);
-        if (match) visible += 1;
-      }});
-      if (counter) counter.textContent = `${{visible}} of ${{total}} rows`;
-    }};
-    input?.addEventListener("input", apply);
-    colFilters.forEach((f) => f.addEventListener("input", apply));
-    apply();
-  }});
-  document.querySelectorAll(".rule-panel").forEach((panel) => {{
-    const table = panel.querySelector("table.rule-table");
-    if (!table) return;
-    const input = panel.querySelector("[data-search]");
-    const counter = panel.querySelector("[data-count]");
-    const mainRows = Array.from(table.querySelectorAll("tr.rule-row"));
-    const details = {{}};
-    table.querySelectorAll("tr.detail-row").forEach((d) => {{ details[d.dataset.key] = d; }});
-    const total = mainRows.length;
-    table.querySelectorAll(".expander").forEach((btn) => {{
-      btn.addEventListener("click", () => {{
-        const tr = btn.closest("tr");
-        const d = details[tr.dataset.key];
-        const open = btn.getAttribute("aria-expanded") === "true";
-        btn.setAttribute("aria-expanded", String(!open));
-        btn.innerHTML = open ? "&#9654;" : "&#9660;";
-        if (d) d.hidden = open;
-      }});
-    }});
-    const apply = () => {{
-      const query = (input?.value || "").trim().toLowerCase();
-      let visible = 0;
-      mainRows.forEach((tr) => {{
-        const match = !query || (tr.dataset.text || "").includes(query);
-        tr.hidden = !match;
-        const d = details[tr.dataset.key];
-        if (d && !match) {{
-          d.hidden = true;
-          const btn = tr.querySelector(".expander");
-          if (btn) {{ btn.setAttribute("aria-expanded", "false"); btn.innerHTML = "&#9654;"; }}
-        }}
-        if (match) visible += 1;
-      }});
-      if (counter) counter.textContent = `${{visible}} of ${{total}} rules`;
-    }};
-    input?.addEventListener("input", apply);
-    apply();
-  }});
-  document.querySelectorAll(".trend-panel").forEach((panel) => {{
-    const svg = panel.querySelector("[data-trend-svg]");
-    const dataNode = panel.querySelector("[data-trend-data]");
-    const select = panel.querySelector("[data-trend-select]");
-    const info = panel.querySelector("[data-trend-info]");
-    if (!svg || !dataNode) return;
-    const data = JSON.parse(dataNode.textContent || "{{}}");
-    const W = 960, H = 320, padL = 70, padR = 24, padT = 20, padB = 34;
-    const draw = (rid) => {{
-      const pts = data[rid] || [];
-      const maxV = Math.max(1, ...pts.map((p) => p[1]));
-      const n = pts.length;
-      const X = (i) => padL + (n <= 1 ? 0 : i * (W - padL - padR) / (n - 1));
-      const Y = (v) => H - padB - (v / maxV) * (H - padT - padB);
-      let s = `<line x1="${{padL}}" y1="${{H - padB}}" x2="${{W - padR}}" y2="${{H - padB}}" stroke="#cbd5e1"/>`;
-      s += `<line x1="${{padL}}" y1="${{padT}}" x2="${{padL}}" y2="${{H - padB}}" stroke="#cbd5e1"/>`;
-      s += `<text x="8" y="${{padT + 4}}" font-size="11" fill="#667085">${{maxV.toLocaleString()}}</text>`;
-      s += `<text x="8" y="${{H - padB}}" font-size="11" fill="#667085">0</text>`;
-      if (n) {{
-        s += `<polyline fill="none" stroke="#1769e0" stroke-width="2" points="${{pts.map((p, i) => `${{X(i)}},${{Y(p[1])}}`).join(" ")}}"/>`;
-        const step = Math.max(1, Math.ceil(n / 10));
-        pts.forEach((p, i) => {{
-          s += `<circle cx="${{X(i)}}" cy="${{Y(p[1])}}" r="2.5" fill="#1769e0"><title>${{p[0]}}: ${{p[1].toLocaleString()}}</title></circle>`;
-          if (i % step === 0 || i === n - 1) {{
-            s += `<text x="${{X(i)}}" y="${{H - padB + 16}}" font-size="10" fill="#667085" text-anchor="middle">${{String(p[0]).slice(5)}}</text>`;
-          }}
-        }});
-      }}
-      svg.innerHTML = s;
-      const total = pts.reduce((a, p) => a + p[1], 0);
-      if (info) info.textContent = `${{rid}}: ${{total.toLocaleString()}} triggers over ${{n}} days`;
-    }};
-    select?.addEventListener("change", () => draw(select.value));
-    draw(select ? select.value : Object.keys(data)[0]);
-  }});
-  document.querySelectorAll(".scatter-panel").forEach((panel) => {{
-    const svg = panel.querySelector("[data-scatter-svg]");
-    const node = panel.querySelector("[data-scatter-data]");
-    if (!svg || !node) return;
-    const pts = JSON.parse(node.textContent || "[]");
-    if (!pts.length) return;
-    const xLabel = JSON.parse(panel.querySelector("[data-scatter-x]")?.textContent || '"x"');
-    const yLabel = JSON.parse(panel.querySelector("[data-scatter-y]")?.textContent || '"y"');
-    const W = 960, H = 420, padL = 70, padR = 24, padT = 20, padB = 46;
-    const xmax = Math.max(1, ...pts.map((p) => p.x)) * 1.1;
-    const ymax = Math.max(1, ...pts.map((p) => p.y)) * 1.1;
-    const smax = Math.max(1, ...pts.map((p) => p.size || 0));
-    const X = (v) => padL + (v / xmax) * (W - padL - padR);
-    const Y = (v) => H - padB - (v / ymax) * (H - padT - padB);
-    const med = (arr) => {{ const s = [...arr].sort((a, b) => a - b); const m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; }};
-    const xmed = med(pts.map((p) => p.x)), ymed = med(pts.map((p) => p.y));
-    let s = `<line x1="${{padL}}" y1="${{H - padB}}" x2="${{W - padR}}" y2="${{H - padB}}" stroke="#cbd5e1"/>`;
-    s += `<line x1="${{padL}}" y1="${{padT}}" x2="${{padL}}" y2="${{H - padB}}" stroke="#cbd5e1"/>`;
-    s += `<line x1="${{X(xmed)}}" y1="${{padT}}" x2="${{X(xmed)}}" y2="${{H - padB}}" stroke="#e4a11b" stroke-dasharray="4 3"/>`;
-    s += `<line x1="${{padL}}" y1="${{Y(ymed)}}" x2="${{W - padR}}" y2="${{Y(ymed)}}" stroke="#e4a11b" stroke-dasharray="4 3"/>`;
-    s += `<text x="${{(padL + W - padR) / 2}}" y="${{H - 12}}" font-size="12" fill="#475467" text-anchor="middle">${{xLabel}}</text>`;
-    s += `<text x="18" y="${{(padT + H - padB) / 2}}" font-size="12" fill="#475467" text-anchor="middle" transform="rotate(-90 18 ${{(padT + H - padB) / 2}})">${{yLabel}}</text>`;
-    s += `<text x="${{W - padR}}" y="${{H - padB + 16}}" font-size="10" fill="#98a2b3" text-anchor="end">${{xmax.toFixed(1)}}</text>`;
-    s += `<text x="${{padL - 6}}" y="${{padT + 8}}" font-size="10" fill="#98a2b3" text-anchor="end">${{ymax.toFixed(1)}}</text>`;
-    s += `<text x="${{W - padR - 6}}" y="${{padT + 14}}" font-size="10" fill="#087443" text-anchor="end">high vol / high precision</text>`;
-    s += `<text x="${{W - padR - 6}}" y="${{H - padB - 6}}" font-size="10" fill="#b42318" text-anchor="end">high vol / low precision — tune</text>`;
-    pts.forEach((p) => {{
-      const r = 4 + Math.sqrt((p.size || 0) / smax) * 14;
-      s += `<circle cx="${{X(p.x)}}" cy="${{Y(p.y)}}" r="${{r.toFixed(1)}}" fill="rgba(23,105,224,.4)" stroke="#1769e0"><title>${{p.label}}: ${{p.x}}% ${{xLabel}}, ${{p.y}}% ${{yLabel}} (vol ${{Math.round(p.size || 0).toLocaleString()}})</title></circle>`;
-    }});
-    svg.innerHTML = s;
-  }});
-}})();
-</script>
-</body></html>"""
+<main>{body}</main>"""
+    return body_html + "\n<script>\n" + _DASHBOARD_JS + "\n</script>\n</body></html>"
 
 
 def _scenario_auth_flow_document(
@@ -1999,6 +2065,30 @@ def write_visualization(
                     )
                 )
                 continue
+            if sheet_name == "Request Outcome Summary":
+                panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Filter…"))
+                if summary and summary[1]:
+                    donut = _donut_panel(
+                        "Outcome Mix",
+                        [("Pass", _v("pass_num")), ("Challenge", _v("challenge_num")), ("Reject", _v("reject_num"))],
+                        note="Share of antifraud outcomes (pass / challenge / reject) for the month.",
+                    )
+                    if donut:
+                        panels.append(donut)
+                continue
+            if sheet_name == "Scene/Sub-scene/Action Usage":
+                col = {str(c): i for i, c in enumerate(headers)}
+                if "scene_name" in col and "transactions" in col:
+                    agg: dict[str, float] = {}
+                    for r in rows:
+                        scene = str(r[col["scene_name"]]) if col["scene_name"] < len(r) else ""
+                        agg[scene] = agg.get(scene, 0.0) + _number(r[col["transactions"]] if col["transactions"] < len(r) else 0)
+                    top = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:15]
+                    bar = _bar_panel("Top Scenes by Transactions", top, note="Highest-traffic scenes this month (top 15).")
+                    if bar:
+                        panels.append(bar)
+                panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder=placeholders.get(sheet_name, "Search…")))
+                continue
             panels.append(
                 _searchable_table_panel(
                     sheet_name,
@@ -2056,6 +2146,21 @@ def write_visualization(
             if sheet_name == "Case & Loss Summary" or sheet_name in nested_sheets:
                 continue  # summary -> KPI cards; subtype breakdown -> nested under the MO panel
             if sheet_name == "Loss by Fraud MO Type" and subtype_breakdown:
+                mo_col = {str(c): i for i, c in enumerate(headers)}
+                if "fraud_mo_type" in mo_col and "total_loss_php" in mo_col:
+                    mo_pairs = [
+                        (str(r[mo_col["fraud_mo_type"]]), r[mo_col["total_loss_php"]])
+                        for r in rows
+                        if mo_col["fraud_mo_type"] < len(r) and mo_col["total_loss_php"] < len(r)
+                    ]
+                    bar = _bar_panel(
+                        "Loss by Fraud Type (PHP)",
+                        sorted(mo_pairs, key=lambda kv: _number(kv[1]), reverse=True)[:12],
+                        note="Total confirmed fraud loss by modus operandi.",
+                        prefix="₱",
+                    )
+                    if bar:
+                        panels.append(bar)
                 panels.append(
                     _expandable_rule_panel(
                         "Loss by Fraud MO Type",
