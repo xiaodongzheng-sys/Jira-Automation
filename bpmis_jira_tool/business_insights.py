@@ -97,6 +97,8 @@ AF_SCENARIOS_ACTIONS_REPORT_ID = "anti-fraud-ph-scenarios-actions-auth-steps"
 AF_RULES_FEATURES_REPORT_ID = "anti-fraud-ph-rules-features"
 AF_RULE_EFFECTIVENESS_REPORT_ID = "anti-fraud-ph-rule-effectiveness"
 AF_FRAUD_LOSS_REPORT_ID = "anti-fraud-ph-fraud-loss-cases"
+AF_DETECTION_EFFECTIVENESS_REPORT_ID = "anti-fraud-ph-detection-effectiveness"
+AF_RULE_CHANGE_LOG_REPORT_ID = "anti-fraud-ph-rule-change-log"
 
 AF_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_scene_tab_ss"
 AF_SUB_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_sub_scene_tab_ss"
@@ -171,6 +173,20 @@ SEEDED_REPORTS: tuple[dict[str, str], ...] = (
         "type": "af_fraud_loss",
         "status": "generator_ready",
     },
+    {
+        "id": AF_DETECTION_EFFECTIVENESS_REPORT_ID,
+        "domain": "anti-fraud",
+        "name": "Anti-fraud PH - Detection Effectiveness & Loss Prevented",
+        "type": "af_detection_effectiveness",
+        "status": "generator_ready",
+    },
+    {
+        "id": AF_RULE_CHANGE_LOG_REPORT_ID,
+        "domain": "anti-fraud",
+        "name": "Anti-fraud PH - Rule Change Log & Governance",
+        "type": "af_rule_change_log",
+        "status": "generator_ready",
+    },
 )
 
 # Reports whose artifacts can be regenerated on demand by running the live
@@ -187,6 +203,8 @@ GENERATOR_REPORT_IDS: frozenset[str] = frozenset(
         AF_RULES_FEATURES_REPORT_ID,
         AF_RULE_EFFECTIVENESS_REPORT_ID,
         AF_FRAUD_LOSS_REPORT_ID,
+        AF_DETECTION_EFFECTIVENESS_REPORT_ID,
+        AF_RULE_CHANGE_LOG_REPORT_ID,
     }
 )
 
@@ -1356,6 +1374,270 @@ order by pending_records desc;
 """
 
 
+def build_af_detection_effectiveness_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    # Detection effectiveness ties the rule engine to confirmed-fraud outcomes: of the fraud cases (and
+    # the PHP loss they carry), how much did a rule flag for review vs surface some other way (customer
+    # report / chargeback / manual). Reuses the proven review_record -> review_case -> rule join that the
+    # Rule Effectiveness scorecard already relies on. Scope: cases opened in the last two full months + MTD.
+    win = business_insights_window(now)
+    span_label = win.span_label
+    span_start_iso = win.span_start.isoformat()
+    span_end_iso = win.span_end_exclusive.isoformat()
+    p2_iso, p3_iso = win.periods[1][1].isoformat(), win.periods[2][1].isoformat()
+    p1_label, p2_label, p3_label = (p[0] for p in win.periods)
+    case_snap = _aliased_snapshot_filter("c", AF_REVIEW_CASE_TABLE, snapshot_pt_date)
+    window = f"c.case_open_datetime >= '{span_start_iso}' and c.case_open_datetime < '{span_end_iso}'"
+    period_case = (
+        f"case when c.case_open_datetime < '{p2_iso}' then '{p1_label}' "
+        f"when c.case_open_datetime < '{p3_iso}' then '{p2_label}' else '{p3_label}' end"
+    )
+    fraud_expr = "lower(trim(coalesce(c.fraud_mo_type, ''))) not in ('not fraud', 'pending', '')"
+    mo_expr = "case when trim(coalesce(c.fraud_mo_type, '')) = '' then 'Unspecified' else c.fraud_mo_type end"
+    subtype_expr = "case when trim(coalesce(c.fraud_mo_subtype, '')) = '' then 'Unspecified' else c.fraud_mo_subtype end"
+    # A case is "rule-detected" when at least one review_record links it to a non-empty rule_id.
+    cases_cte = f"""cases as (
+  select c.case_id,
+    c.case_open_datetime,
+    case when {fraud_expr} then 1 else 0 end as is_fraud,
+    {mo_expr} as fraud_mo_type,
+    {subtype_expr} as fraud_mo_subtype,
+    coalesce(c.loss_total_amt, 0) as loss,
+    coalesce(c.loss_recovered_amt, 0) as recovered
+  from {AF_REVIEW_CASE_TABLE} c
+  where {case_snap} and {window}
+),
+case_rules as (
+  select rr.case_id,
+    count(distinct case when rr.rule_id is not null and trim(rr.rule_id) <> '' then rr.rule_id end) as rule_count
+  from {AF_REVIEW_RECORD_TABLE} rr
+  where rr.pt_date = (select max(pt_date) from {AF_REVIEW_RECORD_TABLE})
+  group by rr.case_id
+),
+flagged as (
+  select cs.*, case when coalesce(cr.rule_count, 0) > 0 then 1 else 0 end as rule_detected
+  from cases cs left join case_rules cr on cr.case_id = cs.case_id
+)"""
+    header = _af_report_header("Anti-fraud PH - Detection Effectiveness & Loss Prevented", snapshot_pt_date)
+    return f"""{header}
+-- Source: DWD review_case (fraud verdict + PHP loss) joined to review_record (which rule flagged the
+-- case for review). Scope: cases opened in {span_label}. Confirmed fraud = fraud_mo_type not in
+-- ('Not Fraud','Pending',''). rule-detected = >=1 review_record with a non-empty rule_id; the remainder
+-- is "leaked" (surfaced outside the rule engine). Loss is in PHP. Per-rule loss is attributed to every
+-- rule that flagged the case, so it can exceed the total when multiple rules cover one case.
+
+-- 1. Detection Coverage Summary
+-- One row per period (last two full months + current MTD). detection_rate_pct = rule-detected fraud
+-- cases / fraud cases; loss_detected_share_pct = rule-detected fraud loss / total fraud loss.
+with {cases_cte}
+select
+  {period_case} as period,
+  sum(is_fraud) as fraud_cases,
+  sum(case when is_fraud = 1 and rule_detected = 1 then 1 else 0 end) as rule_detected_cases,
+  round(sum(case when is_fraud = 1 and rule_detected = 1 then 1 else 0 end) / nullif(sum(is_fraud), 0) * 100, 2) as detection_rate_pct,
+  cast(round(sum(case when is_fraud = 1 then loss else 0 end), 2) as decimal(20, 2)) as fraud_loss_php,
+  cast(round(sum(case when is_fraud = 1 and rule_detected = 1 then loss else 0 end), 2) as decimal(20, 2)) as loss_rule_detected_php,
+  cast(round(sum(case when is_fraud = 1 and rule_detected = 0 then loss else 0 end), 2) as decimal(20, 2)) as loss_leaked_php,
+  round(sum(case when is_fraud = 1 and rule_detected = 1 then loss else 0 end)
+        / nullif(sum(case when is_fraud = 1 then loss else 0 end), 0) * 100, 2) as loss_detected_share_pct
+from flagged
+group by {period_case}
+order by min(case_open_datetime);
+
+-- 2. Detection by Fraud MO Type
+-- Confirmed fraud only. loss_leaked_php highlights the blind spots (fraud the rule engine missed).
+with {cases_cte}
+select
+  fraud_mo_type,
+  sum(is_fraud) as fraud_cases,
+  sum(case when is_fraud = 1 and rule_detected = 1 then 1 else 0 end) as rule_detected_cases,
+  round(sum(case when is_fraud = 1 and rule_detected = 1 then 1 else 0 end) / nullif(sum(is_fraud), 0) * 100, 2) as detection_rate_pct,
+  cast(round(sum(case when is_fraud = 1 then loss else 0 end), 2) as decimal(20, 2)) as total_loss_php,
+  cast(round(sum(case when is_fraud = 1 and rule_detected = 1 then loss else 0 end), 2) as decimal(20, 2)) as loss_detected_php,
+  cast(round(sum(case when is_fraud = 1 and rule_detected = 0 then loss else 0 end), 2) as decimal(20, 2)) as loss_leaked_php
+from flagged
+where is_fraud = 1
+group by fraud_mo_type
+order by loss_leaked_php desc, total_loss_php desc;
+
+-- 3. Top Detecting Rules
+-- Per rule: the confirmed-fraud cases it flagged and the PHP loss it helped catch, plus its precision
+-- (fraud cases / all cases it flagged). The MVP rules - what is actually carrying detection.
+with {cases_cte},
+links as (
+  select rr.case_id, rr.rule_id, max(rr.rule_name) as rule_name
+  from {AF_REVIEW_RECORD_TABLE} rr
+  where rr.pt_date = (select max(pt_date) from {AF_REVIEW_RECORD_TABLE})
+    and rr.rule_id is not null and trim(rr.rule_id) <> ''
+  group by rr.case_id, rr.rule_id
+)
+select
+  l.rule_id,
+  max(l.rule_name) as rule_name,
+  count(distinct l.case_id) as flagged_cases,
+  count(distinct case when f.is_fraud = 1 then l.case_id end) as fraud_cases_caught,
+  round(count(distinct case when f.is_fraud = 1 then l.case_id end) / nullif(count(distinct l.case_id), 0) * 100, 2) as precision_pct,
+  cast(round(sum(case when f.is_fraud = 1 then f.loss else 0 end), 2) as decimal(20, 2)) as loss_caught_php
+from links l
+join flagged f on f.case_id = l.case_id
+group by l.rule_id
+order by loss_caught_php desc, fraud_cases_caught desc;
+
+-- 4. Missed Fraud (Blind Spots)
+-- Confirmed-fraud cases no rule flagged, by MO type/subtype. The detection backlog to build rules for.
+with {cases_cte}
+select
+  fraud_mo_type,
+  fraud_mo_subtype,
+  count(1) as missed_cases,
+  cast(round(sum(loss), 2) as decimal(20, 2)) as loss_leaked_php,
+  cast(round(sum(recovered), 2) as decimal(20, 2)) as recovered_php
+from flagged
+where is_fraud = 1 and rule_detected = 0
+group by fraud_mo_type, fraud_mo_subtype
+order by loss_leaked_php desc, missed_cases desc;
+
+-- 5. Daily Detection Trend
+-- Daily confirmed-fraud loss split into rule-detected vs leaked, plus an 'All fraud loss' series;
+-- powers the filterable trend chart.
+with {cases_cte},
+daily as (
+  select substr(case_open_datetime, 1, 10) as case_open_date,
+    sum(case when is_fraud = 1 and rule_detected = 1 then loss else 0 end) as detected_loss,
+    sum(case when is_fraud = 1 and rule_detected = 0 then loss else 0 end) as leaked_loss,
+    sum(case when is_fraud = 1 then loss else 0 end) as all_loss,
+    sum(case when is_fraud = 1 then 1 else 0 end) as fraud_cases
+  from flagged group by substr(case_open_datetime, 1, 10)
+)
+select 'Rule-detected loss' as series, case_open_date,
+  cast(round(detected_loss, 2) as decimal(20, 2)) as daily_loss_php, fraud_cases from daily
+union all
+select 'Leaked loss' as series, case_open_date,
+  cast(round(leaked_loss, 2) as decimal(20, 2)) as daily_loss_php, fraud_cases from daily
+union all
+select 'All fraud loss' as series, case_open_date,
+  cast(round(all_loss, 2) as decimal(20, 2)) as daily_loss_php, fraud_cases from daily
+order by series, case_open_date;
+"""
+
+
+def build_af_rule_change_log_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    # Governance / audit: diff the rule_config snapshot against an earlier one to surface what changed -
+    # rules added, retired, activated, deactivated, re-targeted (outcome_type), re-scored (risk_level), or
+    # re-logicked (feature_expr). The _ss config table keeps a daily snapshot per pt_date; we compare the
+    # current snapshot to the snapshot on/before the report-window start, falling back to the earliest
+    # retained snapshot when history does not reach that far back.
+    win = business_insights_window(now)
+    baseline_iso = win.span_start.isoformat()
+    curr_snap = _aliased_snapshot_filter("rc", AF_RULE_CONFIG_TABLE, snapshot_pt_date)
+    base_pt = (
+        f"coalesce((select max(pt_date) from {AF_RULE_CONFIG_TABLE} where pt_date <= '{baseline_iso}'), "
+        f"(select min(pt_date) from {AF_RULE_CONFIG_TABLE}))"
+    )
+    status_label = "case when {a}.status > 0 then 'Active' else 'Inactive/Draft' end"
+    outcome_label = (
+        "case {a}.outcome_type when 1 then 'Punish' when 2 then 'Challenge' when 3 then 'Reject' "
+        "else cast({a}.outcome_type as string) end"
+    )
+    # The current and baseline projections, reused by every section. Baseline is pinned to one snapshot.
+    snaps_cte = f"""curr as (
+  select rc.rule_id, rc.rule_name, rc.status, rc.outcome_type, rc.risk_level,
+    rc.priority, rc.review_priority, rc.feature_expr
+  from {AF_RULE_CONFIG_TABLE} rc
+  where {curr_snap}
+),
+base as (
+  select rc.rule_id, rc.rule_name, rc.status, rc.outcome_type, rc.risk_level,
+    rc.priority, rc.review_priority, rc.feature_expr
+  from {AF_RULE_CONFIG_TABLE} rc
+  where rc.pt_date = {base_pt}
+),
+joined as (
+  select
+    coalesce(c.rule_id, b.rule_id) as rule_id,
+    coalesce(c.rule_name, b.rule_name) as rule_name,
+    b.rule_id as base_rule_id, c.rule_id as curr_rule_id,
+    b.status as base_status, c.status as curr_status,
+    b.outcome_type as base_outcome, c.outcome_type as curr_outcome,
+    b.risk_level as base_risk, c.risk_level as curr_risk,
+    b.priority as base_priority, c.priority as curr_priority,
+    b.review_priority as base_review_priority, c.review_priority as curr_review_priority,
+    b.feature_expr as base_expr, c.feature_expr as curr_expr
+  from curr c full outer join base b on c.rule_id = b.rule_id
+),
+classified as (
+  select joined.*,
+    case
+      when base_rule_id is null then 'Added'
+      when curr_rule_id is null then 'Removed'
+      when coalesce(base_status, 0) <= 0 and coalesce(curr_status, 0) > 0 then 'Activated'
+      when coalesce(base_status, 0) > 0 and coalesce(curr_status, 0) <= 0 then 'Deactivated'
+      when coalesce(base_outcome, -999) <> coalesce(curr_outcome, -999) then 'Outcome changed'
+      when coalesce(base_risk, '') <> coalesce(curr_risk, '') then 'Risk level changed'
+      when coalesce(base_expr, '') <> coalesce(curr_expr, '') then 'Logic changed'
+      when coalesce(base_priority, -999) <> coalesce(curr_priority, -999)
+        or coalesce(base_review_priority, -999) <> coalesce(curr_review_priority, -999) then 'Priority changed'
+      else 'Unchanged'
+    end as change_type
+  from joined
+)"""
+    curr_status_l = status_label.format(a="rc")
+    curr_outcome_l = outcome_label.format(a="rc")
+    header = _af_report_header("Anti-fraud PH - Rule Change Log & Governance", snapshot_pt_date)
+    return f"""{header}
+-- Source: rule_config snapshots. Current snapshot vs the snapshot on/before {baseline_iso} (the report
+-- window start), falling back to the earliest retained snapshot if history is shorter. outcome_type:
+-- 1=Punish, 2=Challenge, 3=Reject. status > 0 = Active. If the table retains only recent snapshots the
+-- baseline collapses to the earliest available and rules may appear as 'Added' - read change counts with
+-- the snapshot span in mind.
+
+-- 1. Change Summary
+-- Count of rules per change type since the baseline snapshot.
+with {snaps_cte}
+select change_type, count(1) as rules
+from classified
+group by change_type
+order by case change_type
+  when 'Added' then 1 when 'Activated' then 2 when 'Deactivated' then 3 when 'Removed' then 4
+  when 'Outcome changed' then 5 when 'Risk level changed' then 6 when 'Logic changed' then 7
+  when 'Priority changed' then 8 else 9 end;
+
+-- 2. Rule Change Detail
+-- Every changed rule with its before/after. logic_changed flags a feature_expr edit (the rule's logic).
+with {snaps_cte}
+select
+  change_type,
+  rule_id,
+  rule_name,
+  case when coalesce(base_status, 0) > 0 then 'Active' else 'Inactive/Draft' end as status_before,
+  case when coalesce(curr_status, 0) > 0 then 'Active' else 'Inactive/Draft' end as status_after,
+  case base_outcome when 1 then 'Punish' when 2 then 'Challenge' when 3 then 'Reject' else cast(base_outcome as string) end as outcome_before,
+  case curr_outcome when 1 then 'Punish' when 2 then 'Challenge' when 3 then 'Reject' else cast(curr_outcome as string) end as outcome_after,
+  base_risk as risk_before,
+  curr_risk as risk_after,
+  base_review_priority as review_priority_before,
+  curr_review_priority as review_priority_after,
+  case when coalesce(base_expr, '') <> coalesce(curr_expr, '') then 'Y' else 'N' end as logic_changed
+from classified
+where change_type <> 'Unchanged'
+order by case change_type
+  when 'Added' then 1 when 'Activated' then 2 when 'Deactivated' then 3 when 'Removed' then 4
+  when 'Outcome changed' then 5 when 'Risk level changed' then 6 when 'Logic changed' then 7
+  when 'Priority changed' then 8 else 9 end, rule_id;
+
+-- 3. Current Rule Inventory
+-- The current control surface: active/inactive rule counts by outcome type and risk level.
+select
+  {curr_outcome_l} as outcome_type,
+  {curr_status_l} as rule_status,
+  coalesce(nullif(trim(rc.risk_level), ''), 'Unspecified') as risk_level,
+  count(1) as rules
+from {AF_RULE_CONFIG_TABLE} rc
+where {curr_snap}
+group by {curr_outcome_l}, {curr_status_l}, coalesce(nullif(trim(rc.risk_level), ''), 'Unspecified')
+order by outcome_type, rule_status, risk_level;
+"""
+
+
 def _normalize_header(value: Any) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9]+", "_", str(value or "").strip().lower()).strip("_")
     return normalized
@@ -1733,6 +2015,8 @@ class BusinessInsightsStore:
             AF_RULES_FEATURES_REPORT_ID: lambda: build_af_rules_features_sql(now=now),
             AF_RULE_EFFECTIVENESS_REPORT_ID: lambda: build_af_rule_effectiveness_sql(now=now),
             AF_FRAUD_LOSS_REPORT_ID: lambda: build_af_fraud_loss_sql(now=now),
+            AF_DETECTION_EFFECTIVENESS_REPORT_ID: lambda: build_af_detection_effectiveness_sql(now=now),
+            AF_RULE_CHANGE_LOG_REPORT_ID: lambda: build_af_rule_change_log_sql(now=now),
         }
         builder = builders.get(report_id)
         if builder is None:

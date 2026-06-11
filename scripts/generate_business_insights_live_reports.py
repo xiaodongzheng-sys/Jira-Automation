@@ -39,9 +39,11 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from bpmis_jira_tool.business_insights import (  # noqa: E402
+    AF_DETECTION_EFFECTIVENESS_REPORT_ID,
     AF_FRAUD_LOSS_REPORT_ID,
     AF_REQUEST_STATISTIC_TABLE,
     AF_REVIEW_CASE_TABLE,
+    AF_RULE_CHANGE_LOG_REPORT_ID,
     AF_RULE_CONFIG_TABLE,
     AF_RULE_EFFECTIVENESS_REPORT_ID,
     AF_RULES_FEATURES_REPORT_ID,
@@ -56,7 +58,9 @@ from bpmis_jira_tool.business_insights import (  # noqa: E402
     PORTFOLIO_REPAYMENT_REPORT_ID,
     REPAY_PLAN_TABLE,
     UNDERWRITING_FUNNEL_REPORT_ID,
+    build_af_detection_effectiveness_sql,
     build_af_fraud_loss_sql,
+    build_af_rule_change_log_sql,
     build_af_rule_effectiveness_sql,
     build_af_rules_features_sql,
     build_af_scenarios_actions_sql,
@@ -93,6 +97,14 @@ REPORT_BUILDERS: dict[str, tuple[str, Callable[..., str]]] = {
         "Anti-fraud PH - Fraud Loss & Case Outcomes",
         build_af_fraud_loss_sql,
     ),
+    AF_DETECTION_EFFECTIVENESS_REPORT_ID: (
+        "Anti-fraud PH - Detection Effectiveness & Loss Prevented",
+        build_af_detection_effectiveness_sql,
+    ),
+    AF_RULE_CHANGE_LOG_REPORT_ID: (
+        "Anti-fraud PH - Rule Change Log & Governance",
+        build_af_rule_change_log_sql,
+    ),
 }
 
 # Anchor table per report used to resolve the latest available pt_date when the
@@ -106,6 +118,8 @@ REPORT_SNAPSHOT_ANCHOR_TABLE: dict[str, str] = {
     AF_RULES_FEATURES_REPORT_ID: AF_RULE_CONFIG_TABLE,
     AF_RULE_EFFECTIVENESS_REPORT_ID: AF_REQUEST_STATISTIC_TABLE,
     AF_FRAUD_LOSS_REPORT_ID: AF_REVIEW_CASE_TABLE,
+    AF_DETECTION_EFFECTIVENESS_REPORT_ID: AF_REVIEW_CASE_TABLE,
+    AF_RULE_CHANGE_LOG_REPORT_ID: AF_RULE_CONFIG_TABLE,
 }
 
 LATEST_SNAPSHOT = "latest"
@@ -1179,10 +1193,13 @@ def _searchable_table_panel(
     rows: list[list[Any]],
     *,
     placeholder: str,
+    step_columns: set[int] | None = None,
 ) -> str:
+    step_columns = step_columns or set()
     header_html = "".join(
         (
-            f'<th><span class="th-label">{html.escape(str(header))}</span>'
+            f'<th{" class=\"step\"" if index in step_columns else ""}>'
+            f'<span class="th-label">{html.escape(str(header))}</span>'
             f'<input class="col-filter" type="text" data-col="{index}" '
             f'placeholder="Filter" aria-label="Filter {html.escape(str(header))}"></th>'
         )
@@ -1195,7 +1212,8 @@ def _searchable_table_panel(
     body_rows = []
     for row in rows:
         cells = "".join(
-            f"<td>{html.escape(_cell(row[index] if index < len(row) else ''))}</td>"
+            f'<td{" class=\"step\"" if index in step_columns else ""}>'
+            f"{html.escape(_cell(row[index] if index < len(row) else ''))}</td>"
             for index in range(len(headers))
         )
         body_rows.append(f"<tr>{cells}</tr>")
@@ -1261,6 +1279,67 @@ def _kpi_cards_panel(title: str, pairs: list[tuple]) -> str:
             f'<div class="kpi"><span>{html.escape(label)}</span><strong>{html.escape(value)}</strong>{delta_html}</div>'
         )
     return f'<section class="panel"><h2>{html.escape(title)}</h2><div class="kpi-grid">{"".join(parts)}</div></section>'
+
+
+def _kpi_fmt(value: Any, fmt: str) -> str:
+    if value in (None, ""):
+        return ""
+    if fmt == "money":
+        return f"₱{_format_number(value)}"
+    if fmt == "pct":
+        return f"{value}%"
+    if fmt == "hours":
+        return f"{value}h"
+    return _format_number(value)
+
+
+def _period_kpi_panel(title_base: str, summary, specs: list[tuple[str, str, str]]) -> str:
+    """Period-switchable KPI panel. summary=(headers, rows) with a 'period' column; specs=list of
+    (label, column, fmt) where fmt in {'pct','money','hours','num'}. Renders cards for the latest full
+    month (delta vs the prior full month) and embeds per-period data so the month selector can recompute
+    each card client-side. Returns '' when there is no period summary to drive it."""
+    headers, rows = summary if summary else ([], [])
+    if not rows:
+        return ""
+    cols = {str(c): i for i, c in enumerate(headers)}
+    if "period" not in cols:
+        return ""
+    cur, prev, cur_label, prev_label, _mtd, scope_label = _period_rows(summary)
+
+    def cell(row, col):
+        i = cols.get(col)
+        return row[i] if row is not None and i is not None and i < len(row) else None
+
+    periods = [str(cell(r, "period")) for r in rows]
+    data: dict[str, dict[str, float]] = {}
+    for r in rows:
+        period = str(cell(r, "period"))
+        data[period] = {col: _number(cell(r, col)) for (_l, col, _f) in specs if _is_number(cell(r, col))}
+
+    cards_html: list[str] = []
+    spec_meta: list[dict[str, str]] = []
+    for (label, col, fmt) in specs:
+        value = cell(cur, col)
+        if value in (None, ""):
+            continue
+        dtext, ddir = _delta_vs(value, cell(prev, col), prev_label)
+        arrow = "&#9650; " if ddir == "up" else ("&#9660; " if ddir == "down" else "")
+        delta_html = f'<small class="delta {html.escape(ddir)}">{arrow}{html.escape(dtext)}</small>' if dtext else ""
+        cards_html.append(
+            f'<div class="kpi" data-kpi-col="{html.escape(col)}" data-kpi-fmt="{html.escape(fmt)}" '
+            f'data-kpi-label="{html.escape(label)}"><span>{html.escape(label)} ({html.escape(cur_label)})</span>'
+            f'<strong>{html.escape(_kpi_fmt(value, fmt))}</strong>{delta_html}</div>'
+        )
+        spec_meta.append({"label": label, "col": col, "fmt": fmt})
+    if not cards_html:
+        return ""
+    payload = {"base": title_base, "periods": periods, "defaultPeriod": cur_label, "specs": spec_meta, "data": data}
+    title = f"{title_base} — {scope_label}" if scope_label else title_base
+    return (
+        f'<section class="panel" data-period-kpi>'
+        f'<script type="application/json" data-period-json>{_js_data(payload)}</script>'
+        f'<h2>{html.escape(title)}</h2><div class="kpi-grid">{"".join(cards_html)}</div></section>'
+    )
 
 
 def _insight_panel(title: str, cards: list[tuple[str, str, str]]) -> str:
@@ -1696,6 +1775,100 @@ _DASHBOARD_JS = r"""
     var a=document.createElement('a'); a.href='#'+o.panel.id; a.textContent=o.h.textContent; nav.appendChild(a); });
   main.insertBefore(nav, main.firstChild);
 })();
+(function(){
+  // Per-table CSV export. Adds a "Download CSV" button to each table panel; exports the rows currently
+  // visible (search / column filters applied) using the unformatted data-raw values.
+  function slug(s){ return (String(s||'table').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,60))||'table'; }
+  function esc(s){ s=String(s==null?'':s); return /[",\n\r]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; }
+  function labelOf(th){ var l=th.querySelector('.th-label'); return (l?l.textContent:th.textContent).trim(); }
+  function exportTable(table, name){
+    var hr = table.tHead ? table.tHead.rows[table.tHead.rows.length-1] : null; if(!hr){ return; }
+    var hcells = Array.prototype.slice.call(hr.cells);
+    var keep = hcells.map(function(th){ return !th.classList.contains('exp-cell'); });
+    var labels = hcells.filter(function(th,i){ return keep[i]; }).map(labelOf);
+    var lines = [labels.map(esc).join(',')];
+    var bodyRows;
+    if(table.classList.contains('rule-table')){
+      bodyRows = Array.prototype.slice.call(table.querySelectorAll('tbody tr.rule-row')).filter(function(tr){ return !tr.hidden; });
+    } else {
+      bodyRows = Array.prototype.slice.call(table.tBodies[0].rows).filter(function(tr){ return !tr.classList.contains('no-match'); });
+    }
+    bodyRows.forEach(function(tr){
+      var vals=[];
+      Array.prototype.forEach.call(tr.cells, function(td,i){ if(!keep[i]){ return; }
+        var raw=td.getAttribute('data-raw'); vals.push(raw!=null?raw:td.textContent.trim()); });
+      lines.push(vals.map(esc).join(','));
+    });
+    var blob = new Blob(['﻿'+lines.join('\r\n')], {type:'text/csv;charset=utf-8;'});
+    var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = slug(name)+'.csv';
+    document.body.appendChild(a); a.click();
+    setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 0);
+  }
+  document.querySelectorAll('.panel').forEach(function(panel){
+    var table = panel.querySelector('table.search-table, table.rule-table'); if(!table){ return; }
+    var h2 = panel.querySelector(':scope > h2'); var name = h2 ? h2.textContent : 'table';
+    var btn = document.createElement('button'); btn.type='button'; btn.className='csv-btn'; btn.textContent='Download CSV';
+    btn.addEventListener('click', function(){ exportTable(table, name); });
+    var bar = panel.querySelector('.search-bar');
+    if(bar){ bar.appendChild(btn); }
+    else { var d=document.createElement('div'); d.className='search-bar'; d.appendChild(btn); panel.insertBefore(d, table.closest('.table-wrap')||table); }
+  });
+})();
+(function(){
+  // Month selector: focus the report on one period. Recomputes [data-period-kpi] cards (with delta vs
+  // the prior period) and filters tables that carry a 'period' column. "All months" restores the
+  // overview (KPIs = latest full month, all table rows shown). Absent when there is no period data.
+  var kpiPanels = Array.prototype.slice.call(document.querySelectorAll('[data-period-kpi]'));
+  var meta = kpiPanels.map(function(p){ var s=p.querySelector('script[data-period-json]'); if(!s){ return null; }
+    try{ return JSON.parse(s.textContent); }catch(e){ return null; } });
+  function periodCol(table){ var hr=table.tHead?table.tHead.rows[table.tHead.rows.length-1]:null; if(!hr){ return -1; }
+    for(var i=0;i<hr.cells.length;i++){ var l=hr.cells[i].querySelector('.th-label');
+      var t=(l?l.textContent:hr.cells[i].textContent).trim().toLowerCase(); if(t==='period'){ return i; } } return -1; }
+  var periodTables=[]; document.querySelectorAll('table.search-table').forEach(function(t){ var ci=periodCol(t); if(ci>=0){ periodTables.push([t,ci]); } });
+  var periods=[];
+  meta.forEach(function(m){ if(m){ (m.periods||[]).forEach(function(p){ if(periods.indexOf(p)<0){ periods.push(p); } }); } });
+  if(!periods.length){ periodTables.forEach(function(pt){ Array.prototype.forEach.call(pt[0].tBodies[0].rows, function(r){
+    var c=r.cells[pt[1]]; var v=(c.getAttribute('data-raw')||c.textContent).trim(); if(v && periods.indexOf(v)<0){ periods.push(v); } }); }); }
+  if(periods.length < 2){ return; }
+  var bar=document.createElement('div'); bar.className='period-bar';
+  var label=document.createElement('span'); label.className='period-label'; label.textContent='Month';
+  var sel=document.createElement('select'); sel.className='period-select';
+  var optAll=document.createElement('option'); optAll.value='__all__'; optAll.textContent='All months'; sel.appendChild(optAll);
+  periods.forEach(function(p){ var o=document.createElement('option'); o.value=p; o.textContent=p; sel.appendChild(o); });
+  bar.appendChild(label); bar.appendChild(sel);
+  var main=document.querySelector('main'); if(!main){ return; }
+  var toc=main.querySelector('.toc');
+  if(toc && toc.nextSibling){ main.insertBefore(bar, toc.nextSibling); } else { main.insertBefore(bar, main.firstChild); }
+  function fmtNum(n){ var dec=(n%1!==0)?2:0; return n.toLocaleString(undefined,{minimumFractionDigits:0,maximumFractionDigits:dec}); }
+  function fmtVal(v,fmt){ if(v==null||isNaN(v)){ return ''; } if(fmt==='money'){ return '₱'+fmtNum(v); }
+    if(fmt==='pct'){ return v+'%'; } if(fmt==='hours'){ return v+'h'; } return fmtNum(v); }
+  function renderKpis(period){
+    kpiPanels.forEach(function(panel,pi){ var m=meta[pi]; if(!m){ return; }
+      var shown = (period==='__all__') ? m.defaultPeriod : period;
+      var idx=m.periods.indexOf(shown); var prevP = idx>0 ? m.periods[idx-1] : null;
+      var row=m.data[shown]||{}; var prow=prevP?(m.data[prevP]||{}):{};
+      Array.prototype.forEach.call(panel.querySelectorAll('.kpi'), function(card){
+        var col=card.getAttribute('data-kpi-col'); if(!col){ return; }
+        var fmt=card.getAttribute('data-kpi-fmt'); var base=card.getAttribute('data-kpi-label');
+        var v=row[col]; var span=card.querySelector('span'); var strong=card.querySelector('strong'); var delta=card.querySelector('.delta');
+        if(span){ span.textContent=base+' ('+shown+')'; }
+        if(strong){ strong.textContent = (v==null?'':fmtVal(v,fmt)); }
+        if(delta){ var pv=prevP?prow[col]:null;
+          if(pv!=null && pv!==0 && v!=null){ var pct=Math.round((v-pv)/pv*1000)/10; var dir=pct>0?'up':(pct<0?'down':'');
+            delta.className='delta '+dir; delta.innerHTML=(dir==='up'?'&#9650; ':(dir==='down'?'&#9660; ':''))+Math.abs(pct)+'% vs '+prevP; delta.style.display=''; }
+          else { delta.style.display='none'; } }
+      });
+    });
+  }
+  function filterTables(period){
+    periodTables.forEach(function(pt){ var t=pt[0],ci=pt[1];
+      Array.prototype.forEach.call(t.tBodies[0].rows, function(r){
+        if(period==='__all__'){ r.classList.remove('period-hide'); return; }
+        var c=r.cells[ci]; var v=(c.getAttribute('data-raw')||c.textContent).trim();
+        r.classList.toggle('period-hide', v!==period); }); });
+  }
+  sel.addEventListener('change', function(){ renderKpis(sel.value); filterTables(sel.value); });
+})();
 """
 
 
@@ -1724,6 +1897,12 @@ h2{{margin:0 0 14px;font-size:18px;}}
 .search-bar{{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap;}}
 .search-bar input{{flex:1;min-width:240px;height:40px;border:1px solid #cbd5e1;border-radius:6px;padding:0 12px;font-size:14px;}}
 .search-bar .count{{color:var(--muted);font-size:13px;white-space:nowrap;}}
+.csv-btn{{flex:0 0 auto;height:36px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;color:var(--blue);font-size:13px;font-weight:600;padding:0 12px;cursor:pointer;white-space:nowrap;}}
+.csv-btn:hover{{border-color:var(--blue);background:#f1f6ff;}}
+.period-bar{{display:flex;align-items:center;gap:10px;margin:0 0 14px;}}
+.period-bar .period-label{{font-size:13px;font-weight:700;color:#344054;}}
+.period-bar .period-select{{height:36px;border:1px solid #cbd5e1;border-radius:6px;padding:0 10px;font-size:14px;background:#fff;color:var(--ink);min-width:160px;}}
+tr.period-hide{{display:none;}}
 .kpi-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;}}
 .kpi{{border:1px solid #e4e7ec;border-radius:8px;padding:14px;background:#fafcff;}}
 .kpi span{{display:block;color:var(--muted);font-size:12px;margin-bottom:6px;}}
@@ -1736,6 +1915,7 @@ th,td{{border-bottom:1px solid #edf1f7;padding:8px 10px;text-align:left;white-sp
 th{{background:#f1f6ff;font-weight:700;color:#344054;position:sticky;top:0;}}
 th .th-label{{display:block;margin-bottom:6px;}}
 th .col-filter{{display:block;width:100%;min-width:90px;font-weight:400;font-size:12px;padding:3px 6px;border:1px solid #cbd5e1;border-radius:4px;background:#fff;}}
+th.step,td.step{{width:50ch;min-width:50ch;max-width:50ch;white-space:normal;overflow-wrap:anywhere;word-break:break-word;}}
 .exp-cell{{width:34px;text-align:center;}}
 .expander{{border:none;background:none;cursor:pointer;font-size:11px;color:var(--blue);padding:2px 4px;line-height:1;}}
 td.detail-cell{{padding:0;background:#f8fbff;}}
@@ -1774,102 +1954,6 @@ padding:10px 4px;margin:-8px 0 6px;background:rgba(245,247,251,.96);backdrop-fil
     return body_html + "\n<script>\n" + _DASHBOARD_JS + "\n</script>\n</body></html>"
 
 
-def _scenario_auth_flow_document(
-    report_title: str,
-    snapshot_pt_date: str,
-    sheets: list[tuple[str, list[str], list[list[Any]]]],
-) -> str:
-    lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
-    flow = lookup.get("Scenario Action Auth Flow")
-    if flow is not None:
-        headers, rows = flow
-    elif sheets:
-        _name, headers, rows = sheets[-1]
-    else:
-        headers, rows = [], []
-    step_offsets = {
-        index for index, header in enumerate(headers) if str(header).strip().lower().endswith("_step")
-    }
-    header_html = "".join(
-        f'<th{" class=\"step\"" if index in step_offsets else ""}>{html.escape(str(header))}</th>'
-        for index, header in enumerate(headers)
-    )
-
-    def _cell(value: Any) -> str:
-        return "" if value is None else str(value)
-
-    body_rows = []
-    for row in rows:
-        cells = "".join(
-            f'<td{" class=\"step\"" if index in step_offsets else ""}>'
-            f"{html.escape(_cell(row[index] if index < len(row) else ''))}</td>"
-            for index in range(len(headers))
-        )
-        body_rows.append(f"<tr>{cells}</tr>")
-    table_html = (
-        f'<div class="table-wrap"><table data-flow-table><thead><tr>{header_html}</tr></thead>'
-        f'<tbody>{"".join(body_rows)}</tbody></table></div>'
-        if headers
-        else '<p class="empty">No scenario flow rows were returned.</p>'
-    )
-    generated_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
-    row_count = len(rows)
-    return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{html.escape(report_title)} Visualization</title>
-<style>
-:root{{--ink:#182230;--muted:#667085;--line:#d9e2ec;--bg:#f5f7fb;--blue:#1769e0;}}
-*{{box-sizing:border-box;}}
-body{{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}}
-header{{background:linear-gradient(135deg,#102a43,#173b5f);color:#fff;padding:30px 38px;}}
-header h1{{margin:0 0 8px;font-size:28px;overflow-wrap:anywhere;}} header p{{margin:0;color:#dbeafe;}}
-main{{padding:24px 34px 38px;}}
-.panel{{background:#fff;border:1px solid var(--line);border-radius:8px;padding:18px;box-shadow:0 1px 2px rgba(16,42,67,.06);}}
-h2{{margin:0 0 14px;font-size:18px;}}
-.search-bar{{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap;}}
-.search-bar input{{flex:1;min-width:240px;height:40px;border:1px solid #cbd5e1;border-radius:6px;padding:0 12px;font-size:14px;}}
-.search-bar .count{{color:var(--muted);font-size:13px;white-space:nowrap;}}
-.table-wrap{{overflow:auto;border:1px solid #edf1f7;border-radius:6px;max-height:74vh;}}
-table{{width:100%;border-collapse:collapse;font-size:13px;}}
-th,td{{border-bottom:1px solid #edf1f7;padding:8px 10px;text-align:left;white-space:nowrap;vertical-align:top;}}
-th{{background:#f1f6ff;font-weight:700;color:#344054;position:sticky;top:0;}}
-th.step,td.step{{width:50ch;min-width:50ch;max-width:50ch;white-space:normal;overflow-wrap:anywhere;word-break:break-word;}}
-tr.no-match{{display:none;}}
-.empty{{padding:18px;color:var(--muted);}}
-</style></head><body>
-<header><h1>{html.escape(report_title)}</h1><p>Snapshot {html.escape(snapshot_pt_date)}. Generated {generated_at} UTC from Data Workbench output.</p></header>
-<main><section class="panel">
-<h2>Scenario Action Auth Flow</h2>
-<div class="search-bar">
-<input type="search" data-search placeholder="Search scene name or step…" aria-label="Search scene name or step">
-<span class="count" data-count>{row_count} of {row_count} rows</span>
-</div>
-{table_html}
-</section></main>
-<script>
-(() => {{
-  const input = document.querySelector("[data-search]");
-  const counter = document.querySelector("[data-count]");
-  const rows = Array.from(document.querySelectorAll("[data-flow-table] tbody tr"));
-  const total = rows.length;
-  rows.forEach((row) => {{ row.dataset.text = row.textContent.toLowerCase(); }});
-  const apply = () => {{
-    const query = (input?.value || "").trim().toLowerCase();
-    let visible = 0;
-    rows.forEach((row) => {{
-      const match = !query || row.dataset.text.includes(query);
-      row.classList.toggle("no-match", !match);
-      if (match) visible += 1;
-    }});
-    if (counter) counter.textContent = `${{visible}} of ${{total}} rows`;
-  }};
-  input?.addEventListener("input", apply);
-  apply();
-}})();
-</script>
-</body></html>"""
-
-
 def write_visualization(
     path: Path,
     *,
@@ -1879,60 +1963,136 @@ def write_visualization(
     report_id: str = "",
 ) -> None:
     if report_id == AF_SCENARIOS_ACTIONS_REPORT_ID:
+        flow_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
+        flow = flow_lookup.get("Scenario Action Auth Flow")
+        if flow is None and sheets:
+            _name, fheaders, frows = sheets[-1]
+            flow = (fheaders, frows)
+        headers, rows = flow if flow else ([], [])
+        step_cols = {i for i, h in enumerate(headers) if str(h).strip().lower().endswith("_step")}
+
+        def _distinct(col: str):
+            idx = next((i for i, h in enumerate(headers) if str(h) == col), None)
+            if idx is None:
+                return None
+            return len({str(r[idx]) for r in rows if idx < len(r) and r[idx] not in (None, "")})
+
+        kpis: list[tuple] = []
+        if rows:
+            kpis.append(("Flow mappings", _format_number(len(rows))))
+        for label, col in (("L1 scenes", "l1_scene_name"), ("L2 sub-scenes", "l2_sub_scene_name"), ("Actions", "action_name")):
+            distinct = _distinct(col)
+            if distinct:
+                kpis.append((label, _format_number(distinct)))
+        intro = _kpi_cards_panel("Scenario Coverage", kpis)
+        panel = _searchable_table_panel(
+            "Scenario Action Auth Flow",
+            headers,
+            rows,
+            placeholder="Search scene name or step…",
+            step_columns=step_cols,
+        )
         path.write_text(
-            _scenario_auth_flow_document(report_title, snapshot_pt_date, sheets),
+            _searchable_tables_document(report_title, snapshot_pt_date, [panel], intro_html=intro),
             encoding="utf-8",
         )
         return
     if report_id == AF_RULES_FEATURES_REPORT_ID:
         flow_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
-        panels: list[str] = []
         rules = flow_lookup.get("Rules")
+        features = flow_lookup.get("Features")
+
+        def _count_by(table, col):
+            if not table:
+                return {}
+            hdrs, rws = table
+            idx = next((i for i, h in enumerate(hdrs) if str(h) == col), None)
+            if idx is None:
+                return {}
+            agg: dict[str, float] = {}
+            for r in rws:
+                if idx < len(r) and r[idx] not in (None, ""):
+                    key = str(r[idx])
+                    agg[key] = agg.get(key, 0.0) + 1
+            return agg
+
+        kpis: list[tuple] = []
+        if rules and rules[1]:
+            status = _count_by(rules, "rule_status")
+            kpis.append(("Total rules", _format_number(len(rules[1]))))
+            if status.get("Active"):
+                kpis.append(("Active rules", _format_number(status["Active"])))
+        if features and features[1]:
+            fstatus = _count_by(features, "feature_status")
+            kpis.append(("Total features", _format_number(len(features[1]))))
+            if fstatus.get("Active"):
+                kpis.append(("Active features", _format_number(fstatus["Active"])))
+        intro = _kpi_cards_panel("Catalog Summary", kpis)
+
+        chart_panels: list[str] = []
+        outcome = _count_by(rules, "outcome_type")
+        if outcome:
+            donut = _donut_panel(
+                "Rules by Outcome Type",
+                sorted(outcome.items(), key=lambda kv: kv[1], reverse=True),
+                note="Configured rules split by enforcement outcome (Reject / Challenge / Punish).",
+            )
+            if donut:
+                chart_panels.append(donut)
+        risk = _count_by(rules, "risk_level")
+        if risk:
+            bar = _bar_panel(
+                "Rules by Risk Level",
+                sorted(risk.items(), key=lambda kv: kv[1], reverse=True),
+                note="Configured rule count per risk level.",
+            )
+            if bar:
+                chart_panels.append(bar)
+        fstatus_chart = _count_by(features, "feature_status")
+        if fstatus_chart:
+            fbar = _bar_panel(
+                "Features by Status",
+                sorted(fstatus_chart.items(), key=lambda kv: kv[1], reverse=True),
+                note="Active vs inactive configured features.",
+            )
+            if fbar:
+                chart_panels.append(fbar)
+
+        table_panels: list[str] = []
         if rules:
-            panels.append(
+            table_panels.append(
                 _searchable_table_panel("Rules", rules[0], rules[1], placeholder="Search rule id or name…")
             )
-        features = flow_lookup.get("Features")
         if features:
-            panels.append(
+            table_panels.append(
                 _searchable_table_panel("Features", features[0], features[1], placeholder="Search feature id or name…")
             )
         path.write_text(
-            _searchable_tables_document(report_title, snapshot_pt_date, panels),
+            _searchable_tables_document(
+                report_title, snapshot_pt_date, chart_panels + table_panels, intro_html=intro
+            ),
             encoding="utf-8",
         )
         return
     if report_id == AF_RULE_EFFECTIVENESS_REPORT_ID:
         eff_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
-        # KPI cards: latest full month headline + delta vs the prior full month, plus an MTD card.
-        kpis: list[tuple] = []
-        scope_label = ""
+        # KPI cards: latest full month headline + delta vs the prior full month, switchable by month.
         cur = None
         cur_action_rate = None
         summary = eff_lookup.get("Request Outcome Summary")
         if summary and summary[1]:
-            cur, prev, cur_label, prev_label, mtd, scope_label = _period_rows(summary)
-
-            def _cv(row, col):
-                cols = {str(c): i for i, c in enumerate(summary[0])}
-                return row[cols[col]] if row is not None and col in cols and cols[col] < len(row) else None
-
-            cur_action_rate = _cv(cur, "action_rate_pct")
-            for label, col, suffix in [
-                ("Total outcomes", "total_outcomes", ""), ("Pass", "pass_num", ""),
-                ("Challenge", "challenge_num", ""), ("Reject", "reject_num", ""), ("Action rate", "action_rate_pct", "%"),
-            ]:
-                value = _cv(cur, col)
-                if value in (None, ""):
-                    continue
-                text = f"{_format_number(value)}{suffix}" if _is_number(value) else f"{value}{suffix}"
-                dtext, ddir = _delta_vs(_cv(cur, col), _cv(prev, col), prev_label)
-                kpis.append((f"{label} ({cur_label})", text, dtext, ddir))
-            if mtd is not None:
-                mv = _cv(mtd, "total_outcomes")
-                if mv not in (None, ""):
-                    kpis.append((f"Outcomes ({_period_label(summary, mtd)})", _format_number(mv)))
-        kpi_panel = _kpi_cards_panel(f"Hit-Rate Summary — {scope_label}" if scope_label else "Hit-Rate Summary", kpis)
+            cur, _prev, _cur_label, _prev_label, _mtd, _scope = _period_rows(summary)
+            scols = {str(c): i for i, c in enumerate(summary[0])}
+            cur_action_rate = cur[scols["action_rate_pct"]] if cur is not None and "action_rate_pct" in scols and scols["action_rate_pct"] < len(cur) else None
+        kpi_panel = _period_kpi_panel(
+            "Hit-Rate Summary",
+            summary,
+            [
+                ("Total outcomes", "total_outcomes", "num"), ("Pass", "pass_num", "num"),
+                ("Challenge", "challenge_num", "num"), ("Reject", "reject_num", "num"),
+                ("Action rate", "action_rate_pct", "pct"),
+            ],
+        )
         # Auto-insight highlights from the scorecard (most over-firing rule, lowest precision).
         insight_cards: list[tuple[str, str, str]] = []
         scorecard = eff_lookup.get("Rule Scorecard")
@@ -2150,45 +2310,17 @@ def write_visualization(
         return
     if report_id == AF_FRAUD_LOSS_REPORT_ID:
         loss_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
-        kpis: list[tuple] = []
-        scope_label = ""
         summary = loss_lookup.get("Case & Loss Summary")
-        if summary and summary[1]:
-            cur, prev, cur_label, prev_label, mtd, scope_label = _period_rows(summary)
-            cols = {str(c): i for i, c in enumerate(summary[0])}
-
-            def _cv(row, col):
-                return row[cols[col]] if row is not None and col in cols and cols[col] < len(row) else None
-
-            def _kpi(label, col, fmt):
-                value = _cv(cur, col)
-                if value in (None, ""):
-                    return None
-                if fmt == "money":
-                    text = f"₱{_format_number(value)}"
-                elif fmt == "pct":
-                    text = f"{value}%"
-                elif fmt == "hours":
-                    text = f"{value}h"
-                else:
-                    text = _format_number(value)
-                dtext, ddir = _delta_vs(value, _cv(prev, col), prev_label)
-                return (f"{label} ({cur_label})", text, dtext, ddir)
-
-            for spec in [
+        intro = _period_kpi_panel(
+            "Fraud Loss Summary",
+            summary,
+            [
                 ("Cases opened", "cases_opened", "num"), ("Confirmed fraud", "fraud_cases", "num"),
                 ("Fraud rate", "fraud_rate_pct", "pct"), ("Total loss", "total_loss_php", "money"),
                 ("Borne by customer", "loss_customer_php", "money"), ("Recovered", "recovered_php", "money"),
                 ("Avg review time", "avg_review_hours", "hours"),
-            ]:
-                card = _kpi(*spec)
-                if card:
-                    kpis.append(card)
-            if mtd is not None:
-                mv = _cv(mtd, "total_loss_php")
-                if mv not in (None, ""):
-                    kpis.append((f"Loss ({_period_label(summary, mtd)})", f"₱{_format_number(mv)}"))
-        intro = _kpi_cards_panel(f"Fraud Loss Summary — {scope_label}" if scope_label else "Fraud Loss Summary", kpis)
+            ],
+        )
         subtype_breakdown = loss_lookup.get("Fraud MO Subtype Breakdown")
         nested_sheets = {"Fraud MO Subtype Breakdown"}
         placeholders = {
@@ -2250,6 +2382,144 @@ def write_visualization(
             panels.append(
                 _searchable_table_panel(sheet_name, headers, rows, placeholder=placeholders.get(sheet_name, "Search…"))
             )
+        path.write_text(
+            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),
+            encoding="utf-8",
+        )
+        return
+    if report_id == AF_DETECTION_EFFECTIVENESS_REPORT_ID:
+        det_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
+        summary = det_lookup.get("Detection Coverage Summary")
+        cur = cur_label = None
+        kpi_panel = ""
+        if summary and summary[1]:
+            cur, _prev, cur_label, _prev_label, _mtd, _scope = _period_rows(summary)
+            kpi_panel = _period_kpi_panel(
+                "Detection Coverage",
+                summary,
+                [
+                    ("Detection rate", "detection_rate_pct", "pct"),
+                    ("Fraud loss", "fraud_loss_php", "money"),
+                    ("Loss rule-detected", "loss_rule_detected_php", "money"),
+                    ("Loss leaked", "loss_leaked_php", "money"),
+                    ("Loss detected share", "loss_detected_share_pct", "pct"),
+                ],
+            )
+        # Auto-insights: overall detection rate, biggest blind spot, top detecting rule.
+        insight_cards: list[tuple[str, str, str]] = []
+        if summary and summary[1]:
+            scols = {str(c): i for i, c in enumerate(summary[0])}
+
+            def _cv(row, col):
+                return row[scols[col]] if row is not None and col in scols and scols[col] < len(row) else None
+
+            dr = _cv(cur, "detection_rate_pct")
+            if dr not in (None, ""):
+                drn = _number(dr)
+                insight_cards.append((f"Detection rate ({cur_label})", f"{dr}%", "good" if drn >= 80 else ("warn" if drn >= 60 else "bad")))
+        by_mo = det_lookup.get("Detection by Fraud MO Type")
+        if by_mo and by_mo[1]:
+            mc = {str(c): i for i, c in enumerate(by_mo[0])}
+            if "fraud_mo_type" in mc and "loss_leaked_php" in mc:
+                worst = max(by_mo[1], key=lambda r: _number(r[mc["loss_leaked_php"]] if mc["loss_leaked_php"] < len(r) else 0))
+                lv = _number(worst[mc["loss_leaked_php"]])
+                if lv > 0:
+                    insight_cards.append(("Biggest blind spot", f"{worst[mc['fraud_mo_type']]} — ₱{_format_number(lv)} leaked", "bad"))
+        top_rules = det_lookup.get("Top Detecting Rules")
+        if top_rules and top_rules[1]:
+            tc = {str(c): i for i, c in enumerate(top_rules[0])}
+            if "rule_id" in tc and "loss_caught_php" in tc:
+                best = top_rules[1][0]
+                cv = _number(best[tc["loss_caught_php"]] if tc["loss_caught_php"] < len(best) else 0)
+                if cv > 0:
+                    insight_cards.append(("Top detecting rule", f"{best[tc['rule_id']]} — ₱{_format_number(cv)} caught", "good"))
+        intro = _insight_panel("Highlights", insight_cards) + kpi_panel
+        panels = []
+        for sheet_name, headers, rows in sheets:
+            if sheet_name == "Detection by Fraud MO Type":
+                mo_col = {str(c): i for i, c in enumerate(headers)}
+                if "fraud_mo_type" in mo_col and "loss_leaked_php" in mo_col:
+                    pairs = [
+                        (str(r[mo_col["fraud_mo_type"]]), r[mo_col["loss_leaked_php"]])
+                        for r in rows
+                        if mo_col["fraud_mo_type"] < len(r) and mo_col["loss_leaked_php"] < len(r)
+                    ]
+                    bar = _bar_panel(
+                        "Leaked Loss by Fraud Type (PHP)",
+                        sorted(pairs, key=lambda kv: _number(kv[1]), reverse=True)[:12],
+                        note="Confirmed fraud loss the rule engine did not flag, by modus operandi.",
+                        prefix="₱",
+                    )
+                    if bar:
+                        panels.append(bar)
+                panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Search fraud type…"))
+                continue
+            if sheet_name == "Daily Detection Trend":
+                panels.append(
+                    _daily_trend_panel(
+                        "Daily Detection Trend",
+                        headers,
+                        rows,
+                        rule_column="series",
+                        date_column="case_open_date",
+                        value_column="daily_loss_php",
+                    )
+                )
+                continue
+            placeholder = "Search rule id or name…" if sheet_name == "Top Detecting Rules" else (
+                "Search fraud type…" if sheet_name == "Missed Fraud (Blind Spots)" else "Filter…"
+            )
+            panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder=placeholder))
+        path.write_text(
+            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),
+            encoding="utf-8",
+        )
+        return
+    if report_id == AF_RULE_CHANGE_LOG_REPORT_ID:
+        chg_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
+        counts: dict[str, float] = {}
+        summary = chg_lookup.get("Change Summary")
+        if summary and summary[1]:
+            sc = {str(c): i for i, c in enumerate(summary[0])}
+            if "change_type" in sc and "rules" in sc:
+                for r in summary[1]:
+                    if sc["change_type"] < len(r) and sc["rules"] < len(r):
+                        counts[str(r[sc["change_type"]])] = _number(r[sc["rules"]])
+        kpis = [
+            (label, _format_number(counts[label]))
+            for label in ("Added", "Activated", "Deactivated", "Removed", "Outcome changed", "Risk level changed", "Logic changed", "Priority changed")
+            if counts.get(label)
+        ]
+        insight_cards = []
+        net = (counts.get("Added", 0) + counts.get("Activated", 0)) - (counts.get("Removed", 0) + counts.get("Deactivated", 0))
+        if counts:
+            sign = "+" if net >= 0 else ""
+            insight_cards.append(("Net change in active rules", f"{sign}{_format_number(net)}", "good" if net > 0 else ("warn" if net < 0 else "")))
+        if counts.get("Deactivated"):
+            insight_cards.append(("Rules deactivated", _format_number(counts["Deactivated"]), "warn"))
+        if counts.get("Logic changed"):
+            insight_cards.append(("Rules re-logicked", _format_number(counts["Logic changed"]), "warn"))
+        intro = _insight_panel("Highlights", insight_cards) + _kpi_cards_panel("Change Summary", kpis)
+        panels = []
+        for sheet_name, headers, rows in sheets:
+            if sheet_name == "Current Rule Inventory":
+                ic = {str(c): i for i, c in enumerate(headers)}
+                if "outcome_type" in ic and "rules" in ic:
+                    agg: dict[str, float] = {}
+                    for r in rows:
+                        key = str(r[ic["outcome_type"]]) if ic["outcome_type"] < len(r) else ""
+                        agg[key] = agg.get(key, 0.0) + _number(r[ic["rules"]] if ic["rules"] < len(r) else 0)
+                    bar = _bar_panel(
+                        "Current Rules by Outcome Type",
+                        sorted(agg.items(), key=lambda kv: kv[1], reverse=True),
+                        note="Active + inactive rule count per outcome type in the current snapshot.",
+                    )
+                    if bar:
+                        panels.append(bar)
+                panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Search outcome, status or risk…"))
+                continue
+            placeholder = "Search rule id, name or change type…" if sheet_name == "Rule Change Detail" else "Filter…"
+            panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder=placeholder))
         path.write_text(
             _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),
             encoding="utf-8",

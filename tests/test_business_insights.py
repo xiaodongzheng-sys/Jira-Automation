@@ -14,8 +14,10 @@ from openpyxl import load_workbook
 from bpmis_jira_tool.business_insights import (
     AF_FEATURE_CONFIG_TABLE,
     AF_ACTION_LOG_TABLE,
+    AF_DETECTION_EFFECTIVENESS_REPORT_ID,
     AF_FRAUD_LOSS_REPORT_ID,
     AF_IDENTIFY_REJECT_TABLE,
+    AF_RULE_CHANGE_LOG_REPORT_ID,
     AF_PUNISH_LIST_TABLE,
     AF_REQUEST_STATISTIC_TABLE,
     AF_REVIEW_CASE_TABLE,
@@ -32,7 +34,9 @@ from bpmis_jira_tool.business_insights import (
     PORTFOLIO_REPAYMENT_REPORT_ID,
     UNDERWRITING_FUNNEL_REPORT_ID,
     UNDERWRITING_FUNNEL_TABLE,
+    build_af_detection_effectiveness_sql,
     build_af_fraud_loss_sql,
+    build_af_rule_change_log_sql,
     build_af_rule_effectiveness_sql,
     build_af_rules_features_sql,
     build_af_scenarios_actions_sql,
@@ -320,7 +324,9 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertIn("Anti-fraud PH - Rules &amp; Features", response.get_data(as_text=True))
         self.assertIn("Anti-fraud PH - Rule Effectiveness / Hit-Rate", response.get_data(as_text=True))
         self.assertIn("Anti-fraud PH - Fraud Loss &amp; Case Outcomes", response.get_data(as_text=True))
-        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 8)
+        self.assertIn("Anti-fraud PH - Detection Effectiveness &amp; Loss Prevented", response.get_data(as_text=True))
+        self.assertIn("Anti-fraud PH - Rule Change Log &amp; Governance", response.get_data(as_text=True))
+        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 10)
         self.assertNotIn("Upload Export", response.get_data(as_text=True))
         self.assertIsNone(soup.select_one("[data-business-insights-upload]"))
 
@@ -474,7 +480,7 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
         self.assertIn("a.name = f.action", flow_section.query)
         self.assertNotIn("s.code = f.scene", flow_section.query)
 
-    def test_visualization_renders_only_searchable_flow_table(self):
+    def test_scenarios_visualization_is_world_class_single_flow_table(self):
         flow_headers = [
             "l1_scene_name",
             "l1_enum_name",
@@ -507,24 +513,28 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
             )
             html = output_path.read_text(encoding="utf-8")
 
-        # Only the flow table is rendered, with a search box.
-        self.assertIn("data-flow-table", html)
+        # The flow table now uses the world-class interactive shell (searchable, sortable,
+        # per-column filters, CSV export via the shared dashboard JS) instead of the bare table.
+        self.assertEqual(html.count('class="search-table"'), 1)  # single flow table
         self.assertIn("data-search", html)
         self.assertIn("Search scene name or step", html)
-        for header in flow_headers:
-            expected = f'<th class="step">{header}</th>' if header.endswith("_step") else f"<th>{header}</th>"
-            self.assertIn(expected, html)
+        self.assertIn("enhanceTable", html)
+        self.assertIn("sortable", html)
+        self.assertIn('class="col-filter"', html)
+        # Step columns are tagged for 50ch wrapping; non-step columns are not.
+        self.assertIn('<th class="step"><span class="th-label">default_step</span>', html)
+        self.assertIn('<th class="step"><span class="th-label">challenge5_step</span>', html)
+        self.assertIn('<td class="step">step_a</td>', html)
+        self.assertIn('<th><span class="th-label">l1_scene_name</span>', html)
+        self.assertIn("th.step,td.step{width:50ch;min-width:50ch;max-width:50ch;white-space:normal;", html)
         self.assertIn("Password Login", html)
         self.assertIn("P2P_TRANSFER", html)
-        # Step columns get a fixed 50-character width and wrap.
-        self.assertIn('<th class="step">default_step</th>', html)
-        self.assertIn('<th class="step">challenge5_step</th>', html)
-        self.assertIn('<td class="step">step_a</td>', html)
-        self.assertIn("th.step,td.step{width:50ch;min-width:50ch;max-width:50ch;white-space:normal;", html)
-        # Non-step columns are not tagged.
-        self.assertIn("<th>l1_scene_name</th>", html)
-        # The other sheets and the generic dashboard chrome are not rendered.
-        self.assertNotIn("L1 Scenarios", html)
+        # KPI coverage cards are rendered above the table.
+        self.assertIn("Scenario Coverage", html)
+        self.assertIn("Flow mappings", html)
+        # The legacy bare-table shell, catalog sheets, and generic dashboard chrome are gone.
+        self.assertNotIn("data-flow-table", html)
+        self.assertNotIn("l1_scene_code", html)
         self.assertNotIn("data-product-filter", html)
         self.assertNotIn("Data Quality Notes", html)
 
@@ -589,7 +599,14 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
         returned_ids = {report["id"] for report in reports_response.get_json()["reports"]}
         self.assertEqual(
             returned_ids,
-            {AF_SCENARIOS_ACTIONS_REPORT_ID, AF_RULES_FEATURES_REPORT_ID, AF_RULE_EFFECTIVENESS_REPORT_ID, AF_FRAUD_LOSS_REPORT_ID},
+            {
+                AF_SCENARIOS_ACTIONS_REPORT_ID,
+                AF_RULES_FEATURES_REPORT_ID,
+                AF_RULE_EFFECTIVENESS_REPORT_ID,
+                AF_FRAUD_LOSS_REPORT_ID,
+                AF_DETECTION_EFFECTIVENESS_REPORT_ID,
+                AF_RULE_CHANGE_LOG_REPORT_ID,
+            },
         )
         self.assertEqual(page_response.status_code, 200)
         self.assertIn(
@@ -670,6 +687,11 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
         self.assertIn("enhanceTable", html)
         self.assertIn("flag-bad", html)
         self.assertIn("sortable", html)
+        # Enriched with a KPI summary + outcome donut + status charts (still exactly two tables).
+        self.assertIn("Catalog Summary", html)
+        self.assertIn("Total rules", html)
+        self.assertIn("Rules by Outcome Type", html)
+        self.assertIn("Features by Status", html)
 
 
 class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
@@ -779,7 +801,10 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
         self.assertIn("Hit-Rate Summary", html)
         self.assertIn("Action rate", html)
         self.assertIn("4.23%", html)
-        self.assertIn('<div class="kpi">', html)
+        self.assertIn('class="kpi"', html)
+        # Period-switchable KPI panel + month selector data are embedded for the summary.
+        self.assertIn("data-period-kpi", html)
+        self.assertIn("data-period-json", html)
         # Expandable rule table with nested scene-breakdown rows.
         self.assertIn("<h2>Reject Rule Hit Summary</h2>", html)
         self.assertIn('class="rule-table"', html)
@@ -968,6 +993,151 @@ class FraudLossBusinessInsightsTests(unittest.TestCase):
         self.assertIn("IHCS", html)
         # The single-row summary is shown as KPIs, not a table panel.
         self.assertNotIn("<h2>Case &amp; Loss Summary</h2>", html)
+
+
+class DetectionEffectivenessBusinessInsightsTests(unittest.TestCase):
+    def test_seeded_and_generator_registration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ids = {r["id"] for r in BusinessInsightsStore(Path(tmp)).reports("anti-fraud")}
+        self.assertIn(AF_DETECTION_EFFECTIVENESS_REPORT_ID, ids)
+        self.assertIn(AF_DETECTION_EFFECTIVENESS_REPORT_ID, REPORT_BUILDERS)
+        self.assertEqual(
+            REPORT_BUILDERS[AF_DETECTION_EFFECTIVENESS_REPORT_ID][0],
+            "Anti-fraud PH - Detection Effectiveness & Loss Prevented",
+        )
+
+    def test_sql_sections_and_scope(self):
+        sql = build_af_detection_effectiveness_sql(snapshot_pt_date="2026-06-08", now=FIXED_NOW)
+        sections = extract_sql_sections(sql)
+        self.assertEqual(
+            [s.sheet_name for s in sections],
+            [
+                "Detection Coverage Summary",
+                "Detection by Fraud MO Type",
+                "Top Detecting Rules",
+                "Missed Fraud (Blind Spots)",
+                "Daily Detection Trend",
+            ],
+        )
+        # Reuses the proven review_record -> review_case join (rule that flagged the case for review).
+        self.assertIn(AF_REVIEW_CASE_TABLE, sql)
+        self.assertIn(AF_REVIEW_RECORD_TABLE, sql)
+        self.assertIn("rule_detected", sql)
+        self.assertIn("loss_leaked_php", sql)
+        self.assertIn("not in ('not fraud', 'pending', '')", sql)
+        # Spans the last two full months + current MTD (Mar 1 -> May 27 under the fixed clock).
+        self.assertIn("case_open_datetime >= '2026-03-01'", sql)
+        self.assertIn("case_open_datetime < '2026-05-27'", sql)
+        self.assertIn("'May 2026 MTD'", sql)
+
+    def test_visualization_renders_kpis_blind_spots_and_period_selector(self):
+        sheets = [
+            ("Detection Coverage Summary",
+             ["period", "fraud_cases", "rule_detected_cases", "detection_rate_pct", "fraud_loss_php",
+              "loss_rule_detected_php", "loss_leaked_php", "loss_detected_share_pct"],
+             [["Mar 2026", "120", "90", "75.0", "5000000", "3800000", "1200000", "76.0"],
+              ["Apr 2026", "140", "98", "70.0", "6200000", "4300000", "1900000", "69.4"],
+              ["May 2026 MTD", "40", "30", "75.0", "1800000", "1300000", "500000", "72.2"]]),
+            ("Detection by Fraud MO Type",
+             ["fraud_mo_type", "fraud_cases", "rule_detected_cases", "detection_rate_pct",
+              "total_loss_php", "loss_detected_php", "loss_leaked_php"],
+             [["Account Takeover", "60", "40", "66.7", "3000000", "2100000", "900000"]]),
+            ("Top Detecting Rules",
+             ["rule_id", "rule_name", "flagged_cases", "fraud_cases_caught", "precision_pct", "loss_caught_php"],
+             [["R001", "ATO velocity", "120", "90", "75.0", "2100000"]]),
+            ("Missed Fraud (Blind Spots)",
+             ["fraud_mo_type", "fraud_mo_subtype", "missed_cases", "loss_leaked_php", "recovered_php"],
+             [["Account Takeover", "SIM swap", "20", "900000", "100000"]]),
+            ("Daily Detection Trend", ["series", "case_open_date", "daily_loss_php", "fraud_cases"],
+             [["All fraud loss", "2026-05-01", "150000", "5"]]),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "viz.html"
+            write_visualization(
+                output_path,
+                report_title="Anti-fraud PH - Detection Effectiveness & Loss Prevented",
+                snapshot_pt_date="2026-06-08",
+                sheets=sheets,
+                report_id=AF_DETECTION_EFFECTIVENESS_REPORT_ID,
+            )
+            html = output_path.read_text(encoding="utf-8")
+        # Period-switchable KPI panel with embedded per-period data drives the month selector.
+        self.assertIn("Detection Coverage", html)
+        self.assertIn("data-period-kpi", html)
+        self.assertIn('<script type="application/json" data-period-json>', html)
+        self.assertIn("May 2026 MTD", html)
+        # Auto-insight highlights + leaked-loss bar + blind-spot table + trend.
+        self.assertIn("<h2>Highlights</h2>", html)
+        self.assertIn("<h2>Leaked Loss by Fraud Type (PHP)</h2>", html)
+        self.assertIn("<h2>Missed Fraud (Blind Spots)</h2>", html)
+        self.assertIn("SIM swap", html)
+        self.assertIn('id="ec-daily-detection-trend" class="echart"', html)
+
+
+class RuleChangeLogBusinessInsightsTests(unittest.TestCase):
+    def test_seeded_and_generator_registration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ids = {r["id"] for r in BusinessInsightsStore(Path(tmp)).reports("anti-fraud")}
+        self.assertIn(AF_RULE_CHANGE_LOG_REPORT_ID, ids)
+        self.assertIn(AF_RULE_CHANGE_LOG_REPORT_ID, REPORT_BUILDERS)
+        self.assertEqual(
+            REPORT_BUILDERS[AF_RULE_CHANGE_LOG_REPORT_ID][0],
+            "Anti-fraud PH - Rule Change Log & Governance",
+        )
+
+    def test_sql_sections_and_baseline(self):
+        sql = build_af_rule_change_log_sql(snapshot_pt_date="2026-06-08", now=FIXED_NOW)
+        sections = extract_sql_sections(sql)
+        self.assertEqual(
+            [s.sheet_name for s in sections],
+            ["Change Summary", "Rule Change Detail", "Current Rule Inventory"],
+        )
+        self.assertIn(AF_RULE_CONFIG_TABLE, sql)
+        # Diffs the current snapshot against the snapshot on/before the window start (Mar 1),
+        # falling back to the earliest retained snapshot.
+        self.assertIn("pt_date <= '2026-03-01'", sql)
+        self.assertIn("select min(pt_date)", sql)
+        self.assertIn("full outer join", sql)
+        self.assertIn("'Added'", sql)
+        self.assertIn("'Deactivated'", sql)
+        self.assertIn("Logic changed", sql)
+
+    def test_visualization_renders_change_kpis_and_no_period_selector(self):
+        sheets = [
+            ("Change Summary", ["change_type", "rules"],
+             [["Added", "5"], ["Deactivated", "3"], ["Logic changed", "4"], ["Unchanged", "900"]]),
+            ("Rule Change Detail",
+             ["change_type", "rule_id", "rule_name", "status_before", "status_after", "outcome_before",
+              "outcome_after", "risk_before", "risk_after", "review_priority_before", "review_priority_after", "logic_changed"],
+             [["Added", "R900", "New scam rule", "Inactive/Draft", "Active", "Reject", "Reject", "high", "high", "1", "1", "N"]]),
+            ("Current Rule Inventory", ["outcome_type", "rule_status", "risk_level", "rules"],
+             [["Reject", "Active", "high", "120"], ["Challenge", "Active", "medium", "80"]]),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "viz.html"
+            write_visualization(
+                output_path,
+                report_title="Anti-fraud PH - Rule Change Log & Governance",
+                snapshot_pt_date="2026-06-08",
+                sheets=sheets,
+                report_id=AF_RULE_CHANGE_LOG_REPORT_ID,
+            )
+            html = output_path.read_text(encoding="utf-8")
+        self.assertIn("Change Summary", html)
+        self.assertIn("<h2>Highlights</h2>", html)
+        self.assertIn("<h2>Current Rules by Outcome Type</h2>", html)
+        self.assertIn("<h2>Rule Change Detail</h2>", html)
+        self.assertIn("New scam rule", html)
+        # No period summary -> the plain (non-switchable) KPI panel, no embedded period data.
+        self.assertNotIn("data-period-kpi", _strip_dashboard_js(html))
+
+
+def _strip_dashboard_js(html: str) -> str:
+    """Drop the trailing inline <script> blocks so attribute assertions test rendered markup, not the
+    shared dashboard JS (which references selectors like data-period-kpi by name)."""
+    marker = "<script>"
+    index = html.find(marker)
+    return html[:index] if index != -1 else html
 
 
 class BusinessInsightsGenerationJobTests(unittest.TestCase):
