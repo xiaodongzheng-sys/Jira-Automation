@@ -719,12 +719,17 @@ def create_app() -> Flask:
     def inject_primary_navigation():
         current_endpoint = request.endpoint or ""
 
-        def _nav_group(label: str, href: str, children: list[dict[str, Any]]) -> dict[str, Any]:
+        def _nav_group(
+            label: str, href: str, children: list[dict[str, Any]], *, render_subtabs: bool = True
+        ) -> dict[str, Any]:
             return {
                 "label": label,
                 "href": href,
                 "active": any(child.get("active") for child in children),
                 "children": children,
+                # Whether to render the secondary sub-tab strip in the header. Business Insights renders
+                # its own in-page domain switcher, so its header subtrack would be a duplicate.
+                "render_subtabs": render_subtabs,
             }
 
         if _site_requires_google_login(settings) and not _google_session_is_connected():
@@ -844,7 +849,7 @@ def create_app() -> Flask:
                     "active": current_endpoint == "business_insights_page" and active_business_domain == "ops-risk",
                 },
             ]
-            site_tabs.append(_nav_group("Business Insights", url_for("business_insights_page", domain="anti-fraud"), business_insights_tabs))
+            site_tabs.append(_nav_group("Business Insights", url_for("business_insights_page", domain="anti-fraud"), business_insights_tabs, render_subtabs=False))
         if show_admin_tool_entries and _can_access_vpn_connection(settings):
             site_tabs.append(
                 _nav_group(

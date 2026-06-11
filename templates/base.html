@@ -46,7 +46,7 @@
             {% endfor %}
           </div>
           {% for tab in site_tabs %}
-            {% if tab.active and tab.children %}
+            {% if tab.active and tab.children and tab.render_subtabs %}
               <div class="site-switcher-subtrack" aria-label="{{ tab.label }} tools">
                 {% for child in tab.children %}
                   <a class="site-switcher-subtab{% if child.active %} is-active{% endif %}" href="{{ child.href }}">{{ child.label }}</a>
