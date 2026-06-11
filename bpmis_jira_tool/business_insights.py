@@ -1243,7 +1243,7 @@ order by rsa.rule_id, rsa.challenge_trxn desc;
 
 -- 8. Daily Challenge/Reject/Punish
 select
-  rs.date as trigger_date,
+  concat_ws('-', substr(rs.date, 1, 4), substr(rs.date, 5, 2), substr(rs.date, 7, 2)) as trigger_date,
   sum(coalesce(rs.challenge_num, 0)) as challenge_num,
   sum(coalesce(rs.reject_num, 0)) as reject_num,
   sum(coalesce(rs.punish_num, 0)) as punish_num
@@ -1402,7 +1402,9 @@ def build_af_fraud_loss_sql(*, snapshot_pt_date: str | None = None, now: datetim
     # Confirmed fraud = a fraud modus operandi was assigned (not the 'Not Fraud'/'Pending' verdicts).
     fraud_expr = "lower(trim(coalesce(c.fraud_mo_type, ''))) not in ('not fraud', 'pending', '')"
     mo_expr = "case when trim(coalesce(c.fraud_mo_type, '')) = '' then 'Unspecified' else c.fraud_mo_type end"
-    subtype_expr = "case when trim(coalesce(c.fraud_mo_subtype, '')) = '' then 'Unspecified' else c.fraud_mo_subtype end"
+    # fraud_mo_subtype is stored as a JSON array string (e.g. ["Order (E-commerce)"]); strip the brackets
+    # and quotes so it reads as plain text.
+    subtype_expr = "case when trim(coalesce(c.fraud_mo_subtype, '')) = '' then 'Unspecified' else regexp_replace(translate(c.fraud_mo_subtype, '[]\"', ''), ',', ', ') end"
     review_hours = (
         "round(avg(case when c.case_status = 'CLOSED' and c.case_closed_timestamp is not null "
         "and c.case_open_timestamp is not null then (c.case_closed_timestamp - c.case_open_timestamp) / 3600000.0 end), 1)"
@@ -1528,7 +1530,9 @@ def build_af_detection_effectiveness_sql(*, snapshot_pt_date: str | None = None,
     )
     fraud_expr = "lower(trim(coalesce(c.fraud_mo_type, ''))) not in ('not fraud', 'pending', '')"
     mo_expr = "case when trim(coalesce(c.fraud_mo_type, '')) = '' then 'Unspecified' else c.fraud_mo_type end"
-    subtype_expr = "case when trim(coalesce(c.fraud_mo_subtype, '')) = '' then 'Unspecified' else c.fraud_mo_subtype end"
+    # fraud_mo_subtype is stored as a JSON array string (e.g. ["Order (E-commerce)"]); strip the brackets
+    # and quotes so it reads as plain text.
+    subtype_expr = "case when trim(coalesce(c.fraud_mo_subtype, '')) = '' then 'Unspecified' else regexp_replace(translate(c.fraud_mo_subtype, '[]\"', ''), ',', ', ') end"
     # A case is "rule-detected" when at least one review_record links it to a non-empty rule_id.
     cases_cte = f"""cases as (
   select c.case_id,
@@ -1943,6 +1947,10 @@ def build_af_device_risk_sql(*, snapshot_pt_date: str | None = None, now: dateti
     start = end - timedelta(days=7)
     pt = f"pt_date >= '{start.isoformat()}' and pt_date < '{end.isoformat()}'"
     neg = "('', '0', 'cfcd208495d565ef66e7dff9f98764da', 'd41d8cd98f00b204e9800998ecf8427e')"
+    # Exclude sentinel/anonymous keys ('0', '', their md5 forms) from account-farming so the pre-login /
+    # unattributed bucket (uid='0') does not masquerade as one device tied to hundreds of thousands of accounts.
+    real_uid = f"uid not in {neg}"
+    real_dev = f"deviceuuid not in {neg}"
     ext = AF_ACTION_LOG_EXT_TABLE
     header = _af_report_header("Anti-fraud PH - Device & Identity Risk", snapshot_pt_date)
     return f"""{header}
@@ -1954,7 +1962,7 @@ def build_af_device_risk_sql(*, snapshot_pt_date: str | None = None, now: dateti
 with dev as (
   select deviceuuid, count(distinct uid) as accounts
   from {ext}
-  where {pt} and deviceuuid is not null and trim(deviceuuid) <> ''
+  where {pt} and {real_dev} and {real_uid}
   group by deviceuuid
 )
 select
@@ -1973,7 +1981,7 @@ select
   count(distinct scene_name) as distinct_scenes,
   count(1) as events
 from {ext}
-where {pt} and deviceuuid is not null and trim(deviceuuid) <> ''
+where {pt} and {real_dev} and {real_uid}
 group by deviceuuid
 having count(distinct uid) >= 5
 order by distinct_accounts desc
@@ -1987,7 +1995,7 @@ select
   count(distinct scene_name) as distinct_scenes,
   count(1) as events
 from {ext}
-where {pt} and uid is not null and trim(uid) <> ''
+where {pt} and {real_uid} and {real_dev}
 group by uid
 having count(distinct deviceuuid) >= 5
 order by distinct_devices desc
@@ -2029,7 +2037,7 @@ from (
 select
   scene_name,
   count(1) as events,
-  count(distinct uid) as distinct_accounts,
+  count(distinct case when {real_uid} then uid end) as distinct_accounts,
   sum(case when (is_root not in {neg} or is_emulator not in {neg} or is_vpn not in {neg}
     or is_http_proxy not in {neg} or is_gps_modified not in {neg} or is_fake_identity not in {neg}
     or is_illegal_imei not in {neg} or is_risk_app_install_root not in {neg}) then 1 else 0 end) as risky_events
@@ -2045,7 +2053,7 @@ from (
   select pt_date as event_date, count(1) as multi_account_devices from (
     select pt_date, deviceuuid, count(distinct uid) as accounts
     from {ext}
-    where {pt} and deviceuuid is not null and trim(deviceuuid) <> ''
+    where {pt} and {real_dev} and {real_uid}
     group by pt_date, deviceuuid
     having count(distinct uid) >= 5
   ) d group by pt_date
@@ -2136,7 +2144,7 @@ limit 100;
 -- 5. Card Fraud Cases by MO
 select
   coalesce(nullif(trim(mo_reason), ''), 'Unspecified') as mo_reason,
-  coalesce(nullif(trim(sub_mo_reason), ''), 'Unspecified') as sub_mo_reason,
+  coalesce(nullif(trim(regexp_replace(translate(sub_mo_reason, '[]"', ''), ',', ', ')), ''), 'Unspecified') as sub_mo_reason,
   count(distinct case_id) as cases
 from {cf}
 where {pt}
