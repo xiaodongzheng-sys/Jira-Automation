@@ -61,10 +61,13 @@ def build_business_insights_handlers(ctx: Any) -> Any:
         if artifact:
             artifact_id = str(artifact.get("id") or "")
             if artifact_id:
+                from bpmis_jira_tool.timefmt import format_gmt8
+
                 artifact = dict(artifact)
                 artifact["url"] = url_for("business_insights_artifact", artifact_id=artifact_id)
                 if artifact.get("visualization_filename"):
                     artifact["visualization_url"] = url_for("business_insights_visualization", artifact_id=artifact_id)
+                artifact["created_at_display"] = format_gmt8(artifact.get("created_at"))
                 item["artifact"] = artifact
         item["sql_url"] = url_for("business_insights_report_sql", report_id=item["id"])
         item["ingest_url"] = url_for("business_insights_report_ingest", report_id=item["id"])

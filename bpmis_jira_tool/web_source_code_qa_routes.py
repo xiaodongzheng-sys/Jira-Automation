@@ -54,10 +54,9 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
         return ""
 
     def _format_generated_at(value: object) -> str:
-        text = str(value or "").strip()
-        if not text:
-            return ""
-        return text.replace("T", " ").replace("Z", " UTC")
+        from bpmis_jira_tool.timefmt import format_gmt8
+
+        return format_gmt8(value)
 
     def _repo_download_scopes_with_status() -> list:
         scopes = repo_download_scope_definitions()

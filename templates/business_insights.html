@@ -69,7 +69,7 @@
                               <a class="button button-secondary" href="{{ artifact.visualization_url }}" target="_blank" rel="noopener" data-business-insights-visualization>Open Visualization</a>
                             {% endif %}
                           </div>
-                          <span class="business-insights-meta">{{ artifact.row_count }} rows - {{ artifact.created_at }}</span>
+                          <span class="business-insights-meta">{{ artifact.row_count }} rows - {{ artifact.created_at_display or artifact.created_at }}</span>
                         {% elif report.status == "generator_ready" %}
                           <span class="business-insights-placeholder">No Excel file generated yet.</span>
                         {% else %}

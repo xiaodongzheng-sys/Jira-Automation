@@ -580,7 +580,8 @@
     const state = String(syncState.state || '').trim();
     if (state === 'running') return versionPlanSyncPausedMessage;
     if (state === 'error') return syncState.error || syncState.message || 'Sync failed.';
-    if (syncState.last_synced_date_sgt) return `Last synced: ${syncState.last_synced_date_sgt} SGT`;
+    if (syncState.last_synced_at_sgt) return `Last synced: ${syncState.last_synced_at_sgt}`;
+    if (syncState.last_synced_date_sgt) return `Last synced: ${syncState.last_synced_date_sgt} (GMT+8)`;
     return 'Cached Version Plan loaded. Click Sync Jira to refresh.';
   };
 

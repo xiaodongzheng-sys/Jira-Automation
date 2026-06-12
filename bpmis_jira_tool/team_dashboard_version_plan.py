@@ -135,6 +135,7 @@ def normalize_version_plan_state(value: Any) -> dict[str, Any]:
     normalized_sync_state = {
         "state": str(sync_state.get("state") or "idle").strip() or "idle",
         "last_synced_date_sgt": str(sync_state.get("last_synced_date_sgt") or "").strip(),
+        "last_synced_at_sgt": str(sync_state.get("last_synced_at_sgt") or "").strip(),
         "started_at": str(sync_state.get("started_at") or "").strip(),
         "finished_at": str(sync_state.get("finished_at") or "").strip(),
         "message": str(sync_state.get("message") or "").strip(),
@@ -251,6 +252,7 @@ def version_plan_sync(config: dict[str, Any], bpmis_client: Any, *, now: datetim
     af["sync_state"] = {
         "state": "fresh_today",
         "last_synced_date_sgt": today.isoformat(),
+        "last_synced_at_sgt": _display_text(current_dt),
         "started_at": str(af["sync_state"].get("started_at") or ""),
         "finished_at": _now_text(current_dt),
         "message": "Version Plan synced.",
@@ -1334,6 +1336,14 @@ def _now_text(now: datetime | None = None) -> str:
     if current.tzinfo is None:
         current = current.replace(tzinfo=VERSION_PLAN_TIMEZONE)
     return current.astimezone(VERSION_PLAN_TIMEZONE).isoformat()
+
+
+def _display_text(now: datetime | None = None) -> str:
+    # Unified portal display format: YYYY-MM-DD HH:MM:SS (GMT+8).
+    current = now or datetime.now(VERSION_PLAN_TIMEZONE)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=VERSION_PLAN_TIMEZONE)
+    return current.astimezone(VERSION_PLAN_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S (GMT+8)")
 
 
 def _next_sort_order(rows: list[dict[str, Any]]) -> int:
