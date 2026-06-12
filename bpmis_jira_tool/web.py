@@ -920,6 +920,7 @@ def create_app() -> Flask:
             "static",
             "index",
             "healthz",
+            "robots_txt",
             "google_login",
             "google_callback",
             "google_logout",
@@ -968,6 +969,9 @@ def create_app() -> Flask:
         request_id = getattr(g, "request_id", None)
         if request_id:
             response.headers["X-Request-ID"] = request_id
+        # Keep the whole portal out of search engines (public pages expose
+        # internal report/Jira data only to people who already have the link).
+        response.headers.setdefault("X-Robots-Tag", "noindex, nofollow")
         if (
             _google_session_is_connected()
             and response.mimetype == "text/html"
@@ -977,9 +981,17 @@ def create_app() -> Flask:
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
         if request.endpoint in {"static", "cloud_static"} and request.path.endswith((".css", ".js")):
-            response.headers["Cache-Control"] = "no-store, private, max-age=0, must-revalidate"
-            response.headers["Pragma"] = "no-cache"
-            response.headers["Expires"] = "0"
+            # Assets are content-addressed via ?v=<release sha>, so a versioned
+            # request is safe to cache for a long time (big win for repeat public
+            # visitors). Unversioned requests stay no-store to avoid stale code.
+            if str(request.args.get("v") or "").strip():
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+                response.headers.pop("Pragma", None)
+                response.headers.pop("Expires", None)
+            else:
+                response.headers["Cache-Control"] = "no-store, private, max-age=0, must-revalidate"
+                response.headers["Pragma"] = "no-cache"
+                response.headers["Expires"] = "0"
         if response.status_code >= HTTPStatus.BAD_REQUEST:
             status_details = _classify_http_status(response.status_code)
             _log_portal_event(
@@ -1003,6 +1015,11 @@ def create_app() -> Flask:
     @app.get("/cloud-static/<path:filename>")
     def cloud_static(filename: str):
         return send_from_directory(app.static_folder, filename)
+
+    @app.get("/robots.txt")
+    def robots_txt():
+        body = "User-agent: *\nDisallow: /\n"
+        return Response(body, mimetype="text/plain", headers={"Cache-Control": "public, max-age=86400"})
 
     @app.get("/")
     def index():
@@ -1650,6 +1667,9 @@ def create_app() -> Flask:
                 _verify_business_insights_download_password=lambda *args, **kwargs: _verify_business_insights_download_password(*args, **kwargs),
                 _business_insights_downloads_unlocked=lambda *args, **kwargs: _business_insights_downloads_unlocked(*args, **kwargs),
                 _unlock_business_insights_downloads=lambda *args, **kwargs: _unlock_business_insights_downloads(*args, **kwargs),
+                _download_unlock_retry_after=lambda *args, **kwargs: _download_unlock_retry_after(*args, **kwargs),
+                _record_download_unlock_failure=lambda *args, **kwargs: _record_download_unlock_failure(*args, **kwargs),
+                _clear_download_unlock_failures=lambda *args, **kwargs: _clear_download_unlock_failures(*args, **kwargs),
                 _get_user_identity=lambda *args, **kwargs: _get_user_identity(*args, **kwargs),
                 _get_business_insights_store=lambda *args, **kwargs: _get_business_insights_store(*args, **kwargs),
                 _current_release_revision=lambda *args, **kwargs: _current_release_revision(*args, **kwargs),
@@ -3013,6 +3033,49 @@ def _business_insights_downloads_unlocked() -> bool:
 
 def _unlock_business_insights_downloads() -> None:
     session[_BUSINESS_INSIGHTS_DOWNLOAD_SESSION_KEY] = True
+
+
+# Brute-force deterrent for the shared download password. In-memory, per client
+# IP; single Cloud Run instance (max-instances=1) so this is consistent within
+# the instance lifetime and costs nothing. Not a hard security boundary — just
+# slows guessing of the low-entropy shared password.
+_DOWNLOAD_UNLOCK_MAX_FAILURES = 6
+_DOWNLOAD_UNLOCK_WINDOW_SECONDS = 300.0
+_DOWNLOAD_UNLOCK_ATTEMPTS: dict[str, list[float]] = {}
+_DOWNLOAD_UNLOCK_LOCK = threading.Lock()
+
+
+def _download_unlock_client_ip() -> str:
+    forwarded = request.headers.get("CF-Connecting-IP") or request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+
+def _download_unlock_retry_after() -> int:
+    """Return seconds to wait if the client is currently rate-limited, else 0."""
+    now = time.time()
+    client = _download_unlock_client_ip()
+    with _DOWNLOAD_UNLOCK_LOCK:
+        attempts = [t for t in _DOWNLOAD_UNLOCK_ATTEMPTS.get(client, []) if now - t < _DOWNLOAD_UNLOCK_WINDOW_SECONDS]
+        _DOWNLOAD_UNLOCK_ATTEMPTS[client] = attempts
+        if len(attempts) >= _DOWNLOAD_UNLOCK_MAX_FAILURES:
+            return max(1, int(_DOWNLOAD_UNLOCK_WINDOW_SECONDS - (now - attempts[0])))
+    return 0
+
+
+def _record_download_unlock_failure() -> None:
+    now = time.time()
+    client = _download_unlock_client_ip()
+    with _DOWNLOAD_UNLOCK_LOCK:
+        attempts = [t for t in _DOWNLOAD_UNLOCK_ATTEMPTS.get(client, []) if now - t < _DOWNLOAD_UNLOCK_WINDOW_SECONDS]
+        attempts.append(now)
+        _DOWNLOAD_UNLOCK_ATTEMPTS[client] = attempts
+
+
+def _clear_download_unlock_failures() -> None:
+    with _DOWNLOAD_UNLOCK_LOCK:
+        _DOWNLOAD_UNLOCK_ATTEMPTS.pop(_download_unlock_client_ip(), None)
 
 
 def _can_refresh_business_insights(settings: Settings) -> bool:

@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
     <title>{{ page_title or "Risk PM Tool" }}</title>
     {% set static_endpoint = 'cloud_static' if cloud_auth_mode|default(false) else 'static' %}
     <link rel="stylesheet" href="{{ url_for(static_endpoint, filename='style.css', v=asset_revision|default('static')) }}">
@@ -71,6 +72,27 @@
         </footer>
       {% endif %}
     </main>
+
+    <div class="portal-password-modal" data-download-password-modal hidden>
+      <div class="portal-password-backdrop" data-download-password-cancel></div>
+      <form class="portal-password-card" data-download-password-form>
+        <h2 data-download-password-title>需要密码 / Password required</h2>
+        <p class="portal-password-help" data-download-password-help>输入密码以下载报表与源码包（本次会话只需输入一次）。</p>
+        <input
+          type="password"
+          class="portal-password-input"
+          data-download-password-input
+          autocomplete="off"
+          autofocus
+          aria-label="Password"
+        >
+        <p class="portal-password-error" data-download-password-error hidden></p>
+        <div class="portal-password-actions">
+          <button type="button" class="button button-secondary" data-download-password-cancel>取消 / Cancel</button>
+          <button type="submit" class="button button-primary" data-download-password-submit>确认 / Unlock</button>
+        </div>
+      </form>
+    </div>
     {% if run_notice %}
       <div class="notice-backdrop" data-run-notice-backdrop>
         <section class="notice-card notice-{{ run_notice.tone }}" role="dialog" aria-modal="true" aria-labelledby="run-notice-title">
@@ -348,6 +370,79 @@
         if (backdrop) {
           bindNoticeClose(backdrop);
         }
+      })();
+    </script>
+    <script>
+      // Shared in-page password prompt for gated downloads (Business Insights
+      // workbooks/visualizations and Source Code repo bundles). Exposes
+      // window.portalDownloadUnlock(unlockUrl) -> Promise<boolean>.
+      (() => {
+        const modal = document.querySelector('[data-download-password-modal]');
+        if (!modal) return;
+        const form = modal.querySelector('[data-download-password-form]');
+        const input = modal.querySelector('[data-download-password-input]');
+        const errorEl = modal.querySelector('[data-download-password-error]');
+        const submitBtn = modal.querySelector('[data-download-password-submit]');
+        const cancelEls = modal.querySelectorAll('[data-download-password-cancel]');
+        let activeResolve = null;
+        let activeUnlockUrl = '/api/business-insights/download-unlock';
+
+        const close = (result) => {
+          modal.hidden = true;
+          errorEl.hidden = true;
+          input.value = '';
+          submitBtn.disabled = false;
+          const resolve = activeResolve;
+          activeResolve = null;
+          if (resolve) resolve(result);
+        };
+
+        const showError = (message) => {
+          errorEl.textContent = message;
+          errorEl.hidden = false;
+          input.focus();
+          input.select();
+        };
+
+        cancelEls.forEach((el) => el.addEventListener('click', () => close(false)));
+        document.addEventListener('keydown', (event) => {
+          if (event.key === 'Escape' && !modal.hidden) close(false);
+        });
+
+        form.addEventListener('submit', async (event) => {
+          event.preventDefault();
+          const password = input.value;
+          if (!password) { showError('请输入密码 / Enter the password.'); return; }
+          submitBtn.disabled = true;
+          try {
+            const response = await fetch(activeUnlockUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+              body: JSON.stringify({ password }),
+            });
+            if (response.ok) { close(true); return; }
+            submitBtn.disabled = false;
+            if (response.status === 429) {
+              showError('尝试次数过多，请稍后再试 / Too many attempts, try again later.');
+            } else {
+              showError('密码错误 / Incorrect password.');
+            }
+          } catch (error) {
+            submitBtn.disabled = false;
+            showError('网络错误，请重试 / Network error, please retry.');
+          }
+        });
+
+        window.portalDownloadUnlock = (unlockUrl) => {
+          activeUnlockUrl = unlockUrl || activeUnlockUrl;
+          return new Promise((resolve) => {
+            activeResolve = resolve;
+            modal.hidden = false;
+            errorEl.hidden = true;
+            input.value = '';
+            setTimeout(() => input.focus(), 0);
+          });
+        };
       })();
     </script>
     {% block extra_scripts %}{% endblock %}

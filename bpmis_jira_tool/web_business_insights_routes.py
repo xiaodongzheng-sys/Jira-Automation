@@ -107,6 +107,14 @@ def build_business_insights_handlers(ctx: Any) -> Any:
         )
 
     def business_insights_download_unlock():
+        retry_after = ctx._download_unlock_retry_after()
+        if retry_after:
+            response = jsonify({
+                "status": "error",
+                "message": "Too many incorrect attempts. Please wait a few minutes and try again.",
+            })
+            response.headers["Retry-After"] = str(retry_after)
+            return response, HTTPStatus.TOO_MANY_REQUESTS
         password = ""
         if request.is_json:
             payload = request.get_json(silent=True) or {}
@@ -114,7 +122,9 @@ def build_business_insights_handlers(ctx: Any) -> Any:
         else:
             password = str(request.form.get("password") or "")
         if not ctx._verify_business_insights_download_password(password):
+            ctx._record_download_unlock_failure()
             return jsonify({"status": "error", "message": "Incorrect password."}), HTTPStatus.FORBIDDEN
+        ctx._clear_download_unlock_failures()
         ctx._unlock_business_insights_downloads()
         return jsonify({"status": "ok"})
 
@@ -200,12 +210,16 @@ def build_business_insights_handlers(ctx: Any) -> Any:
             metadata, path = _store().artifact_path(artifact_id)
         except ToolError:
             return redirect(url_for("business_insights_page", domain="anti-fraud"))
-        return send_file(
+        response = send_file(
             path,
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             download_name=str(metadata.get("filename") or "business-insights.xlsx"),
             as_attachment=True,
         )
+        # Hash-named, password-gated -> safe to cache in the browser (private,
+        # never a shared cache) so repeat opens don't re-download.
+        response.headers["Cache-Control"] = "private, max-age=86400"
+        return response
 
     def business_insights_visualization(artifact_id: str):
         access_gate = ctx._require_business_insights_access(settings)
@@ -219,12 +233,14 @@ def build_business_insights_handlers(ctx: Any) -> Any:
             metadata, path = _store().visualization_path(artifact_id)
         except ToolError:
             return redirect(url_for("business_insights_page", domain="anti-fraud"))
-        return send_file(
+        response = send_file(
             path,
             mimetype="text/html; charset=utf-8",
             download_name=str(metadata.get("visualization_filename") or "business-insights-visualization.html"),
             as_attachment=False,
         )
+        response.headers["Cache-Control"] = "private, max-age=86400"
+        return response
 
     return SimpleNamespace(
         business_insights_page=business_insights_page,

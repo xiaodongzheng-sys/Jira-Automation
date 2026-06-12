@@ -162,31 +162,12 @@
   // ---- Shared password gate for repo source-bundle downloads ----
   let repoDownloadsUnlocked = root.dataset.downloadUnlocked === 'true';
 
-  const verifyDownloadPassword = async (password) => {
-    try {
-      const response = await fetch('/api/business-insights/download-unlock', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({ password }),
-      });
-      return response.ok;
-    } catch (error) {
-      return false;
-    }
-  };
-
   const ensureRepoDownloadUnlocked = async () => {
     if (repoDownloadsUnlocked) return true;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const password = window.prompt('Enter the password to download source bundles:');
-      if (password === null) return false;
-      if (await verifyDownloadPassword(password)) {
-        repoDownloadsUnlocked = true;
-        return true;
-      }
-      window.alert('Incorrect password. Please try again.');
-    }
-    return false;
+    if (typeof window.portalDownloadUnlock !== 'function') return false;
+    const ok = await window.portalDownloadUnlock('/api/business-insights/download-unlock');
+    if (ok) repoDownloadsUnlocked = true;
+    return ok;
   };
 
   document.addEventListener('click', (event) => {

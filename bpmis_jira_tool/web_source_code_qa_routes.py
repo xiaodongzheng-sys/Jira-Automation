@@ -42,6 +42,50 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
 
     _refresh_source_code_qa_globals()
 
+    def _human_size(num_bytes: object) -> str:
+        try:
+            size = float(num_bytes)
+        except (TypeError, ValueError):
+            return ""
+        for unit in ("B", "KB", "MB", "GB"):
+            if size < 1024 or unit == "GB":
+                return (f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}")
+            size /= 1024
+        return ""
+
+    def _format_generated_at(value: object) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        return text.replace("T", " ").replace("Z", " UTC")
+
+    def _repo_download_scopes_with_status() -> list:
+        scopes = repo_download_scope_definitions()
+        for scope in scopes:
+            scope["meta"] = ""
+            status = None
+            try:
+                from bpmis_jira_tool.public_artifacts_gcs import fetch_repo_download_status, public_gcs_read_bucket
+
+                if public_gcs_read_bucket():
+                    status = fetch_repo_download_status(scope["filename"])
+            except Exception:
+                status = None
+            if status is None:
+                continue
+            if not status.get("available"):
+                scope["meta"] = "Not published yet"
+                continue
+            parts = []
+            generated = _format_generated_at(status.get("generated_at"))
+            if generated:
+                parts.append(f"Updated {generated}")
+            size = _human_size(status.get("size_bytes"))
+            if size:
+                parts.append(size)
+            scope["meta"] = " · ".join(parts)
+        return scopes
+
     @app.before_request
     def _refresh_source_code_qa_route_module_globals():
         path = str(getattr(request, "path", "") or "")
@@ -62,7 +106,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
             team_profiles=TEAM_PROFILE_DEFAULTS,
             country_options=list(CRMS_COUNTRIES),
             all_country=ALL_COUNTRY,
-            repo_download_scopes=repo_download_scope_definitions(),
+            repo_download_scopes=_repo_download_scopes_with_status(),
             can_use_source_code_qa_chat=_can_use_source_code_qa_chat(settings),
             can_manage_source_code_qa=_can_manage_source_code_qa(settings),
             download_unlocked=bool(_business_insights_downloads_unlocked()),

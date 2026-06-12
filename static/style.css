@@ -6291,3 +6291,58 @@ select:focus {
   gap: 18px;
   margin-top: 18px;
 }
+
+/* ---- Shared download-password modal ---- */
+.portal-password-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.portal-password-modal[hidden] { display: none; }
+.portal-password-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+}
+.portal-password-card {
+  position: relative;
+  width: 100%;
+  max-width: 420px;
+  background: #fff;
+  border-radius: 14px;
+  padding: 24px;
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.25);
+}
+.portal-password-card h2 { margin: 0 0 6px; font-size: 1.15rem; }
+.portal-password-help { margin: 0 0 14px; color: #475569; font-size: 0.9rem; }
+.portal-password-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 11px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.6);
+  border-radius: 9px;
+  font-size: 1rem;
+}
+.portal-password-error { margin: 10px 0 0; color: #b91c1c; font-size: 0.88rem; }
+.portal-password-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+/* ---- Mobile: let wide report/version-plan tables scroll horizontally ---- */
+.premium-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+/* ---- Public landing: responsive 3-up that stacks on narrow screens ---- */
+.cloud-home-panel .public-home-grid {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+@media (max-width: 760px) {
+  .cloud-home-panel .public-home-grid { grid-template-columns: 1fr; }
+  .portal-password-card { padding: 20px; }
+}

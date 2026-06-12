@@ -29,31 +29,12 @@
   let downloadsUnlocked = root.dataset.downloadUnlocked === "true";
   const unlockUrl = root.dataset.downloadUnlockUrl || "/api/business-insights/download-unlock";
 
-  const verifyPassword = async (password) => {
-    try {
-      const response = await fetch(unlockUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ password }),
-      });
-      return response.ok;
-    } catch (error) {
-      return false;
-    }
-  };
-
   const ensureUnlocked = async () => {
     if (downloadsUnlocked) return true;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const password = window.prompt("Enter the password to access Business Insights reports:");
-      if (password === null) return false; // cancelled
-      if (await verifyPassword(password)) {
-        downloadsUnlocked = true;
-        return true;
-      }
-      window.alert("Incorrect password. Please try again.");
-    }
-    return false;
+    if (typeof window.portalDownloadUnlock !== "function") return false;
+    const ok = await window.portalDownloadUnlock(unlockUrl);
+    if (ok) downloadsUnlocked = true;
+    return ok;
   };
 
   const isGatedDownloadLink = (el) =>

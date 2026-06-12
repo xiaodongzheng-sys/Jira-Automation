@@ -176,6 +176,32 @@ def publish_repo_download_archive(metadata: dict[str, Any], content: bytes) -> b
     return ok
 
 
+def fetch_repo_download_status(filename: str) -> dict[str, Any] | None:
+    """Cheap status for a published bundle (size + generated_at) without
+    downloading the zip. None when the read bucket is not configured."""
+    bucket_name = public_gcs_read_bucket()
+    if not bucket_name:
+        return None
+    status: dict[str, Any] = {"available": False, "size_bytes": None, "generated_at": None}
+    try:
+        blob = _bucket(bucket_name).blob(f"repo-downloads/{filename}")
+        if blob.exists():
+            blob.reload()
+            status["available"] = True
+            status["size_bytes"] = int(blob.size or 0)
+    except Exception:
+        logger.warning("Could not stat gs://%s/repo-downloads/%s", bucket_name, filename, exc_info=True)
+    metadata_bytes = gcs_read_bytes(bucket_name, f"repo-downloads/{filename}.json")
+    if metadata_bytes:
+        try:
+            parsed = json.loads(metadata_bytes.decode("utf-8"))
+            if isinstance(parsed, dict):
+                status["generated_at"] = parsed.get("generated_at")
+        except (ValueError, UnicodeDecodeError):
+            pass
+    return status
+
+
 def fetch_repo_download_archive(filename: str) -> tuple[dict[str, Any], bytes] | None:
     """Serve a repo source bundle from GCS (Cloud Run side). None = not available."""
     bucket_name = public_gcs_read_bucket()

@@ -198,7 +198,10 @@
           <tbody>
             {% for item in repo_download_scopes %}
               <tr>
-                <td>{{ item.label }}</td>
+                <td>
+                  {{ item.label }}
+                  {% if item.meta %}<div class="business-insights-meta">{{ item.meta }}</div>{% endif %}
+                </td>
                 <td>
                   <a
                     class="button"
