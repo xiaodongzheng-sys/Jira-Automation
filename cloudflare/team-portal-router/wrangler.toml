@@ -1,0 +1,7 @@
+name = "team-portal-router"
+main = "src/index.js"
+compatibility_date = "2026-06-01"
+
+routes = [
+  { pattern = "app.bankpmtool.uk/*", zone_name = "bankpmtool.uk" }
+]
