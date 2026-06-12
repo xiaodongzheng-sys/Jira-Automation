@@ -159,6 +159,46 @@
     }
   };
 
+  // ---- Shared password gate for repo source-bundle downloads ----
+  let repoDownloadsUnlocked = root.dataset.downloadUnlocked === 'true';
+
+  const verifyDownloadPassword = async (password) => {
+    try {
+      const response = await fetch('/api/business-insights/download-unlock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ password }),
+      });
+      return response.ok;
+    } catch (error) {
+      return false;
+    }
+  };
+
+  const ensureRepoDownloadUnlocked = async () => {
+    if (repoDownloadsUnlocked) return true;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const password = window.prompt('Enter the password to download source bundles:');
+      if (password === null) return false;
+      if (await verifyDownloadPassword(password)) {
+        repoDownloadsUnlocked = true;
+        return true;
+      }
+      window.alert('Incorrect password. Please try again.');
+    }
+    return false;
+  };
+
+  document.addEventListener('click', (event) => {
+    const link = event.target.closest('a[data-source-repo-download]');
+    if (!link || repoDownloadsUnlocked) return;
+    event.preventDefault();
+    const href = link.getAttribute('href');
+    ensureRepoDownloadUnlocked().then((ok) => {
+      if (ok && href) window.location.href = href;
+    });
+  });
+
   const allCountryValue = () => options.all_country || 'All';
   const sharedCodeTeams = ['AF', 'GRC'];
   const countrySpecificTeams = ['CRMS'];
@@ -1327,9 +1367,11 @@
     const entries = config.mappings?.[currentKey()] || [];
     const count = entries.length;
     const runtimeScopeNote = runtimeContextHelp();
-    configStatus.textContent = count
-      ? `${count} repositories configured for ${currentKey()}. ${runtimeScopeNote}`
-      : `No repositories configured for ${currentKey()} yet. ${runtimeScopeNote}`;
+    if (configStatus) {
+      configStatus.textContent = count
+        ? `${count} repositories configured for ${currentKey()}. ${runtimeScopeNote}`
+        : `No repositories configured for ${currentKey()} yet. ${runtimeScopeNote}`;
+    }
     if (reposInput) {
       reposInput.value = entries.map((entry) => `${entry.display_name} | ${entry.url}`).join('\n');
       reposInput.disabled = false;
@@ -1390,7 +1432,7 @@
       renderIndexHealth(indexHealthPayload);
     } catch (error) {
       configLoadState = 'error';
-      configStatus.textContent = error.message || 'Repository config could not be loaded.';
+      if (configStatus) configStatus.textContent = error.message || 'Repository config could not be loaded.';
       if (adminStatus) adminStatus.textContent = error.message || 'Repository config could not be loaded.';
       renderSelectedConfig();
     }
@@ -2886,7 +2928,10 @@
     applyActiveSession(null);
   }
   updateAnswerModeState();
-  loadConfig();
+  if (canChat || canManage) {
+    // Anonymous Repo Download visitors have no config API access; skip the load.
+    loadConfig();
+  }
   if (canChat) {
     loadSessions();
   }

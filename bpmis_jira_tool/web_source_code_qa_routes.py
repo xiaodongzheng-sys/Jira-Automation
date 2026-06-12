@@ -50,9 +50,8 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
 
     @app.get("/source-code-qa")
     def source_code_qa():
-        access_gate = _require_source_code_qa_access(settings)
-        if access_gate is not None:
-            return access_gate
+        # Public page: anonymous visitors see the Repo Download view only (the
+        # chat / effort / admin tabs render solely for the signed-in admin).
         user_identity = _get_user_identity(settings)
         service = _build_source_code_qa_service()
         return render_template(
@@ -66,16 +65,34 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
             repo_download_scopes=repo_download_scope_definitions(),
             can_use_source_code_qa_chat=_can_use_source_code_qa_chat(settings),
             can_manage_source_code_qa=_can_manage_source_code_qa(settings),
+            download_unlocked=bool(_business_insights_downloads_unlocked()),
             asset_revision=_current_release_revision(),
         )
 
     @app.get("/api/source-code-qa/repo-downloads/<scope_key>")
     def source_code_qa_repo_download_api(scope_key: str):
-        access_gate = _require_source_code_qa_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
+        # Public endpoint, but the actual download requires the shared password
+        # (same per-session unlock as Business Insights downloads).
+        if not _business_insights_downloads_unlocked():
+            return jsonify({"status": "error", "message": "Password required."}), HTTPStatus.UNAUTHORIZED
         try:
             scope = resolve_repo_download_scope(scope_key)
+            if public_gcs_read_bucket():
+                # Cloud Run: serve the bundle published to GCS so downloads work
+                # while the Mac host is offline.
+                fetched = fetch_repo_download_archive(scope["filename"])
+                if fetched is not None:
+                    metadata, content = fetched
+                    return send_file(
+                        io.BytesIO(content),
+                        mimetype="application/zip",
+                        download_name=str(metadata.get("filename") or scope["filename"]),
+                        as_attachment=True,
+                    )
+                return jsonify({
+                    "status": "error",
+                    "message": "This source bundle has not been published yet. Ask the admin to run a sync.",
+                }), HTTPStatus.NOT_FOUND
             if _local_agent_source_code_qa_enabled(settings):
                 response = _build_local_agent_client(settings).source_code_qa_repo_download(scope["scope_key"])
                 content_type = response.headers.get("Content-Type") or "application/zip"

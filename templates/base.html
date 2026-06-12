@@ -16,7 +16,10 @@
           <span>Testing environment</span>
         </section>
       {% endif %}
-      {% if user_identity is defined %}
+      {# The session bar renders only for the signed-in admin. Anonymous visitors
+         go straight to the public content; the Admin Sign In link lives in the
+         page footer instead of a prominent button. #}
+      {% if user_identity is defined and user_identity.mode == "google" %}
         <section class="session-bar" aria-label="Current session">
           <div class="session-copy">
             <p class="session-kicker">Portal Session</p>
@@ -28,13 +31,9 @@
             </div>
           </div>
           <div class="session-actions">
-            {% if user_identity.mode == "google" %}
-              <form method="post" action="{{ url_for('cloud_google_logout') if cloud_auth_mode|default(false) else url_for('google_logout') }}">
-                <button class="button button-secondary" type="submit">Logout</button>
-              </form>
-            {% elif user_identity.mode == "guest" %}
-              <a class="button button-secondary" href="{{ url_for('cloud_google_login') if cloud_auth_mode|default(false) else url_for('google_login') }}">Sign in with Google</a>
-            {% endif %}
+            <form method="post" action="{{ url_for('cloud_google_logout') if cloud_auth_mode|default(false) else url_for('google_logout') }}">
+              <button class="button button-secondary" type="submit">Logout</button>
+            </form>
           </div>
         </section>
       {% endif %}
@@ -66,6 +65,11 @@
         {% endif %}
       {% endwith %}
       {% block body %}{% endblock %}
+      {% if user_identity is defined and user_identity.mode != "google" %}
+        <footer class="portal-footer" aria-label="Portal footer">
+          <a class="portal-footer-admin-link" href="{{ url_for('cloud_google_login') if cloud_auth_mode|default(false) else url_for('google_login') }}">Admin Sign In</a>
+        </footer>
+      {% endif %}
     </main>
     {% if run_notice %}
       <div class="notice-backdrop" data-run-notice-backdrop>

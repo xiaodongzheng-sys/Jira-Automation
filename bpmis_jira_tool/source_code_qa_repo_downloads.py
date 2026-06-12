@@ -115,7 +115,9 @@ def build_repo_download_zip(service: SourceCodeQAService, scope_key: str) -> tup
         "generated_at": manifest["generated_at"],
     }
     if archive_path.exists():
-        return metadata, archive_path.read_bytes()
+        content = archive_path.read_bytes()
+        _publish_archive_best_effort(metadata, content)
+        return metadata, content
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -123,7 +125,19 @@ def build_repo_download_zip(service: SourceCodeQAService, scope_key: str) -> tup
         for item in repo_items:
             _write_repo_to_archive(archive, repo_path=item["path"], archive_root=item["folder"])
     archive_path.write_bytes(buffer.getvalue())
+    _publish_archive_best_effort(metadata, buffer.getvalue())
     return metadata, buffer.getvalue()
+
+
+def _publish_archive_best_effort(metadata: dict[str, Any], content: bytes) -> None:
+    # Mirror freshly built bundles to the public GCS bucket (no-op unless the
+    # publish bucket env is configured on the producing host).
+    try:
+        from bpmis_jira_tool.public_artifacts_gcs import publish_repo_download_archive
+
+        publish_repo_download_archive(metadata, content)
+    except Exception:  # noqa: BLE001 - publishing must never break the download
+        pass
 
 
 def _manifest_signature(manifest: dict[str, Any]) -> str:

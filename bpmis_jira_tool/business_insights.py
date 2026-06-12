@@ -2631,3 +2631,32 @@ class BusinessInsightsStore:
                     raise ToolError("Business Insights visualization was not found.")
                 return dict(metadata), path
         raise ToolError("Business Insights visualization was not found.")
+
+
+class GcsBusinessInsightsStore(BusinessInsightsStore):
+    """Read-through store for Cloud Run: hydrates reports.json and artifact
+    files from the public GCS bucket so the surface works without the Mac."""
+
+    def _load(self) -> dict[str, Any]:
+        from bpmis_jira_tool.public_artifacts_gcs import hydrate_business_insights_metadata
+
+        hydrate_business_insights_metadata(self.root_dir)
+        return super()._load()
+
+    def _hydrate_artifact_file(self, artifact_id: str, *, key: str) -> None:
+        from bpmis_jira_tool.public_artifacts_gcs import hydrate_business_insights_artifact
+
+        payload = self._load()
+        artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}
+        for metadata in artifacts.values():
+            if isinstance(metadata, dict) and str(metadata.get("id") or "") == str(artifact_id or ""):
+                hydrate_business_insights_artifact(self.root_dir, str(metadata.get(key) or ""))
+                return
+
+    def artifact_path(self, artifact_id: str) -> tuple[dict[str, Any], Path]:
+        self._hydrate_artifact_file(artifact_id, key="filename")
+        return super().artifact_path(artifact_id)
+
+    def visualization_path(self, artifact_id: str) -> tuple[dict[str, Any], Path]:
+        self._hydrate_artifact_file(artifact_id, key="visualization_filename")
+        return super().visualization_path(artifact_id)

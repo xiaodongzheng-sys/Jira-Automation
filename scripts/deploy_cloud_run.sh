@@ -274,6 +274,14 @@ append_optional_env_var TRELLO_BOARD_ID
 append_optional_env_var TRELLO_DAILY_LIST_NAME
 append_optional_env_var PRD_BRIEFING_EDGE_MANDARIN_VOICE
 append_optional_env_var VERSION_PLAN_FIRESTORE_PROJECT
+# Public artifacts bucket: lets Cloud Run serve Business Insights workbooks and
+# repo source bundles from GCS while the Mac host is offline. The .env key is
+# deploy-scoped (CLOUD_RUN_*) so the Mac runtime never enables the read layer
+# and keeps treating its local files as the source of truth.
+PUBLIC_GCS_BUCKET_RESOLVED="${CLOUD_RUN_PUBLIC_GCS_BUCKET:-$(read_env_value CLOUD_RUN_PUBLIC_GCS_BUCKET)}"
+if [[ -n "$PUBLIC_GCS_BUCKET_RESOLVED" ]]; then
+  ENV_VARS+=("TEAM_PORTAL_PUBLIC_GCS_BUCKET=$PUBLIC_GCS_BUCKET_RESOLVED")
+fi
 append_optional_or_existing_cloud_env_var BPMIS_API_ACCESS_TOKEN
 if [[ -n "$BASE_URL" ]]; then
   ENV_VARS+=("TEAM_PORTAL_BASE_URL=$BASE_URL")

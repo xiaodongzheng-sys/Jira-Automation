@@ -24,7 +24,7 @@ class RouteSaveRegressionTests(unittest.TestCase):
 
             with app.test_client() as client:
                 with client.session_transaction() as session:
-                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
                     session["google_credentials"] = {"token": "x"}
 
                 app.config["CONFIG_STORE"].save(
@@ -38,7 +38,7 @@ class RouteSaveRegressionTests(unittest.TestCase):
                             "Deposit |  |  |  | "
                         ),
                     },
-                    "google:teammate@npt.sg",
+                    "google:xiaodong.zheng@npt.sg",
                 )
 
                 response = client.post(
@@ -74,7 +74,7 @@ class RouteSaveRegressionTests(unittest.TestCase):
 
             with app.test_client() as client:
                 with client.session_transaction() as session:
-                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
                     session["google_credentials"] = {"token": "x"}
 
                 app.config["CONFIG_STORE"].save(
@@ -85,7 +85,7 @@ class RouteSaveRegressionTests(unittest.TestCase):
                         "component_route_rules_text": "AF | SG | DBP-Anti-fraud",
                         "component_default_rules_text": "AF | SG | DBP-Anti-fraud",
                     },
-                    "google:teammate@npt.sg",
+                    "google:xiaodong.zheng@npt.sg",
                 )
 
                 response = client.post(
@@ -123,7 +123,7 @@ class RouteSaveRegressionTests(unittest.TestCase):
 
             with app.test_client() as client:
                 with client.session_transaction() as session:
-                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
                     session["google_credentials"] = {"token": "x"}
 
                 app.config["CONFIG_STORE"].save(
@@ -134,7 +134,7 @@ class RouteSaveRegressionTests(unittest.TestCase):
                         "component_route_rules_text": "AF | SG | DBP-Anti-fraud",
                         "component_default_rules_text": "DBP-Anti-fraud | owner@npt.sg | dev@npt.sg | qa@npt.sg | Planning_26Q2",
                     },
-                    "google:teammate@npt.sg",
+                    "google:xiaodong.zheng@npt.sg",
                 )
 
                 response = client.post(

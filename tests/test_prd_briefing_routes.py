@@ -758,7 +758,10 @@ class PRDBriefingRouteTests(unittest.TestCase):
         self.assertEqual(anonymous.status_code, 401)
         self.assertIn("Sign in", anonymous.get_json()["message"])
         self.assertEqual(signed_in.status_code, 403)
-        self.assertIn("signed-in portal users", signed_in.get_json()["message"])
+        # Either the portal-wide non-admin block or the PRD briefing gate fires
+        # first depending on env; both deny the non-admin.
+        message = signed_in.get_json()["message"]
+        self.assertTrue("not authorized" in message or "available to signed-in portal users" in message, message)
 
     @patch("prd_briefing.blueprint._build_service")
     def test_prd_briefing_session_and_followup_errors_return_json(self, mock_service):

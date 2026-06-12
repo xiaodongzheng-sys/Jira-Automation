@@ -118,7 +118,8 @@ from bpmis_jira_tool.seatalk_stores import SeaTalkNameMappingStore, SeaTalkTodoS
 from bpmis_jira_tool.bpmis_client import build_bpmis_client
 from bpmis_jira_tool.bpmis_projects import BPMISProjectStore, PortalJiraCreationService, PortalProjectSyncService
 from bpmis_jira_tool.background_jobs import start_durable_job_thread
-from bpmis_jira_tool.business_insights import BusinessInsightsStore
+from bpmis_jira_tool.business_insights import BusinessInsightsStore, GcsBusinessInsightsStore
+from bpmis_jira_tool.public_artifacts_gcs import fetch_repo_download_archive, public_gcs_read_bucket
 from bpmis_jira_tool.source_code_qa import CRMS_COUNTRIES, ALL_COUNTRY, IDENTIFIER_PATTERN, CodexCliBridgeSourceCodeQALLMProvider, SourceCodeQAService
 from bpmis_jira_tool.source_code_qa_factory import build_source_code_qa_service_from_settings
 from bpmis_jira_tool.source_code_qa_jobs import SourceCodeQAQueryScheduler
@@ -709,7 +710,12 @@ def create_app() -> Flask:
         data_root / "source_code_qa" / "runtime_evidence"
     )
     app.config["PRD_BRIEFING_STORE"] = BriefingStore(data_root / "prd_briefing")
-    app.config["BUSINESS_INSIGHTS_STORE"] = BusinessInsightsStore(data_root / "business_insights")
+    if public_gcs_read_bucket():
+        # Cloud Run: hydrate Business Insights metadata/artifacts from GCS so the
+        # public reports keep working while the Mac host is offline.
+        app.config["BUSINESS_INSIGHTS_STORE"] = GcsBusinessInsightsStore(data_root / "business_insights")
+    else:
+        app.config["BUSINESS_INSIGHTS_STORE"] = BusinessInsightsStore(data_root / "business_insights")
     app.config["SOURCE_CODE_QA_SERVICE"] = build_source_code_qa_service_from_settings(settings)
     app.config["GET_USER_IDENTITY"] = lambda: _get_user_identity(settings)
     app.config["CAN_ACCESS_PRD_BRIEFING"] = lambda: _can_access_prd_briefing(settings)
@@ -734,29 +740,38 @@ def create_app() -> Flask:
             }
 
         if _site_requires_google_login(settings) and not _google_session_is_connected():
-            # Business Insights -> Anti-fraud is public; expose it (only) so visitors
-            # can view those reports before signing in. Everything else stays gated.
-            public_bi_tabs = [
-                {
-                    "label": "Anti-fraud",
-                    "href": url_for("business_insights_page", domain="anti-fraud"),
-                    "active": current_endpoint == "business_insights_page",
-                }
-            ]
+            # Anonymous visitors get the three public surfaces; everything else
+            # stays admin-only behind the footer Admin Sign In link.
             return {
                 "site_tabs": [
+                    {
+                        "label": "Repo Download",
+                        "href": url_for("source_code_qa"),
+                        "active": request.path.startswith("/source-code-qa"),
+                    },
+                    {
+                        "label": "Version Plan",
+                        "href": url_for("version_plan_page"),
+                        "active": current_endpoint == "version_plan_page",
+                    },
                     _nav_group(
                         "Business Insights",
                         url_for("business_insights_page", domain="anti-fraud"),
-                        public_bi_tabs,
+                        [
+                            {
+                                "label": "Anti-fraud",
+                                "href": url_for("business_insights_page", domain="anti-fraud"),
+                                "active": current_endpoint == "business_insights_page",
+                            }
+                        ],
                         render_subtabs=False,
-                    )
+                    ),
                 ],
                 "site_requires_google_login": True,
                 "can_access_prd_briefing": False,
                 "can_access_prd_self_assessment": False,
                 "can_access_meeting_recorder": False,
-                "can_access_source_code_qa": False,
+                "can_access_source_code_qa": True,
                 "can_manage_source_code_qa": False,
                 "asset_revision": _current_release_revision(),
                 "portal_stage": str(settings.team_portal_stage or "").strip().lower(),
@@ -923,6 +938,13 @@ def create_app() -> Flask:
             "business_insights_artifact",
             "business_insights_visualization",
             "business_insights_download_unlock",
+            # Public read surface: Source Code repo downloads (password-gated at
+            # the endpoint) and the read-only Version Plan view.
+            "source_code_qa",
+            "source_code_qa_repo_download_api",
+            "version_plan_page",
+            "team_dashboard_version_plan_af",
+            "team_dashboard_version_plan_sync_status",
         }:
             return None
         login_gate = _require_google_login(
@@ -992,6 +1014,15 @@ def create_app() -> Flask:
 
         if settings.cloud_home_enabled:
             user_identity = _get_user_identity(settings)
+            if not _google_session_is_connected():
+                # Anonymous visitors land on the public home: the three public
+                # surfaces, with Admin Sign In tucked into the footer.
+                return render_template(
+                    "public_home.html",
+                    page_title="Risk PM Workspace",
+                    user_identity=user_identity,
+                    cloud_auth_mode=True,
+                )
             full_portal_path = url_for("portal_home", workspace="run")
             full_portal_url = _bpmis_run_portal_url(settings, full_portal_path)
             full_portal_available = _mac_full_portal_is_available(settings, full_portal_url)
@@ -999,17 +1030,21 @@ def create_app() -> Flask:
                 "cloud_home.html",
                 page_title="Risk PM Workspace",
                 user_identity=user_identity,
-                signed_in=_google_session_is_connected(),
+                signed_in=True,
                 can_access_version_plan=_can_access_team_dashboard_version_plan(user_identity),
                 version_plan_url=url_for("version_plan_page"),
                 full_portal_url=full_portal_url,
                 full_portal_available=full_portal_available,
-                full_portal_login_url=None if _google_session_is_connected() else url_for("google_login", next=full_portal_path),
+                full_portal_login_url=None,
                 cloud_auth_mode=True,
             )
 
         if _site_requires_google_login(settings) and not _google_session_is_connected():
-            return render_template("login_gate.html", page_title="Sign In", user_identity=_get_user_identity(settings))
+            return render_template(
+                "public_home.html",
+                page_title="Risk PM Workspace",
+                user_identity=_get_user_identity(settings),
+            )
 
         if str(request.args.get("workspace") or "").strip() == "team-dashboard":
             return redirect(url_for("team_dashboard_page"))
@@ -1990,20 +2025,14 @@ def _is_portal_admin(email: str | None = None) -> bool:
 
 
 def _is_portal_user(email: str | None = None) -> bool:
-    # Full portal users: signed-in NPT staff plus the gmail test user.
-    current_email = str(email or _current_google_email() or "").strip().lower()
-    return bool(
-        current_email
-        and (
-            current_email.endswith("@npt.sg")
-            or current_email == PORTAL_TEST_USER_EMAIL
-        )
-    )
+    # The portal is public-read; the only signed-in user is the admin. Everyone
+    # else (NPT colleagues included) browses the public pages anonymously.
+    return _is_portal_admin(email)
 
 
 def _restricted_to_anti_fraud_business_insights(settings: Settings | None = None, email: str | None = None) -> bool:
-    # Anyone who is not a full portal user (anonymous / non-NPT visitors) sees
-    # only the public Anti-fraud Business Insights domain.
+    # Anyone who is not the admin (anonymous public visitors) sees only the
+    # public Anti-fraud Business Insights domain.
     return not _is_portal_user(email)
 
 
@@ -2013,7 +2042,7 @@ def _current_google_user_is_blocked(settings: Settings) -> bool:
     email = _current_google_email()
     if not email:
         return False
-    return not _is_portal_user(email)
+    return not _is_portal_admin(email)
 
 
 def _shared_portal_enabled(settings: Settings) -> bool:
@@ -2598,17 +2627,9 @@ def _require_team_dashboard_access(settings: Settings, *, api: bool = False):
 
 
 def _require_team_dashboard_version_plan_access(settings: Settings, *, api: bool = False):
-    access_gate = _require_team_dashboard_access(settings, api=api)
-    if access_gate is not None:
-        return access_gate
-    user_identity = _get_user_identity(settings)
-    if _can_access_team_dashboard_version_plan(user_identity):
-        return None
-    message = "Version Plan is restricted to AF team users."
-    if api:
-        return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
-    flash(message, "error")
-    return redirect(url_for("access_denied"))
+    # The Version Plan view (page + read APIs) is public. Mutating endpoints
+    # (Jira sync, cell/row edits) enforce their own admin checks.
+    return None
 
 
 def _require_prd_self_assessment_access(settings: Settings, *, api: bool = False):
@@ -3048,7 +3069,9 @@ def _can_access_productization_upgrade_summary(user_identity: dict[str, str | No
 
 
 def _can_access_team_dashboard(user_identity: dict[str, str | None]) -> bool:
-    return _can_manage_team_dashboard(user_identity) or _can_access_team_dashboard_version_plan(user_identity)
+    # The full Team Dashboard stays admin-only; the public Version Plan view no
+    # longer grants dashboard access.
+    return _can_manage_team_dashboard(user_identity)
 
 
 def _can_manage_team_dashboard(user_identity: dict[str, str | None]) -> bool:
@@ -3056,19 +3079,9 @@ def _can_manage_team_dashboard(user_identity: dict[str, str | None]) -> bool:
 
 
 def _can_access_team_dashboard_version_plan(user_identity: dict[str, str | None]) -> bool:
-    email = str(user_identity.get("email") or "").strip().lower()
-    if not email:
-        return False
-    if _is_portal_admin(email):
-        return True
-    try:
-        store = _get_team_dashboard_config_store()
-        config = store.load()
-    except Exception:
-        config = {"teams": {"AF": {"member_emails": list(TEAM_DASHBOARD_DEFAULT_MEMBER_EMAILS_BY_TEAM.get("AF", ()))}}}
-    team_config = (config.get("teams") or {}).get("AF") or {}
-    af_emails = _normalize_team_dashboard_emails(team_config.get("member_emails") or [])
-    return email in af_emails
+    # The Version Plan view is public (read-only for visitors; edits and Jira
+    # sync are gated separately to admins).
+    return True
 
 
 def _can_access_team_dashboard_monthly_report(user_identity: dict[str, str | None]) -> bool:

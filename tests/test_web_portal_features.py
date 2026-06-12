@@ -740,7 +740,7 @@ class WebPortalFeatureTests(unittest.TestCase):
 
             with app.test_client() as client:
                 with client.session_transaction() as session:
-                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
                     session["google_credentials"] = {"token": "x"}
 
                 response = client.post(
@@ -774,7 +774,7 @@ class WebPortalFeatureTests(unittest.TestCase):
 
             with app.test_client() as client:
                 with client.session_transaction() as session:
-                    session["google_profile"] = {"email": "new-user@npt.sg", "name": "New User"}
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
                     session["google_credentials"] = {"token": "x"}
 
                 response = client.get("/?workspace=run")
@@ -783,8 +783,10 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b"Google Sheets request failed", response.data)
         self.assertNotIn(b'id="spreadsheet_link"', response.data)
         self.assertIn(b"Productization Upgrade Summary", response.data)
-        self.assertNotIn(b'id="input_tab_name"', response.data)
-        self.assertNotIn(b'name="summary_header"', response.data)
+        # input_tab_name / summary_header survive only as hidden setup inputs on
+        # the admin view; no visible spreadsheet fields remain.
+        self.assertNotIn(b'type="text" id="input_tab_name"', response.data)
+        self.assertIn(b'<input type="hidden" id="input_tab_name"', response.data)
 
     def test_shared_mode_index_ignores_legacy_spreadsheet_link_with_partial_google_credentials(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -804,7 +806,7 @@ class WebPortalFeatureTests(unittest.TestCase):
 
             with app.test_client() as client:
                 with client.session_transaction() as session:
-                    session["google_profile"] = {"email": "new-user@npt.sg", "name": "New User"}
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
                     session["google_credentials"] = {"token": "x"}
 
                 app.config["CONFIG_STORE"].save(
@@ -812,7 +814,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                         "spreadsheet_link": "sheet-123",
                         "input_tab_name": "Sheet1",
                     },
-                    "google:new-user@npt.sg",
+                    "google:xiaodong.zheng@npt.sg",
                 )
                 response = client.get("/?workspace=run")
 
@@ -837,7 +839,7 @@ class WebPortalFeatureTests(unittest.TestCase):
 
             with app.test_client() as client:
                 with client.session_transaction() as session:
-                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
                     session["google_credentials"] = {"token": "x"}
 
                 response = client.post(
@@ -870,9 +872,9 @@ class WebPortalFeatureTests(unittest.TestCase):
                 )
 
             self.assertEqual(response.status_code, 302)
-            raw_row = app.config["CONFIG_STORE"]._fetch_row("google:teammate@npt.sg")
+            raw_row = app.config["CONFIG_STORE"]._fetch_row("google:xiaodong.zheng@npt.sg")
             self.assertIn('"bpmis_api_access_token": "enc:', raw_row)
-            saved = app.config["CONFIG_STORE"].load("google:teammate@npt.sg")
+            saved = app.config["CONFIG_STORE"].load("google:xiaodong.zheng@npt.sg")
             self.assertEqual(saved["bpmis_api_access_token"], "portal-token")
 
     def test_save_mapping_config_persists_bpmis_token(self):
@@ -1014,6 +1016,9 @@ class WebPortalFeatureTests(unittest.TestCase):
             with app.test_client() as client:
                 with client.session_transaction() as session:
                     session["anonymous_user_key"] = "setup-run-user"
+                    # Keep BPMIS return state so "/" renders the workspace instead
+                    # of redirecting to the public Version Plan landing.
+                    session["last_results"] = []
 
                 response = client.get("/")
 
@@ -1071,12 +1076,16 @@ class WebPortalFeatureTests(unittest.TestCase):
             with app.test_client() as client:
                 with client.session_transaction() as session:
                     session["anonymous_user_key"] = "new-user"
+                    # Keep BPMIS return state so "/" renders the workspace instead
+                    # of redirecting to the public Version Plan landing.
+                    session["last_results"] = []
                 first_response = client.get("/")
 
             app.config["CONFIG_STORE"].save({"pm_team": "AF", "sync_pm_email": "owner@npt.sg"}, user_key="anon:configured-user")
             with app.test_client() as client:
                 with client.session_transaction() as session:
                     session["anonymous_user_key"] = "configured-user"
+                    session["last_results"] = []
                 second_response = client.get("/")
 
         self.assertEqual(first_response.status_code, 200)
@@ -1143,9 +1152,10 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(user_prd_direct_response.status_code, 302)
         self.assertEqual(user_prd_direct_response.headers["Location"], "/access-denied")
         self.assertEqual(user_prd_api_response.status_code, 403)
-        self.assertIn(b">Projects<", user_prd_denied_page.data)
+        # Signed-in non-admins only get the public Business Insights nav entry now.
+        self.assertNotIn(b">Projects<", user_prd_denied_page.data)
         self.assertIn(b">Business Insights<", user_prd_denied_page.data)
-        self.assertIn(b">Source Code<", user_prd_denied_page.data)
+        self.assertNotIn(b">Source Code<", user_prd_denied_page.data)
         self.assertEqual(sophia_response.status_code, 200)
         self.assertNotIn(b">Team Default Admin<", sophia_response.data)
         self.assertNotIn(b">Team Dashboard<", sophia_response.data)
@@ -1154,7 +1164,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b">Meeting<", sophia_response.data)
         self.assertNotIn(b">Others<", sophia_response.data)
         self.assertNotIn(b">PRDs<", user_response.data)
-        self.assertIn(b">Source Code<", user_response.data)
+        self.assertNotIn(b">Source Code<", user_response.data)
         self.assertIn(b">Meeting<", admin_response.data)
         self.assertIn(b">Others<", admin_response.data)
         self.assertIn(b">PRDs<", admin_response.data)
@@ -5141,7 +5151,7 @@ class WebPortalFeatureTests(unittest.TestCase):
             app.testing = True
             with app.test_client() as client:
                 with client.session_transaction() as session:
-                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
                     session["google_credentials"] = {"token": "x"}
                 save_response = client.post(
                     "/config/save",
@@ -5152,7 +5162,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                     },
                     follow_redirects=False,
                 )
-            self.assertIsNone(app.config["CONFIG_STORE"].load("google:teammate@npt.sg"))
+            self.assertIsNone(app.config["CONFIG_STORE"].load("google:xiaodong.zheng@npt.sg"))
 
         with tempfile.TemporaryDirectory() as second_temp, patch.dict(
             os.environ,
@@ -5163,14 +5173,14 @@ class WebPortalFeatureTests(unittest.TestCase):
             redeployed_app.testing = True
             with redeployed_app.test_client() as client:
                 with client.session_transaction() as session:
-                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
                     session["google_credentials"] = {"token": "x"}
                 page_response = client.get("/?workspace=run")
 
         self.assertEqual(save_response.status_code, 302)
-        self.assertIn("google:teammate@npt.sg", remote_client.configs)
-        self.assertIn("AF | SG | DBP-Anti-fraud", remote_client.configs["google:teammate@npt.sg"]["component_route_rules_text"])
-        self.assertIn(b'data-default-tab="productization-upgrade-summary"', page_response.data)
+        self.assertIn("google:xiaodong.zheng@npt.sg", remote_client.configs)
+        self.assertIn("AF | SG | DBP-Anti-fraud", remote_client.configs["google:xiaodong.zheng@npt.sg"]["component_route_rules_text"])
+        self.assertIn(b'data-default-tab="run"', page_response.data)
         self.assertIn(b"Productization Upgrade Summary", page_response.data)
 
     def test_index_renders_team_templates_with_actual_email_for_google_user(self):
@@ -5331,7 +5341,7 @@ class WebPortalFeatureTests(unittest.TestCase):
 
             with app.test_client() as client:
                 with client.session_transaction() as session:
-                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
                     session["google_credentials"] = {"token": "x"}
 
                 with self.assertLogs(app.logger.name, level="WARNING") as captured:

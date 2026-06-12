@@ -131,20 +131,26 @@ class SourceCodeQARouteTests(unittest.TestCase):
         )
         return repo_path
 
-    def test_npt_user_can_access_source_code_qa_direct_url(self):
+    def test_npt_user_gets_public_repo_download_page_but_blocked_apis(self):
         with self.app.test_client() as client:
             self._login(client, "teammate@npt.sg")
             default_response = client.get("/", follow_redirects=False)
+            self._login(client, "teammate@npt.sg")
             page_response = client.get("/source-code-qa", follow_redirects=False)
             api_response = client.get("/api/source-code-qa/config")
+            self._login(client, "teammate@npt.sg")
             sessions_response = client.get("/api/source-code-qa/sessions")
 
-        self.assertEqual(default_response.status_code, 200)
+        # Non-admin NPT users are blocked from the signed-in home but still get
+        # the public Repo Download page; the config/session APIs are admin-only.
+        self.assertEqual(default_response.status_code, 302)
+        self.assertEqual(default_response.headers["Location"], "/access-denied")
         self.assertEqual(page_response.status_code, 200)
-        self.assertEqual(api_response.status_code, 200)
+        self.assertEqual(api_response.status_code, 403)
         self.assertEqual(sessions_response.status_code, 403)
-        self.assertEqual(api_response.get_json()["status"], "ok")
-        self.assertIn('href="/source-code-qa">Source Code</a>', default_response.get_data(as_text=True))
+        page_html = page_response.get_data(as_text=True)
+        self.assertIn("Source Code Repo Download", page_html)
+        self.assertNotIn('data-source-view-tab="chat"', page_html)
 
     def test_admin_user_can_access_source_code_qa_directly(self):
         with self.app.test_client() as client:
@@ -203,7 +209,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         )
         self.assertLess(html.index("data-source-attachment-upload"), html.index("data-source-query"))
 
-    def test_non_npt_user_is_blocked_from_page_and_api(self):
+    def test_non_npt_user_gets_public_download_page_but_blocked_api(self):
         with self.app.test_client() as client:
             with client.session_transaction() as session:
                 session["google_profile"] = {"email": "teammate@example.com", "name": "External User"}
@@ -211,7 +217,10 @@ class SourceCodeQARouteTests(unittest.TestCase):
             page_response = client.get("/source-code-qa", follow_redirects=False)
             api_response = client.post("/api/source-code-qa/query", json={"pm_team": "AF", "country": "All", "question": "test"})
 
-        self.assertIn(page_response.status_code, {302, 403})
+        # The page is public (Repo Download view only); the chat API stays blocked.
+        self.assertEqual(page_response.status_code, 200)
+        self.assertIn(b"Source Code Repo Download", page_response.data)
+        self.assertNotIn(b'data-source-view-tab="chat"', page_response.data)
         self.assertEqual(api_response.status_code, 403)
 
     def test_owner_sees_admin_controls_but_teammate_does_not(self):
@@ -254,12 +263,20 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn(b'data-source-view-tab="download"', teammate_response.data)
         self.assertNotIn(b"Model Availability", owner_response.data)
 
-    def test_repo_download_endpoint_is_available_to_non_admin(self):
+    def test_repo_download_endpoint_is_public_after_password_unlock(self):
         self._seed_repo_download_scope()
-        with self.app.test_client() as client:
+        with self.app.test_client() as client, patch.dict(
+            os.environ, {"BUSINESS_INSIGHTS_DOWNLOAD_PASSWORD": "test-bi-pass"}, clear=False
+        ):
             self._login(client, "teammate@npt.sg")
+            locked = client.get("/api/source-code-qa/repo-downloads/AF:All")
+            unlock = client.post("/api/business-insights/download-unlock", json={"password": "test-bi-pass"})
             download = client.get("/api/source-code-qa/repo-downloads/AF:All")
 
+        # The endpoint is public but password-gated: 401 until the shared
+        # download password unlocks the session.
+        self.assertEqual(locked.status_code, 401)
+        self.assertEqual(unlock.status_code, 200)
         self.assertEqual(download.status_code, 200)
         self.assertEqual(download.headers["Content-Type"], "application/zip")
         with zipfile.ZipFile(io.BytesIO(download.data)) as archive:
@@ -450,11 +467,13 @@ class SourceCodeQARouteTests(unittest.TestCase):
             page_response = client.get("/source-code-qa")
             config_response = client.get("/api/source-code-qa/config")
 
+        # The allowlisted gmail user is just another blocked non-admin now: the
+        # public page renders without admin controls and the config API is 403.
         self.assertEqual(page_response.status_code, 200)
         self.assertNotIn(b"Repository Mapping", page_response.data)
         self.assertNotIn(b"Repo Admin", page_response.data)
-        self.assertFalse(config_response.get_json()["can_manage"])
-        self.assertEqual(config_response.get_json()["auth"]["admin_match_source"], "")
+        self.assertEqual(config_response.status_code, 403)
+        self.assertEqual(config_response.get_json()["status"], "error")
 
     def test_source_code_qa_builtin_owner_can_manage_when_env_owner_changes(self):
         with patch.dict(
@@ -506,21 +525,23 @@ class SourceCodeQARouteTests(unittest.TestCase):
                 self._login(client, "xiaodong.zheng1991@gmail.com")
                 page_response = client.get("/source-code-qa")
                 config_response = client.get("/api/source-code-qa/config")
+                self._login(client, "xiaodong.zheng1991@gmail.com")
                 save_response = client.post(
                     "/api/source-code-qa/config",
                     json={"pm_team": "AF", "country": "All", "repositories": [{"url": "https://git.example.com/team/repo.git"}]},
                 )
+                self._login(client, "xiaodong.zheng1991@gmail.com")
                 sync_response = client.post("/api/source-code-qa/sync", json={"pm_team": "AF", "country": "All"})
 
-        config_payload = config_response.get_json()
+        # The gmail test user is blocked like any non-admin: public page only,
+        # all config/sync APIs rejected.
         self.assertNotIn(b"Repository Mapping", page_response.data)
-        self.assertFalse(config_payload["can_manage"])
-        self.assertEqual(config_payload["auth"]["signed_in_email"], "xiaodong.zheng1991@gmail.com")
-        self.assertEqual(config_payload["auth"]["admin_match_source"], "")
+        self.assertEqual(config_response.status_code, 403)
+        self.assertEqual(config_response.get_json()["status"], "error")
         self.assertEqual(save_response.status_code, 403)
         self.assertEqual(sync_response.status_code, 403)
 
-    def test_source_code_qa_manage_forbidden_reports_signed_in_email(self):
+    def test_source_code_qa_manage_blocked_for_non_admin_with_error_payload(self):
         with self.app.test_client() as client:
             self._login(client, "teammate@npt.sg")
             response = client.post(
@@ -528,11 +549,11 @@ class SourceCodeQARouteTests(unittest.TestCase):
                 json={"pm_team": "AF", "country": "All", "repositories": [{"url": "https://git.example.com/team/repo.git"}]},
             )
 
+        # Non-admins are blocked before the manage gate: generic blocked payload.
         payload = response.get_json()
         self.assertEqual(response.status_code, 403)
-        self.assertEqual(payload["auth"]["signed_in_email"], "teammate@npt.sg")
-        self.assertFalse(payload["auth"]["can_manage"])
-        self.assertIn("Signed in as teammate@npt.sg", payload["message"])
+        self.assertEqual(payload["status"], "error")
+        self.assertIn("not authorized", payload["message"])
 
     def test_config_save_is_owner_only_and_validates_https(self):
         with self.app.test_client() as client:
@@ -595,29 +616,37 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
     def test_source_code_qa_route_access_gate_and_json_error_boundaries(self):
         with self.app.test_client() as client:
+            # The page itself is public now; every Q&A API stays blocked for a
+            # non-admin (each blocked request clears the session, so re-login).
             self._login(client, "external@example.com")
-            blocked = [
-                client.get("/source-code-qa", follow_redirects=False),
-                client.get("/api/source-code-qa/config"),
-                client.get("/api/source-code-qa/sync-jobs/missing"),
-                client.get("/api/source-code-qa/sessions"),
-                client.get("/api/source-code-qa/sessions/missing"),
-                client.post("/api/source-code-qa/sessions/missing/archive"),
-                client.post("/api/source-code-qa/attachments"),
-                client.get("/api/source-code-qa/attachments/missing"),
-                client.get("/api/source-code-qa/generated-artifacts/missing"),
-                client.post("/api/source-code-qa/query", json={"question": "x"}),
-                client.post("/api/source-code-qa/feedback", json={"rating": "ok"}),
-                client.get("/api/source-code-qa/query-jobs/missing"),
-                client.get("/api/source-code-qa/query-jobs/missing/events"),
+            public_page = client.get("/source-code-qa", follow_redirects=False)
+            blocked_calls = [
+                ("get", "/api/source-code-qa/config", None),
+                ("get", "/api/source-code-qa/sync-jobs/missing", None),
+                ("get", "/api/source-code-qa/sessions", None),
+                ("get", "/api/source-code-qa/sessions/missing", None),
+                ("post", "/api/source-code-qa/sessions/missing/archive", None),
+                ("post", "/api/source-code-qa/attachments", None),
+                ("get", "/api/source-code-qa/attachments/missing", None),
+                ("get", "/api/source-code-qa/generated-artifacts/missing", None),
+                ("post", "/api/source-code-qa/query", {"question": "x"}),
+                ("post", "/api/source-code-qa/feedback", {"rating": "ok"}),
+                ("get", "/api/source-code-qa/query-jobs/missing", None),
+                ("get", "/api/source-code-qa/query-jobs/missing/events", None),
             ]
+            blocked = []
+            for method, path, payload in blocked_calls:
+                self._login(client, "external@example.com")
+                caller = getattr(client, method)
+                blocked.append(caller(path, json=payload) if payload is not None else caller(path))
             self._login(client, "xiaodong.zheng@npt.sg")
             with patch("bpmis_jira_tool.web._build_source_code_qa_service", side_effect=RuntimeError("config exploded")):
                 config_error = client.get("/api/source-code-qa/config")
             save_empty_payload = client.post("/api/source-code-qa/config", data="not-json", content_type="text/plain")
             invalid_limit = client.get("/api/source-code-qa/sessions?limit=not-a-number")
 
-        self.assertTrue(all(response.status_code in {302, 403} for response in blocked))
+        self.assertEqual(public_page.status_code, 200)
+        self.assertTrue(all(response.status_code == 403 for response in blocked))
         self.assertEqual(config_error.status_code, 500)
         self.assertEqual(config_error.get_json()["error_category"], "source_code_qa_internal")
         self.assertIn(save_empty_payload.status_code, {200, 400})
@@ -799,7 +828,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
         try:
             register_source_code_qa_routes(app, object(), override_globals)
             direct_calls = [
-                ("source_code_qa", "/source-code-qa"),
+                # NOTE: the /source-code-qa page itself is public now and does
+                # not consult the access gate, so it is not probed here.
                 ("source_code_qa_config_api", "/api/source-code-qa/config"),
                 ("source_code_qa_sync_job_api", "/api/source-code-qa/sync-jobs/missing", "missing"),
                 ("source_code_qa_sessions_api", "/api/source-code-qa/sessions"),
@@ -1889,7 +1919,6 @@ class SourceCodeQARouteTests(unittest.TestCase):
                 },
                 content_type="multipart/form-data",
             )
-            self._login(client, "teammate@npt.sg")
             response = client.get("/api/source-code-qa/config")
 
         self.assertEqual(apollo_upload.status_code, 200)
@@ -2358,7 +2387,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
     def test_config_api_reports_llm_not_ready_by_default(self):
         with self.app.test_client() as client:
-            self._login(client, "teammate@npt.sg")
+            self._login(client, "xiaodong.zheng@npt.sg")
             response = client.get("/api/source-code-qa/config")
 
         self.assertEqual(response.status_code, 200)

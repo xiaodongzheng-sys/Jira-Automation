@@ -653,6 +653,8 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         access_gate = _require_team_dashboard_version_plan_access(settings, api=True)
         if access_gate is not None:
             return access_gate
+        if not _can_sync_version_plan():
+            return jsonify({"status": "error", "message": "Version Plan edits are admin-only."}), HTTPStatus.FORBIDDEN
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
             return jsonify({"status": "error", "message": "JSON payload is required."}), HTTPStatus.BAD_REQUEST
@@ -680,6 +682,8 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         access_gate = _require_team_dashboard_version_plan_access(settings, api=True)
         if access_gate is not None:
             return access_gate
+        if not _can_sync_version_plan():
+            return jsonify({"status": "error", "message": "Version Plan edits are admin-only."}), HTTPStatus.FORBIDDEN
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
             return jsonify({"status": "error", "message": "JSON payload is required."}), HTTPStatus.BAD_REQUEST

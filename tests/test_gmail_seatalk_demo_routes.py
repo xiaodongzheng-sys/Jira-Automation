@@ -90,7 +90,10 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
             response = client.get(TEAM_SEATALK_INSIGHTS_URL)
 
         self.assertEqual(response.status_code, 403)
-        self.assertIn("restricted", response.get_json()["message"])
+        # Either the portal-wide non-admin block or the SeaTalk route gate fires
+        # first depending on env; both deny the non-admin.
+        message = response.get_json()["message"]
+        self.assertTrue("not authorized" in message or "restricted to" in message, message)
 
     def test_non_owner_split_seatalk_apis_are_forbidden(self):
         with self.app.test_client() as client:

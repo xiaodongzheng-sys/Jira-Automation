@@ -6265,3 +6265,29 @@ select:focus {
     max-width: 84vw;
   }
 }
+
+/* Footer with the tucked-away Admin Sign In link (public pages). */
+.portal-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 28px 6px 10px;
+}
+
+.portal-footer-admin-link {
+  color: rgba(15, 23, 42, 0.35);
+  font-size: 0.78rem;
+  text-decoration: none;
+}
+
+.portal-footer-admin-link:hover {
+  color: rgba(15, 23, 42, 0.7);
+  text-decoration: underline;
+}
+
+/* Public landing page cards. */
+.public-home-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 18px;
+  margin-top: 18px;
+}

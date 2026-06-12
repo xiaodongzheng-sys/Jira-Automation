@@ -3438,7 +3438,21 @@ def main() -> int:
         )
     if report_has_artifacts(portal_data_dir, UNDERWRITING_FUNNEL_REPORT_ID):
         print(f"{UNDERWRITING_FUNNEL_REPORT_ID}: existing artifact present.", flush=True)
+    _publish_to_public_gcs(portal_data_dir)
     return 0
+
+
+def _publish_to_public_gcs(portal_data_dir: Path) -> None:
+    """Mirror refreshed reports to the public GCS bucket (best-effort)."""
+    try:
+        from bpmis_jira_tool.public_artifacts_gcs import publish_business_insights_dir, public_gcs_publish_bucket
+
+        if not public_gcs_publish_bucket():
+            return
+        uploaded = publish_business_insights_dir(portal_data_dir / "business_insights")
+        print(f"published_business_insights_files_to_gcs={uploaded}", flush=True)
+    except Exception as error:  # noqa: BLE001 - publishing must not fail the refresh
+        print(f"publish_business_insights_to_gcs_failed={error}", flush=True)
 
 
 if __name__ == "__main__":

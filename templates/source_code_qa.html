@@ -21,15 +21,22 @@
     data-repo-download-url="{{ url_for('source_code_qa_repo_download_api', scope_key='__SCOPE_KEY__') }}"
     data-can-chat="{{ 'true' if can_use_source_code_qa_chat else 'false' }}"
     data-can-manage="{{ 'true' if can_manage_source_code_qa else 'false' }}"
+    data-download-unlocked="{{ 'true' if download_unlocked else 'false' }}"
     data-options='{{ options | tojson }}'
   >
     <div class="panel-head source-qa-hero">
       <div>
-        <p class="eyebrow">Code-Grounded Answers</p>
-        <h1>Source Code Q&amp;A</h1>
+        {% if can_use_source_code_qa_chat or can_manage_source_code_qa %}
+          <p class="eyebrow">Code-Grounded Answers</p>
+          <h1>Source Code Q&amp;A</h1>
+        {% else %}
+          <p class="eyebrow">Source Bundles</p>
+          <h1>Source Code Repo Download</h1>
+        {% endif %}
       </div>
     </div>
 
+    {% if can_use_source_code_qa_chat or can_manage_source_code_qa %}
     <div class="source-qa-selector config-card">
       <div class="field-grid source-qa-config-grid">
         <label class="field-group">
@@ -65,6 +72,7 @@
         Loading repository configuration...
       </div>
     </div>
+    {% endif %}
   </section>
 
   <nav class="source-qa-tabs" aria-label="Source Code Q&A views" data-default-tab="{{ 'chat' if can_use_source_code_qa_chat else 'download' }}">
