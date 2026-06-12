@@ -1,6 +1,32 @@
 """Source Code QA Flask route registration."""
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
+from bpmis_jira_tool.errors import ToolError
+from bpmis_jira_tool.source_code_qa_patterns import PLACEHOLDER_HOST_PATTERN
+
+
+def _reject_placeholder_repo_urls(repositories: object) -> None:
+    """Block the demo/example clone URLs shown as Repo Admin hints (e.g.
+    https://git.example.com/team/repo.git) from being saved as a real mapping.
+    Runs only on the human "Save Config" path so loading legacy data and
+    isolated eval/test seeding stay unaffected."""
+    if not isinstance(repositories, list):
+        return
+    for repo in repositories:
+        if not isinstance(repo, dict):
+            continue
+        url = str(repo.get("url") or "").strip()
+        if not url:
+            continue
+        host = urlsplit(url).hostname or ""
+        if host and PLACEHOLDER_HOST_PATTERN.search(host):
+            raise ToolError(
+                f"'{url}' uses a placeholder host ({host}); enter a real HTTPS clone URL "
+                "such as https://gitlab.npt.seabank.io/group/repo.git."
+            )
+
 
 def register_source_code_qa_routes(app: object, settings: object, global_context: dict[str, object]) -> None:
     def _refresh_source_code_qa_globals() -> None:
@@ -136,10 +162,12 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
         if not isinstance(payload, dict):
             payload = {}
         try:
+            repositories = payload.get("repositories") or []
+            _reject_placeholder_repo_urls(repositories)
             result = _build_source_code_qa_service().save_mapping(
                 pm_team=str(payload.get("pm_team") or ""),
                 country=str(payload.get("country") or ""),
-                repositories=payload.get("repositories") or [],
+                repositories=repositories,
             )
             return jsonify({"status": "ok", **result})
         except ToolError as error:

@@ -685,10 +685,11 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
     def test_rules_features_sql_has_catalog_and_governance_sections(self):
         sql = build_af_rules_features_sql(snapshot_pt_date="2026-06-08", now=FIXED_NOW)
         sections = extract_sql_sections(sql)
-        # Catalogs (1-2) plus the folded-in rule change-log governance sections (3-5).
+        # Catalogs (1-2), the Function-usage dimension (3), then the folded-in rule change-log
+        # governance sections (4-6).
         self.assertEqual(
             [s.sheet_name for s in sections],
-            ["Rules", "Features", "Change Summary", "Rule Change Detail", "Current Rule Inventory"],
+            ["Rules", "Features", "Function Usage", "Change Summary", "Rule Change Detail", "Current Rule Inventory"],
         )
         self.assertIn(AF_RULE_CONFIG_TABLE, sql)
         self.assertIn(AF_FEATURE_CONFIG_TABLE, sql)
@@ -697,6 +698,12 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
         self.assertIn("pt_date = '2026-06-08'", sql)
         for column in ("rule_id", "rule_name", "feature_id", "feature_name"):
             self.assertIn(column, sql)
+        # Function-usage dimension: per function_id, the feature count + active + example features.
+        func_section = next(s for s in sections if s.sheet_name == "Function Usage")
+        self.assertIn("fc.function_id", func_section.query)
+        self.assertIn("count(1) as features", func_section.query)
+        self.assertIn("active_features", func_section.query)
+        self.assertIn("collect_set(fc.feature_name)", func_section.query)
         # Governance diff present (added/deactivated/logic-changed classification).
         self.assertIn("full outer join", sql)
         self.assertIn("'Added'", sql)
@@ -754,6 +761,36 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
         self.assertIn("Total rules", html)
         self.assertIn("Rules by Outcome Type", html)
         self.assertIn("Features by Status", html)
+
+    def test_visualization_renders_function_usage_dimension(self):
+        sheets = [
+            ("Rules", ["rule_id", "rule_name", "outcome_type", "rule_status"],
+             [["R1", "High Velocity Login", "Challenge", "Active"]]),
+            ("Features", ["feature_id", "feature_name", "function_id", "feature_status"],
+             [["F1c", "Login count 1h", "F1", "Active"]]),
+            ("Function Usage",
+             ["function_id", "features", "active_features", "distinct_scenes", "distinct_actions",
+              "distinct_time_windows", "max_window_seconds", "example_features"],
+             [["F1", "181", "90", "57", "65", "13", "2592000", "Login count 1h | BIN Attack | OTP retries"],
+              ["F12", "187", "9", "6", "6", "1", "0", "PN/AR Validation | CRC flow | Soft Token"]]),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "viz.html"
+            write_visualization(
+                output_path,
+                report_title="Anti-fraud PH - Rules & Features",
+                snapshot_pt_date="2026-06-08",
+                sheets=sheets,
+                report_id=AF_RULES_FEATURES_REPORT_ID,
+            )
+            html = output_path.read_text(encoding="utf-8")
+        # Function-usage KPI, ranking bar chart, and searchable table all render.
+        self.assertIn("Functions in use", html)
+        self.assertIn("<h2>Top Functions by Feature Count</h2>", html)
+        self.assertIn("<h2>Function Usage</h2>", html)
+        self.assertIn("Search function id", html)
+        self.assertIn("example_features", html)
+        self.assertIn("BIN Attack", html)
 
 
 class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):

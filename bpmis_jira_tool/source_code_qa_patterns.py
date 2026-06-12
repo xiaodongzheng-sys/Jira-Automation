@@ -4,6 +4,14 @@ import re
 
 
 HTTPS_URL_PATTERN = re.compile(r"^https://[^/\s]+/.+\.git$")
+# Reject RFC 2606 reserved placeholder/example hosts (e.g. the "git.example.com"
+# demo URL shown as a hint in the Repo Admin textarea), so they can never be saved
+# as a real repository mapping. Matches a host whose final labels are
+# example.com/net/org, or whose final label is example/test/invalid/localhost.
+PLACEHOLDER_HOST_PATTERN = re.compile(
+    r"(?:^|\.)(?:example\.(?:com|net|org)|example|test|invalid|localhost)$",
+    re.IGNORECASE,
+)
 IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 CLASS_DEF_PATTERN = re.compile(r"\b(class|interface|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\b")
 JAVA_PACKAGE_PATTERN = re.compile(r"^\s*package\s+([A-Za-z_][A-Za-z0-9_.]*)\s*;")

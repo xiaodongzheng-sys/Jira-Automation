@@ -2229,6 +2229,9 @@ def write_visualization(
             kpis.append(("Total features", _format_number(len(features[1]))))
             if fstatus.get("Active"):
                 kpis.append(("Active features", _format_number(fstatus["Active"])))
+        func_usage = flow_lookup.get("Function Usage")
+        if func_usage and func_usage[1]:
+            kpis.append(("Functions in use", _format_number(len(func_usage[1]))))
         intro = _kpi_cards_panel("Catalog Summary", kpis)
         # Governance (folded-in rule change log): KPIs + highlights from the rule_config snapshot diff.
         chg_counts: dict[str, float] = {}
@@ -2283,6 +2286,21 @@ def write_visualization(
             )
             if fbar:
                 chart_panels.append(fbar)
+        if func_usage and func_usage[1]:
+            uc = {str(c): i for i, c in enumerate(func_usage[0])}
+            if "function_id" in uc and "features" in uc:
+                pairs = [
+                    (str(r[uc["function_id"]]), r[uc["features"]])
+                    for r in func_usage[1]
+                    if uc["function_id"] < len(r) and uc["features"] < len(r)
+                ]
+                ubar = _bar_panel(
+                    "Top Functions by Feature Count",
+                    sorted(pairs, key=lambda kv: _number(kv[1]), reverse=True)[:15],
+                    note="Metric functions (function_id) ranked by how many configured features use them.",
+                )
+                if ubar:
+                    chart_panels.append(ubar)
 
         table_panels: list[str] = []
         if rules:
@@ -2292,6 +2310,10 @@ def write_visualization(
         if features:
             table_panels.append(
                 _searchable_table_panel("Features", features[0], features[1], placeholder="Search feature id or name…")
+            )
+        if func_usage:
+            table_panels.append(
+                _searchable_table_panel("Function Usage", func_usage[0], func_usage[1], placeholder="Search function id…")
             )
         # Governance panels (folded-in rule change log): current-inventory bar + change-log tables.
         governance_panels: list[str] = []

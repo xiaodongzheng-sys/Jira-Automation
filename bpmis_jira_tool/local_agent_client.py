@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import time
 from typing import Any, Callable
-from urllib.parse import quote, urlencode, urljoin, urlsplit
+from urllib.parse import quote, unquote, urlencode, urljoin, urlsplit
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -889,6 +889,11 @@ class LocalAgentClient:
         if signed:
             request_path = path if str(path or "").startswith("/") else f"/{path}"
             request_path = str(request_path).split("?", 1)[0]
+            # Sign the URL-decoded path so it matches Werkzeug's request.path on the
+            # server side. Path segments may be percent-encoded in the sent URL (e.g.
+            # a scope key like "AF:All" -> "AF%3AAll"), but request.path is decoded;
+            # signing the encoded form would mismatch and fail verification.
+            request_path = unquote(request_path)
             headers.update(sign_headers(secret=self.hmac_secret, method=method, path=request_path, body=body))
         max_attempts = len(LOCAL_AGENT_TRANSIENT_UNREADABLE_RETRY_DELAYS_SECONDS) + 1
         for attempt in range(max_attempts):

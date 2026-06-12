@@ -55,6 +55,35 @@ from scripts.source_code_qa_auto_eval_candidates import build_auto_eval_candidat
 from scripts.source_code_qa_feedback_to_eval import build_eval_candidates
 
 
+# These tests build the Flask app via create_app(), which loads the host's .env.
+# On the live host that .env enables local-agent passthrough (LOCAL_AGENT_MODE,
+# LOCAL_AGENT_SOURCE_CODE_QA_ENABLED, a real LOCAL_AGENT_BASE_URL + secret). Without
+# this guard, a config-save test would forward through the live local-agent server
+# and clobber the real Source Code Q&A repository mapping, ignoring the per-test
+# temp data dir. Force direct mode for the whole module so every test stays isolated
+# to its TemporaryDirectory. Tests that need local-agent behavior re-enable it via
+# their own inner patch.dict (and mock the client / use a fake host).
+_LOCAL_AGENT_DISABLE_ENV = {
+    "BPMIS_CALL_MODE": "direct",
+    "LOCAL_AGENT_MODE": "disabled",
+    "LOCAL_AGENT_SOURCE_CODE_QA_ENABLED": "false",
+    "LOCAL_AGENT_BASE_URL": "",
+    "LOCAL_AGENT_HMAC_SECRET": "",
+}
+_module_local_agent_env_patch = None
+
+
+def setUpModule():
+    global _module_local_agent_env_patch
+    _module_local_agent_env_patch = patch.dict(os.environ, _LOCAL_AGENT_DISABLE_ENV, clear=False)
+    _module_local_agent_env_patch.start()
+
+
+def tearDownModule():
+    if _module_local_agent_env_patch is not None:
+        _module_local_agent_env_patch.stop()
+
+
 class SourceCodeQARouteTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -517,17 +546,27 @@ class SourceCodeQARouteTests(unittest.TestCase):
                 "/api/source-code-qa/config",
                 json={"pm_team": "AF", "country": "All", "repositories": [{"url": "git@git.example.com:team/repo.git"}]},
             )
+            placeholder = client.post(
+                "/api/source-code-qa/config",
+                json={
+                    "pm_team": "AF",
+                    "country": "All",
+                    "repositories": [{"display_name": "Repo One", "url": "https://git.example.com/team/repo.git"}],
+                },
+            )
             valid = client.post(
                 "/api/source-code-qa/config",
                 json={
                     "pm_team": "AF",
                     "country": "SG",
-                    "repositories": [{"display_name": "Repo One", "url": "https://git.example.com/team/repo.git"}],
+                    "repositories": [{"display_name": "Repo One", "url": "https://gitlab.npt.seabank.io/team/repo.git"}],
                 },
             )
 
         self.assertEqual(forbidden.status_code, 403)
         self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(placeholder.status_code, 400)
+        self.assertIn("placeholder host", placeholder.get_json()["message"])
         self.assertEqual(valid.status_code, 200)
         payload = valid.get_json()
         self.assertEqual(payload["key"], "AF:All")

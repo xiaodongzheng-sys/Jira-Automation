@@ -936,11 +936,30 @@ select
 from {AF_FEATURE_CONFIG_TABLE} fc
 where {feature_snap}
 order by case when fc.status = 1 then 0 else 1 end, fc.feature_id;
+
+-- 3. Function Usage
+-- The metric Function (function_id) dimension: every function used in the live feature config, with how
+-- many features rely on it ("PH market feature count"), how many are active, and where it is exercised.
+-- Function definitions (calculation logic / Codis storage structure) live in design docs, not the lake;
+-- this is the live usage side of that catalog.
+select
+  fc.function_id,
+  count(1) as features,
+  sum(case when fc.status = 1 then 1 else 0 end) as active_features,
+  count(distinct nullif(trim(fc.scene), '')) as distinct_scenes,
+  count(distinct nullif(trim(fc.action), '')) as distinct_actions,
+  count(distinct nullif(trim(fc.time_range), '')) as distinct_time_windows,
+  max(cast(nullif(trim(fc.time_range), '') as bigint)) as max_window_seconds,
+  concat_ws(' | ', slice(array_sort(collect_set(fc.feature_name)), 1, 3)) as example_features
+from {AF_FEATURE_CONFIG_TABLE} fc
+where {feature_snap}
+group by fc.function_id
+order by features desc;
 """
     # Governance: fold in the rule change-log sections (Change Summary / Detail / Current Inventory)
-    # from the same rule_config snapshots, renumbered to follow Rules (1) and Features (2).
+    # from the same rule_config snapshots, renumbered to follow Rules (1), Features (2), Function Usage (3).
     governance = _merge_report_sections(
-        build_af_rule_change_log_sql(snapshot_pt_date=snapshot_pt_date, now=now), start_number=3
+        build_af_rule_change_log_sql(snapshot_pt_date=snapshot_pt_date, now=now), start_number=4
     )
     return base + "\n" + governance
 
