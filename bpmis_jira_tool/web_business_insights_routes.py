@@ -98,8 +98,22 @@ def build_business_insights_handlers(ctx: Any) -> Any:
             active_domain=active_domain,
             reports_by_domain=_reports_by_domain(),
             underwriting_report_id=UNDERWRITING_FUNNEL_REPORT_ID,
+            download_unlocked=bool(ctx._business_insights_downloads_unlocked()),
+            download_unlock_url=url_for("business_insights_download_unlock"),
             asset_revision=ctx._current_release_revision(),
         )
+
+    def business_insights_download_unlock():
+        password = ""
+        if request.is_json:
+            payload = request.get_json(silent=True) or {}
+            password = str(payload.get("password") or "")
+        else:
+            password = str(request.form.get("password") or "")
+        if not ctx._verify_business_insights_download_password(password):
+            return jsonify({"status": "error", "message": "Incorrect password."}), HTTPStatus.FORBIDDEN
+        ctx._unlock_business_insights_downloads()
+        return jsonify({"status": "ok"})
 
     def business_insights_reports_api():
         access_gate = ctx._require_business_insights_access(settings, api=True)
@@ -175,6 +189,8 @@ def build_business_insights_handlers(ctx: Any) -> Any:
         access_gate = ctx._require_business_insights_access(settings)
         if access_gate is not None:
             return access_gate
+        if not ctx._business_insights_downloads_unlocked():
+            return jsonify({"status": "error", "message": "Password required."}), HTTPStatus.UNAUTHORIZED
         if _anti_fraud_only() and artifact_id not in _visible_artifact_ids():
             return redirect(url_for("business_insights_page", domain="anti-fraud"))
         try:
@@ -192,6 +208,8 @@ def build_business_insights_handlers(ctx: Any) -> Any:
         access_gate = ctx._require_business_insights_access(settings)
         if access_gate is not None:
             return access_gate
+        if not ctx._business_insights_downloads_unlocked():
+            return jsonify({"status": "error", "message": "Password required."}), HTTPStatus.UNAUTHORIZED
         if _anti_fraud_only() and artifact_id not in _visible_artifact_ids():
             return redirect(url_for("business_insights_page", domain="anti-fraud"))
         try:
@@ -207,6 +225,7 @@ def build_business_insights_handlers(ctx: Any) -> Any:
 
     return SimpleNamespace(
         business_insights_page=business_insights_page,
+        business_insights_download_unlock=business_insights_download_unlock,
         business_insights_reports_api=business_insights_reports_api,
         business_insights_report_sql=business_insights_report_sql,
         business_insights_report_ingest=business_insights_report_ingest,
@@ -219,6 +238,7 @@ def build_business_insights_handlers(ctx: Any) -> Any:
 
 def register_business_insights_routes(app: Any, handlers: Any) -> None:
     _add_route(app, "/business-insights", handlers.business_insights_page)
+    _add_route(app, "/api/business-insights/download-unlock", handlers.business_insights_download_unlock, methods=["POST"])
     _add_route(app, "/api/business-insights/reports", handlers.business_insights_reports_api)
     _add_route(app, "/api/business-insights/reports/<report_id>/sql", handlers.business_insights_report_sql)
     _add_route(app, "/api/business-insights/reports/<report_id>/ingest", handlers.business_insights_report_ingest, methods=["POST"])

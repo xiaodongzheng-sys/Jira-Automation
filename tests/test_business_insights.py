@@ -352,6 +352,7 @@ class BusinessInsightsTests(unittest.TestCase):
                 "TEAM_ALLOWED_EMAILS": "",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                "BUSINESS_INSIGHTS_DOWNLOAD_PASSWORD": "test-bi-pass",
             },
             clear=True,
         ):
@@ -392,6 +393,10 @@ class BusinessInsightsTests(unittest.TestCase):
                 page_with_visualization = client.get("/business-insights")
                 visualized_reports_response = client.get("/api/business-insights/reports?domain=credit-risk")
                 visualization_url = visualized_reports_response.get_json()["reports"][0]["artifact"]["visualization_url"]
+                # Downloads/visualizations are password-gated until unlocked.
+                locked_download = client.get(artifact_url)
+                unlock_bad = client.post("/api/business-insights/download-unlock", json={"password": "nope"})
+                unlock_ok = client.post("/api/business-insights/download-unlock", json={"password": "test-bi-pass"})
                 visualization_response = client.get(visualization_url)
                 visualization_body = visualization_response.get_data(as_text=True)
                 visualization_response.close()
@@ -423,6 +428,10 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertEqual(ingest_response.get_json()["artifact"]["row_count"], 3)
         self.assertEqual(page_with_visualization.status_code, 200)
         self.assertIn("Open Visualization", page_with_visualization.get_data(as_text=True))
+        # Password gate: locked before unlock, wrong password rejected, correct accepted.
+        self.assertEqual(locked_download.status_code, 401)
+        self.assertEqual(unlock_bad.status_code, 403)
+        self.assertEqual(unlock_ok.status_code, 200)
         self.assertEqual(visualization_response.status_code, 200)
         self.assertEqual(visualization_response.mimetype, "text/html")
         self.assertIn("Credit Risk Visualization", visualization_body)

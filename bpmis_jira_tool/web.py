@@ -5,6 +5,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import difflib
 import hashlib
+import hmac
 import inspect
 import io
 from http import HTTPStatus
@@ -921,6 +922,7 @@ def create_app() -> Flask:
             "business_insights_report_sql",
             "business_insights_artifact",
             "business_insights_visualization",
+            "business_insights_download_unlock",
         }:
             return None
         login_gate = _require_google_login(
@@ -1610,6 +1612,9 @@ def create_app() -> Flask:
                 _require_business_insights_admin=lambda *args, **kwargs: _require_business_insights_admin(*args, **kwargs),
                 _can_refresh_business_insights=lambda *args, **kwargs: _can_refresh_business_insights(*args, **kwargs),
                 _restricted_to_anti_fraud_business_insights=lambda *args, **kwargs: _restricted_to_anti_fraud_business_insights(*args, **kwargs),
+                _verify_business_insights_download_password=lambda *args, **kwargs: _verify_business_insights_download_password(*args, **kwargs),
+                _business_insights_downloads_unlocked=lambda *args, **kwargs: _business_insights_downloads_unlocked(*args, **kwargs),
+                _unlock_business_insights_downloads=lambda *args, **kwargs: _unlock_business_insights_downloads(*args, **kwargs),
                 _get_user_identity=lambda *args, **kwargs: _get_user_identity(*args, **kwargs),
                 _get_business_insights_store=lambda *args, **kwargs: _get_business_insights_store(*args, **kwargs),
                 _current_release_revision=lambda *args, **kwargs: _current_release_revision(*args, **kwargs),
@@ -2963,6 +2968,30 @@ def _require_business_insights_access(settings: Settings, *, api: bool = False):
 def _can_access_business_insights(settings: Settings) -> bool:
     # Public surface: anyone (including anonymous) may view Business Insights.
     return True
+
+
+# Password gate for downloading Business Insights workbooks / opening visualizations.
+# Stored as a SHA-256 hash so the plaintext is not committed; override at runtime
+# with the BUSINESS_INSIGHTS_DOWNLOAD_PASSWORD env var.
+BUSINESS_INSIGHTS_DOWNLOAD_PASSWORD_SHA256 = "418b0883c42f13f7bc352783e7198cc5d01a07da4d804722e0297fbd23418ba4"
+_BUSINESS_INSIGHTS_DOWNLOAD_SESSION_KEY = "business_insights_download_unlocked"
+
+
+def _verify_business_insights_download_password(candidate: str | None) -> bool:
+    override = str(os.environ.get("BUSINESS_INSIGHTS_DOWNLOAD_PASSWORD") or "").strip()
+    candidate = str(candidate or "")
+    if override:
+        return hmac.compare_digest(candidate, override)
+    digest = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
+    return hmac.compare_digest(digest, BUSINESS_INSIGHTS_DOWNLOAD_PASSWORD_SHA256)
+
+
+def _business_insights_downloads_unlocked() -> bool:
+    return bool(session.get(_BUSINESS_INSIGHTS_DOWNLOAD_SESSION_KEY))
+
+
+def _unlock_business_insights_downloads() -> None:
+    session[_BUSINESS_INSIGHTS_DOWNLOAD_SESSION_KEY] = True
 
 
 def _can_refresh_business_insights(settings: Settings) -> bool:

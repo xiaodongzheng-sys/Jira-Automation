@@ -25,6 +25,61 @@
     tab.addEventListener("click", () => setActiveDomain(tab.dataset.businessInsightsTab));
   });
 
+  // ---- Password gate for "Download Excel" / "Open Visualization" ----
+  let downloadsUnlocked = root.dataset.downloadUnlocked === "true";
+  const unlockUrl = root.dataset.downloadUnlockUrl || "/api/business-insights/download-unlock";
+
+  const verifyPassword = async (password) => {
+    try {
+      const response = await fetch(unlockUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      return response.ok;
+    } catch (error) {
+      return false;
+    }
+  };
+
+  const ensureUnlocked = async () => {
+    if (downloadsUnlocked) return true;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const password = window.prompt("Enter the password to access Business Insights reports:");
+      if (password === null) return false; // cancelled
+      if (await verifyPassword(password)) {
+        downloadsUnlocked = true;
+        return true;
+      }
+      window.alert("Incorrect password. Please try again.");
+    }
+    return false;
+  };
+
+  const isGatedDownloadLink = (el) =>
+    !!el &&
+    typeof el.matches === "function" &&
+    el.matches(
+      "[data-business-insights-download], [data-business-insights-visualization], a[href*='/artifacts/'], a[href*='/visualizations/']"
+    );
+
+  root.addEventListener("click", (event) => {
+    const link = event.target.closest("a");
+    if (!isGatedDownloadLink(link)) return;
+    if (downloadsUnlocked) return; // already verified this session -> normal navigation
+    event.preventDefault();
+    const href = link.getAttribute("href");
+    const openInNewTab = link.target === "_blank";
+    ensureUnlocked().then((ok) => {
+      if (!ok || !href) return;
+      if (openInNewTab) {
+        window.open(href, "_blank", "noopener");
+      } else {
+        window.location.href = href;
+      }
+    });
+  });
+
   // ---- On-demand "Refresh data": run the Data Workbench generator + poll ----
   const POLL_MS = 4000;
 

@@ -5,7 +5,12 @@
 {% endblock %}
 
 {% block body %}
-  <section class="workspace-shell business-insights-page" data-business-insights>
+  <section
+    class="workspace-shell business-insights-page"
+    data-business-insights
+    data-download-unlocked="{{ 'true' if download_unlocked else 'false' }}"
+    data-download-unlock-url="{{ download_unlock_url }}"
+  >
     <div class="section-heading">
       <p class="eyebrow">MIS Reports</p>
       <h2>Business Insights</h2>
@@ -58,9 +63,9 @@
                       <div class="business-insights-link-cell">
                         {% if artifact and artifact.url %}
                           <div class="business-insights-actions">
-                            <a class="button button-secondary" href="{{ artifact.url }}">Download Excel</a>
+                            <a class="button button-secondary" href="{{ artifact.url }}" data-business-insights-download>Download Excel</a>
                             {% if artifact.visualization_url %}
-                              <a class="button button-secondary" href="{{ artifact.visualization_url }}" target="_blank" rel="noopener">Open Visualization</a>
+                              <a class="button button-secondary" href="{{ artifact.visualization_url }}" target="_blank" rel="noopener" data-business-insights-visualization>Open Visualization</a>
                             {% endif %}
                           </div>
                           <span class="business-insights-meta">{{ artifact.row_count }} rows - {{ artifact.created_at }}</span>
