@@ -66,6 +66,9 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
             can_use_source_code_qa_chat=_can_use_source_code_qa_chat(settings),
             can_manage_source_code_qa=_can_manage_source_code_qa(settings),
             download_unlocked=bool(_business_insights_downloads_unlocked()),
+            # Assets and auth links go through the Cloud Run surface so the
+            # public Repo Download page keeps working while the Mac is offline.
+            cloud_auth_mode=True,
             asset_revision=_current_release_revision(),
         )
 

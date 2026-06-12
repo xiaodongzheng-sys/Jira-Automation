@@ -100,6 +100,9 @@ def build_business_insights_handlers(ctx: Any) -> Any:
             underwriting_report_id=UNDERWRITING_FUNNEL_REPORT_ID,
             download_unlocked=bool(ctx._business_insights_downloads_unlocked()),
             download_unlock_url=url_for("business_insights_download_unlock"),
+            # Assets and auth links go through the Cloud Run surface so the
+            # public page keeps working while the Mac host is offline.
+            cloud_auth_mode=True,
             asset_revision=ctx._current_release_revision(),
         )
 

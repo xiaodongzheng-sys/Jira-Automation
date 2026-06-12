@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 
 {% block extra_head %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='business_insights.css', v=asset_revision|default('static')) }}">
+  {% set static_endpoint = 'cloud_static' if cloud_auth_mode|default(false) else 'static' %}
+  <link rel="stylesheet" href="{{ url_for(static_endpoint, filename='business_insights.css', v=asset_revision|default('static')) }}">
 {% endblock %}
 
 {% block body %}
@@ -113,5 +114,6 @@
 {% endblock %}
 
 {% block extra_scripts %}
-  <script src="{{ url_for('static', filename='business_insights.js', v=asset_revision|default('static')) }}"></script>
+  {% set static_endpoint = 'cloud_static' if cloud_auth_mode|default(false) else 'static' %}
+  <script src="{{ url_for(static_endpoint, filename='business_insights.js', v=asset_revision|default('static')) }}"></script>
 {% endblock %}

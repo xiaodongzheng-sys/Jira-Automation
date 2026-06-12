@@ -376,7 +376,8 @@
 {% endblock %}
 
 {% block extra_head %}
-  <link rel="stylesheet" href="{{ url_for('static', filename='source_code_qa.css', v=asset_revision|default('static')) }}">
-  <script defer src="{{ url_for('static', filename='source_code_qa_api.js') }}?v={{ asset_revision }}"></script>
-  <script defer src="{{ url_for('static', filename='source_code_qa.js') }}?v={{ asset_revision }}&qa=20260428-codex-qa-check"></script>
+  {% set static_endpoint = 'cloud_static' if cloud_auth_mode|default(false) else 'static' %}
+  <link rel="stylesheet" href="{{ url_for(static_endpoint, filename='source_code_qa.css', v=asset_revision|default('static')) }}">
+  <script defer src="{{ url_for(static_endpoint, filename='source_code_qa_api.js') }}?v={{ asset_revision }}"></script>
+  <script defer src="{{ url_for(static_endpoint, filename='source_code_qa.js') }}?v={{ asset_revision }}&qa=20260428-codex-qa-check"></script>
 {% endblock %}
