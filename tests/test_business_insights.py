@@ -430,9 +430,10 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertEqual(download_mimetype, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
-class BusinessInsightsRestrictedGuestTests(unittest.TestCase):
-    """@monee.com / @seamoney.com / the gmail test user may sign in but only
-    see Business Insights -> Anti-fraud (no Refresh, no other tabs/domains)."""
+class BusinessInsightsPublicAntiFraudTests(unittest.TestCase):
+    """Anti-fraud Business Insights is publicly viewable before login. Anonymous
+    and non-NPT visitors see only Anti-fraud; other modules stay login-gated. The
+    gmail test user is a full (non-admin) portal user and sees all BI domains."""
 
     def _probe(self, email=None):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -464,30 +465,18 @@ class BusinessInsightsRestrictedGuestTests(unittest.TestCase):
                     "landing": client.get("/portal-home", follow_redirects=False),
                 }
 
-    def test_restricted_guests_only_see_anti_fraud_business_insights(self):
-        for email in ("analyst@monee.com", "analyst@seamoney.com", "xiaodong.zheng1991@gmail.com"):
-            with self.subTest(email=email):
-                r = self._probe(email)
-                # Business Insights opens on Anti-fraud; no other domains, no Refresh.
-                self.assertEqual(r["bi_page"].status_code, 200)
-                html = r["bi_page"].get_data(as_text=True)
-                self.assertIn('data-business-insights-tab="anti-fraud"', html)
-                self.assertNotIn('data-business-insights-tab="credit-risk"', html)
-                self.assertNotIn('data-business-insights-tab="ops-risk"', html)
-                self.assertNotIn('data-business-insights-panel="credit-risk"', html)
-                self.assertNotIn("Refresh data", html)
-                # Anti-fraud reports available; credit-risk reports/SQL denied.
-                self.assertEqual(r["af_reports"].status_code, 200)
-                self.assertGreater(len(r["af_reports"].get_json()["reports"]), 0)
-                self.assertEqual(r["cr_reports"].status_code, 200)
-                self.assertEqual(r["cr_reports"].get_json()["reports"], [])
-                self.assertEqual(r["cr_sql"].status_code, 404)
-                # No access to other tools.
-                self.assertEqual(r["source_code"].status_code, 302)
-                self.assertEqual(r["version_plan"].status_code, 302)
-                # Default landing is Business Insights -> Anti-fraud.
-                self.assertEqual(r["landing"].status_code, 302)
-                self.assertEqual(r["landing"].headers["Location"], "/business-insights?domain=anti-fraud")
+    def test_gmail_test_user_has_full_non_admin_access(self):
+        r = self._probe("xiaodong.zheng1991@gmail.com")
+        # Full portal user (non-admin): sees all BI domains and the Source Code page.
+        self.assertEqual(r["bi_page"].status_code, 200)
+        html = r["bi_page"].get_data(as_text=True)
+        self.assertIn('data-business-insights-tab="anti-fraud"', html)
+        self.assertIn('data-business-insights-tab="credit-risk"', html)
+        self.assertNotIn("Refresh data", html)  # refresh stays admin-only
+        self.assertEqual(r["cr_reports"].status_code, 200)
+        self.assertGreater(len(r["cr_reports"].get_json()["reports"]), 0)
+        self.assertEqual(r["cr_sql"].status_code, 200)
+        self.assertEqual(r["source_code"].status_code, 200)
 
     def test_anonymous_visitor_can_view_anti_fraud_before_login(self):
         r = self._probe(email=None)  # not signed in
@@ -505,14 +494,19 @@ class BusinessInsightsRestrictedGuestTests(unittest.TestCase):
         self.assertEqual(r["source_code"].status_code, 302)
         self.assertEqual(r["version_plan"].status_code, 302)
 
-    def test_unknown_external_user_sees_public_bi_but_is_denied_gated_modules(self):
-        r = self._probe("stranger@external.com")
-        # Business Insights is public, so even a non-allowed signed-in user sees
-        # Anti-fraud; but gated modules remain denied.
-        self.assertEqual(r["bi_page"].status_code, 200)
-        self.assertEqual(r["cr_sql"].status_code, 404)
-        self.assertEqual(r["source_code"].status_code, 302)
-        self.assertEqual(r["version_plan"].status_code, 302)
+    def test_non_npt_domains_cannot_access_gated_modules_but_see_public_bi(self):
+        # @monee.com / @seamoney.com are no longer allowed in: they behave like any
+        # external account -- public Anti-fraud only, every gated module denied.
+        for email in ("analyst@monee.com", "analyst@seamoney.com", "stranger@external.com"):
+            with self.subTest(email=email):
+                r = self._probe(email)
+                self.assertEqual(r["bi_page"].status_code, 200)
+                html = r["bi_page"].get_data(as_text=True)
+                self.assertNotIn('data-business-insights-tab="credit-risk"', html)
+                self.assertEqual(r["cr_reports"].get_json()["reports"], [])
+                self.assertEqual(r["cr_sql"].status_code, 404)
+                self.assertEqual(r["source_code"].status_code, 302)
+                self.assertEqual(r["version_plan"].status_code, 302)
 
 
 class AntiFraudBusinessInsightsTests(unittest.TestCase):

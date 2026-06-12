@@ -319,8 +319,6 @@ if _dotenv_path:
 MARKET_KEYS = ["ID", "SG", "PH", "Regional"]
 PORTAL_ADMIN_EMAIL = "xiaodong.zheng@npt.sg"
 PORTAL_TEST_USER_EMAIL = "xiaodong.zheng1991@gmail.com"
-# Email domains that may sign in but only see Business Insights -> Anti-fraud reports.
-BUSINESS_INSIGHTS_ONLY_EMAIL_DOMAINS = ("monee.com", "seamoney.com")
 TEAM_PROFILE_ADMIN_EMAIL = PORTAL_ADMIN_EMAIL
 SYNC_EMAIL_EDIT_ALLOWLIST = {PORTAL_ADMIN_EMAIL}
 SOURCE_CODE_QA_BUILTIN_ADMIN_EMAILS = {PORTAL_ADMIN_EMAIL}
@@ -1987,27 +1985,20 @@ def _is_portal_admin(email: str | None = None) -> bool:
 
 
 def _is_portal_user(email: str | None = None) -> bool:
-    # Full portal users: signed-in NPT staff. (The Business-Insights-only test
-    # user and external Anti-fraud guests are intentionally NOT portal users.)
+    # Full portal users: signed-in NPT staff plus the gmail test user.
     current_email = str(email or _current_google_email() or "").strip().lower()
-    return bool(current_email and current_email.endswith("@npt.sg"))
-
-
-def _is_business_insights_only_user(email: str | None = None) -> bool:
-    # Restricted guests who may sign in but only see Business Insights -> Anti-fraud
-    # reports: the @monee.com / @seamoney.com domains, plus the gmail test user.
-    current_email = str(email or _current_google_email() or "").strip().lower()
-    if not current_email:
-        return False
-    if current_email == PORTAL_TEST_USER_EMAIL:
-        return True
-    domain = current_email.rsplit("@", 1)[-1] if "@" in current_email else ""
-    return domain in BUSINESS_INSIGHTS_ONLY_EMAIL_DOMAINS
+    return bool(
+        current_email
+        and (
+            current_email.endswith("@npt.sg")
+            or current_email == PORTAL_TEST_USER_EMAIL
+        )
+    )
 
 
 def _restricted_to_anti_fraud_business_insights(settings: Settings | None = None, email: str | None = None) -> bool:
-    # Anyone who is not a full NPT portal user (anonymous visitors and
-    # Business-Insights-only guests) sees only the Anti-fraud domain.
+    # Anyone who is not a full portal user (anonymous / non-NPT visitors) sees
+    # only the public Anti-fraud Business Insights domain.
     return not _is_portal_user(email)
 
 
@@ -2017,7 +2008,7 @@ def _current_google_user_is_blocked(settings: Settings) -> bool:
     email = _current_google_email()
     if not email:
         return False
-    return not (_is_portal_user(email) or _is_business_insights_only_user(email))
+    return not _is_portal_user(email)
 
 
 def _shared_portal_enabled(settings: Settings) -> bool:
@@ -2101,8 +2092,6 @@ def _default_portal_landing_target(settings: Settings, user_identity: dict[str, 
     identity = user_identity if user_identity is not None else _get_user_identity(settings)
     if _can_access_team_dashboard_version_plan(identity):
         return url_for("version_plan_page")
-    if _is_business_insights_only_user(identity.get("email")):
-        return url_for("business_insights_page", domain="anti-fraud")
     return ""
 
 
