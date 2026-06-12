@@ -1,4 +1,5 @@
-name = "team-portal-router"
+# Updates the existing edge router in place (route: app.bankpmtool.uk/*).
+name = "bankpmtool-app-router"
 main = "src/index.js"
 compatibility_date = "2026-06-01"
 
