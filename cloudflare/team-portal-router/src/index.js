@@ -10,6 +10,7 @@ const MAC_ORIGIN = "https://mac-app.bankpmtool.uk";
 
 const CLOUD_PATH_PATTERNS = [
   /^\/$/,
+  /^\/robots\.txt$/,
   // Business Insights: page + read APIs/artifacts on Cloud Run (GCS-backed).
   // generate/ingest run the Data Workbench generator on the Mac.
   /^\/business-insights(?:\/.*)?$/,
