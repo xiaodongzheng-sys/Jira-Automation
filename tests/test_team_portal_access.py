@@ -166,7 +166,11 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertNotIn(b"Checking Mac portal availability", response.data)
             self.assertNotIn(b"fetch('/healthz'", response.data)
             self.assertIn(b"session-bar", response.data)
-            self.assertNotIn(b"site-switcher", response.data)
+            # Business Insights -> Anti-fraud is publicly viewable before login,
+            # so an anonymous visitor gets that (and only that) nav entry.
+            self.assertIn(b"site-switcher", response.data)
+            self.assertIn(b"/business-insights?domain=anti-fraud", response.data)
+            self.assertNotIn(b"/source-code-qa", response.data)
 
     def test_cloud_home_shows_only_full_portal_when_full_portal_is_available(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

@@ -735,8 +735,24 @@ def create_app() -> Flask:
             }
 
         if _site_requires_google_login(settings) and not _google_session_is_connected():
+            # Business Insights -> Anti-fraud is public; expose it (only) so visitors
+            # can view those reports before signing in. Everything else stays gated.
+            public_bi_tabs = [
+                {
+                    "label": "Anti-fraud",
+                    "href": url_for("business_insights_page", domain="anti-fraud"),
+                    "active": current_endpoint == "business_insights_page",
+                }
+            ]
             return {
-                "site_tabs": [],
+                "site_tabs": [
+                    _nav_group(
+                        "Business Insights",
+                        url_for("business_insights_page", domain="anti-fraud"),
+                        public_bi_tabs,
+                        render_subtabs=False,
+                    )
+                ],
                 "site_requires_google_login": True,
                 "can_access_prd_briefing": False,
                 "can_access_prd_self_assessment": False,
@@ -899,6 +915,14 @@ def create_app() -> Flask:
             "cloud_static",
             "access_denied",
             "prd_briefing.image_proxy",
+            # Business Insights read surface is public (Anti-fraud only for
+            # anonymous/non-NPT visitors; full domains for NPT users). Per-domain
+            # filtering happens inside these handlers. Refresh/ingest stay gated.
+            "business_insights_page",
+            "business_insights_reports_api",
+            "business_insights_report_sql",
+            "business_insights_artifact",
+            "business_insights_visualization",
         }:
             return None
         login_gate = _require_google_login(
@@ -1982,8 +2006,9 @@ def _is_business_insights_only_user(email: str | None = None) -> bool:
 
 
 def _restricted_to_anti_fraud_business_insights(settings: Settings | None = None, email: str | None = None) -> bool:
-    # True for the restricted Business-Insights-only class (never a full NPT user).
-    return _is_business_insights_only_user(email) and not _is_portal_user(email)
+    # Anyone who is not a full NPT portal user (anonymous visitors and
+    # Business-Insights-only guests) sees only the Anti-fraud domain.
+    return not _is_portal_user(email)
 
 
 def _current_google_user_is_blocked(settings: Settings) -> bool:
@@ -2940,20 +2965,15 @@ def _require_team_dashboard_monthly_report_access(settings: Settings, *, api: bo
 
 
 def _require_business_insights_access(settings: Settings, *, api: bool = False):
-    login_gate = _require_google_login(settings, api=api)
-    if login_gate is not None:
-        return login_gate
-    if _can_access_business_insights(settings):
-        return None
-    message = "Business Insights is available to signed-in portal users."
-    if api:
-        return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
-    flash(message, "error")
-    return redirect(url_for("access_denied"))
+    # Business Insights is publicly viewable without signing in. Non-NPT visitors
+    # (anonymous or Business-Insights-only guests) are limited to the Anti-fraud
+    # domain by per-domain filtering in the routes; full NPT users see all domains.
+    return None
 
 
 def _can_access_business_insights(settings: Settings) -> bool:
-    return _is_portal_user() or _is_business_insights_only_user()
+    # Public surface: anyone (including anonymous) may view Business Insights.
+    return True
 
 
 def _can_refresh_business_insights(settings: Settings) -> bool:

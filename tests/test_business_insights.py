@@ -434,7 +434,7 @@ class BusinessInsightsRestrictedGuestTests(unittest.TestCase):
     """@monee.com / @seamoney.com / the gmail test user may sign in but only
     see Business Insights -> Anti-fraud (no Refresh, no other tabs/domains)."""
 
-    def _probe(self, email):
+    def _probe(self, email=None):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -450,9 +450,10 @@ class BusinessInsightsRestrictedGuestTests(unittest.TestCase):
             app = create_app()
             app.testing = True
             with app.test_client() as client:
-                with client.session_transaction() as session:
-                    session["google_profile"] = {"email": email, "name": "Guest"}
-                    session["google_credentials"] = {"token": "x"}
+                if email is not None:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": email, "name": "Guest"}
+                        session["google_credentials"] = {"token": "x"}
                 return {
                     "bi_page": client.get("/business-insights?domain=anti-fraud", follow_redirects=False),
                     "af_reports": client.get("/api/business-insights/reports?domain=anti-fraud"),
@@ -488,11 +489,30 @@ class BusinessInsightsRestrictedGuestTests(unittest.TestCase):
                 self.assertEqual(r["landing"].status_code, 302)
                 self.assertEqual(r["landing"].headers["Location"], "/business-insights?domain=anti-fraud")
 
-    def test_unknown_external_user_is_blocked_from_login(self):
+    def test_anonymous_visitor_can_view_anti_fraud_before_login(self):
+        r = self._probe(email=None)  # not signed in
+        # Anti-fraud Business Insights is public.
+        self.assertEqual(r["bi_page"].status_code, 200)
+        html = r["bi_page"].get_data(as_text=True)
+        self.assertIn('data-business-insights-tab="anti-fraud"', html)
+        self.assertNotIn('data-business-insights-tab="credit-risk"', html)
+        self.assertNotIn("Refresh data", html)
+        self.assertEqual(r["af_reports"].status_code, 200)
+        self.assertGreater(len(r["af_reports"].get_json()["reports"]), 0)
+        self.assertEqual(r["cr_reports"].get_json()["reports"], [])
+        self.assertEqual(r["cr_sql"].status_code, 404)
+        # Other modules still require login.
+        self.assertEqual(r["source_code"].status_code, 302)
+        self.assertEqual(r["version_plan"].status_code, 302)
+
+    def test_unknown_external_user_sees_public_bi_but_is_denied_gated_modules(self):
         r = self._probe("stranger@external.com")
-        # Not an NPT user nor an allowed Business-Insights guest -> blocked.
-        self.assertEqual(r["bi_page"].status_code, 302)
-        self.assertNotEqual(r["bi_page"].headers.get("Location"), "/business-insights?domain=anti-fraud")
+        # Business Insights is public, so even a non-allowed signed-in user sees
+        # Anti-fraud; but gated modules remain denied.
+        self.assertEqual(r["bi_page"].status_code, 200)
+        self.assertEqual(r["cr_sql"].status_code, 404)
+        self.assertEqual(r["source_code"].status_code, 302)
+        self.assertEqual(r["version_plan"].status_code, 302)
 
 
 class AntiFraudBusinessInsightsTests(unittest.TestCase):
