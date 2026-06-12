@@ -825,7 +825,7 @@ order by min(al.pt_date);
 -- tiers). Limited to risk-evaluated actions so the reject rate is clean.
 select
   coalesce(nullif(trim(al.scene_name), ''), 'Unspecified') as scene_name,
-  coalesce(nullif(trim(al.authentication_type), ''), 'Unspecified') as authentication_type,
+  coalesce(nullif(trim(al.authentication_type), ''), 'Non-interactive (engine-scored)') as authentication_type,
   count(1) as actions,
   count(distinct al.uid) as distinct_users,
   sum(case when {al_pass} then 1 else 0 end) as pass_actions,
@@ -834,14 +834,14 @@ select
 from {AF_ACTION_LOG_TABLE} al
 where {al_window} and {al_evaluated}
 group by coalesce(nullif(trim(al.scene_name), ''), 'Unspecified'),
-  coalesce(nullif(trim(al.authentication_type), ''), 'Unspecified')
+  coalesce(nullif(trim(al.authentication_type), ''), 'Non-interactive (engine-scored)')
 order by actions desc;
 
 -- 7. Challenge Friction by Auth Type
 -- How much friction each authentication tier adds: volume share, reject rate, and the users/flows it
 -- touched. Step-up (CHALLENGE_*) tiers are the added customer friction.
 select
-  coalesce(nullif(trim(al.authentication_type), ''), 'Unspecified') as authentication_type,
+  coalesce(nullif(trim(al.authentication_type), ''), 'Non-interactive (engine-scored)') as authentication_type,
   count(1) as actions,
   count(distinct al.uid) as distinct_users,
   count(distinct al.bizflow_instance_id) as flows,
@@ -851,7 +851,7 @@ select
   round(sum(case when {al_reject} then 1 else 0 end) / nullif(count(1), 0) * 100, 3) as reject_rate_pct
 from {AF_ACTION_LOG_TABLE} al
 where {al_window} and {al_evaluated}
-group by coalesce(nullif(trim(al.authentication_type), ''), 'Unspecified')
+group by coalesce(nullif(trim(al.authentication_type), ''), 'Non-interactive (engine-scored)')
 order by actions desc;
 
 -- 8. Auth Drop-off by Scene

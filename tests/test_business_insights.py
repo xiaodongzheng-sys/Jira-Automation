@@ -535,7 +535,7 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
                 report_title="Anti-fraud PH - L1+L2 Scenarios, Actions & Auth Steps",
                 snapshot_pt_date="2026-05-25",
                 sheets=[
-                    ("L1 Scenarios", ["l1_scene_code", "l1_scene_name"], [["100", "Login"]]),
+                    ("L1 Scenarios", ["l1_scene_code", "l1_scene_name", "mode", "source"], [["100", "Login", "2", "4"]]),
                     ("Scenario Action Auth Flow", flow_headers, flow_rows),
                     ("Authentication Outcome Summary",
                      ["period", "actions", "distinct_users", "flows", "pass_actions", "reject_actions", "not_evaluated_actions", "reject_rate_pct"],
@@ -580,6 +580,13 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
         # No generic credit-risk dashboard chrome.
         self.assertNotIn("data-product-filter", html)
         self.assertNotIn("Data Quality Notes", html)
+        # Click-to-view info notes on source / mode / drop-off, plus the auth-step glossary.
+        self.assertIn('aria-label="About source"', html)
+        self.assertIn('aria-label="About mode"', html)
+        self.assertIn('aria-label="About drop_off_rate_pct"', html)
+        self.assertIn("col-note-pop", html)
+        self.assertIn("<h2>Auth Step Glossary</h2>", html)
+        self.assertIn("Facial Verification (dynamic-light liveness)", html)
 
     def test_latest_snapshot_resolves_to_anchor_table_max_pt_date(self):
         from scripts import generate_business_insights_live_reports as gen

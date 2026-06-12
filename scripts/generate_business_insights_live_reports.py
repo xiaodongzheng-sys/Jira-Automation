@@ -1200,17 +1200,27 @@ def _searchable_table_panel(
     *,
     placeholder: str,
     step_columns: set[int] | None = None,
+    column_notes: dict[str, str] | None = None,
 ) -> str:
     step_columns = step_columns or set()
-    header_html = "".join(
-        (
-            f'<th{" class=\"step\"" if index in step_columns else ""}>'
-            f'<span class="th-label">{html.escape(str(header))}</span>'
+    column_notes = column_notes or {}
+
+    def _th(index: int, header: str) -> str:
+        cls = ' class="step"' if index in step_columns else ""
+        note = column_notes.get(str(header))
+        info = (
+            f'<button type="button" class="col-info" data-note="{html.escape(str(note), quote=True)}" '
+            f'aria-label="About {html.escape(str(header), quote=True)}">&#9432;</button>'
+            if note
+            else ""
+        )
+        return (
+            f"<th{cls}><span class=\"th-label\">{html.escape(str(header))}</span>{info}"
             f'<input class="col-filter" type="text" data-col="{index}" '
             f'placeholder="Filter" aria-label="Filter {html.escape(str(header))}"></th>'
         )
-        for index, header in enumerate(headers)
-    )
+
+    header_html = "".join(_th(index, header) for index, header in enumerate(headers))
 
     def _cell(value: Any) -> str:
         return "" if value is None else str(value)
@@ -1689,7 +1699,7 @@ _DASHBOARD_JS = r"""
       Array.prototype.forEach.call(hr.cells, function(th,i){
         th.classList.add('sortable');
         th.addEventListener('click', function(e){
-          if(e.target && e.target.classList && e.target.classList.contains('col-filter')) return;
+          if(e.target && ((e.target.classList && e.target.classList.contains('col-filter')) || (e.target.closest && e.target.closest('.col-info')))) return;
           var asc = th.getAttribute('data-dir')!=='asc';
           Array.prototype.forEach.call(hr.cells, function(o){ o.removeAttribute('data-dir'); o.classList.remove('sort-asc','sort-desc'); });
           th.setAttribute('data-dir', asc?'asc':'desc'); th.classList.add(asc?'sort-asc':'sort-desc');
@@ -1875,6 +1885,27 @@ _DASHBOARD_JS = r"""
   }
   sel.addEventListener('change', function(){ renderKpis(sel.value); filterTables(sel.value); });
 })();
+(function(){
+  // Click an info icon (next to a column header) to toggle a note popover explaining that column.
+  var pop=null;
+  function close(){ if(pop){ pop.remove(); pop=null; } }
+  document.addEventListener('click', function(e){
+    var btn = e.target.closest ? e.target.closest('.col-info') : null;
+    if(btn){
+      var owned = pop && pop._owner===btn;
+      close();
+      if(owned){ return; }
+      pop=document.createElement('div'); pop.className='col-note-pop'; pop._owner=btn;
+      pop.textContent=btn.getAttribute('data-note')||'';
+      document.body.appendChild(pop);
+      var r=btn.getBoundingClientRect();
+      var left=Math.max(8, Math.min(window.scrollX+r.left, window.scrollX+window.innerWidth-pop.offsetWidth-8));
+      pop.style.top=(window.scrollY+r.bottom+6)+'px'; pop.style.left=left+'px';
+      return;
+    }
+    if(pop && !(e.target.closest && e.target.closest('.col-note-pop'))){ close(); }
+  });
+})();
 """
 
 
@@ -1921,6 +1952,9 @@ th,td{{border-bottom:1px solid #edf1f7;padding:8px 10px;text-align:left;white-sp
 th{{background:#f1f6ff;font-weight:700;color:#344054;position:sticky;top:0;}}
 th .th-label{{display:block;margin-bottom:6px;}}
 th .col-filter{{display:block;width:100%;min-width:90px;font-weight:400;font-size:12px;padding:3px 6px;border:1px solid #cbd5e1;border-radius:4px;background:#fff;}}
+.col-info{{border:none;background:none;color:var(--blue);cursor:pointer;font-size:13px;padding:0 4px;line-height:1;vertical-align:middle;}}
+.col-info:hover{{color:#0b4fb0;}}
+.col-note-pop{{position:absolute;z-index:60;max-width:340px;background:#102a43;color:#fff;font-size:12px;font-weight:400;line-height:1.45;padding:10px 12px;border-radius:8px;box-shadow:0 4px 14px rgba(16,42,67,.35);white-space:normal;}}
 th.step,td.step{{width:50ch;min-width:50ch;max-width:50ch;white-space:normal;overflow-wrap:anywhere;word-break:break-word;}}
 .exp-cell{{width:34px;text-align:center;}}
 .expander{{border:none;background:none;cursor:pointer;font-size:11px;color:var(--blue);padding:2px 4px;line-height:1;}}
@@ -1958,6 +1992,87 @@ padding:10px 4px;margin:-8px 0 6px;background:rgba(245,247,251,.96);backdrop-fil
 <header><h1>{html.escape(report_title)}</h1><p>Snapshot {html.escape(snapshot_pt_date)}. Generated {generated_at} UTC from Data Workbench output.</p></header>
 <main>{body}</main>"""
     return body_html + "\n<script>\n" + _DASHBOARD_JS + "\n</script>\n</body></html>"
+
+
+# --- Scenarios report: column explanations (info-icon popovers) + auth-step glossary ---
+_SCENE_COL_NOTES = {
+    "source": (
+        "Channel the scene originates from (SceneSourceEnum): 1 = Seabank app (BANKING_APP), "
+        "2 = Seabank SDK embedded in Shopee / ShopeePay (BANKING_SDK), 3 = Admin / internal, "
+        "4 = Other (e.g. loans, money-in). Sources 1 and 2 are authentication scenes."
+    ),
+    "mode": (
+        "Only set on logic (aggregate) scenes; blank for real scenes. 1 = include — the scene equals "
+        "this explicit list of real scenes (e.g. 'All Seabank loans'). 2 = exclude — the scene equals "
+        "all real scenes except a list (e.g. 'All except HelpCenterFacialVerification')."
+    ),
+}
+_DROPOFF_COL_NOTES = {
+    "drop_off_rate_pct": (
+        "A flow is one bizflow_instance_id. 'Reached final' = the flow logged its terminal action "
+        "(the BD / Done step, is_final_action_in_flow_of_the_day = 'Y') that day. Drop-off = flows that "
+        "started but recorded no final action that day, i.e. abandoned mid-flow. Caveats: it is computed "
+        "per calendar day, so a flow spanning midnight can read as a drop-off; single-action flows "
+        "(e.g. Login) are 0% by construction, since the only action is also the final one."
+    ),
+    "flows_reached_final": (
+        "Distinct flows (bizflow_instance_id) that logged their terminal action (BD / Done, "
+        "is_final_action_in_flow_of_the_day = 'Y') that day."
+    ),
+}
+# Auth-step codes from the risk-decision engine (StepEnum / StepActionEnum). Comma-separated codes mean
+# multiple steps in sequence; 'EXP:…' is a runtime rule that picks the step by app version / login type.
+_AUTH_STEP_GLOSSARY = [
+    ("NA", "No authentication step configured", "—"),
+    ("BP", "Verify PIN", "VerifyPinAction"),
+    ("BPW", "Verify password", "VerifyPassword"),
+    ("BSO", "Verify SMS OTP", "Trigger/Verify SMS OTP"),
+    ("BO", "SMS or Email OTP (user chooses)", "Trigger/Verify SMS or Email OTP"),
+    ("BST", "Activate + verify Soft Token", "ActivateSoftToken, VerifySoftToken"),
+    ("BSV", "Verify Soft Token only", "VerifySoftToken"),
+    ("BFV", "Facial Verification (dynamic-light liveness)", "FacialVerification"),
+    ("BLC", "Liveness Check (standalone)", "LivenessCheck"),
+    ("BBIO", "TouchID / FaceID (device biometrics)", "VerifyFingerID / VerifyFaceID"),
+    ("BPST", "PIN + Soft Token", "VerifyPin, VerifySoftToken"),
+    ("BPWST", "Password + Soft Token", "VerifyPassword, VerifySoftToken"),
+    ("BSOST", "SMS OTP + Soft Token", "SMS OTP, VerifySoftToken"),
+    ("BTST", "Transaction Bio / PIN / PWD + Soft Token", "varies by action"),
+    ("BPPWST", "PIN or Password + Soft Token", "varies by action"),
+    ("BPFV", "PIN or Facial Verification", "VerifyPin, FacialVerification"),
+    ("BPWFV", "Password or Facial Verification", "VerifyPassword, FacialVerification"),
+    ("BSOFV", "SMS OTP or Facial Verification", "SMS OTP, FacialVerification"),
+    ("BPSO", "PIN or SMS OTP", "VerifyPin, SMS OTP"),
+    ("BPBIO", "PIN or TouchID / FaceID", "VerifyPin, VerifyFinger/FaceID"),
+    ("BDOB", "Date-of-Birth verification", "—"),
+    ("BPDOB", "PIN or Date-of-Birth", "—"),
+    ("BOP", "Verify one-time PIN", "VerifyOnetimepin"),
+    ("BAOP", "Send one-time PIN", "TriggerOnetimepin"),
+    ("BH5P", "H5 (web) verify PIN", "—"),
+    ("BH5SO", "H5 (web) verify SMS OTP", "—"),
+    ("BKFI", "Shopee x Seabank FaceID login", "ActivateFaceIDSDKLogin"),
+    ("BKTI", "Shopee x Seabank TouchID login", "ActivateTouchIDSDKLogin"),
+    ("BE", "Flow start", "—"),
+    ("BD", "Flow complete (final / done)", "—"),
+    ("BULUL", "(internal) uplift-unlock AF punishment list", "—"),
+    ("EXP:…", "Runtime rule that picks the step by app version / PIN-vs-password / login type", "varies"),
+]
+
+
+def _auth_step_glossary_panel() -> str:
+    rows = [[code, meaning, action] for code, meaning, action in _AUTH_STEP_GLOSSARY]
+    return _searchable_table_panel(
+        "Auth Step Glossary",
+        ["step_code", "meaning", "underlying_action"],
+        rows,
+        placeholder="Search step code or meaning…",
+        column_notes={
+            "step_code": (
+                "Auth-step codes issued by the risk-decision engine (StepEnum). Comma-separated codes = "
+                "multiple steps required in sequence; 'EXP:…' = a runtime rule that selects the step by "
+                "app version / PIN-vs-password / login type."
+            )
+        },
+    )
 
 
 def write_visualization(
@@ -2072,7 +2187,13 @@ def write_visualization(
                 step_cols = {i for i, h in enumerate(headers) if str(h).strip().lower().endswith("_step")}
                 panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Search scene name or step…", step_columns=step_cols))
                 continue
-            panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder=placeholders.get(sheet_name, "Search…")))
+            notes = _SCENE_COL_NOTES if sheet_name == "L1 Scenarios" else (
+                _DROPOFF_COL_NOTES if sheet_name == "Auth Drop-off by Scene" else None
+            )
+            panels.append(_searchable_table_panel(
+                sheet_name, headers, rows, placeholder=placeholders.get(sheet_name, "Search…"), column_notes=notes
+            ))
+        panels.append(_auth_step_glossary_panel())
         path.write_text(
             _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),
             encoding="utf-8",
