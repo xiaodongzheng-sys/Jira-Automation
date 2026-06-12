@@ -430,6 +430,71 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertEqual(download_mimetype, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
+class BusinessInsightsRestrictedGuestTests(unittest.TestCase):
+    """@monee.com / @seamoney.com / the gmail test user may sign in but only
+    see Business Insights -> Anti-fraud (no Refresh, no other tabs/domains)."""
+
+    def _probe(self, email):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "ENV_FILE": os.devnull,
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": email, "name": "Guest"}
+                    session["google_credentials"] = {"token": "x"}
+                return {
+                    "bi_page": client.get("/business-insights?domain=anti-fraud", follow_redirects=False),
+                    "af_reports": client.get("/api/business-insights/reports?domain=anti-fraud"),
+                    "cr_reports": client.get("/api/business-insights/reports?domain=credit-risk"),
+                    "cr_sql": client.get(f"/api/business-insights/reports/{UNDERWRITING_FUNNEL_REPORT_ID}/sql"),
+                    "source_code": client.get("/source-code-qa", follow_redirects=False),
+                    "version_plan": client.get("/version-plan", follow_redirects=False),
+                    "landing": client.get("/portal-home", follow_redirects=False),
+                }
+
+    def test_restricted_guests_only_see_anti_fraud_business_insights(self):
+        for email in ("analyst@monee.com", "analyst@seamoney.com", "xiaodong.zheng1991@gmail.com"):
+            with self.subTest(email=email):
+                r = self._probe(email)
+                # Business Insights opens on Anti-fraud; no other domains, no Refresh.
+                self.assertEqual(r["bi_page"].status_code, 200)
+                html = r["bi_page"].get_data(as_text=True)
+                self.assertIn('data-business-insights-tab="anti-fraud"', html)
+                self.assertNotIn('data-business-insights-tab="credit-risk"', html)
+                self.assertNotIn('data-business-insights-tab="ops-risk"', html)
+                self.assertNotIn('data-business-insights-panel="credit-risk"', html)
+                self.assertNotIn("Refresh data", html)
+                # Anti-fraud reports available; credit-risk reports/SQL denied.
+                self.assertEqual(r["af_reports"].status_code, 200)
+                self.assertGreater(len(r["af_reports"].get_json()["reports"]), 0)
+                self.assertEqual(r["cr_reports"].status_code, 200)
+                self.assertEqual(r["cr_reports"].get_json()["reports"], [])
+                self.assertEqual(r["cr_sql"].status_code, 404)
+                # No access to other tools.
+                self.assertEqual(r["source_code"].status_code, 302)
+                self.assertEqual(r["version_plan"].status_code, 302)
+                # Default landing is Business Insights -> Anti-fraud.
+                self.assertEqual(r["landing"].status_code, 302)
+                self.assertEqual(r["landing"].headers["Location"], "/business-insights?domain=anti-fraud")
+
+    def test_unknown_external_user_is_blocked_from_login(self):
+        r = self._probe("stranger@external.com")
+        # Not an NPT user nor an allowed Business-Insights guest -> blocked.
+        self.assertEqual(r["bi_page"].status_code, 302)
+        self.assertNotEqual(r["bi_page"].headers.get("Location"), "/business-insights?domain=anti-fraud")
+
+
 class AntiFraudBusinessInsightsTests(unittest.TestCase):
     def test_seeded_reports_include_scenarios_actions_report(self):
         with tempfile.TemporaryDirectory() as tmp:

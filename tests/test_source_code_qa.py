@@ -447,14 +447,13 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
         with app.test_client() as client:
             self._login(client, "xiaodong.zheng1991@gmail.com")
-            page_response = client.get("/source-code-qa")
+            page_response = client.get("/source-code-qa", follow_redirects=False)
             config_response = client.get("/api/source-code-qa/config")
 
-        self.assertEqual(page_response.status_code, 200)
-        self.assertNotIn(b"Repository Mapping", page_response.data)
-        self.assertNotIn(b"Repo Admin", page_response.data)
-        self.assertFalse(config_response.get_json()["can_manage"])
-        self.assertEqual(config_response.get_json()["auth"]["admin_match_source"], "")
+        # The gmail test user is a Business-Insights-only guest: even on the
+        # Source Code QA admin allowlist it gets no Source Code QA access at all.
+        self.assertEqual(page_response.status_code, 302)
+        self.assertEqual(config_response.status_code, 403)
 
     def test_source_code_qa_builtin_owner_can_manage_when_env_owner_changes(self):
         with patch.dict(
@@ -512,11 +511,11 @@ class SourceCodeQARouteTests(unittest.TestCase):
                 )
                 sync_response = client.post("/api/source-code-qa/sync", json={"pm_team": "AF", "country": "All"})
 
-        config_payload = config_response.get_json()
+        # The gmail test user is restricted to Business Insights; Source Code QA
+        # is fully denied (page redirect + 403 on config/save/sync).
         self.assertNotIn(b"Repository Mapping", page_response.data)
-        self.assertFalse(config_payload["can_manage"])
-        self.assertEqual(config_payload["auth"]["signed_in_email"], "xiaodong.zheng1991@gmail.com")
-        self.assertEqual(config_payload["auth"]["admin_match_source"], "")
+        self.assertEqual(page_response.status_code, 302)
+        self.assertEqual(config_response.status_code, 403)
         self.assertEqual(save_response.status_code, 403)
         self.assertEqual(sync_response.status_code, 403)
 

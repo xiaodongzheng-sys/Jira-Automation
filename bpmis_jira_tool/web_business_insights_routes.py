@@ -27,6 +27,34 @@ def build_business_insights_handlers(ctx: Any) -> Any:
     def _store() -> BusinessInsightsStore:
         return ctx._get_business_insights_store()
 
+    def _anti_fraud_only() -> bool:
+        # Restricted Business-Insights-only guests (monee/seamoney + test user).
+        return bool(ctx._restricted_to_anti_fraud_business_insights(settings))
+
+    def _visible_domains() -> list[dict[str, Any]]:
+        domains = list(_store().domains())
+        if _anti_fraud_only():
+            return [d for d in domains if d.get("key") == "anti-fraud"]
+        return domains
+
+    def _visible_domain_keys() -> set[str]:
+        return {str(d.get("key")) for d in _visible_domains()}
+
+    def _report_domain_visible(report_id: str) -> bool:
+        if not _anti_fraud_only():
+            return True
+        report = _store().report(report_id)
+        return bool(report) and str(report.get("domain") or "") in _visible_domain_keys()
+
+    def _visible_artifact_ids() -> set[str]:
+        ids: set[str] = set()
+        for domain in _visible_domains():
+            for report in _store().reports(domain["key"]):
+                artifact = report.get("artifact")
+                if isinstance(artifact, dict) and artifact.get("id"):
+                    ids.add(str(artifact["id"]))
+        return ids
+
     def _report_payload(report: dict[str, Any]) -> dict[str, Any]:
         item = dict(report)
         artifact = item.get("artifact") if isinstance(item.get("artifact"), dict) else None
@@ -50,22 +78,23 @@ def build_business_insights_handlers(ctx: Any) -> Any:
     def _reports_by_domain() -> dict[str, list[dict[str, Any]]]:
         return {
             domain["key"]: [_report_payload(report) for report in _store().reports(domain["key"])]
-            for domain in _store().domains()
+            for domain in _visible_domains()
         }
 
     def business_insights_page():
         access_gate = ctx._require_business_insights_access(settings)
         if access_gate is not None:
             return access_gate
+        domains = _visible_domains()
+        domain_keys = {domain["key"] for domain in domains}
         active_domain = str(request.args.get("domain") or "anti-fraud").strip().lower()
-        domain_keys = {domain["key"] for domain in _store().domains()}
         if active_domain not in domain_keys:
-            active_domain = "anti-fraud"
+            active_domain = "anti-fraud" if "anti-fraud" in domain_keys else (next(iter(domain_keys), "anti-fraud"))
         return render_template(
             "business_insights.html",
             page_title="Business Insights",
             user_identity=ctx._get_user_identity(settings),
-            domains=_store().domains(),
+            domains=domains,
             active_domain=active_domain,
             reports_by_domain=_reports_by_domain(),
             underwriting_report_id=UNDERWRITING_FUNNEL_REPORT_ID,
@@ -77,12 +106,16 @@ def build_business_insights_handlers(ctx: Any) -> Any:
         if access_gate is not None:
             return access_gate
         domain = str(request.args.get("domain") or "").strip().lower()
+        if _anti_fraud_only() and domain not in _visible_domain_keys():
+            return jsonify({"status": "ok", "domain": domain, "reports": []})
         return jsonify({"status": "ok", "domain": domain, "reports": [_report_payload(report) for report in _store().reports(domain)]})
 
     def business_insights_report_sql(report_id: str):
         access_gate = ctx._require_business_insights_access(settings, api=True)
         if access_gate is not None:
             return access_gate
+        if not _report_domain_visible(report_id):
+            return jsonify({"status": "error", "message": "Report not found."}), HTTPStatus.NOT_FOUND
         try:
             sql = _store().sql_for_report(report_id)
         except ToolError as error:
@@ -98,6 +131,8 @@ def build_business_insights_handlers(ctx: Any) -> Any:
         access_gate = ctx._require_business_insights_access(settings, api=True)
         if access_gate is not None:
             return access_gate
+        if not _report_domain_visible(report_id):
+            return jsonify({"status": "error", "message": "Report not found."}), HTTPStatus.NOT_FOUND
         if report_id != UNDERWRITING_FUNNEL_REPORT_ID:
             return jsonify({"status": "error", "message": "Export ingestion is not configured for this report yet."}), HTTPStatus.NOT_FOUND
         uploaded = request.files.get("file")
@@ -140,10 +175,12 @@ def build_business_insights_handlers(ctx: Any) -> Any:
         access_gate = ctx._require_business_insights_access(settings)
         if access_gate is not None:
             return access_gate
+        if _anti_fraud_only() and artifact_id not in _visible_artifact_ids():
+            return redirect(url_for("business_insights_page", domain="anti-fraud"))
         try:
             metadata, path = _store().artifact_path(artifact_id)
         except ToolError:
-            return redirect(url_for("business_insights_page", domain="credit-risk"))
+            return redirect(url_for("business_insights_page", domain="anti-fraud"))
         return send_file(
             path,
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -155,10 +192,12 @@ def build_business_insights_handlers(ctx: Any) -> Any:
         access_gate = ctx._require_business_insights_access(settings)
         if access_gate is not None:
             return access_gate
+        if _anti_fraud_only() and artifact_id not in _visible_artifact_ids():
+            return redirect(url_for("business_insights_page", domain="anti-fraud"))
         try:
             metadata, path = _store().visualization_path(artifact_id)
         except ToolError:
-            return redirect(url_for("business_insights_page", domain="credit-risk"))
+            return redirect(url_for("business_insights_page", domain="anti-fraud"))
         return send_file(
             path,
             mimetype="text/html; charset=utf-8",

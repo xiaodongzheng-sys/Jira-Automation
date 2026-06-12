@@ -319,6 +319,8 @@ if _dotenv_path:
 MARKET_KEYS = ["ID", "SG", "PH", "Regional"]
 PORTAL_ADMIN_EMAIL = "xiaodong.zheng@npt.sg"
 PORTAL_TEST_USER_EMAIL = "xiaodong.zheng1991@gmail.com"
+# Email domains that may sign in but only see Business Insights -> Anti-fraud reports.
+BUSINESS_INSIGHTS_ONLY_EMAIL_DOMAINS = ("monee.com", "seamoney.com")
 TEAM_PROFILE_ADMIN_EMAIL = PORTAL_ADMIN_EMAIL
 SYNC_EMAIL_EDIT_ALLOWLIST = {PORTAL_ADMIN_EMAIL}
 SOURCE_CODE_QA_BUILTIN_ADMIN_EMAILS = {PORTAL_ADMIN_EMAIL}
@@ -832,22 +834,20 @@ def create_app() -> Flask:
             site_tabs.append(_nav_group("Projects", project_tabs[0]["href"], project_tabs))
         if can_access_business_insights:
             active_business_domain = str(request.args.get("domain") or "anti-fraud").strip().lower()
+            _bi_domain_tabs = [
+                ("anti-fraud", "Anti-fraud"),
+                ("credit-risk", "Credit Risk"),
+                ("ops-risk", "Ops Risk"),
+            ]
+            if _restricted_to_anti_fraud_business_insights(settings):
+                _bi_domain_tabs = [tab for tab in _bi_domain_tabs if tab[0] == "anti-fraud"]
             business_insights_tabs = [
                 {
-                    "label": "Anti-fraud",
-                    "href": url_for("business_insights_page", domain="anti-fraud"),
-                    "active": current_endpoint == "business_insights_page" and active_business_domain == "anti-fraud",
-                },
-                {
-                    "label": "Credit Risk",
-                    "href": url_for("business_insights_page", domain="credit-risk"),
-                    "active": current_endpoint == "business_insights_page" and active_business_domain == "credit-risk",
-                },
-                {
-                    "label": "Ops Risk",
-                    "href": url_for("business_insights_page", domain="ops-risk"),
-                    "active": current_endpoint == "business_insights_page" and active_business_domain == "ops-risk",
-                },
+                    "label": label,
+                    "href": url_for("business_insights_page", domain=key),
+                    "active": current_endpoint == "business_insights_page" and active_business_domain == key,
+                }
+                for key, label in _bi_domain_tabs
             ]
             site_tabs.append(_nav_group("Business Insights", url_for("business_insights_page", domain="anti-fraud"), business_insights_tabs, render_subtabs=False))
         if show_admin_tool_entries and _can_access_vpn_connection(settings):
@@ -1587,6 +1587,7 @@ def create_app() -> Flask:
                 _require_business_insights_access=lambda *args, **kwargs: _require_business_insights_access(*args, **kwargs),
                 _require_business_insights_admin=lambda *args, **kwargs: _require_business_insights_admin(*args, **kwargs),
                 _can_refresh_business_insights=lambda *args, **kwargs: _can_refresh_business_insights(*args, **kwargs),
+                _restricted_to_anti_fraud_business_insights=lambda *args, **kwargs: _restricted_to_anti_fraud_business_insights(*args, **kwargs),
                 _get_user_identity=lambda *args, **kwargs: _get_user_identity(*args, **kwargs),
                 _get_business_insights_store=lambda *args, **kwargs: _get_business_insights_store(*args, **kwargs),
                 _current_release_revision=lambda *args, **kwargs: _current_release_revision(*args, **kwargs),
@@ -1962,14 +1963,27 @@ def _is_portal_admin(email: str | None = None) -> bool:
 
 
 def _is_portal_user(email: str | None = None) -> bool:
+    # Full portal users: signed-in NPT staff. (The Business-Insights-only test
+    # user and external Anti-fraud guests are intentionally NOT portal users.)
     current_email = str(email or _current_google_email() or "").strip().lower()
-    return bool(
-        current_email
-        and (
-            current_email.endswith("@npt.sg")
-            or current_email == PORTAL_TEST_USER_EMAIL
-        )
-    )
+    return bool(current_email and current_email.endswith("@npt.sg"))
+
+
+def _is_business_insights_only_user(email: str | None = None) -> bool:
+    # Restricted guests who may sign in but only see Business Insights -> Anti-fraud
+    # reports: the @monee.com / @seamoney.com domains, plus the gmail test user.
+    current_email = str(email or _current_google_email() or "").strip().lower()
+    if not current_email:
+        return False
+    if current_email == PORTAL_TEST_USER_EMAIL:
+        return True
+    domain = current_email.rsplit("@", 1)[-1] if "@" in current_email else ""
+    return domain in BUSINESS_INSIGHTS_ONLY_EMAIL_DOMAINS
+
+
+def _restricted_to_anti_fraud_business_insights(settings: Settings | None = None, email: str | None = None) -> bool:
+    # True for the restricted Business-Insights-only class (never a full NPT user).
+    return _is_business_insights_only_user(email) and not _is_portal_user(email)
 
 
 def _current_google_user_is_blocked(settings: Settings) -> bool:
@@ -1978,7 +1992,7 @@ def _current_google_user_is_blocked(settings: Settings) -> bool:
     email = _current_google_email()
     if not email:
         return False
-    return not _is_portal_user(email)
+    return not (_is_portal_user(email) or _is_business_insights_only_user(email))
 
 
 def _shared_portal_enabled(settings: Settings) -> bool:
@@ -2062,6 +2076,8 @@ def _default_portal_landing_target(settings: Settings, user_identity: dict[str, 
     identity = user_identity if user_identity is not None else _get_user_identity(settings)
     if _can_access_team_dashboard_version_plan(identity):
         return url_for("version_plan_page")
+    if _is_business_insights_only_user(identity.get("email")):
+        return url_for("business_insights_page", domain="anti-fraud")
     return ""
 
 
@@ -2937,7 +2953,7 @@ def _require_business_insights_access(settings: Settings, *, api: bool = False):
 
 
 def _can_access_business_insights(settings: Settings) -> bool:
-    return _is_portal_user()
+    return _is_portal_user() or _is_business_insights_only_user()
 
 
 def _can_refresh_business_insights(settings: Settings) -> bool:
@@ -2989,7 +3005,8 @@ def _can_access_bpmis_automation_tool(user_identity: dict[str, str | None]) -> b
 
 
 def _can_access_productization_upgrade_summary(user_identity: dict[str, str | None]) -> bool:
-    return bool(str(user_identity.get("email") or "").strip())
+    # Full NPT portal users only; Business-Insights-only guests must not see BPMIS surfaces.
+    return _is_portal_user(str(user_identity.get("email") or ""))
 
 
 def _can_access_team_dashboard(user_identity: dict[str, str | None]) -> bool:
