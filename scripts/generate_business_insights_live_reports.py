@@ -40,11 +40,13 @@ if str(ROOT_DIR) not in sys.path:
 
 from bpmis_jira_tool.timefmt import format_gmt8  # noqa: E402
 from bpmis_jira_tool.business_insights import (  # noqa: E402
+    AF_BLACK_WHITE_LIST_TABLE,
     AF_CARD_3DS_REPORT_ID,
     AF_DEVICE_RISK_REPORT_ID,
     AF_FACIAL_VERIFICATION_REPORT_ID,
     AF_FACIAL_VERIFICATION_TABLE,
     AF_FRAUD_LOSS_REPORT_ID,
+    AF_LIST_USAGE_REPORT_ID,
     AF_REQUEST_STATISTIC_TABLE,
     AF_REVIEW_CASE_TABLE,
     AF_RULE_CONFIG_TABLE,
@@ -63,6 +65,7 @@ from bpmis_jira_tool.business_insights import (  # noqa: E402
     UNDERWRITING_FUNNEL_REPORT_ID,
     build_af_card_3ds_sql,
     build_af_device_risk_sql,
+    build_af_list_usage_sql,
     build_af_facial_verification_sql,
     build_af_fraud_loss_sql,
     build_af_rule_effectiveness_sql,
@@ -113,6 +116,10 @@ REPORT_BUILDERS: dict[str, tuple[str, Callable[..., str]]] = {
         "Anti-fraud PH - Card Fraud & 3DS Authentication",
         build_af_card_3ds_sql,
     ),
+    AF_LIST_USAGE_REPORT_ID: (
+        "Anti-fraud PH - Blacklist, Whitelist & Greylist",
+        build_af_list_usage_sql,
+    ),
 }
 
 # Anchor table per report used to resolve the latest available pt_date when the
@@ -127,6 +134,7 @@ REPORT_SNAPSHOT_ANCHOR_TABLE: dict[str, str] = {
     AF_RULE_EFFECTIVENESS_REPORT_ID: AF_REQUEST_STATISTIC_TABLE,
     AF_FRAUD_LOSS_REPORT_ID: AF_REVIEW_CASE_TABLE,
     AF_FACIAL_VERIFICATION_REPORT_ID: AF_FACIAL_VERIFICATION_TABLE,
+    AF_LIST_USAGE_REPORT_ID: AF_BLACK_WHITE_LIST_TABLE,
 }
 
 LATEST_SNAPSHOT = "latest"
@@ -136,6 +144,52 @@ PREFERRED_PRODUCT_CODES: dict[str, str] = {
 }
 PREFERRED_SUB_PRODUCT_CODES: dict[str, str] = {
     "Employee Loan": "108",
+}
+
+# ISO 18245 Merchant Category Codes - common ones, used to render "code - name" in the 3DS MCC table.
+# Unknown codes fall back to the bare code (see _mcc_label); 3000-3999 are carrier/rental/lodging ranges.
+MCC_LABELS: dict[str, str] = {
+    "4111": "Local / commuter transport", "4121": "Taxicabs & rideshare", "4131": "Bus lines",
+    "4214": "Freight & courier", "4411": "Cruise lines", "4511": "Airlines", "4722": "Travel agencies",
+    "4784": "Tolls & bridge fees", "4789": "Transportation services", "4812": "Telecom equipment",
+    "4814": "Telecom services", "4816": "Computer network / information services", "4829": "Money transfer",
+    "4899": "Cable & streaming services", "4900": "Utilities (electric, gas, water)",
+    "5111": "Office supplies & printing", "5172": "Petroleum products", "5200": "Home supply stores",
+    "5300": "Wholesale clubs", "5310": "Discount stores", "5311": "Department stores",
+    "5331": "Variety stores", "5399": "General merchandise", "5411": "Grocery & supermarkets",
+    "5412": "Convenience stores", "5422": "Meat / freezer provisioners", "5441": "Candy & confectionery",
+    "5451": "Dairy products", "5462": "Bakeries", "5499": "Specialty food stores",
+    "5511": "Car dealers (new & used)", "5541": "Service stations (fuel)", "5542": "Automated fuel dispensers",
+    "5611": "Men's clothing", "5621": "Women's clothing", "5631": "Women's accessories",
+    "5641": "Children's clothing", "5651": "Family clothing", "5661": "Shoe stores",
+    "5691": "Clothing stores", "5712": "Furniture & furnishings", "5722": "Household appliances",
+    "5732": "Electronics stores", "5733": "Music & instrument stores", "5734": "Computer software stores",
+    "5735": "Record / media stores", "5811": "Caterers", "5812": "Restaurants & eating places",
+    "5813": "Bars, lounges & nightclubs", "5814": "Fast food", "5815": "Digital goods - media/books",
+    "5816": "Digital goods - games", "5817": "Digital goods - apps", "5818": "Digital goods - large merchant",
+    "5912": "Pharmacies & drug stores", "5921": "Liquor stores", "5941": "Sporting goods",
+    "5942": "Book stores", "5944": "Jewelry & watches", "5945": "Toy & game stores",
+    "5946": "Camera & photo supply", "5947": "Gift & novelty shops", "5964": "Direct marketing - catalog",
+    "5965": "Direct marketing - retail", "5967": "Direct marketing - inbound telemarketing",
+    "5968": "Direct marketing - subscriptions", "5969": "Direct marketing - other",
+    "5999": "Miscellaneous retail", "6010": "Manual cash disbursement", "6011": "ATM cash withdrawal",
+    "6012": "Financial institution merchandise", "6051": "Quasi-cash / crypto / wallets",
+    "6211": "Securities & brokers", "6300": "Insurance", "6513": "Real estate agents & rentals",
+    "6540": "Prepaid / wallet top-up (non-financial)", "7011": "Lodging & hotels",
+    "7032": "Recreational camps", "7210": "Laundry & cleaning", "7230": "Beauty & barber shops",
+    "7273": "Dating & escort services", "7298": "Health & beauty spas", "7299": "Personal services",
+    "7311": "Advertising services", "7349": "Cleaning & maintenance", "7372": "Computer programming / IT",
+    "7392": "Management & consulting", "7399": "Business services", "7512": "Car rental agencies",
+    "7523": "Parking lots & garages", "7832": "Cinemas", "7841": "Video rental",
+    "7922": "Theatrical & event tickets", "7929": "Bands & entertainers", "7941": "Sports clubs & promoters",
+    "7991": "Tourist attractions", "7994": "Video game arcades", "7995": "Betting & gambling",
+    "7997": "Membership clubs (sports/golf)", "7999": "Recreation services", "8011": "Doctors & physicians",
+    "8021": "Dentists", "8062": "Hospitals", "8071": "Medical & dental labs", "8099": "Health services",
+    "8211": "Schools (elementary/secondary)", "8220": "Colleges & universities", "8241": "Correspondence schools",
+    "8299": "Educational services", "8398": "Charitable & social orgs", "8651": "Political organizations",
+    "8999": "Professional services", "9211": "Court costs & fines", "9222": "Government fines",
+    "9311": "Tax payments", "9399": "Government services", "9402": "Postal services",
+    "9405": "Government - intra-government",
 }
 @dataclass(frozen=True)
 class WorkbenchSection:
@@ -531,6 +585,36 @@ def _format_cell(header: str, value: Any) -> str:
             number *= 100
         return f"{number:.1f}%"
     return _format_number(value) if _is_number(value) else str(value or "")
+
+
+def _mcc_label(code: str) -> str:
+    """Human-readable name for an ISO 18245 MCC, or '' when unknown."""
+    name = MCC_LABELS.get(code)
+    if name:
+        return name
+    try:
+        n = int(code)
+    except (TypeError, ValueError):
+        return ""
+    if 3000 <= n <= 3299:
+        return "Airline"
+    if 3300 <= n <= 3499:
+        return "Car rental"
+    if 3500 <= n <= 3999:
+        return "Lodging / hotel"
+    return ""
+
+
+def _format_mcc_cell(value: Any) -> str:
+    """Render an MCC as 'code - name', stripping any thousands separator / trailing .0 from the code."""
+    raw = str(value if value is not None else "").strip()
+    if not raw or raw == "(none)":
+        return raw or "(none)"
+    code = raw.replace(",", "")
+    if code.endswith(".0") and code[:-2].isdigit():
+        code = code[:-2]
+    name = _mcc_label(code)
+    return f"{code} - {name}" if name else code
 
 
 def _product_data_attr(product: Any, *, header: str = "product") -> str:
@@ -2144,49 +2228,84 @@ _DROPOFF_COL_NOTES = {
         "is_final_action_in_flow_of_the_day = 'Y') that day."
     ),
 }
-# Auth-step codes from the risk-decision engine (StepEnum / StepActionEnum). Comma-separated codes mean
-# multiple steps in sequence; 'EXP:…' is a runtime rule that picks the step by app version / login type.
+# Auth-step codes from the risk-decision engine (StepEnum, dbp-antifraud-common). 'type' is the engine's
+# own classification: normal = a real (usually user-facing) step; internal = orchestration step with no
+# user interaction. In the flow-config columns (default_step / challenge*_step) a cell may also be 'NA'
+# (no step), 'EXP:…' (a runtime rule that selects the step), or comma-separated codes (run in sequence).
 _AUTH_STEP_GLOSSARY = [
-    ("NA", "No authentication step configured", "—"),
-    ("BP", "Verify PIN", "VerifyPinAction"),
-    ("BPW", "Verify password", "VerifyPassword"),
-    ("BSO", "Verify SMS OTP", "Trigger/Verify SMS OTP"),
-    ("BO", "SMS or Email OTP (user chooses)", "Trigger/Verify SMS or Email OTP"),
-    ("BST", "Activate + verify Soft Token", "ActivateSoftToken, VerifySoftToken"),
-    ("BSV", "Verify Soft Token only", "VerifySoftToken"),
-    ("BFV", "Facial Verification (dynamic-light liveness)", "FacialVerification"),
-    ("BLC", "Liveness Check (standalone)", "LivenessCheck"),
-    ("BBIO", "TouchID / FaceID (device biometrics)", "VerifyFingerID / VerifyFaceID"),
-    ("BPST", "PIN + Soft Token", "VerifyPin, VerifySoftToken"),
-    ("BPWST", "Password + Soft Token", "VerifyPassword, VerifySoftToken"),
-    ("BSOST", "SMS OTP + Soft Token", "SMS OTP, VerifySoftToken"),
-    ("BTST", "Transaction Bio / PIN / PWD + Soft Token", "varies by action"),
-    ("BPPWST", "PIN or Password + Soft Token", "varies by action"),
-    ("BPFV", "PIN or Facial Verification", "VerifyPin, FacialVerification"),
-    ("BPWFV", "Password or Facial Verification", "VerifyPassword, FacialVerification"),
-    ("BSOFV", "SMS OTP or Facial Verification", "SMS OTP, FacialVerification"),
-    ("BPSO", "PIN or SMS OTP", "VerifyPin, SMS OTP"),
-    ("BPBIO", "PIN or TouchID / FaceID", "VerifyPin, VerifyFinger/FaceID"),
-    ("BDOB", "Date-of-Birth verification", "—"),
-    ("BPDOB", "PIN or Date-of-Birth", "—"),
-    ("BOP", "Verify one-time PIN", "VerifyOnetimepin"),
-    ("BAOP", "Send one-time PIN", "TriggerOnetimepin"),
-    ("BH5P", "H5 (web) verify PIN", "—"),
-    ("BH5SO", "H5 (web) verify SMS OTP", "—"),
-    ("BKFI", "Shopee x Seabank FaceID login", "ActivateFaceIDSDKLogin"),
-    ("BKTI", "Shopee x Seabank TouchID login", "ActivateTouchIDSDKLogin"),
-    ("BE", "Flow start", "—"),
-    ("BD", "Flow complete (final / done)", "—"),
-    ("BULUL", "(internal) uplift-unlock AF punishment list", "—"),
-    ("EXP:…", "Runtime rule that picks the step by app version / PIN-vs-password / login type", "varies"),
+    ("BE", "Flow start", "normal"),
+    ("BD", "Flow complete (final / done)", "normal"),
+    ("BSTD", "Flow aborted / terminated", "normal"),
+    ("BP", "Verify PIN", "normal"),
+    ("BPW", "Verify password", "normal"),
+    ("BSO", "Verify SMS OTP", "normal"),
+    ("BSON", "Verify SMS OTP for a new phone (user enters the number)", "normal"),
+    ("BEO", "Verify Email OTP", "normal"),
+    ("BO", "SMS or Email OTP (user chooses)", "normal"),
+    ("BOP", "Verify one-time PIN", "normal"),
+    ("BOPW", "Verify one-time password", "normal"),
+    ("BAOP", "Send one-time PIN", "normal"),
+    ("BAOPW", "Send one-time password", "normal"),
+    ("BBIO", "TouchID / FaceID (device biometrics)", "normal"),
+    ("BBIOST", "TouchID / FaceID + Soft Token", "normal"),
+    ("BST", "Activate + verify Soft Token (standalone)", "normal"),
+    ("BSTC", "Activate + verify Soft Token, return CA cert to client", "normal"),
+    ("BSV", "Verify Soft Token only", "normal"),
+    ("BPST", "PIN + Soft Token", "normal"),
+    ("BPWST", "Password + Soft Token", "normal"),
+    ("BSOST", "SMS OTP + Soft Token", "normal"),
+    ("BPPWST", "PIN or password + Soft Token", "normal"),
+    ("BPBIOST", "PIN or login TouchID / FaceID + Soft Token", "normal"),
+    ("BTST", "Transaction biometric / PIN / password + Soft Token", "normal"),
+    ("BLO", "Existing-user login (TouchID/FaceID or password) + step-up (varies by action)", "normal"),
+    ("BLOST", "Existing-user login (TouchID/FaceID or password) + Soft Token (varies by action)", "normal"),
+    ("BFV", "Facial verification — ALC dynamic-light (Aurora) liveness", "normal"),
+    ("BSFV", "Facial verification — SLC static liveness", "normal"),
+    ("BLC", "Liveness check (standalone)", "normal"),
+    ("BPFV", "PIN or facial verification", "normal"),
+    ("BPWFV", "Password or facial verification", "normal"),
+    ("BSOFV", "SMS OTP or facial verification", "normal"),
+    ("BPSO", "PIN or SMS OTP", "normal"),
+    ("BPBIO", "PIN or TouchID / FaceID", "normal"),
+    ("BSGP", "SingPass facial recognition", "normal"),
+    ("BPWSGP", "Password or SingPass facial recognition", "normal"),
+    ("BPSGP", "PIN or SingPass facial recognition", "normal"),
+    ("BNSFV", "SingPass-login facial verification", "normal"),
+    ("BPNSFV", "SingPass-login facial or PIN", "normal"),
+    ("BPWNSFV", "SingPass-login facial or password", "normal"),
+    ("BDOB", "Date-of-birth (DOB) verification", "normal"),
+    ("BND", "NIK + DOB verification", "normal"),
+    ("BPND", "PIN or NIK + DOB verification", "normal"),
+    ("BPDOB", "PIN or DOB verification", "normal"),
+    ("BPWDOB", "Password or DOB verification", "normal"),
+    ("BNRIC", "Verify NRIC", "normal"),
+    ("BTBSO", "Transaction biometric or SMS OTP", "normal"),
+    ("BKFI", "Shopee x Seabank FaceID login", "normal"),
+    ("BKTI", "Shopee x Seabank TouchID login", "normal"),
+    ("BH5P", "H5 (web) verify PIN", "normal"),
+    ("BH5SO", "H5 (web) verify SMS OTP", "normal"),
+    ("BPN", "Send push notification (PN)", "normal"),
+    ("BPAN", "Send PN + AR message", "normal"),
+    ("BPAV", "Verify card-auth PN + AR token", "normal"),
+    ("BNO", "Chain-trigger notification-rule flow", "normal"),
+    ("BJP", "Jump SDK -> app, keep SDK page open", "normal"),
+    ("BJPD", "Jump SDK -> app, close SDK page", "normal"),
+    ("BJA", "Jump SDK -> app, may pass verification", "normal"),
+    ("BJSP", "Jump app -> Shopee SDK, may pass verification", "normal"),
+    ("BUDL", "Link user-device info", "internal"),
+    ("BULUL", "Uplift-unlock AF penalty list", "internal"),
+    ("BSKP", "Skip PIN", "internal"),
+    ("BRT", "Post rule-treatment operation", "internal"),
+    ("NA", "No authentication step configured", "config"),
+    ("EXP:…", "Runtime rule that picks the step by app version / PIN-vs-password / login type", "config"),
 ]
 
 
 def _auth_step_glossary_panel() -> str:
-    rows = [[code, meaning, action] for code, meaning, action in _AUTH_STEP_GLOSSARY]
+    rows = [[code, meaning, step_type] for code, meaning, step_type in _AUTH_STEP_GLOSSARY]
     return _searchable_table_panel(
         "Auth Step Glossary",
-        ["step_code", "meaning", "underlying_action"],
+        ["step_code", "meaning", "step_type"],
         rows,
         placeholder="Search step code or meaning…",
         column_notes={
@@ -2194,7 +2313,12 @@ def _auth_step_glossary_panel() -> str:
                 "Auth-step codes issued by the risk-decision engine (StepEnum). Comma-separated codes = "
                 "multiple steps required in sequence; 'EXP:…' = a runtime rule that selects the step by "
                 "app version / PIN-vs-password / login type."
-            )
+            ),
+            "step_type": (
+                "Engine classification: normal = a real (usually user-facing) auth step; internal = "
+                "orchestration step with no user interaction; config = a flow-config placeholder, not a "
+                "real step."
+            ),
         },
     )
 
@@ -2326,9 +2450,11 @@ _REJECT_TYPE_NOTE = (
     "reject), 2 = challenge, 0 = pass (notification / white-list / normal)."
 )
 _AUTH_TYPE_NOTE = (
-    "Authentication tier applied to the action: DEFAULT = no step-up; CHALLENGE_1/2/3 = step-up challenge "
-    "tiers (increasing friction); 'Non-interactive (engine-scored)' = scored by the engine with no user "
-    "challenge."
+    "Authentication tier the risk engine assigned to the action (source AuthenTypeEnum). DEFAULT (L0) = "
+    "engine required no step-up auth factor; CHALLENGE_1/2/3 (L1-L3) = step-up challenge tiers of "
+    "increasing friction. A blank value is shown as 'Non-interactive (engine-scored)': the action "
+    "carried no challenge tier - a business action, or an engine decision with no user-facing challenge. "
+    "Note 'engine-scored' is this report's label for the blank case, not a value from the source enum."
 )
 
 
@@ -2474,7 +2600,7 @@ def write_visualization(
         # Raw engine codes that older artifacts (or unmapped values) leave in the data; charts show the
         # OutcomeType/FeatureStatus meaning instead of a bare digit.
         outcome_code_labels = {"4": "Reject+Punish", "5": "Challenge+Punish", "6": "Pass", "3": "Notification"}
-        feature_status_labels = {"2": "Code 2 (non-active)"}
+        feature_status_labels = {"2": "Retired (status 2)", "1": "Active", "-1": "Inactive"}
 
         def _relabel(agg: dict[str, float], labels: dict[str, str]) -> dict[str, float]:
             relabelled: dict[str, float] = {}
@@ -2535,7 +2661,22 @@ def write_visualization(
             for label in ("Added", "Activated", "Deactivated", "Removed", "Outcome changed", "Risk level changed", "Logic changed", "Priority changed")
             if chg_counts.get(label)
         ]
-        intro = intro + _insight_panel("Rule Change Highlights", chg_insights) + _kpi_cards_panel("Rule Change Summary", chg_kpis)
+        # Annotate the comparison window the change-log diff uses (current snapshot vs the rule_config
+        # snapshot at the reporting-window start, ~2 months back). Baseline matches build_af_rule_change_log_sql.
+        from bpmis_jira_tool.business_insights import business_insights_window  # local import: window helper
+        _chg_baseline = business_insights_window(datetime.now(UTC)).span_start.isoformat()
+        chg_window_note = (
+            f"Comparison window: the current rule_config snapshot ({snapshot_pt_date}) "
+            f"vs the snapshot at the start of the reporting window (≈ {_chg_baseline} — the first day of the "
+            f"earliest of the three reporting months, about two months back). Rules present only now show as "
+            f"'Added'; only in the baseline as 'Removed'; etc. If snapshot history is shorter than that span, "
+            f"the baseline falls back to the earliest retained snapshot, which can inflate 'Added'."
+        )
+        chg_window_panel = (
+            f'<section class="panel"><h2>Rule Change Window</h2><p class="note">{html.escape(chg_window_note)}</p></section>'
+            if chg_counts else ""
+        )
+        intro = intro + chg_window_panel + _insight_panel("Rule Change Highlights", chg_insights) + _kpi_cards_panel("Rule Change Summary", chg_kpis)
 
         chart_panels: list[str] = []
         outcome = _relabel(_count_by(rules, "outcome_type"), outcome_code_labels)
@@ -2561,7 +2702,7 @@ def write_visualization(
             fbar = _bar_panel(
                 "Features by Status",
                 sorted(fstatus_chart.items(), key=lambda kv: kv[1], reverse=True),
-                note="Feature config rows per status. Only status 1 (Active) is live; -1 is Inactive; other codes are non-active configuration states.",
+                note="Feature config rows per status. Only Active (status 1) is loaded by the engine; Inactive is -1; 'Retired (status 2)' rows are superseded config kept in the snapshot but not live (1=valid / 2=invalid convention).",
             )
             if fbar:
                 chart_panels.append(fbar)
@@ -2588,8 +2729,10 @@ def write_visualization(
             "rules as 'Punish'; bare digits are codes the label map did not cover."
         )
         feature_status_note = (
-            "Engine FeatureStatus enum: 1 = Active, -1 = Inactive. Other codes (e.g. 2) are non-active "
-            "configuration states and are not counted in active-feature KPIs."
+            "Engine FeatureStatus enum defines only 1 = Active and -1 = Inactive; the rule engine loads "
+            "ONLY status = 1. status = 2 is not in that enum — it is a retired/superseded config row "
+            "(the codebase's wider convention is 1 = 生效/valid, 2 = 失效/invalid), kept in the snapshot "
+            "but not live. So only the Active (1) count reflects features currently in force."
         )
         table_panels: list[str] = []
         if rules:
@@ -2635,6 +2778,7 @@ def write_visualization(
             "Rule Change Detail": {"outcome_before": outcome_note, "outcome_after": outcome_note},
             "Current Rule Inventory": {"outcome_type": outcome_note},
         }
+        chg_table_notes = {"Change Summary": chg_window_note, "Rule Change Detail": chg_window_note}
         for chg_sheet in ("Change Summary", "Rule Change Detail", "Current Rule Inventory"):
             sec = flow_lookup.get(chg_sheet)
             if sec:
@@ -2644,6 +2788,7 @@ def write_visualization(
                 governance_panels.append(_searchable_table_panel(
                     chg_sheet, sec[0], sec[1], placeholder=placeholder,
                     column_notes=chg_column_notes.get(chg_sheet),
+                    note=chg_table_notes.get(chg_sheet, ""),
                 ))
         path.write_text(
             _searchable_tables_document(
@@ -3135,7 +3280,7 @@ def write_visualization(
                         for r in rows
                         if dc["deepfake_score_band"] < len(r) and dc["checks"] < len(r)
                     ]
-                    bar = _bar_panel("Deepfake Score Distribution", pairs, note="Facial checks by deepfake_spoof_score band (higher band = more deepfake-like).")
+                    bar = _bar_panel("Deepfake Score Distribution", pairs, note="Facial checks by deepfake_spoof_score band (higher band = more genuine / live; lower = more spoof / deepfake-like).")
                     if bar:
                         panels.append(bar)
                 panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Search score band…"))
@@ -3161,12 +3306,15 @@ def write_visualization(
             }
             review_notes = {
                 "fraud_review_status": (
-                    "Raw status code from the post-hoc fraud review system. 0 = the check was never "
-                    "pulled for review; non-zero codes mean it entered the review workflow."
+                    "Whether the check was pulled into the post-hoc fraud review workflow. 'Not reviewed' "
+                    "= never pulled. A non-empty value means it entered review; workflow-status codes map "
+                    "to ReviewStatusEnum (1 = Draft, 2 = Pending review, 3 = Review rejected, 4 = Review "
+                    "approved)."
                 ),
                 "fraud_review_result": (
-                    "Raw numeric verdict code recorded by the review system ('-' = no verdict). Codes "
-                    "are system-internal; treat rows with status 0 as not reviewed."
+                    "KYC Ops manual review verdict (source kyc_review_result): 1 = Same person (genuine / "
+                    "identity matches), 2 = Different person, 3 = Hard to say (inconclusive), 4 = Spoofing "
+                    "(fraudulent). '-' = no verdict recorded."
                 ),
             }
             result_col_note = {
@@ -3343,6 +3491,17 @@ def write_visualization(
             if cr not in (None, ""):
                 insight_cards.append((f"Challenge rate ({cur_label})", f"{cr}%", "warn" if _number(cr) >= 20 else ""))
         intro = _insight_panel("Highlights", insight_cards) + kpi_panel
+        # Display the txn-count column as "3DS_txns" (raw SQL alias stays threeds_txns for lookups).
+        def _disp(hs: list[Any]) -> list[Any]:
+            return ["3DS_txns" if str(h) == "threeds_txns" else h for h in hs]
+        auth_status_note = (
+            "EMV 3DS transaction status (transStatus) - the issuer ACS's verdict. "
+            "Authenticated (Y) = cardholder verified in a frictionless flow; Not authenticated (N) = denied; "
+            "Challenge (C) = a step-up (e.g. OTP / biometric) was required before a final Y/N; "
+            "Rejected (R) = issuer refused, do not authorise; Unavailable (U) = could not be performed "
+            "(technical issue); Info only (I) = informational acknowledgement, no authentication performed "
+            "(e.g. whitelist status); Attempted (A) = proof of attempt, not a full verification."
+        )
         panels = []
         for sheet_name, headers, rows in sheets:
             if sheet_name == "Outcome by Auth Status":
@@ -3355,7 +3514,9 @@ def write_visualization(
                         note="Share of 3DS authentication outcomes over the span.")
                     if donut:
                         panels.append(donut)
-                panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Search status…"))
+                panels.append(_searchable_table_panel(
+                    sheet_name, _disp(headers), rows, placeholder="Search status…",
+                    column_notes={"auth_status": auth_status_note}))
                 continue
             if sheet_name == "Card Fraud Cases by MO":
                 col = {str(c): i for i, c in enumerate(headers)}
@@ -3381,24 +3542,134 @@ def write_visualization(
             placeholder = {
                 "3DS Authentication Summary": "Filter…",
                 "Frictionless vs Challenge": "Filter…",
-                "3DS by Merchant Category (MCC)": "Search MCC…",
+                "3DS by Merchant Category (MCC)": "Search MCC or category…",
             }.get(sheet_name, "Search…")
             table_note = {
                 "3DS by Merchant Category (MCC)": "Top 100 merchant categories by 3DS transaction volume over the window.",
             }.get(sheet_name, "")
             col_notes = {
+                "3DS Authentication Summary": {"challenged": (
+                    "3DS authentications the issuer ACS flagged Challenge Required (EMV transStatus = C) - a "
+                    "step-up (e.g. OTP / biometric) was demanded. Genuinely rare (~0.2%): 3DS 2.x is "
+                    "risk-based-auth driven, so the issuer authenticates most transactions frictionlessly and "
+                    "the merchant's challenge request (even '04 Mandate') does not force one."
+                )},
                 "3DS by Merchant Category (MCC)": {"mcc": (
-                    "ISO 18245 Merchant Category Code — a 4-digit code for the merchant's line of business "
-                    "(e.g. 5399 = general merchandise, 4814 = telecom, 5411 = grocery). '(none)' = no MCC "
-                    "on the transaction."
+                    "ISO 18245 Merchant Category Code, shown as 'code - name' for the merchant's line of "
+                    "business (e.g. 5399 - General merchandise, 4814 - Telecom services). '(none)' = no MCC "
+                    "on the transaction; a bare code = name not in our lookup."
                 )},
                 "Frictionless vs Challenge": {"challenge_indicator": (
-                    "3DS Requestor Challenge Indicator (EMV 3DS field): the merchant's challenge "
-                    "preference — 01 no preference, 02 no challenge, 03 challenge requested, 04 challenge "
-                    "mandated, 05/06 no challenge (data-share / risk-analysis)."
+                    "3DS Requestor Challenge Indicator (EMV 3DS field) - the merchant's challenge *request* "
+                    "sent before authentication, not the outcome. 01 no preference; 02 no challenge requested; "
+                    "03 challenge requested (requestor preference); 04 challenge requested (mandate); "
+                    "05 no challenge (risk analysis already done); 06 no challenge (data share only); "
+                    "07 no challenge (SCA already done); 08 no challenge (whitelist exemption); "
+                    "09 challenge requested (whitelist prompt). The ACS decides via risk-based auth, so even "
+                    "'04 Mandate' is mostly frictionless - see the challenged / challenge_rate_pct columns."
                 )},
             }.get(sheet_name)
-            panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder=placeholder, note=table_note, column_notes=col_notes))
+            display_rows = rows
+            if sheet_name == "3DS by Merchant Category (MCC)":
+                mci = {str(c): i for i, c in enumerate(headers)}.get("mcc")
+                if mci is not None:
+                    display_rows = [
+                        [(_format_mcc_cell(v) if i == mci else v) for i, v in enumerate(r)] for r in rows
+                    ]
+            panels.append(_searchable_table_panel(
+                sheet_name, _disp(headers), display_rows, placeholder=placeholder,
+                note=table_note, column_notes=col_notes))
+        path.write_text(
+            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro, data_through=_data_through(sheets)),
+            encoding="utf-8",
+        )
+        return
+    if report_id == AF_LIST_USAGE_REPORT_ID:
+        lu_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
+        list_type_note = (
+            "Blacklist = list_type 1; Whitelist = list_type 0/2 (the column comment says 0/1 but live "
+            "data carries 1 and 2). Greylist comes from a separate daily-incremental table whose snapshot "
+            "lags the black/white list, so it resolves its own latest pt_date."
+        )
+        status_note = "Engine lifecycle code (1 / 2 / 10 observed live); the meaning is defined in the AF list config."
+        id_type_note = "Punished identifier kind (raw engine code, e.g. 1, 2, 4, 15, 23)."
+        scenario_note = "Applicable scene code; scenario 2 is the global/default scope, the 1xxx codes are specific scenes."
+        overview = lu_lookup.get("List Overview")
+        kpis: list[tuple] = []
+        donut_pairs: list[tuple[str, Any]] = []
+        insight_cards: list[tuple[str, str, str]] = []
+        if overview and overview[1]:
+            oc = {str(c): i for i, c in enumerate(overview[0])}
+            ni, ei = oc.get("list_name"), oc.get("entries")
+            sizes: dict[str, float] = {}
+            for r in overview[1]:
+                name = str(r[ni]) if ni is not None and ni < len(r) else ""
+                ent = r[ei] if ei is not None and ei < len(r) else 0
+                kpis.append((f"{name} entries", _format_number(ent)))
+                donut_pairs.append((name, ent))
+                sizes[name] = _number(ent)
+            bl, wl, gl = sizes.get("Blacklist", 0.0), sizes.get("Whitelist", 0.0), sizes.get("Greylist", 0.0)
+            if wl > 0:
+                insight_cards.append(("Blacklist : Whitelist", f"{_format_number(round(bl / wl))} : 1", ""))
+            insight_cards.append(("Greylist entries", _format_number(gl), "warn" if gl == 0 else ""))
+        intro = _insight_panel("Highlights", insight_cards) + _kpi_cards_panel("List Membership", kpis)
+        panels = []
+        if donut_pairs:
+            donut = _donut_panel(
+                "Entries by List", donut_pairs,
+                note="Current membership per list. Black/white pinned to the report snapshot; greylist to its own latest.")
+            if donut:
+                panels.append(donut)
+
+        def _blacklist_pairs(headers: list[str], rows: list[list[Any]], key: str) -> list[tuple[str, Any]]:
+            col = {str(c): i for i, c in enumerate(headers)}
+            if "list_name" not in col or key not in col or "entries" not in col:
+                return []
+            li, ki, ent = col["list_name"], col[key], col["entries"]
+            pairs = [
+                (str(r[ki]), r[ent]) for r in rows
+                if li < len(r) and ki < len(r) and ent < len(r) and str(r[li]) == "Blacklist"
+            ]
+            return sorted(pairs, key=lambda kv: _number(kv[1]), reverse=True)[:12]
+
+        placeholders = {
+            "List Overview": "Search list…",
+            "Black/White by Status": "Search list or status…",
+            "Black/White by ID Type": "Search list or id type…",
+            "Black/White by Source": "Search list or source…",
+            "Black/White by Listed Reason": "Search reason…",
+            "Black/White by Scenario": "Search list or scenario…",
+            "Greylist Detail": "Search…",
+        }
+        col_notes_by_sheet = {
+            "List Overview": {"list_name": list_type_note},
+            "Black/White by Status": {"status": status_note, "list_name": list_type_note},
+            "Black/White by ID Type": {"id_type": id_type_note},
+            "Black/White by Scenario": {"scenario": scenario_note},
+        }
+        for sheet_name, headers, rows in sheets:
+            if sheet_name == "Monthly Additions":
+                panels.append(_daily_trend_panel(
+                    "Monthly Additions", headers, rows,
+                    rule_column="list_name", date_column="added_month", value_column="entries",
+                    note="New black/white entries by the month they were created (create_date)."))
+                continue
+            if sheet_name == "Black/White by Source":
+                bar = _bar_panel(
+                    "Blacklist Entries by Source", _blacklist_pairs(headers, rows, "source"),
+                    note="Top sources feeding the blacklist.")
+                if bar:
+                    panels.append(bar)
+            if sheet_name == "Black/White by Listed Reason":
+                bar = _bar_panel(
+                    "Blacklist Entries by Reason", _blacklist_pairs(headers, rows, "listed_reason"),
+                    note="Top listed reasons on the blacklist.")
+                if bar:
+                    panels.append(bar)
+            panels.append(_searchable_table_panel(
+                sheet_name, headers, rows,
+                placeholder=placeholders.get(sheet_name, "Search…"),
+                column_notes=col_notes_by_sheet.get(sheet_name)))
         path.write_text(
             _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro, data_through=_data_through(sheets)),
             encoding="utf-8",

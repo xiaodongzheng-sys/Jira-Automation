@@ -102,6 +102,7 @@ AF_RULE_CHANGE_LOG_REPORT_ID = "anti-fraud-ph-rule-change-log"
 AF_FACIAL_VERIFICATION_REPORT_ID = "anti-fraud-ph-facial-verification"
 AF_DEVICE_RISK_REPORT_ID = "anti-fraud-ph-device-identity-risk"
 AF_CARD_3DS_REPORT_ID = "anti-fraud-ph-card-3ds"
+AF_LIST_USAGE_REPORT_ID = "anti-fraud-ph-blacklist-whitelist-greylist"
 
 AF_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_scene_tab_ss"
 AF_SUB_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_sub_scene_tab_ss"
@@ -128,6 +129,12 @@ AF_ACTION_LOG_EXT_TABLE = "fmart_antifraud.dwd_antifraud_action_log_ext_di"
 AF_THREEDS_TRANS_TABLE = "ods.pmt_threeds_acs_t_threeds_trans_ss_d"
 AF_THREEDS_RBA_LOG_TABLE = "ods.pmt_threeds_acs_t_threeds_trans_rba_log_ss_d"
 AF_CARD_FRAUD_CASE_TABLE = "dm.mbs_card_fraud_case_ss_d"
+# Negative/positive list membership snapshots. The black/white list shares one table
+# (list_type: 1 = blacklist, 0/2 = whitelist per live data; the column comment says 0/1
+# but the data carries 1 and 2). The greylist is a separate daily-incremental table whose
+# latest snapshot lags the black/white list, so its sections self-resolve max(pt_date).
+AF_BLACK_WHITE_LIST_TABLE = "ods.mbs_anti_fraud_black_white_list_tab_ss"
+AF_GREY_LIST_TABLE = "ods.ph_seabank_anti_fraud_db_grey_list_tab_di"
 
 SEEDED_REPORTS: tuple[dict[str, str], ...] = (
     {
@@ -207,6 +214,13 @@ SEEDED_REPORTS: tuple[dict[str, str], ...] = (
         "type": "af_card_3ds",
         "status": "generator_ready",
     },
+    {
+        "id": AF_LIST_USAGE_REPORT_ID,
+        "domain": "anti-fraud",
+        "name": "Anti-fraud PH - Blacklist, Whitelist & Greylist",
+        "type": "af_list_usage",
+        "status": "generator_ready",
+    },
 )
 
 # Reports whose artifacts can be regenerated on demand by running the live
@@ -226,6 +240,7 @@ GENERATOR_REPORT_IDS: frozenset[str] = frozenset(
         AF_FACIAL_VERIFICATION_REPORT_ID,
         AF_DEVICE_RISK_REPORT_ID,
         AF_CARD_3DS_REPORT_ID,
+        AF_LIST_USAGE_REPORT_ID,
     }
 )
 
@@ -1846,7 +1861,8 @@ def build_af_facial_verification_sql(*, snapshot_pt_date: str | None = None, now
 -- liveness (LC_SUCCESS) -> anti-spoofing QC (SQA_SUCCESS) -> facial match (FM_SUCCESS); QC/match are
 -- blank when the prior step failed, so pass rates use the prior-step-passed count as the denominator.
 -- Spoofing attack = LC_AURORA_SPOOF or an SQA face-spoofing / deepfake reject. deepfake_spoof_score in
--- [-1, 1] (<0 = not scored). All rates are %.
+-- [-1, 1] (<0 = not scored; higher = more genuine / live, lower = more spoof / deepfake-like). All
+-- rates are %.
 
 -- 1. Verification Outcome Summary
 -- One row per period (last two full months + current MTD). Pass rates are conditional on reaching the
@@ -1905,8 +1921,11 @@ group by fv.facial_matching_result
 order by checks desc;
 
 -- 5. Deepfake Score Distribution
--- deepfake_spoof_score banded; spoof_rejects = how many in each band the anti-spoofing QC rejected as
--- deepfake / spoofing. High bands with low reject counts are the monitoring blind spots.
+-- deepfake_spoof_score banded (higher = more genuine / live, lower = more spoof / deepfake-like). The
+-- bulk of real users sits in the high bands. spoof_rejects = how many in each band were rejected by the
+-- anti-spoofing QC; it is an independent categorical signal (LC_AURORA_SPOOF / SQA reject codes), NOT
+-- derived from this score, so rejects appearing across all bands is expected. Low bands (spoof-like)
+-- with few rejects are the monitoring blind spots.
 select
   case
     when fv.deepfake_spoof_score < 0 then '0. not scored (<0)'
@@ -1940,8 +1959,9 @@ group by coalesce(nullif(trim(fv.scene_name), ''), 'Unspecified')
 order by checks desc;
 
 -- 7. Fraud Review Outcomes
--- Post-hoc fraud review of facial-verification checks (fraud_review_result is a numeric verdict code;
--- non-empty fraud_review_status = the check was pulled for review).
+-- Post-hoc fraud review of facial-verification checks. Non-empty fraud_review_status = the check was
+-- pulled for review. fraud_review_result is the KYC Ops verdict (source kyc_review_result): 1 = same
+-- person (genuine), 2 = different person, 3 = hard to say, 4 = spoofing; '-' = no verdict.
 select
   coalesce(nullif(trim(fv.fraud_review_status), ''), 'Not reviewed') as fraud_review_status,
   coalesce(nullif(trim(fv.fraud_review_result), ''), '-') as fraud_review_result,
@@ -2099,9 +2119,14 @@ order by event_date;
 
 
 def build_af_card_3ds_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
-    # Card-not-present fraud controls: 3DS (ACS) authentication outcomes + risk-based-auth scoring, plus
-    # card fraud cases by modus operandi. trans_status: Y=authenticated, N=not authenticated,
-    # C=challenge, R=rejected, U=unavailable, I=info. Amounts are minor units (/100 = PHP).
+    # Card-not-present fraud controls: 3DS (ACS) authentication outcomes, plus card fraud cases by modus
+    # operandi. trans_status (EMV transStatus, verified against the ODS table): Y=authenticated /
+    # N=not authenticated / C=challenge required (step-up) / R=rejected / U=unavailable / A=attempted /
+    # I=info-only. Challenge is genuinely rare (~0.2%): 3DS 2.x is risk-based-auth driven, so the issuer
+    # ACS authenticates most transactions frictionlessly and the merchant's threeds_requestor_chlg_ind
+    # (even '04 Mandate') does not force a challenge. NB the ODS table has no cnp_decision column - that
+    # AF verdict is internal to anti-fraud-service and not mirrored here, so trans_status='C' is the
+    # challenge signal. Amounts are minor units (/100 = PHP).
     # Scope: last two full months + current MTD (pt_date = event day, partition-pruned).
     win = business_insights_window(now)
     span_start = win.span_start.isoformat()
@@ -2149,16 +2174,22 @@ group by 1
 order by threeds_txns desc;
 
 -- 3. Frictionless vs Challenge
--- By the 3DS Requestor challenge indicator: how often a challenge was requested vs frictionless flow.
+-- Row = the merchant's request (threeds_requestor_chlg_ind), a preference only. challenged counts the
+-- transactions the issuer ACS actually flagged Challenge Required (trans_status='C'). The ACS decides via
+-- risk-based auth, so even '04 Mandate' is overwhelmingly frictionless - the request does not force a
+-- step-up. challenge_rate_pct makes the gap explicit per request type.
 select
   case threeds_requestor_chlg_ind
     when '01' then '01 No preference' when '02' then '02 No challenge requested'
-    when '03' then '03 Challenge requested' when '04' then '04 Challenge mandated'
-    when '05' then '05 No challenge (data share)' when '06' then '06 No challenge (risk analysis)'
+    when '03' then '03 Challenge requested (requestor preference)' when '04' then '04 Challenge requested (mandate)'
+    when '05' then '05 No challenge (risk analysis already done)' when '06' then '06 No challenge (data share only)'
+    when '07' then '07 No challenge (SCA already done)' when '08' then '08 No challenge (whitelist exemption)'
+    when '09' then '09 Challenge requested (whitelist prompt)'
     else concat('ind_', coalesce(nullif(trim(threeds_requestor_chlg_ind), ''), '(blank)')) end as challenge_indicator,
   count(1) as threeds_txns,
-  sum(case when trans_status = 'C' then 1 else 0 end) as resulted_in_challenge,
-  sum(case when trans_status = 'Y' then 1 else 0 end) as authenticated
+  sum(case when trans_status = 'C' then 1 else 0 end) as challenged,
+  sum(case when trans_status = 'Y' then 1 else 0 end) as authenticated,
+  cast(round(sum(case when trans_status = 'C' then 1 else 0 end) / nullif(count(1), 0) * 100, 2) as decimal(20, 2)) as challenge_rate_pct
 from {trans}
 where {pt}
 group by 1
@@ -2202,6 +2233,111 @@ select 'Challenge' as series, pt_date as txn_date, challenged as txns from d
 union all
 select 'Rejected' as series, pt_date as txn_date, rejected as txns from d
 order by series, txn_date;
+"""
+
+
+def build_af_list_usage_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
+    """Blacklist / Whitelist / Greylist membership usage.
+
+    These are list-membership snapshots (current entries), not event logs, so the report
+    profiles the *composition* of each list plus how it has grown over time. The black and
+    white lists share one table (``list_type`` 1 = blacklist, 0/2 = whitelist); the greylist
+    is a separate daily-incremental table whose snapshot lags the black/white list, so its
+    sections self-resolve their own ``max(pt_date)`` rather than reusing the report snapshot.
+    """
+    bw_snap = _aliased_snapshot_filter("bw", AF_BLACK_WHITE_LIST_TABLE, snapshot_pt_date)
+    # Greylist lags behind; never pin it to the black/white snapshot date.
+    gl_snap = _aliased_snapshot_filter("gl", AF_GREY_LIST_TABLE, None)
+    list_name = (
+        "case when bw.list_type = 1 then 'Blacklist' "
+        "when bw.list_type in (0, 2) then 'Whitelist' "
+        "else concat('Other (', cast(bw.list_type as string), ')') end"
+    )
+    reason = "coalesce(nullif(trim(bw.listed_reason_type), ''), '(unspecified)')"
+    source = "coalesce(nullif(trim(bw.source), ''), '(unspecified)')"
+    added_month = "from_unixtime(cast(bw.create_date / 1000 as bigint), 'yyyy-MM')"
+    gl_status = "case when gl.status = 1 then 'Active' when gl.status = 0 then 'Deleted' else cast(gl.status as string) end"
+    gl_reason = "coalesce(nullif(trim(gl.listed_reason_type), ''), '(unspecified)')"
+    gl_source = "coalesce(nullif(trim(gl.source), ''), '(unspecified)')"
+    header = _af_report_header("Anti-fraud PH - Blacklist, Whitelist & Greylist", snapshot_pt_date)
+    return f"""{header}
+-- List-membership snapshots (current entries), not event logs. list_type: 1 = blacklist, 0/2 = whitelist
+-- (the column comment says 0/1 but live data carries 1 and 2). The greylist lives in a separate daily-
+-- incremental table whose snapshot lags behind, so its sections resolve their own max(pt_date).
+
+-- 1. List Overview
+-- Headline membership per list. Black/white pinned to the report snapshot; greylist to its own latest.
+select list_name, count(1) as entries, count(distinct target_value) as distinct_targets
+from (
+  select {list_name} as list_name, bw.id_value as target_value
+  from {AF_BLACK_WHITE_LIST_TABLE} bw
+  where {bw_snap}
+  union all
+  select 'Greylist' as list_name, gl.id_info as target_value
+  from {AF_GREY_LIST_TABLE} gl
+  where {gl_snap}
+) u
+group by list_name
+order by entries desc;
+
+-- 2. Black/White by Status
+-- status is the engine's lifecycle code (1 / 2 / 10 observed live); meaning is per the AF list config.
+select {list_name} as list_name, bw.status, count(1) as entries, count(distinct bw.id_value) as distinct_targets
+from {AF_BLACK_WHITE_LIST_TABLE} bw
+where {bw_snap}
+group by {list_name}, bw.status
+order by list_name, entries desc;
+
+-- 3. Black/White by ID Type
+-- id_type is the punished identifier kind (raw engine code, e.g. 1 / 2 / 4 / 15 / 23).
+select {list_name} as list_name, bw.id_type, count(1) as entries, count(distinct bw.id_value) as distinct_targets
+from {AF_BLACK_WHITE_LIST_TABLE} bw
+where {bw_snap}
+group by {list_name}, bw.id_type
+order by entries desc
+limit 50;
+
+-- 4. Black/White by Source
+select {list_name} as list_name, {source} as source, count(1) as entries, count(distinct bw.id_value) as distinct_targets
+from {AF_BLACK_WHITE_LIST_TABLE} bw
+where {bw_snap}
+group by {list_name}, {source}
+order by entries desc
+limit 100;
+
+-- 5. Black/White by Listed Reason
+select {list_name} as list_name, {reason} as listed_reason, count(1) as entries, count(distinct bw.id_value) as distinct_targets
+from {AF_BLACK_WHITE_LIST_TABLE} bw
+where {bw_snap}
+group by {list_name}, {reason}
+order by entries desc
+limit 100;
+
+-- 6. Black/White by Scenario
+-- scenario is the applicable scene code; scenario 2 dominates (global), the 1xxx codes are specific scenes.
+select {list_name} as list_name, bw.scenario, count(1) as entries, count(distinct bw.id_value) as distinct_targets
+from {AF_BLACK_WHITE_LIST_TABLE} bw
+where {bw_snap}
+group by {list_name}, bw.scenario
+order by entries desc
+limit 50;
+
+-- 7. Monthly Additions
+-- New black/white entries by the month they were created (create_date), so the growth of each list is visible.
+select {added_month} as added_month, {list_name} as list_name, count(1) as entries
+from {AF_BLACK_WHITE_LIST_TABLE} bw
+where {bw_snap} and bw.create_date is not null and bw.create_date > 0
+group by {added_month}, {list_name}
+order by added_month, list_name;
+
+-- 8. Greylist Detail
+-- Greylist membership (own latest snapshot; status 0 = deleted, 1 = active). Typically a small watch list.
+select {gl_status} as status, gl.id_type, {gl_source} as source, {gl_reason} as listed_reason, count(1) as entries
+from {AF_GREY_LIST_TABLE} gl
+where {gl_snap}
+group by {gl_status}, gl.id_type, {gl_source}, {gl_reason}
+order by entries desc
+limit 100;
 """
 
 
@@ -2585,6 +2721,7 @@ class BusinessInsightsStore:
             AF_FACIAL_VERIFICATION_REPORT_ID: lambda: build_af_facial_verification_sql(now=now),
             AF_DEVICE_RISK_REPORT_ID: lambda: build_af_device_risk_sql(now=now),
             AF_CARD_3DS_REPORT_ID: lambda: build_af_card_3ds_sql(now=now),
+            AF_LIST_USAGE_REPORT_ID: lambda: build_af_list_usage_sql(now=now),
         }
         builder = builders.get(report_id)
         if builder is None:

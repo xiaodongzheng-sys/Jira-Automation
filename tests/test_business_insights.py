@@ -17,6 +17,9 @@ from bpmis_jira_tool.business_insights import (
     AF_DETECTION_EFFECTIVENESS_REPORT_ID,
     AF_CARD_3DS_REPORT_ID,
     AF_DEVICE_RISK_REPORT_ID,
+    AF_BLACK_WHITE_LIST_TABLE,
+    AF_GREY_LIST_TABLE,
+    AF_LIST_USAGE_REPORT_ID,
     AF_FACIAL_VERIFICATION_REPORT_ID,
     AF_FACIAL_VERIFICATION_TABLE,
     AF_FRAUD_LOSS_REPORT_ID,
@@ -41,6 +44,7 @@ from bpmis_jira_tool.business_insights import (
     build_af_detection_effectiveness_sql,
     build_af_card_3ds_sql,
     build_af_device_risk_sql,
+    build_af_list_usage_sql,
     build_af_facial_verification_sql,
     build_af_fraud_loss_sql,
     build_af_rule_change_log_sql,
@@ -334,10 +338,11 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertIn("Anti-fraud PH - Facial Verification / Liveness &amp; Deepfake", response.get_data(as_text=True))
         self.assertIn("Anti-fraud PH - Device &amp; Identity Risk", response.get_data(as_text=True))
         self.assertIn("Anti-fraud PH - Card Fraud &amp; 3DS Authentication", response.get_data(as_text=True))
+        self.assertIn("Anti-fraud PH - Blacklist, Whitelist &amp; Greylist", response.get_data(as_text=True))
         # Detection-effectiveness and rule-change-log are folded into other reports, not standalone.
         self.assertNotIn("Anti-fraud PH - Detection Effectiveness &amp; Loss Prevented", response.get_data(as_text=True))
         self.assertNotIn("Anti-fraud PH - Rule Change Log &amp; Governance", response.get_data(as_text=True))
-        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 11)
+        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 12)
         self.assertNotIn("Upload Export", response.get_data(as_text=True))
         self.assertIsNone(soup.select_one("[data-business-insights-upload]"))
 
@@ -684,7 +689,7 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
         self.assertIn('aria-label="About drop_off_rate_pct"', html)
         self.assertIn("col-note-pop", html)
         self.assertIn("<h2>Auth Step Glossary</h2>", html)
-        self.assertIn("Facial Verification (dynamic-light liveness)", html)
+        self.assertIn("ALC dynamic-light (Aurora) liveness", html)
 
     def test_latest_snapshot_resolves_to_anchor_table_max_pt_date(self):
         from scripts import generate_business_insights_live_reports as gen
@@ -755,6 +760,7 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
                 AF_FACIAL_VERIFICATION_REPORT_ID,
                 AF_DEVICE_RISK_REPORT_ID,
                 AF_CARD_3DS_REPORT_ID,
+                AF_LIST_USAGE_REPORT_ID,
             },
         )
         # Detection-effectiveness and rule-change-log are folded into the reports above, not standalone.
@@ -1685,6 +1691,8 @@ class Card3dsBusinessInsightsTests(unittest.TestCase):
         self.assertIn("mbs_card_fraud_case_ss_d", sql)
         self.assertIn("trans_status = 'Y'", sql)
         self.assertIn("auth_rate_pct", sql)
+        # Challenge = EMV transStatus 'C' (the ODS table has no cnp_decision column; verified on portal).
+        self.assertIn("trans_status = 'C'", sql)
         # Spans the last two full months + current MTD (Mar 1 -> May 27 under the fixed clock; period bucketed).
         self.assertIn("pt_date >= '2026-03-01'", sql)
 
@@ -1698,8 +1706,9 @@ class Card3dsBusinessInsightsTests(unittest.TestCase):
               ["Jun 2026 MTD", "1800000", "1500000", "220000", "50000", "18000", "12000", "83.3", "2.8"]]),
             ("Outcome by Auth Status", ["auth_status", "threeds_txns", "share_pct"],
              [["Authenticated", "4808715", "79.8"], ["Not authenticated", "1207508", "20.0"]]),
-            ("Frictionless vs Challenge", ["challenge_indicator", "threeds_txns", "resulted_in_challenge", "authenticated"],
-             [["01 No preference", "5000000", "8000", "4500000"]]),
+            ("Frictionless vs Challenge",
+             ["challenge_indicator", "threeds_txns", "challenged", "authenticated", "challenge_rate_pct"],
+             [["04 Challenge requested (mandate)", "95574786", "562405", "73159766", "0.59"]]),
             ("3DS by Merchant Category (MCC)", ["mcc", "threeds_txns", "authenticated", "auth_rate_pct", "purchase_amount_php"],
              [["5399", "900000", "800000", "88.9", "12500000.00"]]),
             ("Card Fraud Cases by MO", ["mo_reason", "sub_mo_reason", "cases"], [["Cards", "Card Not Present Fraud", "42"]]),
@@ -1717,6 +1726,76 @@ class Card3dsBusinessInsightsTests(unittest.TestCase):
         self.assertIn("<h2>Card Fraud Cases by Sub-MO</h2>", html)
         self.assertIn('id="ec-daily-3ds-trend" class="echart"', html)
         self.assertIn("Card Not Present Fraud", html)
+
+
+class ListUsageBusinessInsightsTests(unittest.TestCase):
+    def test_seeded_and_generator_registration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ids = {r["id"] for r in BusinessInsightsStore(Path(tmp)).reports("anti-fraud")}
+        self.assertIn(AF_LIST_USAGE_REPORT_ID, ids)
+        self.assertIn(AF_LIST_USAGE_REPORT_ID, REPORT_BUILDERS)
+        self.assertEqual(REPORT_BUILDERS[AF_LIST_USAGE_REPORT_ID][0], "Anti-fraud PH - Blacklist, Whitelist & Greylist")
+
+    def test_store_returns_sql_for_list_usage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sql = BusinessInsightsStore(Path(tmp)).sql_for_report(AF_LIST_USAGE_REPORT_ID, now=FIXED_NOW)
+        self.assertIn(AF_BLACK_WHITE_LIST_TABLE, sql)
+
+    def test_sql_sections_and_sources(self):
+        sql = build_af_list_usage_sql(snapshot_pt_date="2026-06-12", now=FIXED_NOW)
+        sections = extract_sql_sections(sql)
+        self.assertEqual(
+            [s.sheet_name for s in sections],
+            ["List Overview", "Black/White by Status", "Black/White by ID Type", "Black/White by Source",
+             "Black/White by Listed Reason", "Black/White by Scenario", "Monthly Additions", "Greylist Detail"],
+        )
+        self.assertIn(AF_BLACK_WHITE_LIST_TABLE, sql)
+        self.assertIn(AF_GREY_LIST_TABLE, sql)
+        # Black/white pinned to the report snapshot.
+        self.assertIn("bw.pt_date = '2026-06-12'", sql)
+        # Greylist must self-resolve its own latest snapshot (it lags the black/white table), never the anchor.
+        self.assertIn(f"gl.pt_date = (select max(pt_date) from {AF_GREY_LIST_TABLE})", sql)
+        self.assertNotIn("gl.pt_date = '2026-06-12'", sql)
+        # list_type mapping (1 = blacklist, 0/2 = whitelist).
+        self.assertIn("when bw.list_type = 1 then 'Blacklist'", sql)
+        self.assertIn("when bw.list_type in (0, 2) then 'Whitelist'", sql)
+        # Monthly growth derives the month from create_date epoch-ms.
+        self.assertIn("from_unixtime(cast(bw.create_date / 1000 as bigint), 'yyyy-MM')", sql)
+
+    def test_greylist_self_resolves_even_without_snapshot(self):
+        sql = build_af_list_usage_sql(now=FIXED_NOW)
+        self.assertIn(f"bw.pt_date = (select max(pt_date) from {AF_BLACK_WHITE_LIST_TABLE})", sql)
+        self.assertIn(f"gl.pt_date = (select max(pt_date) from {AF_GREY_LIST_TABLE})", sql)
+
+    def test_visualization_renders_kpis_donut_and_trend(self):
+        sheets = [
+            ("List Overview", ["list_name", "entries", "distinct_targets"],
+             [["Blacklist", "193012", "161843"], ["Whitelist", "52", "27"], ["Greylist", "8", "8"]]),
+            ("Black/White by Status", ["list_name", "status", "entries", "distinct_targets"],
+             [["Blacklist", "1", "133968", "133741"], ["Whitelist", "1", "44", "24"]]),
+            ("Black/White by ID Type", ["list_name", "id_type", "entries", "distinct_targets"],
+             [["Blacklist", "2", "58211", "45527"]]),
+            ("Black/White by Source", ["list_name", "source", "entries", "distinct_targets"],
+             [["Blacklist", "Others", "104929", "95202"], ["Blacklist", "Anti-Fraud", "51422", "44298"]]),
+            ("Black/White by Listed Reason", ["list_name", "listed_reason", "entries", "distinct_targets"],
+             [["Blacklist", "Identity Theft", "14898", "14833"]]),
+            ("Black/White by Scenario", ["list_name", "scenario", "entries", "distinct_targets"],
+             [["Blacklist", "2", "192838", "161758"]]),
+            ("Monthly Additions", ["added_month", "list_name", "entries"],
+             [["2026-05", "Blacklist", "1200"], ["2026-05", "Whitelist", "3"]]),
+            ("Greylist Detail", ["status", "id_type", "source", "listed_reason", "entries"],
+             [["Active", "17", "Anti-Fraud", "Others", "4"]]),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "viz.html"
+            write_visualization(output_path, report_title="Anti-fraud PH - Blacklist, Whitelist & Greylist",
+                                snapshot_pt_date="2026-06-12", sheets=sheets, report_id=AF_LIST_USAGE_REPORT_ID)
+            html = output_path.read_text(encoding="utf-8")
+        self.assertIn("List Membership", html)
+        self.assertIn("<h2>Entries by List</h2>", html)
+        self.assertIn("Blacklist Entries by Source", html)
+        self.assertIn('id="ec-monthly-additions" class="echart"', html)
+        self.assertIn("Greylist Detail", html)
 
 
 if __name__ == "__main__":
