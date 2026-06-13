@@ -870,18 +870,28 @@ group by coalesce(nullif(trim(al.authentication_type), ''), 'Non-interactive (en
 order by actions desc;
 
 -- 8. Auth Drop-off by Scene
--- Flows started vs flows that reached a final action that day (is_final_action_in_flow_of_the_day).
--- drop_off_rate_pct approximates abandonment mid-flow (started but no final action recorded).
+-- Cross-day, flow-level completion. A flow (bizflow_instance_id) is followed across days AND scenes;
+-- it is attributed to its ENTRY scene (the scene of its first action) and counted as "completed" when
+-- its terminal action (latest timestamp, in any scene) succeeded (action_status = '1'). This avoids the
+-- per-day is_final_action_in_flow_of_the_day flag, which only marks the last action of the day and "may
+-- not be the final action in the design of the bizflow" - so intermediate scenes (e.g. DPDataTopUp ->
+-- DPOrderPaid) no longer show false ~100% drop-off. drop_off_rate_pct = flows that did not complete.
+with flow_outcome as (
+  select
+    al.bizflow_instance_id,
+    min_by(coalesce(nullif(trim(al.scene_name), ''), 'Unspecified'), al.action_timestamp) as entry_scene,
+    max_by(al.action_status, al.action_timestamp) as final_action_status
+  from {AF_ACTION_LOG_TABLE} al
+  where {al_window} and al.bizflow_instance_id is not null and trim(al.bizflow_instance_id) <> ''
+  group by al.bizflow_instance_id
+)
 select
-  coalesce(nullif(trim(al.scene_name), ''), 'Unspecified') as scene_name,
-  count(distinct al.bizflow_instance_id) as flows_started,
-  count(distinct case when al.is_final_action_in_flow_of_the_day = 'Y' then al.bizflow_instance_id end) as flows_reached_final,
-  round((count(distinct al.bizflow_instance_id)
-         - count(distinct case when al.is_final_action_in_flow_of_the_day = 'Y' then al.bizflow_instance_id end))
-        / nullif(count(distinct al.bizflow_instance_id), 0) * 100, 2) as drop_off_rate_pct
-from {AF_ACTION_LOG_TABLE} al
-where {al_window}
-group by coalesce(nullif(trim(al.scene_name), ''), 'Unspecified')
+  entry_scene as scene_name,
+  count(1) as flows_started,
+  sum(case when final_action_status = '1' then 1 else 0 end) as flows_completed,
+  cast(round((1 - sum(case when final_action_status = '1' then 1 else 0 end) / nullif(count(1), 0)) * 100, 2) as decimal(20, 2)) as drop_off_rate_pct
+from flow_outcome
+group by entry_scene
 order by flows_started desc;
 """
 

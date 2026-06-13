@@ -2217,15 +2217,17 @@ _SCENE_COL_NOTES = {
 }
 _DROPOFF_COL_NOTES = {
     "drop_off_rate_pct": (
-        "A flow is one bizflow_instance_id. 'Reached final' = the flow logged its terminal action "
-        "(the BD / Done step, is_final_action_in_flow_of_the_day = 'Y') that day. Drop-off = flows that "
-        "started but recorded no final action that day, i.e. abandoned mid-flow. Caveats: it is computed "
-        "per calendar day, so a flow spanning midnight can read as a drop-off; single-action flows "
-        "(e.g. Login) are 0% by construction, since the only action is also the final one."
+        "Cross-day, flow-level. Each flow (bizflow_instance_id) is followed across days AND scenes and "
+        "attributed to its entry scene (the scene of its first action); 'completed' = the flow's terminal "
+        "action (latest timestamp, in any scene) succeeded (action_status = 1). Drop-off = flows that did "
+        "not complete. This replaces the per-day is_final_action_in_flow_of_the_day flag, which only marks "
+        "the last action of the day and 'may not be the final action in the design of the bizflow' - so "
+        "intermediate scenes (e.g. DPDataTopUp, whose flow continues to DPOrderPaid) no longer show a "
+        "false ~100% drop-off."
     ),
-    "flows_reached_final": (
-        "Distinct flows (bizflow_instance_id) that logged their terminal action (BD / Done, "
-        "is_final_action_in_flow_of_the_day = 'Y') that day."
+    "flows_completed": (
+        "Distinct flows whose terminal action (the latest action across all days and scenes) succeeded "
+        "(action_status = 1)."
     ),
 }
 # Auth-step codes from the risk-decision engine (StepEnum, dbp-antifraud-common). 'type' is the engine's

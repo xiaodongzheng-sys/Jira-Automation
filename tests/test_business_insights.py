@@ -653,7 +653,7 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
                      [["DEFAULT", "180000000", "1", "1", "90", "179000000", "1000000", "0.55"],
                       ["CHALLENGE_2", "15000000", "1", "1", "7.5", "14800000", "200000", "1.33"]]),
                     ("Auth Drop-off by Scene",
-                     ["scene_name", "flows_started", "flows_reached_final", "drop_off_rate_pct"],
+                     ["scene_name", "flows_started", "flows_completed", "drop_off_rate_pct"],
                      [["Transfer", "1000000", "850000", "15.0"]]),
                 ],
                 report_id=AF_SCENARIOS_ACTIONS_REPORT_ID,
