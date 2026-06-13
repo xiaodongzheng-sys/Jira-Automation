@@ -1998,9 +1998,10 @@ _DASHBOARD_JS = r"""
 _ISO_DATE_PREFIX = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
-def _data_through(sheets: list[tuple[str, list[str], list[list[Any]]]]) -> str:
-    """Latest ISO date seen in any date-named column - the honest 'data through' marker for the
-    header (daily partitions can lag the report window by a day)."""
+def _data_window(sheets: list[tuple[str, list[str], list[list[Any]]]]) -> tuple[str, str]:
+    """(earliest, latest) ISO date seen in any date-named column across the sheets - the honest data
+    coverage span for the header (daily partitions can lag the query window by a day)."""
+    earliest = ""
     latest = ""
     for _sheet_name, headers, rows in sheets:
         date_columns = [offset for offset, header in enumerate(headers) if "date" in str(header).lower()]
@@ -2008,9 +2009,21 @@ def _data_through(sheets: list[tuple[str, list[str], list[list[Any]]]]) -> str:
             for row in rows:
                 if offset < len(row) and row[offset] not in (None, ""):
                     text = str(row[offset])[:10]
-                    if _ISO_DATE_PREFIX.fullmatch(text) and text > latest:
-                        latest = text
-    return latest
+                    if _ISO_DATE_PREFIX.fullmatch(text):
+                        if text > latest:
+                            latest = text
+                        if not earliest or text < earliest:
+                            earliest = text
+    return earliest, latest
+
+
+def _data_through(sheets: list[tuple[str, list[str], list[list[Any]]]]) -> str:
+    """Header coverage marker: a 'min → max' window when the data spans multiple dates, else the single
+    'data through' date. Empty when no date column is present (pure config snapshots)."""
+    earliest, latest = _data_window(sheets)
+    if not latest:
+        return ""
+    return f"{earliest} → {latest}" if earliest and earliest != latest else latest
 
 
 def _searchable_tables_document(
@@ -2022,7 +2035,12 @@ def _searchable_tables_document(
     data_through: str = "",
 ) -> str:
     generated_at = format_gmt8(datetime.now(UTC))
-    coverage = f" Data through {html.escape(data_through)}." if data_through else ""
+    if not data_through:
+        coverage = ""
+    elif "→" in data_through:
+        coverage = f" Data window {html.escape(data_through)}."
+    else:
+        coverage = f" Data through {html.escape(data_through)}."
     body = (intro_html + "".join(panels)) or '<section class="panel"><p class="empty">No data was returned.</p></section>'
     body_html = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -3217,7 +3235,15 @@ def write_visualization(
                 n = _number(multi_dev[1][0][mc["distinct_devices"]])
                 if n > 0:
                     insight_cards.append(("Most device-hopping account", f"{int(n)} devices for one account", "bad" if n >= 20 else "warn"))
-        intro = _insight_panel("Highlights", insight_cards) + _kpi_cards_panel("Account Farming — last 7 days", kpis)
+        dr_from, dr_to = _data_window(sheets)
+        window_txt = (
+            f"Rolling 7-day window — events from {dr_from} to {dr_to} (the trend may stop a day short of the "
+            f"query window while the latest daily partition lands)."
+            if dr_from and dr_to else
+            "Rolling 7-day window of device/identity events (the last 7 daily partitions at run time)."
+        )
+        window_panel = f'<section class="panel"><h2>Reporting Window</h2><p class="note">{html.escape(window_txt)}</p></section>'
+        intro = window_panel + _insight_panel("Highlights", insight_cards) + _kpi_cards_panel("Account Farming — last 7 days", kpis)
         panels = []
         for sheet_name, headers, rows in sheets:
             if sheet_name == "Account Farming Summary":
@@ -3246,10 +3272,16 @@ def write_visualization(
                         "Risk Signal Prevalence", ["risk_signal", "events", "share_of_events_pct"], sig_rows,
                         placeholder="Search signal…",
                         note="One row per device-risk signal: events where the flag fired and its share of "
-                             "all events. See the Risk Signal Glossary panel for what each signal means.",
+                             "all events, across the full window (all 17 signals, no scene filter). One event "
+                             "can trip several signals, so these rows count independently and the column does "
+                             "NOT sum to total events — it is not comparable to 'risky_events' in Risk Signals "
+                             "by Scene. See the Risk Signal Glossary panel for what each signal means.",
                         column_notes={"risk_signal": (
                             "Device / identity risk flag from the action log; see the Risk Signal Glossary "
                             "panel for the plain-language meaning of each."
+                        ), "events": (
+                            "Events where THIS signal fired. An event can fire multiple signals, so these "
+                            "counts overlap and do not add up to total events."
                         )}))
                 continue
             if sheet_name == "Multi-Account Device Trend":
@@ -3268,9 +3300,13 @@ def write_visualization(
                 "Risk Signals by Scene": "Top 100 scenes by risky-event count.",
             }.get(sheet_name, "")
             signal_scene_note = {"risky_events": (
-                "Events where any device-risk signal fired (rooted / emulator / VPN / fake GPS / fake "
-                "identity / illegal IMEI / risk-app). See the Risk Signal Glossary panel."
-            )} if sheet_name == "Risk Signals by Scene" else None
+                "Events in this scene where AT LEAST ONE of 8 core risk signals fired — is_root, "
+                "is_emulator, is_vpn, is_http_proxy, is_gps_modified, is_fake_identity, is_illegal_imei, "
+                "is_risk_app_install_root (counted once per event, not per signal). This is a different "
+                "metric from Risk Signal Prevalence (which counts all 17 signals separately over every "
+                "event), so the two will NOT sum to the same number. Top 100 scenes; null scenes excluded."
+            ), "events": "All events recorded in this scene in the window (risky or not)."
+            } if sheet_name == "Risk Signals by Scene" else None
             panels.append(_searchable_table_panel(
                 sheet_name, headers, rows, placeholder=placeholder, note=table_note, column_notes=signal_scene_note))
         panels.append(_device_risk_signal_glossary_panel())

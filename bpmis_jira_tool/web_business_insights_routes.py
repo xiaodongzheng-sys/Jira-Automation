@@ -221,7 +221,10 @@ def build_business_insights_handlers(ctx: Any) -> Any:
         )
         # Hash-named, password-gated -> safe to cache in the browser (private,
         # never a shared cache) so repeat opens don't re-download.
-        response.headers["Cache-Control"] = "private, max-age=86400"
+        # Artifacts are regenerated in place under the same filename (e.g. on a data refresh or a
+        # visualization rebuild), so the browser must revalidate each load instead of serving a day-old
+        # cached copy. no-cache = "always revalidate"; the files are small and admin-only.
+        response.headers["Cache-Control"] = "private, no-cache, must-revalidate"
         return response
 
     def business_insights_visualization(artifact_id: str):
@@ -242,7 +245,10 @@ def build_business_insights_handlers(ctx: Any) -> Any:
             download_name=str(metadata.get("visualization_filename") or "business-insights-visualization.html"),
             as_attachment=False,
         )
-        response.headers["Cache-Control"] = "private, max-age=86400"
+        # Artifacts are regenerated in place under the same filename (e.g. on a data refresh or a
+        # visualization rebuild), so the browser must revalidate each load instead of serving a day-old
+        # cached copy. no-cache = "always revalidate"; the files are small and admin-only.
+        response.headers["Cache-Control"] = "private, no-cache, must-revalidate"
         return response
 
     return SimpleNamespace(
