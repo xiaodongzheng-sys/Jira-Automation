@@ -886,12 +886,30 @@ def _merge_report_sections(sql: str, *, start_number: int) -> str:
     return re.sub(r"^--\s+\d+\.\s+(.+?)\s*$", _bump, body, flags=re.M)
 
 
+def _af_outcome_case(outcome_expr: str, real_time_expr: str | None = None) -> str:
+    """SparkSQL label for rule_config outcome_type, matching the engine's OutcomeType enum
+    (dbp-antifraud-common OutcomeType + getByRuleProperties): code 1 is Reject when the rule is
+    real-time and Punish when batch; 2=Challenge, 3=Notification, 4=Reject+Punish,
+    5=Challenge+Punish, 6=Pass. Unknown codes fall through as the raw code."""
+    one = (
+        f"case when {real_time_expr} = 1 then 'Reject' else 'Punish' end"
+        if real_time_expr
+        else "'Punish/Reject'"
+    )
+    return (
+        f"case {outcome_expr} when 1 then {one} when 2 then 'Challenge' when 3 then 'Notification' "
+        f"when 4 then 'Reject+Punish' when 5 then 'Challenge+Punish' when 6 then 'Pass' "
+        f"else cast({outcome_expr} as string) end"
+    )
+
+
 def build_af_rules_features_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
     rule_snap = _aliased_snapshot_filter("rc", AF_RULE_CONFIG_TABLE, snapshot_pt_date)
     feature_snap = _aliased_snapshot_filter("fc", AF_FEATURE_CONFIG_TABLE, snapshot_pt_date)
     header = _af_report_header("Anti-fraud PH - Rules & Features", snapshot_pt_date)
     base = f"""{header}
--- Full rule and feature catalogs. outcome_type: 1=Punish, 2=Challenge, 3=Reject.
+-- Full rule and feature catalogs. outcome_type (engine OutcomeType enum): 1 = Reject when
+-- real_time = 1 else Punish, 2=Challenge, 3=Notification, 4=Reject+Punish, 5=Challenge+Punish, 6=Pass.
 -- rule status > 0 = Active; feature status 1=Active / -1=Inactive.
 
 -- 1. Rules
@@ -901,7 +919,7 @@ select
   rc.feature_expr,
   case when rc.status > 0 then 'Active' else 'Inactive/Draft' end as rule_status,
   rc.status as status_code,
-  case rc.outcome_type when 1 then 'Punish' when 2 then 'Challenge' when 3 then 'Reject' else cast(rc.outcome_type as string) end as outcome_type,
+  {_af_outcome_case("rc.outcome_type", "rc.real_time")} as outcome_type,
   case rc.real_time when 1 then 'Real-time' else 'Batch' end as execution_mode,
   rc.risk_level,
   rc.priority,
@@ -1692,19 +1710,15 @@ def build_af_rule_change_log_sql(*, snapshot_pt_date: str | None = None, now: da
         f"(select min(pt_date) from {AF_RULE_CONFIG_TABLE}))"
     )
     status_label = "case when {a}.status > 0 then 'Active' else 'Inactive/Draft' end"
-    outcome_label = (
-        "case {a}.outcome_type when 1 then 'Punish' when 2 then 'Challenge' when 3 then 'Reject' "
-        "else cast({a}.outcome_type as string) end"
-    )
     # The current and baseline projections, reused by every section. Baseline is pinned to one snapshot.
     snaps_cte = f"""curr as (
-  select rc.rule_id, rc.rule_name, rc.status, rc.outcome_type, rc.risk_level,
+  select rc.rule_id, rc.rule_name, rc.status, rc.outcome_type, rc.real_time, rc.risk_level,
     rc.priority, rc.review_priority, rc.feature_expr
   from {AF_RULE_CONFIG_TABLE} rc
   where {curr_snap}
 ),
 base as (
-  select rc.rule_id, rc.rule_name, rc.status, rc.outcome_type, rc.risk_level,
+  select rc.rule_id, rc.rule_name, rc.status, rc.outcome_type, rc.real_time, rc.risk_level,
     rc.priority, rc.review_priority, rc.feature_expr
   from {AF_RULE_CONFIG_TABLE} rc
   where rc.pt_date = {base_pt}
@@ -1716,6 +1730,7 @@ joined as (
     b.rule_id as base_rule_id, c.rule_id as curr_rule_id,
     b.status as base_status, c.status as curr_status,
     b.outcome_type as base_outcome, c.outcome_type as curr_outcome,
+    b.real_time as base_real_time, c.real_time as curr_real_time,
     b.risk_level as base_risk, c.risk_level as curr_risk,
     b.priority as base_priority, c.priority as curr_priority,
     b.review_priority as base_review_priority, c.review_priority as curr_review_priority,
@@ -1729,7 +1744,8 @@ classified as (
       when curr_rule_id is null then 'Removed'
       when coalesce(base_status, 0) <= 0 and coalesce(curr_status, 0) > 0 then 'Activated'
       when coalesce(base_status, 0) > 0 and coalesce(curr_status, 0) <= 0 then 'Deactivated'
-      when coalesce(base_outcome, -999) <> coalesce(curr_outcome, -999) then 'Outcome changed'
+      when coalesce(base_outcome, -999) <> coalesce(curr_outcome, -999)
+        or coalesce(base_real_time, -999) <> coalesce(curr_real_time, -999) then 'Outcome changed'
       when coalesce(base_risk, '') <> coalesce(curr_risk, '') then 'Risk level changed'
       when coalesce(base_expr, '') <> coalesce(curr_expr, '') then 'Logic changed'
       when coalesce(base_priority, -999) <> coalesce(curr_priority, -999)
@@ -1739,14 +1755,15 @@ classified as (
   from joined
 )"""
     curr_status_l = status_label.format(a="rc")
-    curr_outcome_l = outcome_label.format(a="rc")
+    curr_outcome_l = _af_outcome_case("rc.outcome_type", "rc.real_time")
     header = _af_report_header("Anti-fraud PH - Rule Change Log & Governance", snapshot_pt_date)
     return f"""{header}
 -- Source: rule_config snapshots. Current snapshot vs the snapshot on/before {baseline_iso} (the report
--- window start), falling back to the earliest retained snapshot if history is shorter. outcome_type:
--- 1=Punish, 2=Challenge, 3=Reject. status > 0 = Active. If the table retains only recent snapshots the
--- baseline collapses to the earliest available and rules may appear as 'Added' - read change counts with
--- the snapshot span in mind.
+-- window start), falling back to the earliest retained snapshot if history is shorter. outcome_type
+-- (engine OutcomeType enum): 1 = Reject when real_time = 1 else Punish, 2=Challenge, 3=Notification,
+-- 4=Reject+Punish, 5=Challenge+Punish, 6=Pass. status > 0 = Active. If the table retains only recent
+-- snapshots the baseline collapses to the earliest available and rules may appear as 'Added' - read
+-- change counts with the snapshot span in mind.
 
 -- 1. Change Summary
 -- Count of rules per change type since the baseline snapshot.
@@ -1768,8 +1785,8 @@ select
   rule_name,
   case when coalesce(base_status, 0) > 0 then 'Active' else 'Inactive/Draft' end as status_before,
   case when coalesce(curr_status, 0) > 0 then 'Active' else 'Inactive/Draft' end as status_after,
-  case base_outcome when 1 then 'Punish' when 2 then 'Challenge' when 3 then 'Reject' else cast(base_outcome as string) end as outcome_before,
-  case curr_outcome when 1 then 'Punish' when 2 then 'Challenge' when 3 then 'Reject' else cast(curr_outcome as string) end as outcome_after,
+  {_af_outcome_case("base_outcome", "base_real_time")} as outcome_before,
+  {_af_outcome_case("curr_outcome", "curr_real_time")} as outcome_after,
   base_risk as risk_before,
   curr_risk as risk_after,
   base_review_priority as review_priority_before,

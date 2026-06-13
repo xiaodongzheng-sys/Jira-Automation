@@ -38,6 +38,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from bpmis_jira_tool.timefmt import format_gmt8  # noqa: E402
 from bpmis_jira_tool.business_insights import (  # noqa: E402
     AF_CARD_3DS_REPORT_ID,
     AF_DEVICE_RISK_REPORT_ID,
@@ -368,6 +369,40 @@ def _excel_sheet_title(sheet_name: str) -> str:
     return re.sub(r"[:\\/?*\[\]]", " ", str(sheet_name)).strip()[:31] or "Sheet"
 
 
+# Canonical sheet names that _excel_sheet_title mangles (slashes become spaces). Used to restore the
+# original names when sheets are read back from Excel, so write_visualization's sheet lookups keep
+# matching on --refresh-visualizations runs.
+_CANONICAL_SHEET_NAMES = (
+    "Scene/Sub-scene/Action Usage",
+    "Daily Challenge/Reject/Punish",
+    "Rule Precision / Catch Rate",
+    "Review Pool / Backlog (current)",
+)
+_SHEET_TITLE_TO_CANONICAL = {_excel_sheet_title(name): name for name in _CANONICAL_SHEET_NAMES}
+
+
+def _canonical_sheet_name(excel_title: str) -> str:
+    return _SHEET_TITLE_TO_CANONICAL.get(str(excel_title), str(excel_title))
+
+
+def _typed_cell(value: Any) -> Any:
+    """Coerce Data Workbench string output to a real number when the round-trip is lossless, so the
+    Excel artifact gets numeric cells (sortable/summable) instead of text. Leading-zero codes
+    ('041…', '01') and long identifiers (>15 digits, float precision) stay strings."""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not re.fullmatch(r"-?\d+(\.\d+)?", text):
+        return value
+    if "." not in text:
+        if len(text.lstrip("-")) > 15:
+            return value
+        coerced = int(text)
+        return coerced if str(coerced) == text else value
+    coerced = float(text)
+    return coerced if repr(coerced) == text else value
+
+
 def write_workbook(path: Path, sheets: list[tuple[str, list[str], list[list[Any]]]]) -> None:
     workbook = Workbook()
     workbook.remove(workbook.active)
@@ -375,7 +410,7 @@ def write_workbook(path: Path, sheets: list[tuple[str, list[str], list[list[Any]
         sheet = workbook.create_sheet(_excel_sheet_title(sheet_name))
         sheet.append(schema)
         for row in rows:
-            sheet.append(row)
+            sheet.append([_typed_cell(value) for value in row])
         style_sheet(sheet)
     workbook.save(path)
 
@@ -1201,6 +1236,7 @@ def _searchable_table_panel(
     placeholder: str,
     step_columns: set[int] | None = None,
     column_notes: dict[str, str] | None = None,
+    note: str = "",
 ) -> str:
     step_columns = step_columns or set()
     column_notes = column_notes or {}
@@ -1240,8 +1276,9 @@ def _searchable_table_panel(
         else '<p class="empty">No rows were returned.</p>'
     )
     total = len(rows)
+    note_html = f'<p class="note">{html.escape(note)}</p>' if note else ""
     return (
-        f'<section class="panel"><h2>{html.escape(title)}</h2>'
+        f'<section class="panel"><h2>{html.escape(title)}</h2>{note_html}'
         '<div class="search-bar">'
         f'<input type="search" data-search placeholder="{html.escape(placeholder)}" aria-label="{html.escape(placeholder)}">'
         f'<span class="count" data-count>{total} of {total} rows</span>'
@@ -1449,6 +1486,7 @@ def _daily_trend_panel(
     rule_column: str,
     date_column: str,
     value_column: str,
+    note: str = "",
 ) -> str:
     """Interactive multi-line daily trend (ECharts): legend toggle + time brushing (dataZoom)."""
     idx = {str(col): offset for offset, col in enumerate(headers)}
@@ -1465,9 +1503,12 @@ def _daily_trend_panel(
     chart_id = _echart_id(title)
     data_json = _js_data({rid: sorted(pts) for rid, pts in series.items()})
     script = _TREND_JS.replace("__ID__", chart_id).replace("__DATA__", data_json)
+    full_note = "Toggle series in the legend; drag the slider to zoom the date range."
+    if note:
+        full_note = f"{note} {full_note}"
     return (
         f'<section class="panel"><h2>{html.escape(title)}</h2>'
-        '<p class="note">Toggle series in the legend; drag the slider to zoom the date range.</p>'
+        f'<p class="note">{html.escape(full_note)}</p>'
         f'<div id="{chart_id}" class="echart" style="height:360px"></div>'
         f"<script>{script}</script></section>"
     )
@@ -1565,6 +1606,39 @@ def _donut_panel(title: str, pairs: list[tuple[str, Any]], *, note: str = "") ->
     )
 
 
+_FUNNEL_JS = r"""
+(function(){ if(!window.echarts){return;} var el=document.getElementById('__ID__'); if(!el){return;}
+  var data=__DATA__; if(!data.length){el.innerHTML='<p class="empty">No data.</p>';return;}
+  var max=data[0].value||1;
+  var chart=echarts.init(el);
+  chart.setOption({tooltip:{trigger:'item',formatter:function(p){
+      var share=max?Math.round(p.value/max*10000)/100:0;
+      return p.name+': '+(p.value||0).toLocaleString()+' ('+share+'% of '+data[0].name.toLowerCase()+')';}},
+    series:[{type:'funnel',sort:'none',gap:3,top:8,bottom:8,left:'5%',width:'90%',minSize:'45%',
+      label:{position:'inside',color:'#fff',fontWeight:600,
+        formatter:function(p){var share=max?Math.round(p.value/max*10000)/100:0;
+        return p.name+'  '+(p.value||0).toLocaleString()+' ('+share+'%)';}},
+      data:data}]});
+  window.addEventListener('resize',function(){chart.resize();});
+})();
+"""
+
+
+def _funnel_panel(title: str, stages: list[tuple[str, Any]], *, note: str = "") -> str:
+    """Sequential funnel (ECharts). stages = ordered (label, count); rendered in given order with
+    share-of-first labels."""
+    data = [{"name": str(name), "value": _number(value)} for name, value in stages if _number(value) > 0]
+    if len(data) < 2:
+        return ""
+    chart_id = _echart_id(title)
+    script = _FUNNEL_JS.replace("__ID__", chart_id).replace("__DATA__", _js_data(data))
+    note_html = f'<p class="note">{html.escape(note)}</p>' if note else ""
+    return (
+        f'<section class="panel"><h2>{html.escape(title)}</h2>{note_html}'
+        f'<div id="{chart_id}" class="echart" style="height:300px"></div><script>{script}</script></section>'
+    )
+
+
 def _bar_panel(title: str, pairs: list[tuple[str, Any]], *, note: str = "", prefix: str = "") -> str:
     data = [{"name": str(name), "value": _number(value)} for name, value in pairs if _number(value) > 0]
     if not data:
@@ -1589,6 +1663,7 @@ def _expandable_rule_panel(
     main_columns: tuple[str, ...],
     detail_columns: tuple[str, ...],
     name_column: str,
+    note: str = "",
 ) -> str:
     """Render a per-rule table whose rows expand to a nested scene breakdown.
 
@@ -1650,8 +1725,9 @@ def _expandable_rule_panel(
         if s_rows
         else '<p class="empty">No rows were returned.</p>'
     )
+    note_html = f'<p class="note">{html.escape(note)}</p>' if note else ""
     return (
-        f'<section class="panel rule-panel"><h2>{html.escape(title)}</h2>'
+        f'<section class="panel rule-panel"><h2>{html.escape(title)}</h2>{note_html}'
         '<div class="search-bar">'
         f'<input type="search" data-search placeholder="{html.escape(placeholder)}" aria-label="{html.escape(placeholder)}">'
         f'<span class="count" data-count>{total} of {total} rules</span>'
@@ -1665,7 +1741,7 @@ _DASHBOARD_JS = r"""
 (function () {
   function parseNum(s){ if(s==null) return null; var t=String(s).replace(/[,₱%\s]/g,''); if(t===''||isNaN(Number(t))) return null; return Number(t); }
   function fmt(n, dec){ if(dec==null){ dec = (n%1!==0)?2:0; } return n.toLocaleString(undefined,{minimumFractionDigits:0,maximumFractionDigits:dec}); }
-  function idLike(h){ return /(^id$|_id$|_code$|date|status_code|trigger_date)/.test(h); }
+  function idLike(h){ return /(^id$|_id$|^uid$|^mcc$|uuid|_code$|date|status_code|trigger_date)/.test(h); }
   function colKind(h){ if(h.slice(-4)==='_pct') return 'pct'; if(h.slice(-4)==='_php') return 'php'; return 'num'; }
   function flagClass(h,v){ if(v==null) return '';
     if(h.indexOf('trigger_rate_pct')>=0){ if(v>=20) return 'flag-bad'; if(v>=5) return 'flag-warn'; }
@@ -1886,6 +1962,16 @@ _DASHBOARD_JS = r"""
   sel.addEventListener('change', function(){ renderKpis(sel.value); filterTables(sel.value); });
 })();
 (function(){
+  // Charts depend on the portal-served ECharts bundle; if it failed to load (e.g. the HTML file was
+  // downloaded and opened standalone), say so instead of leaving silent blank panels.
+  window.addEventListener('load', function(){
+    if(window.echarts){ return; }
+    document.querySelectorAll('.echart').forEach(function(el){
+      el.innerHTML = '<p class="empty">Chart could not load its library - open this report from the portal to see the interactive chart. The table data on this page is unaffected.</p>';
+    });
+  });
+})();
+(function(){
   // Click an info icon (next to a column header) to toggle a note popover explaining that column.
   var pop=null;
   function close(){ if(pop){ pop.remove(); pop=null; } }
@@ -1909,14 +1995,34 @@ _DASHBOARD_JS = r"""
 """
 
 
+_ISO_DATE_PREFIX = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _data_through(sheets: list[tuple[str, list[str], list[list[Any]]]]) -> str:
+    """Latest ISO date seen in any date-named column - the honest 'data through' marker for the
+    header (daily partitions can lag the report window by a day)."""
+    latest = ""
+    for _sheet_name, headers, rows in sheets:
+        date_columns = [offset for offset, header in enumerate(headers) if "date" in str(header).lower()]
+        for offset in date_columns:
+            for row in rows:
+                if offset < len(row) and row[offset] not in (None, ""):
+                    text = str(row[offset])[:10]
+                    if _ISO_DATE_PREFIX.fullmatch(text) and text > latest:
+                        latest = text
+    return latest
+
+
 def _searchable_tables_document(
     report_title: str,
     snapshot_pt_date: str,
     panels: list[str],
     *,
     intro_html: str = "",
+    data_through: str = "",
 ) -> str:
-    generated_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+    generated_at = format_gmt8(datetime.now(UTC))
+    coverage = f" Data through {html.escape(data_through)}." if data_through else ""
     body = (intro_html + "".join(panels)) or '<section class="panel"><p class="empty">No data was returned.</p></section>'
     body_html = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1989,7 +2095,7 @@ padding:10px 4px;margin:-8px 0 6px;background:rgba(245,247,251,.96);backdrop-fil
 .panel{{scroll-margin-top:52px;}}
 </style></head><body>
 <script src="/static/vendor/echarts.min.js"></script>
-<header><h1>{html.escape(report_title)}</h1><p>Snapshot {html.escape(snapshot_pt_date)}. Generated {generated_at} UTC from Data Workbench output.</p></header>
+<header><h1>{html.escape(report_title)}</h1><p>Snapshot {html.escape(snapshot_pt_date)}.{coverage} Generated {generated_at} from Data Workbench output.</p></header>
 <main>{body}</main>"""
     return body_html + "\n<script>\n" + _DASHBOARD_JS + "\n</script>\n</body></html>"
 
@@ -2073,6 +2179,139 @@ def _auth_step_glossary_panel() -> str:
             )
         },
     )
+
+
+# Facial-verification result codes from the authentication engine (LCResultEnum / SQAResultEnum /
+# facial-match result). Used to build a plain-language glossary so the raw LC_/SQA_/FM_ codes in the
+# breakdown sheets are readable. (group, code, meaning).
+_FACIAL_RESULT_GLOSSARY = [
+    ("Liveness (LC_)", "LC_SUCCESS", "Passed liveness"),
+    ("Liveness (LC_)", "LC_FRAUD", "Liveness check flagged as fraud"),
+    ("Liveness (LC_)", "LC_AURORA_SPOOF", "Aurora liveness detected a spoof (presentation attack)"),
+    ("Liveness (LC_)", "LC_AURORA_BRIGHT", "Too bright — flagged for possible deepfake"),
+    ("Liveness (LC_)", "LC_BLUR", "Face too blurry"),
+    ("Liveness (LC_)", "LC_BLOCKED", "Face blocked / obstructed"),
+    ("Liveness (LC_)", "LC_BRIGHT", "Face too bright"),
+    ("Liveness (LC_)", "LC_DARK", "Face too dark"),
+    ("Liveness (LC_)", "LC_EYE_INVALID", "Eyes not valid (closed / not detected)"),
+    ("Liveness (LC_)", "LC_TIMEEXPIRED", "Liveness check timed out"),
+    ("Liveness (LC_)", "LC_ALLRETRIESFAILED", "Timed out after all retries"),
+    ("Liveness (LC_)", "LC_CAPTUREIMAGEFAILED", "Camera failed to capture an image"),
+    ("Liveness (LC_)", "LC_NETWORK_ERROR", "Network issue during the check"),
+    ("Liveness (LC_)", "LC_INTERACTION_FAIL", "User did not complete the interactive prompts"),
+    ("Liveness (LC_)", "LC_NO_CAMERA_PERMISSION", "Camera permission not granted"),
+    ("Liveness (LC_)", "LC_SIGNATURE_ERROR", "Image signature invalid — image was altered"),
+    ("Liveness (LC_)", "LC_ERROR", "Unknown liveness error"),
+    ("Anti-spoof QC (SQA_)", "SQA_SUCCESS", "Passed selfie anti-spoofing QC"),
+    ("Anti-spoof QC (SQA_)", "SQA_REJECT_FACE_SPOOFING", "Detected a spoof face (photo/mask/replay)"),
+    ("Anti-spoof QC (SQA_)", "SQA_REJECT_FACE_DEEPFAKE", "Face suspected to be a deepfake"),
+    ("Anti-spoof QC (SQA_)", "SQA_REJECT_FACE_SHALLOWFAKE", "Face suspected to be a shallowfake (edited)"),
+    ("Anti-spoof QC (SQA_)", "SQA_REJECT_FACE_SCREENSHOT", "Face suspected to be a screenshot"),
+    ("Anti-spoof QC (SQA_)", "SQA_REJECT_FACE_DETECTION", "No face detected"),
+    ("Anti-spoof QC (SQA_)", "SQA_REJECT_FACE_QC_FAILED_BRIGHT", "QC fail: face too bright"),
+    ("Anti-spoof QC (SQA_)", "SQA_REJECT_FACE_QC_FAILED_DARK", "QC fail: face too dark"),
+    ("Anti-spoof QC (SQA_)", "SQA_REJECT_FACE_QC_FAILED_BLUR", "QC fail: face too blurry"),
+    ("Anti-spoof QC (SQA_)", "SQA_REJECT_FACE_QC_FAILED_BLOCKED", "QC fail: face blocked"),
+    ("Anti-spoof QC (SQA_)", "SQA_REJECT_FACE_QC_FAILED_EYECLOSE", "QC fail: eyes closed"),
+    ("Anti-spoof QC (SQA_)", "SQA_ERROR_IMAGE_IDENTICAL", "The two images submitted were identical"),
+    ("Anti-spoof QC (SQA_)", "SQA_ERROR_FACE_DOWNLOAD", "Could not download the photo"),
+    ("Anti-spoof QC (SQA_)", "SQA_ERROR_FACE_SIGNATURE_NONE", "Image had no signature"),
+    ("Anti-spoof QC (SQA_)", "SQA_ERROR_HONEYPOT_TRIGGER", "Image signature contained a forbidden (honeypot) key"),
+    ("Anti-spoof QC (SQA_)", "SQA_ERROR", "Unknown anti-spoofing error"),
+    ("Face match (FM_)", "FM_SUCCESS", "Selfie matched the reference face"),
+    ("Face match (FM_)", "FM_ERROR_FACE_MISMATCHED", "Selfie did not match the reference face"),
+    ("Face match (FM_)", "FM_ERROR", "Unknown face-matching error"),
+]
+
+
+def _facial_result_glossary_panel() -> str:
+    rows = [[group, code, meaning] for group, code, meaning in _FACIAL_RESULT_GLOSSARY]
+    return _searchable_table_panel(
+        "Result Code Glossary",
+        ["step", "result_code", "meaning"],
+        rows,
+        placeholder="Search result code or meaning…",
+        note="Plain-language meaning of the LC_ (liveness), SQA_ (anti-spoofing QC) and FM_ (face match) "
+             "result codes used in the breakdown tables. Source: authentication-engine LCResultEnum / "
+             "SQAResultEnum.",
+        column_notes={
+            "result_code": (
+                "Engine result code. LC_ = liveness check, SQA_ = selfie anti-spoofing QC, FM_ = facial "
+                "matching. SUCCESS = passed; REJECT_/ERROR_ = the failure reason."
+            )
+        },
+    )
+
+
+# Device-risk signal glossary (fmart_antifraud action-log boolean flags). Each flag = events where the
+# device/identity signal fired. (signal, meaning).
+_DEVICE_RISK_SIGNAL_GLOSSARY = [
+    ("rooted", "Device is rooted (Android superuser access)"),
+    ("emulator", "Running on an emulator, not a physical phone"),
+    ("vpn", "A VPN is active on the device"),
+    ("http proxy", "Traffic is routed through an HTTP proxy"),
+    ("gps modified", "GPS location is being spoofed / mocked"),
+    ("fake identity", "Identity signals look fabricated"),
+    ("fake deviceinfo", "Device fingerprint looks fabricated / tampered"),
+    ("illegal imei", "IMEI is invalid or blacklisted"),
+    ("new deviceid", "First time this device id has been seen"),
+    ("magisk", "Magisk (root-hiding framework) detected"),
+    ("system debuggable", "OS build is debuggable (developer / modified build)"),
+    ("risk app root", "A known rooting app is installed"),
+    ("risk app vpn", "A known VPN app is installed"),
+    ("risk app fake gps", "A known GPS-spoofing app is installed"),
+    ("risk app hook", "A known hooking / instrumentation app is installed (e.g. Frida/Xposed)"),
+    ("remote control", "A remote-control / screen-share accessibility service is enabled"),
+    ("autoclicker", "An auto-clicker / automation service is enabled"),
+]
+
+
+def _device_risk_signal_glossary_panel() -> str:
+    rows = [[signal, meaning] for signal, meaning in _DEVICE_RISK_SIGNAL_GLOSSARY]
+    return _searchable_table_panel(
+        "Risk Signal Glossary",
+        ["risk_signal", "meaning"],
+        rows,
+        placeholder="Search signal or meaning…",
+        note="What each device / identity risk signal means. A signal 'fires' for an event when the "
+             "device telemetry sets that flag (e.g. rooted, emulator, VPN, fake GPS).",
+    )
+
+
+# Shared column info-notes for backend-coded columns, so raw enum codes are explained inline.
+_RULES_COL_NOTES = {
+    "status_code": (
+        "Raw rule status integer from rule_config. The rule_status column already maps it: > 0 = Active, "
+        "otherwise Inactive/Draft."
+    ),
+    "review_priority": "Manual review priority assigned to cases this rule challenges (higher = reviewed sooner).",
+}
+_FEATURES_COL_NOTES = {
+    "feature_type": "Engine feature type code (rule_config feature taxonomy). 1 = the standard metric-based feature.",
+    "event_status": (
+        "Engine EventStatus the feature counts: 0 = Fail events only, 1 = Success events only, 2 = All "
+        "events (pass + fail)."
+    ),
+    "scenario_type": (
+        "ProtectRule scenario scope: 0 = Exclusively (this scene only), 1 = Inclusively (this scene and "
+        "its children)."
+    ),
+    "business_category": "Customer segment: 0 = Retail, 1 = Corporate.",
+    "function_id": (
+        "Metric function the feature calls (e.g. F1, F10). The function's calculation logic lives in the "
+        "engine's function catalog / design docs; the Function Usage sheet lists how each is used."
+    ),
+    "consecutive": "Whether the feature requires consecutive occurrences (Y) or any occurrences (N).",
+}
+_REJECT_TYPE_NOTE = (
+    "Engine RejectType family (output class): 1 = hard reject (black-list / punish-list / realtime "
+    "reject), 2 = challenge, 0 = pass (notification / white-list / normal)."
+)
+_AUTH_TYPE_NOTE = (
+    "Authentication tier applied to the action: DEFAULT = no step-up; CHALLENGE_1/2/3 = step-up challenge "
+    "tiers (increasing friction); 'Non-interactive (engine-scored)' = scored by the engine with no user "
+    "challenge."
+)
 
 
 def write_visualization(
@@ -2181,7 +2420,9 @@ def write_visualization(
                     bar = _bar_panel("Reject Rate by Auth Type (%)", pairs, note="Reject rate per authentication tier (DEFAULT vs step-up challenges).")
                     if bar:
                         panels.append(bar)
-                panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Search auth type…"))
+                panels.append(_searchable_table_panel(
+                    sheet_name, headers, rows, placeholder="Search auth type…",
+                    column_notes={"authentication_type": _AUTH_TYPE_NOTE}))
                 continue
             if sheet_name == "Scenario Action Auth Flow":
                 step_cols = {i for i, h in enumerate(headers) if str(h).strip().lower().endswith("_step")}
@@ -2190,12 +2431,21 @@ def write_visualization(
             notes = _SCENE_COL_NOTES if sheet_name == "L1 Scenarios" else (
                 _DROPOFF_COL_NOTES if sheet_name == "Auth Drop-off by Scene" else None
             )
+            table_note = {
+                "Auth Outcome by Scene & Type": (
+                    "Risk-evaluated actions only (risk_result pass/reject) - actions with no risk "
+                    "decision are excluded, so totals sit below the Authentication Outcomes summary."
+                ),
+            }.get(sheet_name, "")
+            if notes is None and sheet_name == "Auth Outcome by Scene & Type":
+                notes = {"authentication_type": _AUTH_TYPE_NOTE}
             panels.append(_searchable_table_panel(
-                sheet_name, headers, rows, placeholder=placeholders.get(sheet_name, "Search…"), column_notes=notes
+                sheet_name, headers, rows, placeholder=placeholders.get(sheet_name, "Search…"), column_notes=notes,
+                note=table_note,
             ))
         panels.append(_auth_step_glossary_panel())
         path.write_text(
-            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),
+            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro, data_through=_data_through(sheets)),
             encoding="utf-8",
         )
         return
@@ -2203,6 +2453,17 @@ def write_visualization(
         flow_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
         rules = flow_lookup.get("Rules")
         features = flow_lookup.get("Features")
+        # Raw engine codes that older artifacts (or unmapped values) leave in the data; charts show the
+        # OutcomeType/FeatureStatus meaning instead of a bare digit.
+        outcome_code_labels = {"4": "Reject+Punish", "5": "Challenge+Punish", "6": "Pass", "3": "Notification"}
+        feature_status_labels = {"2": "Code 2 (non-active)"}
+
+        def _relabel(agg: dict[str, float], labels: dict[str, str]) -> dict[str, float]:
+            relabelled: dict[str, float] = {}
+            for key, count in agg.items():
+                label = labels.get(key, key)
+                relabelled[label] = relabelled.get(label, 0.0) + count
+            return relabelled
 
         def _count_by(table, col):
             if not table:
@@ -2259,12 +2520,12 @@ def write_visualization(
         intro = intro + _insight_panel("Rule Change Highlights", chg_insights) + _kpi_cards_panel("Rule Change Summary", chg_kpis)
 
         chart_panels: list[str] = []
-        outcome = _count_by(rules, "outcome_type")
+        outcome = _relabel(_count_by(rules, "outcome_type"), outcome_code_labels)
         if outcome:
             donut = _donut_panel(
                 "Rules by Outcome Type",
                 sorted(outcome.items(), key=lambda kv: kv[1], reverse=True),
-                note="Configured rules split by enforcement outcome (Reject / Challenge / Punish).",
+                note="Configured rules split by enforcement outcome (engine OutcomeType enum).",
             )
             if donut:
                 chart_panels.append(donut)
@@ -2277,12 +2538,12 @@ def write_visualization(
             )
             if bar:
                 chart_panels.append(bar)
-        fstatus_chart = _count_by(features, "feature_status")
+        fstatus_chart = _relabel(_count_by(features, "feature_status"), feature_status_labels)
         if fstatus_chart:
             fbar = _bar_panel(
                 "Features by Status",
                 sorted(fstatus_chart.items(), key=lambda kv: kv[1], reverse=True),
-                note="Active vs inactive configured features.",
+                note="Feature config rows per status. Only status 1 (Active) is live; -1 is Inactive; other codes are non-active configuration states.",
             )
             if fbar:
                 chart_panels.append(fbar)
@@ -2302,18 +2563,37 @@ def write_visualization(
                 if ubar:
                     chart_panels.append(ubar)
 
+        outcome_note = (
+            "Engine OutcomeType enum: code 1 = Reject when the rule is real-time, Punish when batch; "
+            "2 = Challenge; 3 = Notification; 4 = Reject+Punish; 5 = Challenge+Punish; 6 = Pass. "
+            "Artifacts generated before 2026-06-13 labelled code 3 as 'Reject' and real-time code-1 "
+            "rules as 'Punish'; bare digits are codes the label map did not cover."
+        )
+        feature_status_note = (
+            "Engine FeatureStatus enum: 1 = Active, -1 = Inactive. Other codes (e.g. 2) are non-active "
+            "configuration states and are not counted in active-feature KPIs."
+        )
         table_panels: list[str] = []
         if rules:
             table_panels.append(
-                _searchable_table_panel("Rules", rules[0], rules[1], placeholder="Search rule id or name…")
+                _searchable_table_panel(
+                    "Rules", rules[0], rules[1], placeholder="Search rule id or name…",
+                    column_notes={"outcome_type": outcome_note, **_RULES_COL_NOTES},
+                )
             )
         if features:
             table_panels.append(
-                _searchable_table_panel("Features", features[0], features[1], placeholder="Search feature id or name…")
+                _searchable_table_panel(
+                    "Features", features[0], features[1], placeholder="Search feature id or name…",
+                    column_notes={"feature_status": feature_status_note, **_FEATURES_COL_NOTES},
+                )
             )
         if func_usage:
             table_panels.append(
-                _searchable_table_panel("Function Usage", func_usage[0], func_usage[1], placeholder="Search function id…")
+                _searchable_table_panel(
+                    "Function Usage", func_usage[0], func_usage[1], placeholder="Search function id…",
+                    column_notes={"function_id": _FEATURES_COL_NOTES["function_id"]},
+                )
             )
         # Governance panels (folded-in rule change log): current-inventory bar + change-log tables.
         governance_panels: list[str] = []
@@ -2328,21 +2608,29 @@ def write_visualization(
                     agg[key] = agg.get(key, 0.0) + _number(r[ic["rules"]] if ic["rules"] < len(r) else 0)
                 inv_bar = _bar_panel(
                     "Current Rules by Outcome Type",
-                    sorted(agg.items(), key=lambda kv: kv[1], reverse=True),
+                    sorted(_relabel(agg, outcome_code_labels).items(), key=lambda kv: kv[1], reverse=True),
                     note="Active + inactive rule count per outcome type in the current snapshot.",
                 )
                 if inv_bar:
                     governance_panels.append(inv_bar)
+        chg_column_notes = {
+            "Rule Change Detail": {"outcome_before": outcome_note, "outcome_after": outcome_note},
+            "Current Rule Inventory": {"outcome_type": outcome_note},
+        }
         for chg_sheet in ("Change Summary", "Rule Change Detail", "Current Rule Inventory"):
             sec = flow_lookup.get(chg_sheet)
             if sec:
                 placeholder = "Search rule id, name or change type…" if chg_sheet == "Rule Change Detail" else (
                     "Search outcome, status or risk…" if chg_sheet == "Current Rule Inventory" else "Filter…"
                 )
-                governance_panels.append(_searchable_table_panel(chg_sheet, sec[0], sec[1], placeholder=placeholder))
+                governance_panels.append(_searchable_table_panel(
+                    chg_sheet, sec[0], sec[1], placeholder=placeholder,
+                    column_notes=chg_column_notes.get(chg_sheet),
+                ))
         path.write_text(
             _searchable_tables_document(
-                report_title, snapshot_pt_date, chart_panels + table_panels + governance_panels, intro_html=intro
+                report_title, snapshot_pt_date, chart_panels + table_panels + governance_panels,
+                intro_html=intro, data_through=_data_through(sheets),
             ),
             encoding="utf-8",
         )
@@ -2404,7 +2692,7 @@ def write_visualization(
             det_summary,
             [
                 ("Detection rate", "detection_rate_pct", "pct"),
-                ("Fraud loss", "fraud_loss_php", "money"),
+                ("Confirmed-fraud loss", "fraud_loss_php", "money"),
                 ("Loss rule-detected", "loss_rule_detected_php", "money"),
                 ("Loss leaked", "loss_leaked_php", "money"),
                 ("Loss detected share", "loss_detected_share_pct", "pct"),
@@ -2483,6 +2771,10 @@ def write_visualization(
                             "normalised_user_impact_pct",
                         ),
                         name_column="scene_name",
+                        note=(
+                            "reject_type is the engine RejectType family: 1 = hard reject (black-list / "
+                            "punish-list / realtime reject). Expand a rule to see its scene breakdown."
+                        ),
                     )
                 )
                 continue
@@ -2557,6 +2849,7 @@ def write_visualization(
                         rule_column="rule_id",
                         date_column="trigger_date",
                         value_column="trigger_trxn",
+                        note="Top 50 rules by total triggers over the window; top 5 pre-selected.",
                     )
                 )
                 continue
@@ -2625,7 +2918,10 @@ def write_visualization(
                     )
                     if bar:
                         panels.append(bar)
-                panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Search fraud type…"))
+                panels.append(_searchable_table_panel(
+                    sheet_name, headers, rows, placeholder="Search fraud type…",
+                    note="Confirmed-fraud cases only.",
+                ))
                 continue
             if sheet_name == "Daily Detection Trend":
                 panels.append(
@@ -2639,16 +2935,23 @@ def write_visualization(
                     )
                 )
                 continue
+            table_notes = {
+                "Detection Coverage Summary": (
+                    "Scope: confirmed-fraud cases only (Not Fraud / Pending excluded), so the loss here "
+                    "is smaller than the Fraud Loss report's all-cases total."
+                ),
+            }
             panels.append(
                 _searchable_table_panel(
                     sheet_name,
                     headers,
                     rows,
                     placeholder=placeholders.get(sheet_name, "Search…"),
+                    note=table_notes.get(sheet_name, ""),
                 )
             )
         path.write_text(
-            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),
+            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro, data_through=_data_through(sheets)),
             encoding="utf-8",
         )
         return
@@ -2660,7 +2963,7 @@ def write_visualization(
             summary,
             [
                 ("Cases opened", "cases_opened", "num"), ("Confirmed fraud", "fraud_cases", "num"),
-                ("Fraud rate", "fraud_rate_pct", "pct"), ("Total loss", "total_loss_php", "money"),
+                ("Fraud rate", "fraud_rate_pct", "pct"), ("Total loss (all cases)", "total_loss_php", "money"),
                 ("Borne by customer", "loss_customer_php", "money"), ("Recovered", "recovered_php", "money"),
                 ("Avg review time", "avg_review_hours", "hours"),
             ],
@@ -2727,7 +3030,7 @@ def write_visualization(
                 _searchable_table_panel(sheet_name, headers, rows, placeholder=placeholders.get(sheet_name, "Search…"))
             )
         path.write_text(
-            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),
+            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro, data_through=_data_through(sheets)),
             encoding="utf-8",
         )
         return
@@ -2772,6 +3075,37 @@ def write_visualization(
                     insight_cards.append(("Lowest-pass scene (≥1k checks)", f"{worst[bc['scene_name']]} — {wp}%", "bad" if wp < 80 else ("warn" if wp < 90 else "")))
         intro = _insight_panel("Highlights", insight_cards) + kpi_panel
         panels = []
+
+        def _fv_stage(sheet_key: str, result_col: str, success_value: str) -> tuple[float, float]:
+            table = fv_lookup.get(sheet_key)
+            if not table:
+                return 0.0, 0.0
+            t_cols = {str(c): i for i, c in enumerate(table[0])}
+            if result_col not in t_cols or "checks" not in t_cols:
+                return 0.0, 0.0
+            total = sum(_number(r[t_cols["checks"]]) for r in table[1] if t_cols["checks"] < len(r))
+            passed = sum(
+                _number(r[t_cols["checks"]]) for r in table[1]
+                if t_cols[result_col] < len(r) and t_cols["checks"] < len(r)
+                and str(r[t_cols[result_col]]) == success_value
+            )
+            return total, passed
+
+        all_checks, liveness_passed = _fv_stage("Liveness Result Breakdown", "liveness_check_result", "LC_SUCCESS")
+        _qc_total, antispoof_passed = _fv_stage("Anti-Spoofing QC Breakdown", "selfie_qc_anti_spoofing_result", "SQA_SUCCESS")
+        _fm_total, match_passed = _fv_stage("Facial Match Result Breakdown", "facial_matching_result", "FM_SUCCESS")
+        funnel = _funnel_panel(
+            "Verification Funnel",
+            [
+                ("All checks", all_checks),
+                ("Liveness passed", liveness_passed),
+                ("Anti-spoof passed", antispoof_passed),
+                ("Face match passed", match_passed),
+            ],
+            note="Whole-window funnel: each step only runs when the prior step passed. Hover a stage for its share of all checks.",
+        )
+        if funnel:
+            panels.append(funnel)
         for sheet_name, headers, rows in sheets:
             if sheet_name == "Verification Outcome Summary":
                 continue  # -> KPI cards
@@ -2807,9 +3141,43 @@ def write_visualization(
                 "Pass Rates by Scene": "Search scene…",
                 "Fraud Review Outcomes": "Search review status…",
             }
-            panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder=placeholders.get(sheet_name, "Search…")))
+            review_notes = {
+                "fraud_review_status": (
+                    "Raw status code from the post-hoc fraud review system. 0 = the check was never "
+                    "pulled for review; non-zero codes mean it entered the review workflow."
+                ),
+                "fraud_review_result": (
+                    "Raw numeric verdict code recorded by the review system ('-' = no verdict). Codes "
+                    "are system-internal; treat rows with status 0 as not reviewed."
+                ),
+            }
+            result_col_note = {
+                "liveness_check_result": (
+                    "Engine LCResultEnum code — see the Result Code Glossary panel. LC_SUCCESS = passed; "
+                    "LC_AURORA_SPOOF / LC_FRAUD = spoof / fraud; the rest are capture-quality failures."
+                ),
+                "selfie_qc_anti_spoofing_result": (
+                    "Engine SQAResultEnum code — see the Result Code Glossary panel. SQA_SUCCESS = passed; "
+                    "SQA_REJECT_FACE_DEEPFAKE / _SPOOFING = attack; SQA_REJECT_FACE_QC_FAILED_* = QC issues."
+                ),
+                "facial_matching_result": (
+                    "Face-match result — see the Result Code Glossary panel. FM_SUCCESS = matched; "
+                    "FM_ERROR_FACE_MISMATCHED = did not match."
+                ),
+            }
+            col_notes = None
+            if sheet_name == "Fraud Review Outcomes":
+                col_notes = review_notes
+            elif sheet_name in ("Liveness Result Breakdown", "Anti-Spoofing QC Breakdown", "Facial Match Result Breakdown"):
+                col_notes = result_col_note
+            panels.append(_searchable_table_panel(
+                sheet_name, headers, rows,
+                placeholder=placeholders.get(sheet_name, "Search…"),
+                column_notes=col_notes,
+            ))
+        panels.append(_facial_result_glossary_panel())
         path.write_text(
-            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),
+            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro, data_through=_data_through(sheets)),
             encoding="utf-8",
         )
         return
@@ -2876,7 +3244,13 @@ def write_visualization(
                         panels.append(bar)
                     panels.append(_searchable_table_panel(
                         "Risk Signal Prevalence", ["risk_signal", "events", "share_of_events_pct"], sig_rows,
-                        placeholder="Search signal…"))
+                        placeholder="Search signal…",
+                        note="One row per device-risk signal: events where the flag fired and its share of "
+                             "all events. See the Risk Signal Glossary panel for what each signal means.",
+                        column_notes={"risk_signal": (
+                            "Device / identity risk flag from the action log; see the Risk Signal Glossary "
+                            "panel for the plain-language meaning of each."
+                        )}))
                 continue
             if sheet_name == "Multi-Account Device Trend":
                 panels.append(_daily_trend_panel(
@@ -2888,9 +3262,20 @@ def write_visualization(
                 "Multi-Device Accounts": "Search account…",
                 "Risk Signals by Scene": "Search scene…",
             }.get(sheet_name, "Search…")
-            panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder=placeholder))
+            table_note = {
+                "Top Multi-Account Devices": "Devices tied to 5+ distinct accounts in the window - top 300 by distinct accounts.",
+                "Multi-Device Accounts": "Accounts seen on 5+ distinct devices in the window - top 300 by distinct devices.",
+                "Risk Signals by Scene": "Top 100 scenes by risky-event count.",
+            }.get(sheet_name, "")
+            signal_scene_note = {"risky_events": (
+                "Events where any device-risk signal fired (rooted / emulator / VPN / fake GPS / fake "
+                "identity / illegal IMEI / risk-app). See the Risk Signal Glossary panel."
+            )} if sheet_name == "Risk Signals by Scene" else None
+            panels.append(_searchable_table_panel(
+                sheet_name, headers, rows, placeholder=placeholder, note=table_note, column_notes=signal_scene_note))
+        panels.append(_device_risk_signal_glossary_panel())
         path.write_text(
-            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),
+            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro, data_through=_data_through(sheets)),
             encoding="utf-8",
         )
         return
@@ -2947,7 +3332,10 @@ def write_visualization(
                         note="Confirmed card fraud cases by modus operandi.")
                     if bar:
                         panels.append(bar)
-                panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder="Search MO…"))
+                panels.append(_searchable_table_panel(
+                    sheet_name, headers, rows, placeholder="Search MO…",
+                    note="Confirmed card fraud cases by modus operandi - top 100 MO / sub-MO combinations by case count.",
+                ))
                 continue
             if sheet_name == "Daily 3DS Trend":
                 panels.append(_daily_trend_panel(
@@ -2959,9 +3347,24 @@ def write_visualization(
                 "Frictionless vs Challenge": "Filter…",
                 "3DS by Merchant Category (MCC)": "Search MCC…",
             }.get(sheet_name, "Search…")
-            panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder=placeholder))
+            table_note = {
+                "3DS by Merchant Category (MCC)": "Top 100 merchant categories by 3DS transaction volume over the window.",
+            }.get(sheet_name, "")
+            col_notes = {
+                "3DS by Merchant Category (MCC)": {"mcc": (
+                    "ISO 18245 Merchant Category Code — a 4-digit code for the merchant's line of business "
+                    "(e.g. 5399 = general merchandise, 4814 = telecom, 5411 = grocery). '(none)' = no MCC "
+                    "on the transaction."
+                )},
+                "Frictionless vs Challenge": {"challenge_indicator": (
+                    "3DS Requestor Challenge Indicator (EMV 3DS field): the merchant's challenge "
+                    "preference — 01 no preference, 02 no challenge, 03 challenge requested, 04 challenge "
+                    "mandated, 05/06 no challenge (data-share / risk-analysis)."
+                )},
+            }.get(sheet_name)
+            panels.append(_searchable_table_panel(sheet_name, headers, rows, placeholder=placeholder, note=table_note, column_notes=col_notes))
         path.write_text(
-            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro),
+            _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro, data_through=_data_through(sheets)),
             encoding="utf-8",
         )
         return
@@ -3022,7 +3425,7 @@ def write_visualization(
         if sheet_name == "Summary by Product":
             continue
         sections.append(f'<section class="panel wide"><h2>{html.escape(sheet_name)}</h2>{_table_html(headers, rows)}</section>')
-    generated_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+    generated_at = format_gmt8(datetime.now(UTC))
     document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(report_title)} Visualization</title>
@@ -3079,7 +3482,7 @@ h2{{margin:0 0 14px;font-size:18px;letter-spacing:0;overflow-wrap:anywhere;word-
 .heatmap td.heat{{color:#12263f;font-weight:650;}}
 .note{{color:var(--muted);font-size:12px;margin:10px 0 0;}}
 @media(max-width:900px){{body{{overflow-x:hidden;}}header{{padding:28px 18px;}}header h1{{font-size:28px;}}main{{grid-template-columns:1fr;padding-left:16px;padding-right:16px;}}.panel{{grid-column:1/-1;}}.filter-card{{display:grid;align-items:stretch;}}.filter-card label{{min-width:0;}}.kpi-grid,.comparison-grid,.insight-grid{{grid-template-columns:1fr;}}.bar-row,.stack-row,.donut-layout{{grid-template-columns:1fr;gap:6px;}}.bar-row b,.stack-row>b{{text-align:left;}}}}
-</style></head><body><header><h1>{html.escape(report_title)}</h1><p>Snapshot {html.escape(snapshot_pt_date)}. Generated {generated_at} UTC from Data Workbench aggregate output.</p></header><main>{"".join(sections)}</main><script>
+</style></head><body><header><h1>{html.escape(report_title)}</h1><p>Snapshot {html.escape(snapshot_pt_date)}. Generated {generated_at} from Data Workbench aggregate output.</p></header><main>{"".join(sections)}</main><script>
 (() => {{
   const filter = document.querySelector("[data-product-filter]");
   const tables = Array.from(document.querySelectorAll("table.bi-table"));
@@ -3207,7 +3610,7 @@ def sheets_from_workbook(
             rows = [list(row) for row in raw_rows[1:] if any(value not in (None, "") for value in row)]
             if sheet.title == "Raw Export" and not include_raw_export:
                 continue
-            sheets.append((sheet.title, headers, rows))
+            sheets.append((_canonical_sheet_name(sheet.title), headers, rows))
         return normalize_product_labels(sheets) if normalize_products else sheets
     finally:
         workbook.close()
@@ -3236,7 +3639,7 @@ def refresh_existing_visualizations(portal_data_dir: Path, *, report_ids: list[s
         write_visualization(
             root / visualization_filename,
             report_title=title_by_report.get(report_id, report_id),
-            snapshot_pt_date=str(artifact.get("snapshot_pt_date") or "2026-05-25"),
+            snapshot_pt_date=str(artifact.get("snapshot_pt_date") or "latest available pt_date at run time"),
             sheets=sheets_from_workbook(workbook_path, normalize_products=False),
             report_id=report_id,
         )
@@ -3271,7 +3674,7 @@ def normalize_existing_product_labels(portal_data_dir: Path, *, report_ids: list
         write_visualization(
             root / visualization_filename,
             report_title=title_by_report.get(report_id, report_id),
-            snapshot_pt_date=str(artifact.get("snapshot_pt_date") or "2026-05-25"),
+            snapshot_pt_date=str(artifact.get("snapshot_pt_date") or "latest available pt_date at run time"),
             sheets=[sheet for sheet in sheets if sheet[0] != "Raw Export"],
             report_id=report_id,
         )
