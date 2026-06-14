@@ -1381,7 +1381,10 @@ class FacialVerificationBusinessInsightsTests(unittest.TestCase):
                 "Facial Match Result Breakdown",
                 "Deepfake Score Distribution",
                 "Pass Rates by Scene",
-                "Fraud Review Outcomes",
+                "Human Review (AMR) Outcomes",
+                "Review Status & Verdict Detail",
+                "Reviewer Workload & Turnaround",
+                "CS Review Track",
                 "Daily Verification Trend",
             ],
         )

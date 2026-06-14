@@ -765,7 +765,7 @@ def build_af_scenarios_actions_sql(*, snapshot_pt_date: str | None = None, now: 
     al_evaluated = "al.risk_result in ('0', '1')"
     header = _af_report_header("Anti-fraud PH - L1+L2 Scenarios, Actions & Auth Steps", snapshot_pt_date)
     return f"""{header}
--- Scenario flow config provides the live scene/sub-scene/action/auth-step mapping. Sections 5-8 add the
+-- Scenario flow config provides the live scene/sub-scene/action/auth-step mapping. Sections 5-9 add the
 -- live authentication funnel / customer-friction view from the DWD action log over {span_label}.
 
 -- 1. L1 Scenarios
@@ -901,6 +901,29 @@ select
 from flow_outcome
 group by entry_scene
 order by flows_started desc;
+
+-- 9. Auth Step Success by Method
+-- Per-method success / failure of each authentication step over {span_label}. action_status: '1' =
+-- success, '0' = failed (per the column dict). This complements the risk_result funnel above: it measures
+-- whether the step ITSELF passed (correct OTP, biometric match, right PIN/password), not the risk-engine
+-- decision. action_id is the table PK, so one row = one action. SoftToken / PIN dominate volume; SMS-OTP
+-- and Password carry the most friction; Email-OTP and one-time pin/pwd are near-zero (legacy) in PH.
+select
+  al.action_name,
+  count(1) as actions,
+  count(distinct al.uid) as distinct_users,
+  sum(case when al.action_status = '1' then 1 else 0 end) as success_actions,
+  sum(case when al.action_status = '0' then 1 else 0 end) as fail_actions,
+  round(sum(case when al.action_status = '1' then 1 else 0 end) / nullif(count(1), 0) * 100, 2) as success_rate_pct
+from {AF_ACTION_LOG_TABLE} al
+where {al_window} and al.action_name in (
+  'TriggerSMSOTP', 'VerifySMSOTP', 'TriggerCardSMSOTP', 'VerifyCardSMSOTP', 'TriggerEmailOTP',
+  'VerifyEmailOTP', 'VerifyFaceID', 'VerifyFingerID', 'VerifyPinAction', 'VerifyPassword',
+  'VerifyCardPINAction', 'VerifyDOBAction', 'FacialVerification', 'TriggerOnetimepin',
+  'VerifyOnetimepin', 'TriggerOnetimepwd', 'VerifyOnetimepwd', 'VerifySoftTokenAction',
+  'ActivateSoftTokenAction')
+group by al.action_name
+order by actions desc;
 """
 
 
@@ -2043,27 +2066,85 @@ where {fv_snap} and {window}
 group by coalesce(nullif(trim(fv.scene_name), ''), 'Unspecified')
 order by checks desc;
 
--- 7. Fraud Review Outcomes
--- Post-hoc fraud review of facial-verification checks. Non-empty fraud_review_status = the check was
--- pulled for review. fraud_review_result is the KYC Ops verdict (source kyc_review_result): 1 = same
--- person (genuine), 2 = different person, 3 = hard to say, 4 = spoofing; '-' = no verdict.
+-- 7. Human Review (AMR) Outcomes
+-- AMR = the manual fraud-review queue. fraud_review_status: 0 = not reviewed, 1 = pulled / awaiting a
+-- reviewer, 2 = human-reviewed (has reviewer_email; ~80 reviewers in play). fraud_review_result is the
+-- KYC Ops verdict: 1 = same person (genuine), 2 = different person, 3 = hard to say, 4 = spoofing,
+-- 0 = no verdict. confirmed_bad = verdict 2 or 4. NOTE: this table records review OUTCOMES, not the
+-- sampling SELECTION -- there is no column marking which checks were pulled by random sampling vs by a
+-- fraud trigger, so these counts are not split by that dimension. One row per period.
 select
-  coalesce(nullif(trim(fv.fraud_review_status), ''), 'Not reviewed') as fraud_review_status,
-  coalesce(nullif(trim(fv.fraud_review_result), ''), '-') as fraud_review_result,
+  {period_case} as period,
+  count(1) as checks,
+  sum(case when fv.fraud_review_status = '2' then 1 else 0 end) as human_reviewed,
+  round(sum(case when fv.fraud_review_status = '2' then 1 else 0 end) / nullif(count(1), 0) * 100, 3) as reviewed_rate_pct,
+  sum(case when fv.fraud_review_status = '2' and fv.fraud_review_result = '1' then 1 else 0 end) as genuine,
+  sum(case when fv.fraud_review_status = '2' and fv.fraud_review_result = '2' then 1 else 0 end) as different_person,
+  sum(case when fv.fraud_review_status = '2' and fv.fraud_review_result = '3' then 1 else 0 end) as hard_to_say,
+  sum(case when fv.fraud_review_status = '2' and fv.fraud_review_result = '4' then 1 else 0 end) as spoofing,
+  round(sum(case when fv.fraud_review_status = '2' and fv.fraud_review_result in ('2', '4') then 1 else 0 end)
+        / nullif(sum(case when fv.fraud_review_status = '2' then 1 else 0 end), 0) * 100, 2) as confirmed_bad_rate_pct
+from {AF_FACIAL_VERIFICATION_TABLE} fv
+where {fv_snap} and {window}
+group by {period_case}
+order by min(fv.create_datetime);
+
+-- 8. Review Status & Verdict Detail
+-- All review states crossed with the KYC Ops verdict over the window (decoded from the codes above).
+select
+  case fv.fraud_review_status when '0' then '0. not reviewed' when '1' then '1. pulled, awaiting reviewer'
+    when '2' then '2. human-reviewed' else concat('? ', coalesce(fv.fraud_review_status, '')) end as fraud_review_status,
+  case fv.fraud_review_result when '0' then '0. no verdict' when '1' then '1. same person (genuine)'
+    when '2' then '2. different person' when '3' then '3. hard to say' when '4' then '4. spoofing'
+    else concat('? ', coalesce(fv.fraud_review_result, '')) end as fraud_review_result,
   count(1) as checks,
   count(distinct fv.uid) as distinct_users
 from {AF_FACIAL_VERIFICATION_TABLE} fv
 where {fv_snap} and {window}
-group by coalesce(nullif(trim(fv.fraud_review_status), ''), 'Not reviewed'),
-  coalesce(nullif(trim(fv.fraud_review_result), ''), '-')
+group by 1, 2
 order by checks desc;
 
--- 8. Daily Verification Trend
--- Daily check volume, spoof-attack volume, and liveness failures; powers the filterable trend chart.
+-- 9. Reviewer Workload & Turnaround
+-- Scope: human-reviewed checks (fraud_review_status = '2'). Turnaround = review_update_timestamp -
+-- create_timestamp (epoch ms) -> hours. Reviews can lag days, so median / p90 matter more than the mean.
+select
+  r.period,
+  count(1) as human_reviews,
+  count(distinct r.reviewer_email) as distinct_reviewers,
+  cast(round(avg(r.turnaround_h), 2) as decimal(12, 2)) as avg_turnaround_h,
+  cast(round(percentile_approx(r.turnaround_h, 0.5), 2) as decimal(12, 2)) as median_turnaround_h,
+  cast(round(percentile_approx(r.turnaround_h, 0.9), 2) as decimal(12, 2)) as p90_turnaround_h
+from (
+  select {period_case} as period, fv.reviewer_email,
+    (fv.review_update_timestamp - fv.create_timestamp) / 3600000.0 as turnaround_h,
+    fv.create_datetime as create_datetime
+  from {AF_FACIAL_VERIFICATION_TABLE} fv
+  where {fv_snap} and {window} and fv.fraud_review_status = '2'
+    and fv.review_update_timestamp > fv.create_timestamp
+) r
+group by r.period
+order by min(r.create_datetime);
+
+-- 10. CS Review Track
+-- Separate CS review queue (cs_review_status), independent of the fraud / AMR queue above. Codes are
+-- kept raw (0 = not reviewed; non-zero = CS-reviewed states) since CS uses its own status scheme.
+select
+  coalesce(nullif(trim(fv.cs_review_status), ''), '(empty)') as cs_review_status,
+  count(1) as checks,
+  count(distinct fv.uid) as distinct_users,
+  round(count(1) / nullif(sum(count(1)) over (), 0) * 100, 2) as share_pct
+from {AF_FACIAL_VERIFICATION_TABLE} fv
+where {fv_snap} and {window}
+group by coalesce(nullif(trim(fv.cs_review_status), ''), '(empty)')
+order by checks desc;
+
+-- 11. Daily Verification Trend
+-- Daily check volume, spoof-attack volume, liveness failures, and human reviews; powers the trend chart.
 with base as (
   select substr(fv.create_datetime, 1, 10) as check_date,
     case when {spoof_attack} then 1 else 0 end as is_spoof,
-    case when {liveness_pass} then 0 else 1 end as is_liveness_fail
+    case when {liveness_pass} then 0 else 1 end as is_liveness_fail,
+    case when fv.fraud_review_status = '2' then 1 else 0 end as is_reviewed
   from {AF_FACIAL_VERIFICATION_TABLE} fv
   where {fv_snap} and {window}
 )
@@ -2072,6 +2153,8 @@ union all
 select 'Spoof attacks' as series, check_date, sum(is_spoof) as checks from base group by check_date
 union all
 select 'Liveness failures' as series, check_date, sum(is_liveness_fail) as checks from base group by check_date
+union all
+select 'Human reviews' as series, check_date, sum(is_reviewed) as checks from base group by check_date
 order by series, check_date;
 """
 
