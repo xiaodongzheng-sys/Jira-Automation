@@ -91,7 +91,7 @@
       meta.className = "business-insights-meta";
       cell.insertBefore(meta, cell.querySelector(".business-insights-actions"));
     }
-    meta.textContent = `${artifact.row_count} rows - ${artifact.created_at}`;
+    meta.textContent = `${artifact.row_count} rows - ${artifact.created_at_display || artifact.created_at}`;
     // Point the existing Download/Visualization links at the fresh artifact,
     // or create them if this is the first successful generation.
     let actions = cell.querySelector(".business-insights-actions");
