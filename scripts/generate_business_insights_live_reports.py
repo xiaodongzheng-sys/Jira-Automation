@@ -2554,6 +2554,7 @@ def write_visualization(
         placeholders = {
             "Auth Outcome by Scene & Type": "Search scene or auth type…",
             "Auth Drop-off by Scene": "Search scene…",
+            "Auth Step Success by Method": "Search method…",
             "L1 Scenarios": "Search scene…",
             "L2 Sub-Scenarios": "Search sub-scene…",
             "Actions and Auth Steps": "Search action…",
@@ -2562,6 +2563,7 @@ def write_visualization(
             "Auth Outcome by Scene & Type",
             "Challenge Friction by Auth Type",
             "Auth Drop-off by Scene",
+            "Auth Step Success by Method",
             "Scenario Action Auth Flow",
             "L1 Scenarios",
             "L2 Sub-Scenarios",
@@ -2598,6 +2600,13 @@ def write_visualization(
                 "Auth Outcome by Scene & Type": (
                     "Risk-evaluated actions only (risk_result pass/reject) - actions with no risk "
                     "decision are excluded, so totals sit below the Authentication Outcomes summary."
+                ),
+                "Auth Step Success by Method": (
+                    "Per-method pass/fail of each authentication step (action_status: 1 = success, "
+                    "0 = failed) over the window. This is whether the step ITSELF passed (correct OTP, "
+                    "biometric match, right PIN/password), not the risk-engine decision (risk_result) "
+                    "used by the sections above. SoftToken / PIN dominate volume; SMS-OTP and Password "
+                    "carry the most friction; Email-OTP and one-time pin/pwd are near-zero (legacy) in PH."
                 ),
             }.get(sheet_name, "")
             if notes is None and sheet_name == "Auth Outcome by Scene & Type":
