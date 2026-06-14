@@ -3645,7 +3645,19 @@ def write_visualization(
             "lags the black/white list, so it resolves its own latest pt_date."
         )
         status_note = "Engine lifecycle code (1 / 2 / 10 observed live); the meaning is defined in the AF list config."
-        id_type_note = "Punished identifier kind (raw engine code, e.g. 1, 2, 4, 15, 23)."
+        id_type_note = (
+            "The kind of identifier this entry lists (NOT a risk label - the risk reason is the "
+            "listed_reason column). Black/white/grey share one code set (AF IdTypeEnum): "
+            "1 = User ID; 2 = Mobile no.; 3 = KTP no.; 4 = Device ID; 5 = IP; 6 = IPRange; 7 = Country; "
+            "8 = City; 9 = Payee Account (deprecated); 10 = Recipient Mobile no.; 11 = Merchant Code; "
+            "12 = Payer Account; 13 = Card Identifier (PH); 14 = CNPTxnDevice; 15 = ID no.; 16 = MCC; "
+            "17 = Merchant Bank Name; 18 = Terminal Code; 20 = UEN (SG); 21 = Shopee UID; 22 = Shop ID; "
+            "23 = Recipient Account No.; 24 = Recipient Bank Name; 25 = Paynow Proxy Mobile no.; "
+            "26 = Paynow Proxy NRIC No.; 27 = Paynow Proxy UEN; 28 = Paynow Proxy VPA; 29 = Token Device; "
+            "30 = Customer ID; 31 = User ID & Source of Fund; 32 = Card Identifier & Source of Fund; "
+            "33 = User ID & Token Device; 34 = Card Identifier & Token Device; 35-38 = GPS Hex11-14; "
+            "39 = Recipient Account No. Range; -1 = not set."
+        )
         scenario_note = "Applicable scene code; scenario 2 is the global/default scope, the 1xxx codes are specific scenes."
         overview = lu_lookup.get("List Overview")
         kpis: list[tuple] = []
@@ -3699,6 +3711,7 @@ def write_visualization(
             "Black/White by Status": {"status": status_note, "list_name": list_type_note},
             "Black/White by ID Type": {"id_type": id_type_note},
             "Black/White by Scenario": {"scenario": scenario_note},
+            "Greylist Detail": {"id_type": id_type_note},
         }
         for sheet_name, headers, rows in sheets:
             if sheet_name == "Monthly Additions":
