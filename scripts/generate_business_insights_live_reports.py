@@ -2222,7 +2222,11 @@ _DROPOFF_COL_NOTES = {
         "not complete. This replaces the per-day is_final_action_in_flow_of_the_day flag, which only marks "
         "the last action of the day and 'may not be the final action in the design of the bizflow' - so "
         "intermediate scenes (e.g. DPDataTopUp, whose flow continues to DPOrderPaid) no longer show a "
-        "false ~100% drop-off."
+        "false ~100% drop-off. CAVEAT: drop-off only means 'user did not finish authenticating' for genuine "
+        "multi-step auth flows (Login, Transfer, etc.). A scene that is itself a terminal-NEGATIVE or "
+        "single-action event - e.g. CardInvalidTxn (an invalid-card transaction that is declined by design) "
+        "- has no successful terminal action to begin with, so it reads ~100%. That is the scene being "
+        "blocked/declined, NOT customers abandoning; read those scenes as 'block rate', not 'abandonment'."
     ),
     "flows_completed": (
         "Distinct flows whose terminal action (the latest action across all days and scenes) succeeded "
@@ -3356,6 +3360,9 @@ def write_visualization(
                 "Facial Match Result Breakdown": "Search match result…",
                 "Pass Rates by Scene": "Search scene…",
                 "Fraud Review Outcomes": "Search review status…",
+                "Human Review (AMR) Outcomes": "Search review status…",
+                "Review Status & Verdict Detail": "Search status or verdict…",
+                "CS Review Track": "Search CS status…",
             }
             review_notes = {
                 "fraud_review_status": (
@@ -3384,9 +3391,21 @@ def write_visualization(
                     "FM_ERROR_FACE_MISMATCHED = did not match."
                 ),
             }
+            cs_review_note = {
+                "cs_review_status": (
+                    "Status in the CS (Customer Service) review queue for this facial check — a SEPARATE "
+                    "queue from the fraud / AMR review. 0 = not picked up by CS review (the vast majority). "
+                    "Non-zero = the check entered a CS-review state. The exact per-code meaning is defined "
+                    "in the CS / authentication system's own status scheme (not in the anti-fraud config), "
+                    "so codes are shown raw; ask the CS/KYC team for the full legend if a non-zero code "
+                    "needs interpreting."
+                ),
+            }
             col_notes = None
-            if sheet_name == "Fraud Review Outcomes":
+            if sheet_name in ("Fraud Review Outcomes", "Human Review (AMR) Outcomes", "Review Status & Verdict Detail"):
                 col_notes = review_notes
+            elif sheet_name == "CS Review Track":
+                col_notes = cs_review_note
             elif sheet_name in ("Liveness Result Breakdown", "Anti-Spoofing QC Breakdown", "Facial Match Result Breakdown"):
                 col_notes = result_col_note
             panels.append(_searchable_table_panel(
