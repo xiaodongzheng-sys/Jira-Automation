@@ -2757,6 +2757,17 @@ def write_visualization(
                     column_notes={"function_id": _FEATURES_COL_NOTES["function_id"]},
                 )
             )
+        two_way = flow_lookup.get("Two-Way Communication Config")
+        if two_way and two_way[1]:
+            table_panels.append(
+                _searchable_table_panel(
+                    "Two-Way Communication Config", two_way[0], two_way[1],
+                    placeholder="Search template, rule or treatment…",
+                    note="Online config of the Two-Way Communication treatment: the customer is asked to "
+                         "approve/reject a flagged transaction within a confirmation window before it "
+                         "settles. One row per template × relation (treatment); *_sec columns are seconds.",
+                )
+            )
         # Governance panels (folded-in rule change log): current-inventory bar + change-log tables.
         governance_panels: list[str] = []
         inventory = flow_lookup.get("Current Rule Inventory")

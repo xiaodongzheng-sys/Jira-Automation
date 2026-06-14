@@ -135,6 +135,11 @@ AF_CARD_FRAUD_CASE_TABLE = "dm.mbs_card_fraud_case_ss_d"
 # latest snapshot lags the black/white list, so its sections self-resolve max(pt_date).
 AF_BLACK_WHITE_LIST_TABLE = "ods.mbs_anti_fraud_black_white_list_tab_ss"
 AF_GREY_LIST_TABLE = "ods.ph_seabank_anti_fraud_db_grey_list_tab_di"
+# Two-Way Communication online config: templates (confirmation window + notification) and the per-template
+# relation/treatment config (approve/reject/expire, reminder, temp-whitelist exemptions, CRC alert, one-way
+# fallback). relation is a daily full snapshot (_df); template is daily incremental (_di).
+AF_TWO_WAY_TEMPLATE_CONFIG_TABLE = "ods.ph_seabank_anti_fraud_db_two_way_template_config_tab_di"
+AF_TWO_WAY_RELATION_CONFIG_TABLE = "ods.ph_seabank_anti_fraud_db_two_way_template_relation_config_tab_df"
 
 SEEDED_REPORTS: tuple[dict[str, str], ...] = (
     {
@@ -931,6 +936,9 @@ def _af_outcome_case(outcome_expr: str, real_time_expr: str | None = None) -> st
 def build_af_rules_features_sql(*, snapshot_pt_date: str | None = None, now: datetime | None = None) -> str:
     rule_snap = _aliased_snapshot_filter("rc", AF_RULE_CONFIG_TABLE, snapshot_pt_date)
     feature_snap = _aliased_snapshot_filter("fc", AF_FEATURE_CONFIG_TABLE, snapshot_pt_date)
+    # Two-way config tables have their own snapshot cadence; self-resolve their latest pt_date rather than
+    # pinning to the rule_config snapshot anchor.
+    two_way_rel_snap = _aliased_snapshot_filter("rel", AF_TWO_WAY_RELATION_CONFIG_TABLE, None)
     header = _af_report_header("Anti-fraud PH - Rules & Features", snapshot_pt_date)
     base = f"""{header}
 -- Full rule and feature catalogs. outcome_type (engine OutcomeType enum): 1 = Reject when
@@ -998,11 +1006,48 @@ from {AF_FEATURE_CONFIG_TABLE} fc
 where {feature_snap}
 group by fc.function_id
 order by features desc;
+
+-- 4. Two-Way Communication Config
+-- Online config of the Two-Way Communication treatment: instead of a one-way block, the customer is asked
+-- to APPROVE/REJECT a flagged transaction within a confirmation window before it settles. Each template
+-- sets the window (effective_period) + notification template; the relation config sets the treatment
+-- (approve/reject/expire), the reminder, the temp-whitelist exemptions (which rules/id-types are waived
+-- and for how long), the CRC alert switch, and the one-way fallback. Driven from the relation config (full
+-- daily snapshot) left-joined to the latest template row per template_id. *_sec columns are in seconds.
+with tpl as (
+  select template_id, template_name, effective_period, noti_template_id, status, modifier, modify_date,
+    row_number() over (partition by template_id order by pt_date desc, modify_date desc) as rn
+  from {AF_TWO_WAY_TEMPLATE_CONFIG_TABLE}
+)
+select
+  rel.two_way_template_id as template_id,
+  t.template_name,
+  case when t.status = 1 then 'Active' when t.status = 0 then 'Inactive' else cast(t.status as string) end as template_status,
+  t.effective_period as confirmation_window_sec,
+  round(t.effective_period / 3600.0, 2) as confirmation_window_hours,
+  t.noti_template_id,
+  rel.relation_type,
+  rel.treatment_tag,
+  rel.reminder_effective_period as reminder_window_sec,
+  rel.reminder_noti_template_id,
+  rel.temp_whitelist_id_type,
+  regexp_replace(translate(cast(rel.temp_whitelist_exempted_rule_id as string), '[]"', ''), ',', ', ') as temp_whitelist_exempted_rules,
+  rel.temp_whitelist_effective_period as temp_whitelist_window_sec,
+  case when rel.crc_alert = 1 then 'ON' else 'OFF' end as crc_alert,
+  rel.one_way_template_id,
+  rel.one_way_safe_period as one_way_safe_period_sec,
+  t.modifier,
+  from_unixtime(cast(t.modify_date / 1000 as bigint), 'yyyy-MM-dd HH:mm:ss') as template_modified_at
+from {AF_TWO_WAY_RELATION_CONFIG_TABLE} rel
+left join tpl t on t.template_id = rel.two_way_template_id and t.rn = 1
+where {two_way_rel_snap}
+order by case when t.status = 1 then 0 else 1 end, rel.two_way_template_id, rel.relation_type;
 """
     # Governance: fold in the rule change-log sections (Change Summary / Detail / Current Inventory)
-    # from the same rule_config snapshots, renumbered to follow Rules (1), Features (2), Function Usage (3).
+    # from the same rule_config snapshots, renumbered to follow Rules (1), Features (2), Function Usage (3),
+    # Two-Way Communication Config (4).
     governance = _merge_report_sections(
-        build_af_rule_change_log_sql(snapshot_pt_date=snapshot_pt_date, now=now), start_number=4
+        build_af_rule_change_log_sql(snapshot_pt_date=snapshot_pt_date, now=now), start_number=5
     )
     return base + "\n" + governance
 
