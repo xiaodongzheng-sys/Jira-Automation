@@ -814,6 +814,9 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
         self.assertEqual(AF_RULE_CONFIG_TABLE, "ods.mbs_anti_fraud_rule_config_tab_ss")
         self.assertEqual(AF_FEATURE_CONFIG_TABLE, "ods.mbs_anti_fraud_feature_config_tab_ss")
         self.assertIn("pt_date = '2026-06-08'", sql)
+        # Rules catalog surfaces the punish duration and the reject transify key.
+        for column in ("punish_length_sec", "punish_duration", "transify_key"):
+            self.assertIn(column, sql)
         for column in ("rule_id", "rule_name", "feature_id", "feature_name"):
             self.assertIn(column, sql)
         # Function-usage dimension: per function_id, the feature count + active + example features.

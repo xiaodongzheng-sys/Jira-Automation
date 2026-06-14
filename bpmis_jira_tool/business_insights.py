@@ -968,7 +968,15 @@ select
   rc.punish_action,
   rc.punish_scene,
   rc.punish_sub_scene,
-  rc.notice_template
+  rc.punish_length as punish_length_sec,
+  case
+    when rc.punish_length is null then ''
+    when rc.punish_length < 0 then 'No limit (permanent)'
+    when rc.punish_length = 0 then '0'
+    else concat(cast(round(rc.punish_length / 3600.0, 2) as string), ' h')
+  end as punish_duration,
+  rc.notice_template,
+  rc.transify_key
 from {AF_RULE_CONFIG_TABLE} rc
 where {rule_snap}
 order by case when rc.status > 0 then 0 else 1 end, rc.rule_id;

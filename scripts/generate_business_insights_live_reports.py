@@ -2428,6 +2428,15 @@ _RULES_COL_NOTES = {
         "otherwise Inactive/Draft."
     ),
     "review_priority": "Manual review priority assigned to cases this rule challenges (higher = reviewed sooner).",
+    "punish_length_sec": (
+        "Configured punishment duration in seconds (rule_config.punish_length). Negative = no limit "
+        "(permanent block); empty/null = not a punish rule. The punish_duration column shows it in hours."
+    ),
+    "punish_duration": "Human-readable punishment duration derived from punish_length_sec.",
+    "transify_key": (
+        "Transify (i18n) key configured for the rejection — resolves to the localized error message / "
+        "error code shown to the customer when this rule rejects. Empty for rules that don't reject."
+    ),
 }
 _FEATURES_COL_NOTES = {
     "feature_type": "Engine feature type code (rule_config feature taxonomy). 1 = the standard metric-based feature.",
