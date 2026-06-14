@@ -1316,37 +1316,7 @@ where {stat_snap}
 group by rs.date
 order by trigger_date;
 
--- 9. Rule Precision / Catch Rate
--- For each rule that flagged cases for review (review_record), the share of those cases later confirmed
--- as fraud. Confirmed fraud = review_case.fraud_mo_type not in ('Not Fraud','Pending',''). Scoped to
--- cases opened in the month. precision_pct = fraud_cases / reviewed_cases; loss is in PHP.
-with cases as (
-  select case_id,
-    case when lower(trim(coalesce(fraud_mo_type, ''))) not in ('not fraud', 'pending', '') then 1 else 0 end as is_fraud,
-    coalesce(loss_total_amt, 0) as loss
-  from {AF_REVIEW_CASE_TABLE}
-  where pt_date = (select max(pt_date) from {AF_REVIEW_CASE_TABLE})
-    and case_open_datetime >= '{month_start_iso}' and case_open_datetime < '{next_month_iso}'
-),
-rr as (
-  select rule_id, max(rule_name) as rule_name, case_id
-  from {AF_REVIEW_RECORD_TABLE}
-  where pt_date = (select max(pt_date) from {AF_REVIEW_RECORD_TABLE})
-    and review_status = 'REVIEWED' and rule_id is not null and trim(rule_id) <> ''
-  group by rule_id, case_id
-)
-select
-  rr.rule_id,
-  max(rr.rule_name) as rule_name,
-  count(distinct rr.case_id) as reviewed_cases,
-  count(distinct case when c.is_fraud = 1 then rr.case_id end) as fraud_cases,
-  round(count(distinct case when c.is_fraud = 1 then rr.case_id end) / nullif(count(distinct rr.case_id), 0) * 100, 2) as precision_pct,
-  cast(round(sum(case when c.is_fraud = 1 then c.loss else 0 end), 2) as decimal(20, 2)) as fraud_loss_php
-from rr join cases c on c.case_id = rr.case_id
-group by rr.rule_id
-order by fraud_cases desc, reviewed_cases desc;
-
--- 10. Daily Rule Trigger Trend
+-- 9. Daily Rule Trigger Trend
 -- Daily effective-hit transactions per rule for the top 50 rules by monthly volume (the result API caps
 -- at 2000 rows). Powers the filterable daily trend chart.
 with daily as (
@@ -1362,7 +1332,7 @@ select d.rule_id, d.trigger_date, d.trigger_trxn
 from daily d join top_rules t on t.rule_id = d.rule_id
 order by d.rule_id, d.trigger_date;
 
--- 11. Scene/Sub-scene/Action Usage
+-- 10. Scene/Sub-scene/Action Usage
 -- Actual transaction volume per scene / sub-scene / action from the action log (all traffic, not just
 -- rule hits). Shows which configured scenes and actions are actually exercised.
 select
@@ -1378,7 +1348,7 @@ where pt_date between '{month_start_iso}' and '{month_end_iso}'
 group by scene_name, sub_scene_name, action_name, action_type
 order by transactions desc;
 
--- 12. Rule Scorecard
+-- 11. Rule Scorecard
 -- Precision x trigger-rate quadrant. Combines, per rule, the trigger rate (hit log: effective
 -- triggers / scene traffic) with precision
 -- (review records -> confirmed-fraud cases). Limited to rules that flagged cases for review, so both
@@ -1435,11 +1405,11 @@ left join triggers t on t.rule_id = p.rule_id
 left join benchmark b on b.rule_id = p.rule_id
 order by p.fraud_cases desc, trigger_rate_pct desc;
 """
-    # Detection effectiveness: fold the rule-hits -> confirmed-fraud-loss sections in as 13-17. Pass
+    # Detection effectiveness: fold the rule-hits -> confirmed-fraud-loss sections in as 12-16. Pass
     # snapshot_pt_date=None so the review_case/review_record sections self-resolve their own latest
     # partition (this report's snapshot anchor is request_statistic, a different table).
     detection = _merge_report_sections(
-        build_af_detection_effectiveness_sql(snapshot_pt_date=None, now=now), start_number=13
+        build_af_detection_effectiveness_sql(snapshot_pt_date=None, now=now), start_number=12
     )
     return base + "\n" + detection
 

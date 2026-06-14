@@ -920,11 +920,10 @@ class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
                 "Challenge Rule Hit Summary",
                 "Challenge Rule Scene Breakdown",
                 "Daily Challenge/Reject/Punish",
-                "Rule Precision / Catch Rate",
                 "Daily Rule Trigger Trend",
                 "Scene/Sub-scene/Action Usage",
                 "Rule Scorecard",
-                # Folded-in detection effectiveness sections (13-17).
+                # Folded-in detection effectiveness sections (12-16).
                 "Detection Coverage Summary",
                 "Detection by Fraud MO Type",
                 "Top Detecting Rules",
@@ -1064,12 +1063,12 @@ class RuleEffectivenessExtraSectionsTests(unittest.TestCase):
 
     def test_precision_and_usage_render_as_searchable_tables(self):
         html = self._viz([
-            ("Rule Precision / Catch Rate", ["rule_id", "rule_name", "reviewed_cases", "fraud_cases", "precision_pct", "fraud_loss_php"],
+            ("Top Detecting Rules", ["rule_id", "rule_name", "flagged_cases", "fraud_cases_caught", "precision_pct", "loss_caught_php"],
              [["U0022v2", "New device transfer", "101", "10", "9.9", "0"]]),
             ("Scene/Sub-scene/Action Usage", ["scene_name", "sub_scene_name", "action_name", "action_type", "transactions", "action_events", "distinct_users"],
              [["Login", "PasswordLogin", "EnterLoginState", "Business", "6089791", "6100000", "1200000"]]),
         ])
-        self.assertIn("<h2>Rule Precision / Catch Rate</h2>", html)
+        self.assertIn("<h2>Top Detecting Rules</h2>", html)
         self.assertIn("precision_pct", html)
         self.assertIn("New device transfer", html)
         self.assertIn("<h2>Scene/Sub-scene/Action Usage</h2>", html)

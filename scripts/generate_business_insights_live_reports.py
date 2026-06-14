@@ -429,7 +429,6 @@ def _excel_sheet_title(sheet_name: str) -> str:
 _CANONICAL_SHEET_NAMES = (
     "Scene/Sub-scene/Action Usage",
     "Daily Challenge/Reject/Punish",
-    "Rule Precision / Catch Rate",
     "Review Pool / Backlog (current)",
 )
 _SHEET_TITLE_TO_CANONICAL = {_excel_sheet_title(name): name for name in _CANONICAL_SHEET_NAMES}
@@ -2891,7 +2890,6 @@ def write_visualization(
         placeholders = {
             "Request Outcome Summary": "Filter…",
             "Daily Challenge/Reject/Punish": "Search date…",
-            "Rule Precision / Catch Rate": "Search rule id or name…",
             "Scene/Sub-scene/Action Usage": "Search scene, sub-scene or action…",
             "Top Detecting Rules": "Search rule id or name…",
             "Missed Fraud (Blind Spots)": "Search fraud type…",
