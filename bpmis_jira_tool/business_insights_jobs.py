@@ -77,6 +77,19 @@ def _pid_alive(pid: Any) -> bool:
         return True
     except OSError:
         return False
+    # A finished generation job is one of our own detached children. Because we
+    # never wait() on it, it lingers as a zombie and os.kill(pid, 0) keeps
+    # succeeding even though it is done. Reap it here (we are its parent): if
+    # waitpid collects it, it had already exited, so report it as not alive so
+    # the job status can resolve to completed instead of freezing at "running".
+    try:
+        reaped_pid, _ = os.waitpid(pid_int, os.WNOHANG)
+    except ChildProcessError:
+        return True  # not our child (can't be a zombie we own) -> assume alive
+    except OSError:
+        return True
+    if reaped_pid == pid_int:
+        return False  # was a zombie; now reaped
     return True
 
 
