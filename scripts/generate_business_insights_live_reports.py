@@ -4148,8 +4148,6 @@ def main() -> int:
             poll_seconds=args.poll_seconds,
             max_polls=args.max_polls,
         )
-    if report_has_artifacts(portal_data_dir, UNDERWRITING_FUNNEL_REPORT_ID):
-        print(f"{UNDERWRITING_FUNNEL_REPORT_ID}: existing artifact present.", flush=True)
     _publish_to_public_gcs(portal_data_dir)
     return 0
 
