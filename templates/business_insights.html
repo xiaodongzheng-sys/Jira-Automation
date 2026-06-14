@@ -63,12 +63,6 @@
                     <td>
                       <div class="business-insights-link-cell">
                         {% if artifact and artifact.url %}
-                          <div class="business-insights-actions">
-                            <a class="button button-secondary" href="{{ artifact.url }}" data-business-insights-download>Download Excel</a>
-                            {% if artifact.visualization_url %}
-                              <a class="button button-secondary" href="{{ artifact.visualization_url }}" target="_blank" rel="noopener" data-business-insights-visualization>Open Visualization</a>
-                            {% endif %}
-                          </div>
                           <span class="business-insights-meta">{{ artifact.row_count }} rows - {{ artifact.created_at_display or artifact.created_at }}</span>
                         {% elif report.status == "generator_ready" %}
                           <span class="business-insights-placeholder">No Excel file generated yet.</span>
@@ -76,8 +70,19 @@
                           <span class="business-insights-placeholder">Not generated yet.</span>
                         {% endif %}
 
-                        {% if report.status == "generator_ready" %}
-                          <div class="business-insights-actions">
+                        <div class="business-insights-actions">
+                          {% if artifact and artifact.visualization_url %}
+                            <a class="button button-secondary" href="{{ artifact.visualization_url }}" target="_blank" rel="noopener" data-business-insights-visualization>Open Visualization</a>
+                          {% endif %}
+                          {% if artifact and artifact.url %}
+                            <a class="button button-secondary" href="{{ artifact.url }}" data-business-insights-download>Download Excel</a>
+                          {% endif %}
+                          {% if report.status == "generator_ready" %}
+                            <a
+                              class="button button-secondary"
+                              data-business-insights-sql
+                              href="{{ report.sql_url }}?format=raw&amp;download=1"
+                            >Download SQL</a>
                             {% if report.can_generate %}
                               <button
                                 type="button"
@@ -87,12 +92,9 @@
                                 data-status-url="{{ report.generate_status_url }}"
                               >Refresh data</button>
                             {% endif %}
-                            <a
-                              class="button button-secondary"
-                              data-business-insights-sql
-                              href="{{ report.sql_url }}?format=raw&amp;download=1"
-                            >Generate SQL</a>
-                          </div>
+                          {% endif %}
+                        </div>
+                        {% if report.status == "generator_ready" %}
                           <p class="business-insights-status" data-business-insights-status></p>
                         {% endif %}
                       </div>

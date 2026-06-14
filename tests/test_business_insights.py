@@ -342,7 +342,7 @@ class BusinessInsightsTests(unittest.TestCase):
         # Detection-effectiveness and rule-change-log are folded into other reports, not standalone.
         self.assertNotIn("Anti-fraud PH - Detection Effectiveness &amp; Loss Prevented", response.get_data(as_text=True))
         self.assertNotIn("Anti-fraud PH - Rule Change Log &amp; Governance", response.get_data(as_text=True))
-        self.assertEqual(response.get_data(as_text=True).count("Generate SQL"), 12)
+        self.assertEqual(response.get_data(as_text=True).count("Download SQL"), 12)
         self.assertNotIn("Upload Export", response.get_data(as_text=True))
         self.assertIsNone(soup.select_one("[data-business-insights-upload]"))
 

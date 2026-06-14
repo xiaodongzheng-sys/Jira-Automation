@@ -100,6 +100,7 @@
       download = document.createElement("a");
       download.className = "button button-secondary";
       download.textContent = "Download Excel";
+      download.setAttribute("data-business-insights-download", "");
       actions.insertBefore(download, actions.firstChild);
     }
     if (download) download.setAttribute("href", artifact.url);
@@ -111,7 +112,9 @@
         viz.textContent = "Open Visualization";
         viz.target = "_blank";
         viz.rel = "noopener";
-        download.insertAdjacentElement("afterend", viz);
+        viz.setAttribute("data-business-insights-visualization", "");
+        // Order: Open Visualization, then Download Excel, then Download SQL / Refresh data.
+        actions.insertBefore(viz, download);
       }
       if (viz) viz.setAttribute("href", artifact.visualization_url);
     }
