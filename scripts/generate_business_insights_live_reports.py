@@ -2768,6 +2768,32 @@ def write_visualization(
                          "settles. One row per template × relation (treatment); *_sec columns are seconds.",
                 )
             )
+        two_way_act = flow_lookup.get("Two-Way Communication Activity")
+        if two_way_act and two_way_act[1]:
+            ah, ar = two_way_act
+            ac = {str(c): i for i, c in enumerate(ah)}
+            if "template_id" in ac and "triggered" in ac:
+                trig_pairs = [
+                    (str(r[ac["template_id"]]), _number(r[ac["triggered"]]))
+                    for r in ar if ac["triggered"] < len(r)
+                ]
+                tbar = _bar_panel(
+                    "Two-Way Triggers by Template",
+                    sorted(trig_pairs, key=lambda kv: kv[1], reverse=True)[:15],
+                    note="Two-way confirmations triggered per template over the reporting window.",
+                )
+                if tbar:
+                    chart_panels.append(tbar)
+            table_panels.append(
+                _searchable_table_panel(
+                    "Two-Way Communication Activity", two_way_act[0], two_way_act[1],
+                    placeholder="Search template…",
+                    note="How often each two-way template fired and how customers responded over the "
+                         "reporting window. approved=status 1+5, rejected=2+6, expired_no_response=3, "
+                         "pending=0 (awaiting customer); response_rate=responded/triggered, "
+                         "approval_rate=approved/responded.",
+                )
+            )
         # Governance panels (folded-in rule change log): current-inventory bar + change-log tables.
         governance_panels: list[str] = []
         inventory = flow_lookup.get("Current Rule Inventory")

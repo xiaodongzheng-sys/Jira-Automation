@@ -140,6 +140,9 @@ AF_GREY_LIST_TABLE = "ods.ph_seabank_anti_fraud_db_grey_list_tab_di"
 # fallback). relation is a daily full snapshot (_df); template is daily incremental (_di).
 AF_TWO_WAY_TEMPLATE_CONFIG_TABLE = "ods.ph_seabank_anti_fraud_db_two_way_template_config_tab_di"
 AF_TWO_WAY_RELATION_CONFIG_TABLE = "ods.ph_seabank_anti_fraud_db_two_way_template_relation_config_tab_df"
+# Two-way communication CASES (each row = one triggered two-way confirmation, with the customer's outcome
+# in `status`). Latest pt_date holds the full cumulative table; scope activity by create_date (epoch ms).
+AF_TWO_WAY_COMMUNICATION_TABLE = "ods.ph_seabank_anti_fraud_db_two_way_communication_tab_di"
 
 SEEDED_REPORTS: tuple[dict[str, str], ...] = (
     {
@@ -939,6 +942,11 @@ def build_af_rules_features_sql(*, snapshot_pt_date: str | None = None, now: dat
     # Two-way config tables have their own snapshot cadence; self-resolve their latest pt_date rather than
     # pinning to the rule_config snapshot anchor.
     two_way_rel_snap = _aliased_snapshot_filter("rel", AF_TWO_WAY_RELATION_CONFIG_TABLE, None)
+    # Two-way ACTIVITY is time-scoped (last two full months + MTD) on create_date (epoch ms).
+    window = business_insights_window(now)
+    span_label = window.span_label
+    two_way_start_ms = _date_to_epoch_millis(window.span_start)
+    two_way_end_ms = _date_to_epoch_millis(window.span_end_exclusive)
     header = _af_report_header("Anti-fraud PH - Rules & Features", snapshot_pt_date)
     base = f"""{header}
 -- Full rule and feature catalogs. outcome_type (engine OutcomeType enum): 1 = Reject when
@@ -1042,12 +1050,46 @@ from {AF_TWO_WAY_RELATION_CONFIG_TABLE} rel
 left join tpl t on t.template_id = rel.two_way_template_id and t.rn = 1
 where {two_way_rel_snap}
 order by case when t.status = 1 then 0 else 1 end, rel.two_way_template_id, rel.relation_type;
+
+-- 5. Two-Way Communication Activity
+-- Triggers & outcomes: how often each Two-Way template actually fired and how customers responded over {span_label} (scoped by
+-- create_date). One row per template. status (TwoWayStatusEnum): 0 = Created/pending (awaiting customer),
+-- 1 = Approved, 2 = Rejected, 3 = Expired with no response, 4 = Closed, 5 = Expired-then-Approved,
+-- 6 = Expired-then-Rejected. approved = 1+5, rejected = 2+6, responded = approved+rejected.
+-- response_rate = responded / triggered; approval_rate = approved / responded. NOTE: other treatment types
+-- (money-lock hold & release, one-way, write-CRC, temp-whitelist, add grey/black/white) are configured per
+-- template in section 4; their standalone trigger counts are not in the granted lake tables (the
+-- rule->treatment mapping table is not provisioned), so this section covers the two-way treatment.
+with tpl as (
+  select template_id, template_name,
+    row_number() over (partition by template_id order by pt_date desc, modify_date desc) as rn
+  from {AF_TWO_WAY_TEMPLATE_CONFIG_TABLE}
+)
+select
+  c.two_way_template_id as template_id,
+  max(t.template_name) as template_name,
+  count(1) as triggered,
+  count(distinct c.uid) as distinct_users,
+  count(distinct c.rule_id) as distinct_rules,
+  sum(case when c.status in (1, 5) then 1 else 0 end) as approved,
+  sum(case when c.status in (2, 6) then 1 else 0 end) as rejected,
+  sum(case when c.status = 3 then 1 else 0 end) as expired_no_response,
+  sum(case when c.status = 0 then 1 else 0 end) as pending,
+  sum(case when c.status = 4 then 1 else 0 end) as closed,
+  cast(round(sum(case when c.status in (1, 2, 5, 6) then 1 else 0 end) / nullif(count(1), 0) * 100, 2) as decimal(20, 2)) as response_rate_pct,
+  cast(round(sum(case when c.status in (1, 5) then 1 else 0 end) / nullif(sum(case when c.status in (1, 2, 5, 6) then 1 else 0 end), 0) * 100, 2) as decimal(20, 2)) as approval_rate_pct
+from {AF_TWO_WAY_COMMUNICATION_TABLE} c
+left join tpl t on t.template_id = c.two_way_template_id and t.rn = 1
+where c.pt_date = (select max(pt_date) from {AF_TWO_WAY_COMMUNICATION_TABLE})
+  and c.create_date >= {two_way_start_ms} and c.create_date < {two_way_end_ms}
+group by c.two_way_template_id
+order by triggered desc;
 """
     # Governance: fold in the rule change-log sections (Change Summary / Detail / Current Inventory)
     # from the same rule_config snapshots, renumbered to follow Rules (1), Features (2), Function Usage (3),
-    # Two-Way Communication Config (4).
+    # Two-Way Communication Config (4), Two-Way Communication Activity (5).
     governance = _merge_report_sections(
-        build_af_rule_change_log_sql(snapshot_pt_date=snapshot_pt_date, now=now), start_number=5
+        build_af_rule_change_log_sql(snapshot_pt_date=snapshot_pt_date, now=now), start_number=6
     )
     return base + "\n" + governance
 

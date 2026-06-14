@@ -36,6 +36,7 @@ from bpmis_jira_tool.business_insights import (
     AF_SCENARIOS_ACTIONS_REPORT_ID,
     AF_TWO_WAY_TEMPLATE_CONFIG_TABLE,
     AF_TWO_WAY_RELATION_CONFIG_TABLE,
+    AF_TWO_WAY_COMMUNICATION_TABLE,
     AF_SCENE_TABLE,
     APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID,
     BusinessInsightsStore,
@@ -791,17 +792,22 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
     def test_rules_features_sql_has_catalog_and_governance_sections(self):
         sql = build_af_rules_features_sql(snapshot_pt_date="2026-06-08", now=FIXED_NOW)
         sections = extract_sql_sections(sql)
-        # Catalogs (1-2), the Function-usage dimension (3), the Two-Way Communication config (4), then the
-        # folded-in rule change-log governance sections (5-7).
+        # Catalogs (1-2), Function-usage (3), Two-Way config (4) + activity (5), then the folded-in rule
+        # change-log governance sections (6-8).
         self.assertEqual(
             [s.sheet_name for s in sections],
             ["Rules", "Features", "Function Usage", "Two-Way Communication Config",
+             "Two-Way Communication Activity",
              "Change Summary", "Rule Change Detail", "Current Rule Inventory"],
         )
         # Two-Way config pulls the template + relation config tables and exposes the treatment/whitelist knobs.
         self.assertIn(AF_TWO_WAY_TEMPLATE_CONFIG_TABLE, sql)
         self.assertIn(AF_TWO_WAY_RELATION_CONFIG_TABLE, sql)
         for column in ("treatment_tag", "confirmation_window_sec", "temp_whitelist_exempted_rules", "crc_alert"):
+            self.assertIn(column, sql)
+        # Two-Way activity counts triggers + outcomes from the communication table over the window.
+        self.assertIn(AF_TWO_WAY_COMMUNICATION_TABLE, sql)
+        for column in ("triggered", "approved", "rejected", "expired_no_response", "approval_rate_pct"):
             self.assertIn(column, sql)
         self.assertIn(AF_RULE_CONFIG_TABLE, sql)
         self.assertIn(AF_FEATURE_CONFIG_TABLE, sql)
