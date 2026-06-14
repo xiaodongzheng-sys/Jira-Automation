@@ -951,14 +951,21 @@ def build_af_rules_features_sql(*, snapshot_pt_date: str | None = None, now: dat
     base = f"""{header}
 -- Full rule and feature catalogs. outcome_type (engine OutcomeType enum): 1 = Reject when
 -- real_time = 1 else Punish, 2=Challenge, 3=Notification, 4=Reject+Punish, 5=Challenge+Punish, 6=Pass.
--- rule status > 0 = Active; feature status 1=Active / -1=Inactive.
+-- rule status (engine RuleStatus enum): 1 = Active (live, enforcing the outcome), 2 = Collect Data
+-- (dry-run / shadow — the rule evaluates and logs hits but does NOT enforce its action), -1 = Inactive.
+-- feature status 1=Active / -1=Inactive.
 
 -- 1. Rules
 select
   rc.rule_id,
   rc.rule_name,
   rc.feature_expr,
-  case when rc.status > 0 then 'Active' else 'Inactive/Draft' end as rule_status,
+  case rc.status
+    when 1 then 'Active'
+    when 2 then 'Collect Data'
+    when -1 then 'Inactive'
+    else concat('Other (', cast(rc.status as string), ')')
+  end as rule_status,
   rc.status as status_code,
   {_af_outcome_case("rc.outcome_type", "rc.real_time")} as outcome_type,
   case rc.real_time when 1 then 'Real-time' else 'Batch' end as execution_mode,
@@ -979,7 +986,7 @@ select
   rc.transify_key
 from {AF_RULE_CONFIG_TABLE} rc
 where {rule_snap}
-order by case when rc.status > 0 then 0 else 1 end, rc.rule_id;
+order by case rc.status when 1 then 0 when 2 then 1 when -1 then 2 else 3 end, rc.rule_id;
 
 -- 2. Features
 select
@@ -1799,7 +1806,10 @@ def build_af_rule_change_log_sql(*, snapshot_pt_date: str | None = None, now: da
         f"coalesce((select max(pt_date) from {AF_RULE_CONFIG_TABLE} where pt_date <= '{baseline_iso}'), "
         f"(select min(pt_date) from {AF_RULE_CONFIG_TABLE}))"
     )
-    status_label = "case when {a}.status > 0 then 'Active' else 'Inactive/Draft' end"
+    status_label = (
+        "case {a}.status when 1 then 'Active' when 2 then 'Collect Data' when -1 then 'Inactive' "
+        "else concat('Other (', cast({a}.status as string), ')') end"
+    )
     # The current and baseline projections, reused by every section. Baseline is pinned to one snapshot.
     snaps_cte = f"""curr as (
   select rc.rule_id, rc.rule_name, rc.status, rc.outcome_type, rc.real_time, rc.risk_level,

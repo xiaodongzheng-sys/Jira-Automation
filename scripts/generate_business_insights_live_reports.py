@@ -2423,9 +2423,14 @@ def _device_risk_signal_glossary_panel() -> str:
 
 # Shared column info-notes for backend-coded columns, so raw enum codes are explained inline.
 _RULES_COL_NOTES = {
+    "rule_status": (
+        "Engine RuleStatus: Active = live and enforcing its outcome; Collect Data = dry-run / shadow "
+        "(the rule evaluates and logs hits but does NOT enforce its action — used to observe a rule before "
+        "turning it on); Inactive = off. Only Active rules actually block/challenge/punish in production."
+    ),
     "status_code": (
-        "Raw rule status integer from rule_config. The rule_status column already maps it: > 0 = Active, "
-        "otherwise Inactive/Draft."
+        "Raw rule status integer from rule_config: 1 = Active, 2 = Collect Data (dry-run/shadow), "
+        "-1 = Inactive. See the rule_status column for the label."
     ),
     "review_priority": "Manual review priority assigned to cases this rule challenges (higher = reviewed sooner).",
     "punish_length_sec": (
@@ -2638,7 +2643,9 @@ def write_visualization(
             status = _count_by(rules, "rule_status")
             kpis.append(("Total rules", _format_number(len(rules[1]))))
             if status.get("Active"):
-                kpis.append(("Active rules", _format_number(status["Active"])))
+                kpis.append(("Active rules (enforcing)", _format_number(status["Active"])))
+            if status.get("Collect Data"):
+                kpis.append(("Collect Data (shadow)", _format_number(status["Collect Data"])))
         if features and features[1]:
             fstatus = _count_by(features, "feature_status")
             kpis.append(("Total features", _format_number(len(features[1]))))
