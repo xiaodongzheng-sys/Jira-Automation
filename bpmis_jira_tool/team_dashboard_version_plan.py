@@ -307,7 +307,7 @@ def merge_version_plan_editable_state(synced_config: dict[str, Any], current_con
                 synced_af["bundles"][version_id] = {
                     **{key: deepcopy(value) for key, value in current_bundle.items() if key not in {"manual_rows", "synced_rows"}},
                     "manual_rows": _normalize_manual_rows(current_bundle.get("manual_rows")),
-                    "synced_rows": _normalize_synced_rows(current_bundle.get("synced_rows")),
+                    "synced_rows": [],
                 }
             continue
         synced_bundle["manual_rows"] = _normalize_manual_rows(current_bundle.get("manual_rows"))

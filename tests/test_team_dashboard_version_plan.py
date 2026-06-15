@@ -795,6 +795,49 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         row = next(row for row in payload["bundles"][0]["synced_rows"] if row["jira_id"] == "SPDBP-94945")
         self.assertEqual(row["remarks"], "Updated note")
 
+    def test_successful_sync_removes_stale_and_filtered_synced_rows(self) -> None:
+        config = {
+            "version_plan": {
+                "af": {
+                    "bundles": {
+                        "af-20260520": {
+                            "synced_rows": [
+                                {"row_id": "sync-stale", "jira_id": "SPDBP-stale", "jira_summary": "Absent from new sync"},
+                                {"row_id": "sync-closed", "jira_id": "SPDBP-closed", "jira_summary": "Closed"},
+                                {"row_id": "sync-tech", "jira_id": "SGDB-tech", "jira_summary": "Tech"},
+                                {"row_id": "sync-support", "jira_id": "SGDB-support", "jira_summary": "Support"},
+                                {"row_id": "sync-planning", "jira_id": "SGDB-planning", "jira_summary": "Planning"},
+                                {"row_id": "sync-keep", "jira_id": "SPDBP-94945", "remarks": "Keep if still valid"},
+                            ],
+                            "manual_rows": [
+                                {"row_id": "manual-keep", "feature": "Manual stays", "priority": "P1"},
+                            ],
+                        }
+                    },
+                    "pipeline_rows": [],
+                }
+            }
+        }
+
+        synced = version_plan_sync(
+            config,
+            FakeBPMISVersionPlanClient(),
+            now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"),
+        )
+        payload = version_plan_payload(synced, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
+        bundle = payload["bundles"][0]
+        jira_ids = {row["jira_id"] for row in bundle["synced_rows"]}
+
+        self.assertNotIn("SPDBP-stale", jira_ids)
+        self.assertNotIn("SPDBP-closed", jira_ids)
+        self.assertNotIn("SGDB-tech", jira_ids)
+        self.assertNotIn("SGDB-support", jira_ids)
+        self.assertNotIn("SGDB-planning", jira_ids)
+        self.assertIn("SPDBP-94945", jira_ids)
+        kept = next(row for row in bundle["synced_rows"] if row["jira_id"] == "SPDBP-94945")
+        self.assertEqual(kept["remarks"], "Keep if still valid")
+        self.assertEqual(bundle["manual_rows"][0]["row_id"], "manual-keep")
+
     def test_empty_bpmis_version_search_preserves_cached_bundles(self) -> None:
         config = {
             "version_plan": {
@@ -981,6 +1024,7 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
 
         self.assertIn("af-manual", merged["version_plan"]["af"]["bundles"])
         self.assertEqual(merged["version_plan"]["af"]["bundles"]["af-manual"]["manual_rows"][0]["row_id"], "manual-only")
+        self.assertEqual(merged["version_plan"]["af"]["bundles"]["af-manual"]["synced_rows"], [])
 
     def test_update_cell_and_row_error_edges(self) -> None:
         config = {
