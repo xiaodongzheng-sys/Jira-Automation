@@ -1167,6 +1167,15 @@
     });
   };
 
+  const versionPlanClosestSheet = (target) => {
+    const element = target instanceof Element ? target : null;
+    if (!element) return null;
+    const directSheet = element.closest('[data-version-plan-sheet]');
+    if (directSheet) return directSheet;
+    const bundle = element.closest('[data-version-plan-bundle-id]');
+    return bundle?.querySelector('[data-version-plan-sheet]') || null;
+  };
+
   const versionPlanSameManualBlock = (row) => Boolean(row && versionPlanDragRow
     && row.dataset.versionPlanScope === versionPlanDragRow.dataset.versionPlanScope
     && (row.dataset.versionId || '') === (versionPlanDragRow.dataset.versionId || '')
@@ -3278,7 +3287,7 @@
   versionPlanContent?.addEventListener('dragover', (event) => {
     if (isVersionPlanSyncRunning()) return;
     const row = event.target.closest('[data-version-plan-manual-row="true"]');
-    const sheet = event.target.closest('[data-version-plan-sheet]');
+    const sheet = versionPlanClosestSheet(event.target);
     if (!versionPlanDragRow || !sheet) return;
     const sameManualBlock = versionPlanSameManualBlock(row);
     const targetAcceptsDrop = versionPlanSheetAcceptsDrop(sheet);
@@ -3303,7 +3312,7 @@
       return;
     }
     const row = event.target.closest('[data-version-plan-manual-row="true"]');
-    const sheet = event.target.closest('[data-version-plan-sheet]');
+    const sheet = versionPlanClosestSheet(event.target);
     if (!sheet) return;
     event.preventDefault();
     try {
@@ -3319,7 +3328,7 @@
     }
   });
   versionPlanContent?.addEventListener('dragleave', (event) => {
-    const sheet = event.target.closest('[data-version-plan-sheet]');
+    const sheet = versionPlanClosestSheet(event.target);
     if (sheet && !sheet.contains(event.relatedTarget)) clearVersionPlanDropIndicators();
   });
   linkBizProjectFindJira?.addEventListener('click', loadLinkBizJira);

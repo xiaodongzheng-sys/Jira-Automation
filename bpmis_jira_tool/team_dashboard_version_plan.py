@@ -484,6 +484,8 @@ def _move_version_plan_manual_row(plan: dict[str, Any], payload: dict[str, Any])
         len(target_rows),
     )
     target_rows.insert(target_index, moving_row)
+    for index, row in enumerate(source_rows):
+        row["sort_order"] = index
     for index, row in enumerate(target_rows):
         row["sort_order"] = index
 
