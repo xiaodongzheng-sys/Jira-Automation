@@ -1426,13 +1426,16 @@ exit 0
         self.assertIn("CLOUD_RUN_UAT_PARALLEL_HOST_SYNC", script)
         self.assertIn("deploy_cloud_run_uat.sh", script)
 
-    def test_fast_uat_live_release_orchestrator_deploys_uat_then_live_without_time_window(self):
+    def test_fast_uat_live_release_orchestrator_deploys_cloud_run_live_and_mac_live_without_time_window(self):
         script = (PROJECT_ROOT / "scripts/release_uat_live_fast.sh").read_text(encoding="utf-8")
 
         self.assertIn("run_gate_and_image_in_parallel", script)
-        self.assertIn("Release policy allows UAT and Live deployment now", script)
-        self.assertIn("Deploying UAT before Live promotion", script)
-        self.assertIn("Live already serves $SHA after UAT deploy; skipping promotion.", script)
+        self.assertIn("Release policy allows deployment now", script)
+        self.assertIn("Live-only release for $SHA (UAT skipped).", script)
+        self.assertIn("Deploying Cloud Run Live with prebuilt image", script)
+        self.assertIn("deploy_cloud_run.sh", script)
+        self.assertIn("PROMOTE_LIVE_TARGET=origin_main", script)
+        self.assertNotIn("release_uat_fast.sh", script)
         self.assertNotIn("selected UAT default path", script)
         self.assertNotIn("selected Live default path", script)
         self.assertIn("require_gcloud_noninteractive_deploy_auth", script)
@@ -1448,7 +1451,6 @@ exit 0
         self.assertIn("run view \"$run_id\"", script)
         self.assertIn("run_timed_gate", script)
         self.assertIn("image_prepare", script)
-        self.assertIn("release_uat_fast.sh", script)
         self.assertIn("run_system_full_test_gate.py", script)
         self.assertIn("promote_uat_to_live.sh", script)
         self.assertIn("run_team_stack.sh\" doctor", script)

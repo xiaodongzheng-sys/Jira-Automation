@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+# Live-only fast release: deploys to Cloud Run (Live traffic) + Mac-hosted Live.
+# UAT is completely skipped.  The prebuilt image is reused when available;
+# otherwise a fallback build is triggered.  Gate and image preparation run in
+# parallel to minimize total release time.
+
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -303,28 +308,34 @@ print_timing_report() {
 
 cd "$ROOT_DIR"
 SHA="$(current_sha)"
-echo "Release policy allows UAT and Live deployment now: $(release_window_summary)"
-echo "Deploying UAT before Live promotion for $SHA."
-"$ROOT_DIR/scripts/release_uat_fast.sh"
+echo "Release policy allows deployment now: $(release_window_summary)"
+echo "Live-only release for $SHA (UAT skipped)."
 
-LIVE_URL="$(resolve_live_url)"
-if [[ "$(live_revision || true)" == "$SHA" ]]; then
-  echo "Live already serves $SHA after UAT deploy; skipping promotion."
-  TEAM_STACK_HOST_ROOT="${TEAM_STACK_HOST_ROOT:-$(recommended_team_stack_root)}"
-  "$TEAM_STACK_HOST_ROOT/scripts/run_team_stack.sh" doctor
-  print_timing_report
-  FINISHED_AT="$(date +%s)"
-  echo "Fast release completed UAT and confirmed Live already current in $((FINISHED_AT - STARTED_AT))s"
-  exit 0
-fi
+# Run gate and image preparation in parallel.
+run_gate_and_image_in_parallel "$SHA"
 
+# Deploy to Cloud Run as Live (traffic to latest) using the prebuilt image.
 require_gcloud_noninteractive_deploy_auth "$GCLOUD_BIN" "$PROJECT_ID" "$DEPLOY_ACCOUNT"
+echo "Deploying Cloud Run Live with prebuilt image: $IMAGE_URI"
+CLOUD_RUN_IMAGE="$IMAGE_URI" \
 GOOGLE_CLOUD_PROJECT="$PROJECT_ID" \
 CLOUD_RUN_DEPLOY_ACCOUNT="$DEPLOY_ACCOUNT" \
-"$ROOT_DIR/scripts/promote_uat_to_live.sh"
+"$ROOT_DIR/scripts/deploy_cloud_run.sh"
+
+# Promote origin/main to Mac-hosted Live.
+LIVE_URL="$(resolve_live_url)"
+if [[ "$(live_revision || true)" == "$SHA" ]]; then
+  echo "Live already serves $SHA after Cloud Run deploy; skipping Mac-hosted promotion."
+else
+  GOOGLE_CLOUD_PROJECT="$PROJECT_ID" \
+  CLOUD_RUN_DEPLOY_ACCOUNT="$DEPLOY_ACCOUNT" \
+  PROMOTE_LIVE_TARGET=origin_main \
+  "$ROOT_DIR/scripts/promote_uat_to_live.sh"
+fi
+
 TEAM_STACK_HOST_ROOT="${TEAM_STACK_HOST_ROOT:-$(recommended_team_stack_root)}"
 "$TEAM_STACK_HOST_ROOT/scripts/run_team_stack.sh" doctor
 print_timing_report
 FINISHED_AT="$(date +%s)"
-echo "Fast release completed UAT and Live in $((FINISHED_AT - STARTED_AT))s"
+echo "Fast release completed Cloud Run + Mac-hosted Live in $((FINISHED_AT - STARTED_AT))s"
 exit 0
