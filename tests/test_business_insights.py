@@ -356,9 +356,9 @@ class BusinessInsightsTests(unittest.TestCase):
                 "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
-                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
                 "TEAM_ALLOWED_EMAILS": "",
-                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
                 "BUSINESS_INSIGHTS_DOWNLOAD_PASSWORD": "test-bi-pass",
             },
@@ -448,11 +448,11 @@ class BusinessInsightsTests(unittest.TestCase):
         self.assertEqual(download_mimetype, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
-class BusinessInsightsPublicAntiFraudTests(unittest.TestCase):
-    """Anti-fraud Business Insights is publicly viewable before login. Everyone
-    except the admin (anonymous, non-NPT, NPT colleagues, the old gmail test
-    user) sees only Anti-fraud plus the other public surfaces (Repo Download and
-    Version Plan); the rest of the portal stays admin-only."""
+class BusinessInsightsLoginRequiredTests(unittest.TestCase):
+    """Business Insights, Version Plan, and Source Code QA all require login.
+    Only admin, allowlisted emails, and allowlisted domains (@npt.sg, @monee.com,
+    @seamoney.com) may access.  Non-admin allowed users see Anti-fraud only.
+    Anonymous visitors are redirected to the login page."""
 
     def _probe(self, email=None):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -462,7 +462,8 @@ class BusinessInsightsPublicAntiFraudTests(unittest.TestCase):
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
-                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_ALLOWED_EMAILS": "xiaodong.zheng1991@gmail.com",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg,monee.com,seamoney.com",
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
             },
             clear=True,
@@ -484,9 +485,17 @@ class BusinessInsightsPublicAntiFraudTests(unittest.TestCase):
                     "landing": client.get("/portal-home", follow_redirects=False),
                 }
 
-    def test_gmail_test_user_is_blocked_like_any_non_admin(self):
-        # The gmail test user is no longer special: same public-only view as
-        # everyone else, and gated pages send it to access-denied.
+    def test_anonymous_visitor_is_redirected_to_login(self):
+        r = self._probe(email=None)  # not signed in
+        # All three pages require login.
+        self.assertEqual(r["bi_page"].status_code, 302)
+        self.assertEqual(r["source_code"].status_code, 302)
+        self.assertEqual(r["version_plan"].status_code, 302)
+        self.assertEqual(r["landing"].status_code, 302)
+        # API calls return 401.
+        self.assertEqual(r["af_reports"].status_code, 401)
+
+    def test_gmail_test_user_sees_anti_fraud_only(self):
         r = self._probe("xiaodong.zheng1991@gmail.com")
         self.assertEqual(r["bi_page"].status_code, 200)
         html = r["bi_page"].get_data(as_text=True)
@@ -498,42 +507,31 @@ class BusinessInsightsPublicAntiFraudTests(unittest.TestCase):
         self.assertEqual(r["cr_sql"].status_code, 404)
         self.assertEqual(r["source_code"].status_code, 200)
         self.assertEqual(r["version_plan"].status_code, 200)
-        self.assertEqual(r["landing"].status_code, 302)
-        self.assertEqual(r["landing"].headers["Location"], "/access-denied")
 
-    def test_anonymous_visitor_can_view_anti_fraud_before_login(self):
-        r = self._probe(email=None)  # not signed in
-        # Anti-fraud Business Insights is public.
-        self.assertEqual(r["bi_page"].status_code, 200)
-        html = r["bi_page"].get_data(as_text=True)
-        self.assertIn('data-business-insights-tab="anti-fraud"', html)
-        self.assertNotIn('data-business-insights-tab="credit-risk"', html)
-        self.assertNotIn("Refresh data", html)
-        self.assertEqual(r["af_reports"].status_code, 200)
-        self.assertGreater(len(r["af_reports"].get_json()["reports"]), 0)
-        self.assertEqual(r["cr_reports"].get_json()["reports"], [])
-        self.assertEqual(r["cr_sql"].status_code, 404)
-        # Repo Download and Version Plan are public too.
-        self.assertEqual(r["source_code"].status_code, 200)
-        self.assertEqual(r["version_plan"].status_code, 200)
-        # The signed-in portal home still requires login.
-        self.assertEqual(r["landing"].status_code, 302)
-
-    def test_non_npt_domains_cannot_access_gated_modules_but_see_public_bi(self):
-        # @monee.com / @seamoney.com are no longer allowed in: they behave like any
-        # external account -- public surfaces only, every gated module denied.
-        for email in ("analyst@monee.com", "analyst@seamoney.com", "stranger@external.com"):
+    def test_monee_and_seamoney_users_see_anti_fraud_only(self):
+        for email in ("analyst@monee.com", "analyst@seamoney.com"):
             with self.subTest(email=email):
                 r = self._probe(email)
                 self.assertEqual(r["bi_page"].status_code, 200)
                 html = r["bi_page"].get_data(as_text=True)
+                self.assertIn('data-business-insights-tab="anti-fraud"', html)
                 self.assertNotIn('data-business-insights-tab="credit-risk"', html)
                 self.assertEqual(r["cr_reports"].get_json()["reports"], [])
                 self.assertEqual(r["cr_sql"].status_code, 404)
                 self.assertEqual(r["source_code"].status_code, 200)
                 self.assertEqual(r["version_plan"].status_code, 200)
-                self.assertEqual(r["landing"].status_code, 302)
-                self.assertEqual(r["landing"].headers["Location"], "/access-denied")
+
+    def test_external_domain_user_is_blocked(self):
+        r = self._probe("stranger@external.com")
+        # External domains are not allowlisted: blocked from all surfaces.
+        self.assertEqual(r["bi_page"].status_code, 302)
+        self.assertEqual(r["bi_page"].headers["Location"], "/access-denied")
+        self.assertEqual(r["source_code"].status_code, 302)
+        self.assertEqual(r["source_code"].headers["Location"], "/access-denied")
+        self.assertEqual(r["version_plan"].status_code, 302)
+        self.assertEqual(r["version_plan"].headers["Location"], "/access-denied")
+        self.assertEqual(r["landing"].status_code, 302)
+        self.assertEqual(r["landing"].headers["Location"], "/access-denied")
 
 
 class AntiFraudBusinessInsightsTests(unittest.TestCase):
@@ -720,6 +718,46 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
 
         self.assertIsNone(
             gen.resolve_snapshot_pt_date(object(), "does-not-exist", poll_seconds=1, max_polls=1)
+        )
+
+    def test_refresh_visualizations_publishes_public_artifacts(self):
+        from scripts import generate_business_insights_live_reports as gen
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            gen, "refresh_existing_visualizations"
+        ) as refresh, patch.object(gen, "_publish_to_public_gcs") as publish, patch(
+            "sys.argv",
+            [
+                "generate_business_insights_live_reports.py",
+                "--refresh-visualizations",
+                "--report-id",
+                AF_RULE_EFFECTIVENESS_REPORT_ID,
+                "--portal-data-dir",
+                temp_dir,
+            ],
+        ):
+            status = gen.main()
+
+        self.assertEqual(status, 0)
+        refresh.assert_called_once_with(Path(temp_dir).resolve(), report_ids=[AF_RULE_EFFECTIVENESS_REPORT_ID])
+        publish.assert_called_once_with(Path(temp_dir).resolve())
+
+    def test_cloud_run_hydrates_existing_business_insights_artifact_with_ttl(self):
+        from bpmis_jira_tool import public_artifacts_gcs as public_gcs
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"TEAM_PORTAL_PUBLIC_GCS_BUCKET": "public-bucket"},
+            clear=False,
+        ), patch.object(public_gcs, "gcs_fetch_to_file", return_value=True) as fetch:
+            ok = public_gcs.hydrate_business_insights_artifact(Path(temp_dir), "viz.html")
+
+        self.assertTrue(ok)
+        fetch.assert_called_once_with(
+            "public-bucket",
+            "business_insights/artifacts/viz.html",
+            Path(temp_dir) / "artifacts" / "viz.html",
+            max_age_seconds=public_gcs.PUBLIC_GCS_METADATA_TTL_SECONDS,
         )
 
     def test_generator_report_builders_include_scenarios_actions(self):

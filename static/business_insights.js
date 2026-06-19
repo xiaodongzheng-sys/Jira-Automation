@@ -92,6 +92,16 @@
       cell.insertBefore(meta, cell.querySelector(".business-insights-actions"));
     }
     meta.textContent = `${artifact.row_count} rows - ${artifact.created_at_display || artifact.created_at}`;
+    const withArtifactVersion = (href) => {
+      if (!href) return href;
+      try {
+        const url = new URL(href, window.location.origin);
+        url.searchParams.set("v", artifact.id || artifact.created_at || Date.now().toString());
+        return `${url.pathname}${url.search}${url.hash}`;
+      } catch (_error) {
+        return href;
+      }
+    };
     // Point the existing Download/Visualization links at the fresh artifact,
     // or create them if this is the first successful generation.
     let actions = cell.querySelector(".business-insights-actions");
@@ -103,7 +113,7 @@
       download.setAttribute("data-business-insights-download", "");
       actions.insertBefore(download, actions.firstChild);
     }
-    if (download) download.setAttribute("href", artifact.url);
+    if (download) download.setAttribute("href", withArtifactVersion(artifact.url));
     if (artifact.visualization_url) {
       let viz = cell.querySelector('a[href*="/visualizations/"]');
       if (!viz && actions) {
@@ -116,7 +126,7 @@
         // Order: Open Visualization, then Download Excel, then Download SQL / Refresh data.
         actions.insertBefore(viz, download);
       }
-      if (viz) viz.setAttribute("href", artifact.visualization_url);
+      if (viz) viz.setAttribute("href", withArtifactVersion(artifact.visualization_url));
     }
   };
 

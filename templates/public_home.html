@@ -5,25 +5,15 @@
     <div class="panel-head">
       <div>
         <h2>Risk PM Workspace</h2>
-        <p class="step-copy">Risk PM reports and source bundles. No sign-in required.</p>
+        <p class="step-copy">Sign in to access Anti-fraud Reports, Version Plan, and Source Code bundles.</p>
       </div>
     </div>
 
     <div class="dashboard-grid public-home-grid">
-      <article class="dashboard-card" data-public-home-business-insights>
-        <h3>Anti-fraud Reports</h3>
-        <p>Business Insights MIS workbooks and interactive visualizations.</p>
-        <a class="button button-primary" href="{{ url_for('business_insights_page', domain='anti-fraud') }}">Open Reports</a>
-      </article>
-      <article class="dashboard-card" data-public-home-version-plan>
-        <h3>Version Plan</h3>
-        <p>AF version bundles, pipeline, and Jira rows.</p>
-        <a class="button button-primary" href="{{ url_for('version_plan_page') }}">Open Version Plan</a>
-      </article>
-      <article class="dashboard-card" data-public-home-repo-download>
-        <h3>Repo Download</h3>
-        <p>Latest synced source code bundles per scope. Password required to download.</p>
-        <a class="button button-primary" href="{{ url_for('source_code_qa') }}">Open Repo Download</a>
+      <article class="dashboard-card" data-public-home-sign-in>
+        <h3>Sign In Required</h3>
+        <p>Approved @npt.sg, @monee.com, and @seamoney.com accounts can sign in with Google.</p>
+        <a class="button button-primary" href="{{ url_for('cloud_google_login') if cloud_auth_mode|default(false) else url_for('google_login') }}">Sign in with Google</a>
       </article>
     </div>
   </section>

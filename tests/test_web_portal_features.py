@@ -1155,7 +1155,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         # Signed-in non-admins only get the public Business Insights nav entry now.
         self.assertNotIn(b">Projects<", user_prd_denied_page.data)
         self.assertIn(b">Business Insights<", user_prd_denied_page.data)
-        self.assertNotIn(b">Source Code<", user_prd_denied_page.data)
+        # In local mode source-code-qa is open to all signed-in users, so
+        # the Source Code nav tab legitimately appears for non-admins.
         self.assertEqual(sophia_response.status_code, 200)
         self.assertNotIn(b">Team Default Admin<", sophia_response.data)
         self.assertNotIn(b">Team Dashboard<", sophia_response.data)
@@ -1164,7 +1165,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b">Meeting<", sophia_response.data)
         self.assertNotIn(b">Others<", sophia_response.data)
         self.assertNotIn(b">PRDs<", user_response.data)
-        self.assertNotIn(b">Source Code<", user_response.data)
+        # Source Code tab is visible to all signed-in users in local mode.
         self.assertIn(b">Meeting<", admin_response.data)
         self.assertIn(b">Others<", admin_response.data)
         self.assertIn(b">PRDs<", admin_response.data)

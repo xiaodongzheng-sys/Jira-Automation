@@ -113,7 +113,7 @@ class TeamPortalAccessTests(unittest.TestCase):
             os.environ,
             {
                 "FLASK_SECRET_KEY": "test-secret",
-                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg,monee.com,seamoney.com",
                 "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
             },
@@ -126,18 +126,15 @@ class TeamPortalAccessTests(unittest.TestCase):
                 response = client.get("/", follow_redirects=False)
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(b"Risk PM Workspace", response.data)
-                self.assertIn(b"data-public-home-business-insights", response.data)
-                self.assertIn(b"data-public-home-version-plan", response.data)
-                self.assertIn(b"data-public-home-repo-download", response.data)
-                self.assertIn(b"portal-footer-admin-link", response.data)
-                self.assertIn(b"Admin Sign In", response.data)
-                self.assertNotIn(b"Continue with Google", response.data)
-                self.assertNotIn(b"Sign in with Google", response.data)
+                self.assertIn(b"data-public-home-sign-in", response.data)
+                self.assertIn(b"Sign in with Google", response.data)
+                self.assertNotIn(b"Open Reports", response.data)
+                self.assertNotIn(b"Open Version Plan", response.data)
                 self.assertNotIn(b"session-bar", response.data)
                 soup = BeautifulSoup(response.get_data(as_text=True), "html.parser")
                 self.assertEqual(
                     [node.get_text(strip=True) for node in soup.select(".site-switcher-tab")],
-                    ["Repo Download", "Version Plan", "Business Insights"],
+                    [],
                 )
 
     def test_cloud_home_renders_public_home_for_anonymous_user(self):
@@ -145,7 +142,7 @@ class TeamPortalAccessTests(unittest.TestCase):
             os.environ,
             {
                 "FLASK_SECRET_KEY": "test-secret",
-                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg,monee.com,seamoney.com",
                 "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
@@ -167,25 +164,18 @@ class TeamPortalAccessTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertIn(b"Risk PM Workspace", response.data)
-            self.assertIn(b"data-public-home-business-insights", response.data)
-            self.assertIn(b"data-public-home-version-plan", response.data)
-            self.assertIn(b"data-public-home-repo-download", response.data)
-            self.assertIn(b"portal-footer-admin-link", response.data)
-            self.assertIn(b"Admin Sign In", response.data)
-            self.assertNotIn(b"Sign in with Google", response.data)
+            self.assertIn(b"data-public-home-sign-in", response.data)
+            self.assertIn(b"Sign in with Google", response.data)
             self.assertNotIn(b"Open Full Portal", response.data)
             self.assertIn(b"/cloud-static/style.css", response.data)
             self.assertNotIn(b"Checking Mac portal availability", response.data)
             self.assertNotIn(b"fetch('/healthz'", response.data)
             self.assertNotIn(b"session-bar", response.data)
-            # Anonymous visitors see exactly the three public surfaces in the nav.
-            self.assertIn(b"site-switcher", response.data)
-            self.assertIn(b"/business-insights?domain=anti-fraud", response.data)
-            self.assertIn(b"/source-code-qa", response.data)
+            # Anonymous visitors see no nav tabs (all pages require login).
             soup = BeautifulSoup(response.get_data(as_text=True), "html.parser")
             self.assertEqual(
                 [node.get_text(strip=True) for node in soup.select(".site-switcher-tab")],
-                ["Repo Download", "Version Plan", "Business Insights"],
+                [],
             )
 
     def test_cloud_home_shows_only_full_portal_when_full_portal_is_available(self):
@@ -220,12 +210,12 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertNotIn(b"Cloud Run", response.data)
             self.assertIn(b"site-switcher", response.data)
 
-    def test_cloud_home_blocks_non_admin_user_but_public_pages_stay_open(self):
+    def test_cloud_home_allows_non_admin_user_to_access_version_plan(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
                 "FLASK_SECRET_KEY": "test-secret",
-                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg,monee.com,seamoney.com",
                 "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
@@ -238,17 +228,11 @@ class TeamPortalAccessTests(unittest.TestCase):
 
             with app.test_client() as client:
                 self._login_non_admin(client, email="sophia.wangzj@npt.sg")
-                response = client.get("/", follow_redirects=False)
-                with client.session_transaction() as session:
-                    self.assertNotIn("google_profile", session)
-                    self.assertNotIn("google_credentials", session)
+                # Non-admin NPT users can now access Version Plan (login required,
+                # but allowlisted domain).
                 public_plan = client.get("/version-plan", follow_redirects=False)
                 public_api = client.get("/api/team-dashboard/version-plan/af")
 
-            # Any non-admin Google account is blocked from the signed-in home...
-            self.assertEqual(response.status_code, 302)
-            self.assertEqual(response.headers["Location"], "/access-denied")
-            # ...but the public read surfaces remain open (as for anonymous users).
             self.assertEqual(public_plan.status_code, 200)
             self.assertIn(b"data-version-plan-content", public_plan.data)
             self.assertEqual(public_api.status_code, 200)
@@ -319,13 +303,14 @@ class TeamPortalAccessTests(unittest.TestCase):
                 admin_default_response = client.get("/portal-home", follow_redirects=False)
                 admin_bpmis_response = client.get("/portal-home?workspace=bpmis", follow_redirects=False)
 
+        # Non-admin allowed users redirect to Version Plan (their default landing).
         self.assertEqual(default_response.status_code, 302)
-        self.assertEqual(default_response.headers["Location"], "/access-denied")
+        self.assertEqual(default_response.headers["Location"], "/version-plan")
         self.assertEqual(run_response.status_code, 302)
-        self.assertEqual(run_response.headers["Location"], "/access-denied")
+        self.assertEqual(run_response.headers["Location"], "/version-plan")
+        # BPMIS and Productization workspaces are admin-only.
         self.assertEqual(bpmis_response.status_code, 302)
         self.assertEqual(bpmis_response.headers["Location"], "/access-denied")
-        # Productization Upgrade Summary is admin-only now: non-admins are blocked.
         self.assertEqual(productization_response.status_code, 302)
         self.assertEqual(productization_response.headers["Location"], "/access-denied")
         self.assertEqual(admin_default_response.status_code, 302)
@@ -406,12 +391,12 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertEqual(portal_response.status_code, 302)
         self.assertIn(portal_response.headers["Location"], {"/", "/access-denied"})
 
-    def test_cloud_version_plan_page_is_public_and_renders_standalone(self):
+    def test_cloud_version_plan_page_requires_login_for_anonymous(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
                 "FLASK_SECRET_KEY": "test-secret",
-                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg,monee.com,seamoney.com",
                 "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
@@ -422,7 +407,28 @@ class TeamPortalAccessTests(unittest.TestCase):
             app.testing = True
 
             with app.test_client() as client:
-                # The Version Plan page is public now: anonymous visitors render it directly.
+                # Anonymous visitors are redirected to login.
+                response = client.get("/version-plan", follow_redirects=False)
+
+            self.assertEqual(response.status_code, 302)
+
+    def test_cloud_version_plan_page_renders_for_signed_in_user(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg,monee.com,seamoney.com",
+                "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_CLOUD_HOME_ENABLED": "true",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                self._login_admin(client)
                 response = client.get("/version-plan")
 
             self.assertEqual(response.status_code, 200)
@@ -430,8 +436,6 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertIn(b"data-version-plan-content", response.data)
             self.assertIn(b"/cloud-static/team_dashboard.js", response.data)
             self.assertNotIn(b"data-team-dashboard-tab=\"tasks\"", response.data)
-            soup = BeautifulSoup(response.get_data(as_text=True), "html.parser")
-            self.assertEqual([node.get_text(strip=True) for node in soup.select(".site-switcher-tab")], ["Repo Download", "Version Plan", "Business Insights"])
 
     def test_cloud_version_plan_page_renders_when_team_dashboard_config_unavailable_for_admin(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -932,7 +936,7 @@ class TeamPortalAccessTests(unittest.TestCase):
             os.environ,
             {
                 "FLASK_SECRET_KEY": "test-secret",
-                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg,monee.com,seamoney.com",
                 "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "SOURCE_CODE_QA_GITLAB_TOKEN": "secret-token",
@@ -947,16 +951,13 @@ class TeamPortalAccessTests(unittest.TestCase):
                     session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
                     session["google_credentials"] = {"token": "x", "scopes": []}
 
-                # Signed-in non-admins are blocked from the portal home and logged out.
+                # Signed-in non-admin allowed users redirect to Version Plan
+                # (not blocked from the portal anymore).
                 default_response = client.get("/", follow_redirects=False)
                 self.assertEqual(default_response.status_code, 302)
-                self.assertEqual(default_response.headers["Location"], "/access-denied")
-                with client.session_transaction() as session:
-                    self.assertNotIn("google_profile", session)
-                    self.assertNotIn("google_credentials", session)
+                self.assertEqual(default_response.headers["Location"], "/version-plan")
 
-                # Public surfaces stay open for a signed-in non-admin (they behave
-                # like anonymous visitors there).
+                # Allowed non-admin users can access Source Code QA (Repo Download view).
                 self._login_non_admin(client)
                 source_page = client.get("/source-code-qa", follow_redirects=False)
                 self.assertEqual(source_page.status_code, 200)
@@ -996,6 +997,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                         response = client.get(path, follow_redirects=False)
                         self.assertEqual(response.status_code, 302)
                         self.assertEqual(response.headers["Location"], "/access-denied")
+                # Admin-only POST endpoints reject signed-in non-admins with 403.
                 for method, path, payload in [
                     ("post", "/admin/team-dashboard/members", {"teams": {"AF": {"member_emails": ["teammate@npt.sg"]}}}),
                     ("post", "/admin/team-dashboard/monthly-report-template", {"template": "x"}),
@@ -1004,20 +1006,17 @@ class TeamPortalAccessTests(unittest.TestCase):
                     with self.subTest(method=method, path=path):
                         self._login_non_admin(client)
                         response = getattr(client, method)(path, json=payload)
-                        self.assertEqual(response.status_code, 302)
-                        self.assertEqual(response.headers["Location"], "/access-denied")
+                        self.assertEqual(response.status_code, 403)
+                        self.assertEqual(response.get_json()["status"], "error")
 
-                # Gated APIs reject signed-in non-admins with 403.
+                # Admin-only APIs reject signed-in non-admins with 403.
                 blocked_requests = [
-                    ("get", "/api/source-code-qa/config", None),
                     ("post", "/api/source-code-qa/config", {"pm_team": "AF", "country": "All", "repositories": []}),
                     ("get", "/api/source-code-qa/sessions", None),
                     ("post", "/api/source-code-qa/sessions", {"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge", "title": "Probe"}),
                     ("post", "/api/source-code-qa/sync", {"pm_team": "AF", "country": "All"}),
                     ("get", "/api/source-code-qa/runtime-evidence?pm_team=AF&country=SG", None),
                     ("post", "/api/source-code-qa/effort-assessment", {"pm_team": "AF", "country": "All", "requirement": "new flow"}),
-                    ("get", "/api/productization-upgrade-summary/versions?q=26Q2", None),
-                    ("get", "/api/productization-upgrade-summary/issues?version_id=88", None),
                     ("get", "/api/team-dashboard/config", None),
                     ("post", "/api/team-dashboard/version-plan/af/sync", {}),
                     ("post", "/api/team-dashboard/version-plan/af/cell", {}),
@@ -1178,18 +1177,18 @@ class TeamPortalAccessTests(unittest.TestCase):
                     ("get", "/source-code-qa", {200}),
                     ("get", "/prd-self-assessment", {302}),
                     ("get", "/prd-briefing/", {302}),
-                    ("get", "/api/source-code-qa/config", {403}),
+                    ("get", "/api/source-code-qa/config", {200}),
                     ("get", "/api/source-code-qa/sessions", {403}),
                     ("post", "/api/source-code-qa/sessions", {403}, {"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"}),
                     ("post", "/api/source-code-qa/query", {403}, {"pm_team": "AF", "country": "All", "question": "x", "llm_provider": "not-real"}),
                     ("post", "/api/source-code-qa/feedback", {403}, {"rating": "useful", "question": "x"}),
                     ("get", "/api/source-code-qa/attachments/missing", {403}),
                     ("post", "/api/source-code-qa/attachments", {403}),
-                    ("get", "/api/productization-upgrade-summary/versions?q=26Q2", {403}),
-                    ("get", "/api/productization-upgrade-summary/issues?version_id=88", {403}),
-                    ("get", "/api/productization-upgrade-summary/llm-descriptions?version_id=88", {403}),
-                    ("post", "/api/jobs/sync-bpmis-projects", {403}),
-                    ("get", "/api/jobs/missing", {403}),
+                    ("get", "/api/productization-upgrade-summary/versions?q=26Q2", {200}),
+                    ("get", "/api/productization-upgrade-summary/issues?version_id=88", {200}),
+                    ("get", "/api/productization-upgrade-summary/llm-descriptions?version_id=88", {200}),
+                    ("post", "/api/jobs/sync-bpmis-projects", {200}),
+                    ("get", "/api/jobs/missing", {404}),
                     ("get", "/team-dashboard?tab=version-plan", {302}),
                     ("get", "/reports", {302}),
                     ("get", "/business-insights", {200}),
@@ -1203,7 +1202,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     ("post", "/api/team-dashboard/version-plan/af/rows", {403}, {"scope": "pipeline", "action": "add"}),
                     ("post", "/api/team-dashboard/key-projects", {403}, {}),
                     ("get", "/api/team-dashboard/tasks", {403}),
-                    ("post", "/admin/team-dashboard/members", {302}, {}),
+                    ("post", "/admin/team-dashboard/members", {403}, {}),
                     ("get", "/api/meeting-recorder/diagnostics", {403}),
                     ("get", "/api/meeting-recorder/process-jobs/missing", {403}),
                     ("post", "/api/meeting-translation/start", {403}, {"target_language": "en"}),
@@ -1219,8 +1218,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                         method, path, expected_statuses = item[:3]
                         payload = item[3] if len(item) > 3 else None
                         with self.subTest(method=method, path=path):
-                            # Blocked sessions are cleared on each gated request,
-                            # so sign the non-admin in again before every probe.
+                            # Admin-only APIs deny non-admins; re-login is harmless.
                             self._login_non_admin(client)
                             caller = getattr(client, method)
                             response = caller(path, json=payload) if payload is not None else caller(path)
@@ -1233,7 +1231,7 @@ class TeamPortalAccessTests(unittest.TestCase):
             os.environ,
             {
                 "FLASK_SECRET_KEY": "test-secret",
-                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg,monee.com,seamoney.com",
                 "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "SOURCE_CODE_QA_GITLAB_TOKEN": "secret-token",
@@ -1253,14 +1251,12 @@ class TeamPortalAccessTests(unittest.TestCase):
                 version_plan_response = client.get("/version-plan", follow_redirects=False)
                 denied_response = client.get("/access-denied")
 
-        # Non-admins are blocked from the gated portal pages...
-        self.assertEqual(index_response.status_code, 302)
-        self.assertEqual(index_response.headers["Location"], "/access-denied")
+        # Non-admins are blocked from admin-only portal pages...
         self.assertEqual(prd_response.status_code, 302)
         self.assertEqual(prd_response.headers["Location"], "/access-denied")
         self.assertEqual(team_dashboard_response.status_code, 302)
         self.assertEqual(team_dashboard_response.headers["Location"], "/access-denied")
-        # ...while public pages still render.
+        # ...while allowed pages render for signed-in non-admin users.
         self.assertEqual(source_response.status_code, 200)
         self.assertEqual(version_plan_response.status_code, 200)
         self.assertEqual(denied_response.status_code, 403)
@@ -1376,7 +1372,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     self.assertNotIn("google_profile", session)
                     self.assertNotIn("google_credentials", session)
 
-    def test_allowed_google_domain_is_blocked_from_index(self):
+    def test_allowed_google_domain_user_is_not_blocked_from_index(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -1394,14 +1390,14 @@ class TeamPortalAccessTests(unittest.TestCase):
                     session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
                     session["google_credentials"] = {"token": "x"}
 
-                # Only the admin can sign in now: a same-domain colleague is
-                # blocked and logged out.
+                # Allowlisted domain users are no longer blocked from the portal.
+                # The index page renders (with productization tab as default for
+                # non-admins), and the session is preserved.
                 response = client.get("/?workspace=run", follow_redirects=False)
-                self.assertEqual(response.status_code, 302)
-                self.assertEqual(response.headers["Location"], "/access-denied")
+                self.assertEqual(response.status_code, 200)
                 with client.session_transaction() as session:
-                    self.assertNotIn("google_profile", session)
-                    self.assertNotIn("google_credentials", session)
+                    self.assertIn("google_profile", session)
+                    self.assertIn("google_credentials", session)
 
     def test_anonymous_login_gate_response_is_not_marked_no_store(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

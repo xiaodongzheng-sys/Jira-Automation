@@ -740,38 +740,14 @@ def create_app() -> Flask:
             }
 
         if _site_requires_google_login(settings) and not _google_session_is_connected():
-            # Anonymous visitors get the three public surfaces; everything else
-            # stays admin-only behind the footer Admin Sign In link.
+            # Anonymous visitors see no nav tabs; all surfaces require login.
             return {
-                "site_tabs": [
-                    {
-                        "label": "Repo Download",
-                        "href": url_for("source_code_qa"),
-                        "active": request.path.startswith("/source-code-qa"),
-                    },
-                    {
-                        "label": "Version Plan",
-                        "href": url_for("version_plan_page"),
-                        "active": current_endpoint == "version_plan_page",
-                    },
-                    _nav_group(
-                        "Business Insights",
-                        url_for("business_insights_page", domain="anti-fraud"),
-                        [
-                            {
-                                "label": "Anti-fraud",
-                                "href": url_for("business_insights_page", domain="anti-fraud"),
-                                "active": current_endpoint == "business_insights_page",
-                            }
-                        ],
-                        render_subtabs=False,
-                    ),
-                ],
+                "site_tabs": [],
                 "site_requires_google_login": True,
                 "can_access_prd_briefing": False,
                 "can_access_prd_self_assessment": False,
                 "can_access_meeting_recorder": False,
-                "can_access_source_code_qa": True,
+                "can_access_source_code_qa": False,
                 "can_manage_source_code_qa": False,
                 "asset_revision": _current_release_revision(),
                 "portal_stage": str(settings.team_portal_stage or "").strip().lower(),
@@ -930,22 +906,11 @@ def create_app() -> Flask:
             "cloud_static",
             "access_denied",
             "prd_briefing.image_proxy",
-            # Business Insights read surface is public (Anti-fraud only for
-            # anonymous/non-NPT visitors; full domains for NPT users). Per-domain
-            # filtering happens inside these handlers. Refresh/ingest stay gated.
-            "business_insights_page",
-            "business_insights_reports_api",
-            "business_insights_report_sql",
-            "business_insights_artifact",
-            "business_insights_visualization",
+            # Business Insights download-unlock endpoint stays exempt so the
+            # password flow works before the session is fully established.
             "business_insights_download_unlock",
-            # Public read surface: Source Code repo downloads (password-gated at
-            # the endpoint) and the read-only Version Plan view.
-            "source_code_qa",
+            # Source Code repo downloads are password-gated at the endpoint.
             "source_code_qa_repo_download_api",
-            "version_plan_page",
-            "team_dashboard_version_plan_af",
-            "team_dashboard_version_plan_sync_status",
         }:
             return None
         login_gate = _require_google_login(
@@ -1048,7 +1013,7 @@ def create_app() -> Flask:
                 page_title="Risk PM Workspace",
                 user_identity=user_identity,
                 signed_in=True,
-                can_access_version_plan=_can_access_team_dashboard_version_plan(user_identity),
+                can_access_version_plan=_can_access_team_dashboard_version_plan(user_identity, settings),
                 version_plan_url=url_for("version_plan_page"),
                 full_portal_url=full_portal_url,
                 full_portal_available=full_portal_available,
@@ -2044,16 +2009,38 @@ def _is_portal_admin(email: str | None = None) -> bool:
     return current_email == PORTAL_ADMIN_EMAIL
 
 
-def _is_portal_user(email: str | None = None) -> bool:
-    # The portal is public-read; the only signed-in user is the admin. Everyone
-    # else (NPT colleagues included) browses the public pages anonymously.
-    return _is_portal_admin(email)
+def _is_allowed_portal_user(email: str | None = None, settings: Settings | None = None) -> bool:
+    """True if the email belongs to the admin, an allowlisted address, or an
+    allowlisted domain.  Used to gate login for the three restricted pages."""
+    current_email = str(email or _current_google_email() or "").strip().lower()
+    if not current_email:
+        return False
+    if current_email == PORTAL_ADMIN_EMAIL:
+        return True
+    if current_email == PORTAL_TEST_USER_EMAIL:
+        return True
+    if settings is not None:
+        if current_email in {e.lower() for e in settings.team_allowed_emails}:
+            return True
+        domain = current_email.rsplit("@", 1)[-1] if "@" in current_email else ""
+        if domain and domain in {d.lower() for d in settings.team_allowed_email_domains}:
+            return True
+    return False
+
+
+def _is_portal_user(email: str | None = None, settings: Settings | None = None) -> bool:
+    # Allowed portal users (admin + allowlisted emails/domains).  Anonymous
+    # visitors are never portal users.
+    return _is_allowed_portal_user(email, settings)
 
 
 def _restricted_to_anti_fraud_business_insights(settings: Settings | None = None, email: str | None = None) -> bool:
-    # Anyone who is not the admin (anonymous public visitors) sees only the
-    # public Anti-fraud Business Insights domain.
-    return not _is_portal_user(email)
+    # Non-admin allowed users (monee/seamoney/test) see only Anti-fraud.
+    # Admin sees all domains.  Anonymous visitors are handled before this
+    # (they are redirected to login).
+    if _is_portal_admin(email):
+        return False
+    return _is_allowed_portal_user(email, settings)
 
 
 def _current_google_user_is_blocked(settings: Settings) -> bool:
@@ -2062,7 +2049,7 @@ def _current_google_user_is_blocked(settings: Settings) -> bool:
     email = _current_google_email()
     if not email:
         return False
-    return not _is_portal_admin(email)
+    return not _is_allowed_portal_user(email, settings)
 
 
 def _shared_portal_enabled(settings: Settings) -> bool:
@@ -2144,7 +2131,7 @@ def _default_portal_landing_target(settings: Settings, user_identity: dict[str, 
     # it (portal admins and AF/Risk team). Users without access fall through to
     # the normal portal home rather than a forced access-denied redirect.
     identity = user_identity if user_identity is not None else _get_user_identity(settings)
-    if _can_access_team_dashboard_version_plan(identity):
+    if _can_access_team_dashboard_version_plan(identity, settings):
         return url_for("version_plan_page")
     return ""
 
@@ -2647,8 +2634,10 @@ def _require_team_dashboard_access(settings: Settings, *, api: bool = False):
 
 
 def _require_team_dashboard_version_plan_access(settings: Settings, *, api: bool = False):
-    # The Version Plan view (page + read APIs) is public. Mutating endpoints
-    # (Jira sync, cell/row edits) enforce their own admin checks.
+    if _shared_portal_enabled(settings):
+        login_gate = _require_google_login(settings, api=api)
+        if login_gate is not None:
+            return login_gate
     return None
 
 
@@ -3000,15 +2989,18 @@ def _require_team_dashboard_monthly_report_access(settings: Settings, *, api: bo
 
 
 def _require_business_insights_access(settings: Settings, *, api: bool = False):
-    # Business Insights is publicly viewable without signing in. Non-NPT visitors
-    # (anonymous or Business-Insights-only guests) are limited to the Anti-fraud
-    # domain by per-domain filtering in the routes; full NPT users see all domains.
+    if _shared_portal_enabled(settings):
+        login_gate = _require_google_login(settings, api=api)
+        if login_gate is not None:
+            return login_gate
     return None
 
 
 def _can_access_business_insights(settings: Settings) -> bool:
-    # Public surface: anyone (including anonymous) may view Business Insights.
-    return True
+    # Business Insights requires login when the shared portal is enabled.
+    if not _shared_portal_enabled(settings):
+        return True
+    return _is_portal_user(settings=settings)
 
 
 # Password gate for downloading Business Insights workbooks / opening visualizations.
@@ -3127,8 +3119,8 @@ def _can_access_bpmis_automation_tool(user_identity: dict[str, str | None]) -> b
 
 
 def _can_access_productization_upgrade_summary(user_identity: dict[str, str | None]) -> bool:
-    # Full NPT portal users only; Business-Insights-only guests must not see BPMIS surfaces.
-    return _is_portal_user(str(user_identity.get("email") or ""))
+    # Admin only; Business-Insights-only guests must not see BPMIS surfaces.
+    return _is_portal_admin(str(user_identity.get("email") or ""))
 
 
 def _can_access_team_dashboard(user_identity: dict[str, str | None]) -> bool:
@@ -3141,10 +3133,12 @@ def _can_manage_team_dashboard(user_identity: dict[str, str | None]) -> bool:
     return _is_portal_admin(str(user_identity.get("email") or ""))
 
 
-def _can_access_team_dashboard_version_plan(user_identity: dict[str, str | None]) -> bool:
-    # The Version Plan view is public (read-only for visitors; edits and Jira
-    # sync are gated separately to admins).
-    return True
+def _can_access_team_dashboard_version_plan(user_identity: dict[str, str | None], settings: Settings | None = None) -> bool:
+    # Version Plan requires login when the shared portal is enabled.
+    if settings is not None and not _shared_portal_enabled(settings):
+        return True
+    email = str(user_identity.get("email") or "").strip().lower()
+    return bool(email) and _is_portal_user(email, settings)
 
 
 def _can_access_team_dashboard_monthly_report(user_identity: dict[str, str | None]) -> bool:

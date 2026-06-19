@@ -7,7 +7,7 @@ Run on the Mac (the data producer). Uploads:
 
 Usage:
   ./scripts/project_python.sh scripts/publish_public_artifacts.py [--bucket NAME]
-  (defaults to TEAM_PORTAL_PUBLIC_GCS_PUBLISH_BUCKET from the environment/.env)
+  (defaults to TEAM_PORTAL_PUBLIC_GCS_PUBLISH_BUCKET or CLOUD_RUN_PUBLIC_GCS_BUCKET from the environment/.env)
 """
 from __future__ import annotations
 
@@ -21,7 +21,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from bpmis_jira_tool.config import Settings  # noqa: E402
 from bpmis_jira_tool.public_artifacts_gcs import (  # noqa: E402
+    CLOUD_RUN_PUBLIC_GCS_BUCKET_ENV,
     PUBLIC_GCS_PUBLISH_BUCKET_ENV,
+    public_gcs_publish_bucket,
     publish_business_insights_dir,
     publish_repo_download_archive,
 )
@@ -40,12 +42,16 @@ def main() -> int:
 
     if args.bucket:
         os.environ[PUBLIC_GCS_PUBLISH_BUCKET_ENV] = args.bucket
-    bucket = os.environ.get(PUBLIC_GCS_PUBLISH_BUCKET_ENV, "").strip()
-    if not bucket:
-        print(f"Set {PUBLIC_GCS_PUBLISH_BUCKET_ENV} (or pass --bucket).", file=sys.stderr)
-        return 2
 
     settings = Settings.from_env()
+    bucket = public_gcs_publish_bucket()
+    if not bucket:
+        print(
+            f"Set {PUBLIC_GCS_PUBLISH_BUCKET_ENV} or {CLOUD_RUN_PUBLIC_GCS_BUCKET_ENV} (or pass --bucket).",
+            file=sys.stderr,
+        )
+        return 2
+
     data_root = Path(settings.team_portal_data_dir).expanduser()
 
     uploaded = publish_business_insights_dir(data_root / "business_insights")

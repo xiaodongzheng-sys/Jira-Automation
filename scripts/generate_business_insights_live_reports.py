@@ -4197,10 +4197,12 @@ def main() -> int:
     if args.refresh_visualizations:
         selected_report_ids = args.report_id if args.report_id else None
         refresh_existing_visualizations(portal_data_dir, report_ids=selected_report_ids)
+        _publish_to_public_gcs(portal_data_dir)
         return 0
     if args.normalize_product_labels:
         selected_report_ids = args.report_id if args.report_id else None
         normalize_existing_product_labels(portal_data_dir, report_ids=selected_report_ids)
+        _publish_to_public_gcs(portal_data_dir)
         return 0
 
     token = load_data_admin_token(chrome_profile=args.chrome_profile)

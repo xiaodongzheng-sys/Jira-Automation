@@ -1,7 +1,11 @@
 """Source Code QA Flask route registration."""
 from __future__ import annotations
 
+import shutil
+import tempfile
 from urllib.parse import urlsplit
+
+from flask import after_this_request, redirect
 
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.source_code_qa_patterns import PLACEHOLDER_HOST_PATTERN
@@ -85,6 +89,26 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
             scope["meta"] = " · ".join(parts)
         return scopes
 
+    def _download_local_agent_archive(response, *, fallback_name: str):
+        content_type = response.headers.get("Content-Type") or "application/zip"
+        disposition = response.headers.get("Content-Disposition") or ""
+        match = re.search(r'filename="?([^";]+)"?', disposition)
+        if match:
+            fallback_name = match.group(1)
+        temp_dir = tempfile.mkdtemp(prefix="source-code-local-agent-download-")
+        temp_path = None
+        try:
+            from pathlib import Path
+
+            temp_path = Path(temp_dir) / fallback_name
+            with temp_path.open("wb") as handle:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        handle.write(chunk)
+        finally:
+            response.close()
+        return temp_dir, temp_path, content_type, fallback_name
+
     @app.before_request
     def _refresh_source_code_qa_route_module_globals():
         path = str(getattr(request, "path", "") or "")
@@ -93,8 +117,11 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
 
     @app.get("/source-code-qa")
     def source_code_qa():
-        # Public page: anonymous visitors see the Repo Download view only (the
-        # chat / effort / admin tabs render solely for the signed-in admin).
+        # Login required: only allowed portal users (admin + allowlisted
+        # emails/domains) may access Source Code QA.
+        access_gate = _require_source_code_qa_access(settings)
+        if access_gate is not None:
+            return access_gate
         user_identity = _get_user_identity(settings)
         service = _build_source_code_qa_service()
         return render_template(
@@ -123,14 +150,52 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
             return jsonify({"status": "error", "message": "Password required."}), HTTPStatus.UNAUTHORIZED
         try:
             scope = resolve_repo_download_scope(scope_key)
+            if _local_agent_source_code_qa_enabled(settings):
+                response = _build_local_agent_client(settings).source_code_qa_repo_download(scope["scope_key"])
+                temp_dir, temp_path, content_type, download_name = _download_local_agent_archive(
+                    response,
+                    fallback_name=scope["filename"],
+                )
+
+                @after_this_request
+                def _cleanup_local_agent_temp(response_obj):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    return response_obj
+
+                return send_file(
+                    temp_path,
+                    mimetype=content_type,
+                    download_name=download_name,
+                    as_attachment=True,
+                )
             if public_gcs_read_bucket():
-                # Cloud Run: serve the bundle published to GCS so downloads work
-                # while the Mac host is offline.
-                fetched = fetch_repo_download_archive(scope["filename"])
-                if fetched is not None:
-                    metadata, content = fetched
+                # Cloud Run: hydrate the bundle from GCS onto a temporary file
+                # only as a fallback. The preferred path is to redirect the
+                # browser to a short-lived signed GCS URL so larger archives do
+                # not travel through the Cloud Run response path at all.
+                from pathlib import Path
+
+                from bpmis_jira_tool.public_artifacts_gcs import (
+                    fetch_repo_download_archive_to_file,
+                    fetch_repo_download_signed_url,
+                )
+
+                signed = fetch_repo_download_signed_url(scope["filename"])
+                if signed is not None:
+                    _, signed_url = signed
+                    return redirect(signed_url, code=302)
+
+                temp_dir = tempfile.mkdtemp(prefix="source-code-repo-download-")
+                temp_path = Path(temp_dir) / scope["filename"]
+                metadata = fetch_repo_download_archive_to_file(scope["filename"], temp_path)
+                if metadata is not None:
+                    @after_this_request
+                    def _cleanup_repo_download_temp(response):
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                        return response
+
                     return send_file(
-                        io.BytesIO(content),
+                        temp_path,
                         mimetype="application/zip",
                         download_name=str(metadata.get("filename") or scope["filename"]),
                         as_attachment=True,
@@ -139,20 +204,6 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
                     "status": "error",
                     "message": "This source bundle has not been published yet. Ask the admin to run a sync.",
                 }), HTTPStatus.NOT_FOUND
-            if _local_agent_source_code_qa_enabled(settings):
-                response = _build_local_agent_client(settings).source_code_qa_repo_download(scope["scope_key"])
-                content_type = response.headers.get("Content-Type") or "application/zip"
-                download_name = scope["filename"]
-                disposition = response.headers.get("Content-Disposition") or ""
-                match = re.search(r'filename="?([^";]+)"?', disposition)
-                if match:
-                    download_name = match.group(1)
-                return send_file(
-                    io.BytesIO(response.content),
-                    mimetype=content_type,
-                    download_name=download_name,
-                    as_attachment=True,
-                )
             metadata, content = build_repo_download_zip(_build_source_code_qa_service(), scope["scope_key"])
             return send_file(
                 io.BytesIO(content),

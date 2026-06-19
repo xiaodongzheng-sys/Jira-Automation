@@ -28,9 +28,11 @@ logger = logging.getLogger(__name__)
 
 PUBLIC_GCS_READ_BUCKET_ENV = "TEAM_PORTAL_PUBLIC_GCS_BUCKET"
 PUBLIC_GCS_PUBLISH_BUCKET_ENV = "TEAM_PORTAL_PUBLIC_GCS_PUBLISH_BUCKET"
+CLOUD_RUN_PUBLIC_GCS_BUCKET_ENV = "CLOUD_RUN_PUBLIC_GCS_BUCKET"
 # gcloud account used for CLI-fallback publishing on hosts without Application
 # Default Credentials (the Mac publishes via the gcloud credential store).
 PUBLIC_GCS_PUBLISH_ACCOUNT_ENV = "TEAM_PORTAL_PUBLIC_GCS_PUBLISH_ACCOUNT"
+CLOUD_RUN_DEPLOY_ACCOUNT_ENV = "CLOUD_RUN_DEPLOY_ACCOUNT"
 # How long a hydrated copy of reports.json is trusted before re-checking GCS.
 PUBLIC_GCS_METADATA_TTL_SECONDS = 60.0
 
@@ -43,7 +45,11 @@ def public_gcs_read_bucket() -> str:
 
 
 def public_gcs_publish_bucket() -> str:
-    return str(os.environ.get(PUBLIC_GCS_PUBLISH_BUCKET_ENV) or "").strip()
+    return str(
+        os.environ.get(PUBLIC_GCS_PUBLISH_BUCKET_ENV)
+        or os.environ.get(CLOUD_RUN_PUBLIC_GCS_BUCKET_ENV)
+        or ""
+    ).strip()
 
 
 def _storage_client() -> Any:
@@ -109,7 +115,11 @@ def _gcloud_upload(local_path: Path, bucket_name: str, remote_path: str) -> bool
     if not gcloud:
         return False
     command = [gcloud, "storage", "cp", str(local_path), f"gs://{bucket_name}/{remote_path}"]
-    account = str(os.environ.get(PUBLIC_GCS_PUBLISH_ACCOUNT_ENV) or "").strip()
+    account = str(
+        os.environ.get(PUBLIC_GCS_PUBLISH_ACCOUNT_ENV)
+        or os.environ.get(CLOUD_RUN_DEPLOY_ACCOUNT_ENV)
+        or ""
+    ).strip()
     if account:
         command += ["--account", account]
     try:
@@ -124,6 +134,8 @@ def _gcloud_upload(local_path: Path, bucket_name: str, remote_path: str) -> bool
 
 
 def gcs_upload_file(bucket_name: str, local_path: Path, remote_path: str) -> bool:
+    if str(os.environ.get(PUBLIC_GCS_PUBLISH_ACCOUNT_ENV) or os.environ.get(CLOUD_RUN_DEPLOY_ACCOUNT_ENV) or "").strip():
+        return _gcloud_upload(Path(local_path), bucket_name, remote_path)
     try:
         blob = _bucket(bucket_name).blob(remote_path)
         blob.upload_from_filename(str(local_path))
@@ -222,6 +234,58 @@ def fetch_repo_download_archive(filename: str) -> tuple[dict[str, Any], bytes] |
     return metadata, content
 
 
+def fetch_repo_download_archive_to_file(filename: str, local_path: Path) -> dict[str, Any] | None:
+    """Hydrate a repo source bundle from GCS onto disk and return its metadata.
+
+    This avoids buffering larger zip payloads in-process before ``send_file``.
+    Returns None when the bucket is not configured or the blob is unavailable.
+    """
+    bucket_name = public_gcs_read_bucket()
+    if not bucket_name:
+        return None
+    if not gcs_fetch_to_file(bucket_name, f"repo-downloads/{filename}", Path(local_path)):
+        return None
+    metadata: dict[str, Any] = {"filename": filename}
+    metadata_bytes = gcs_read_bytes(bucket_name, f"repo-downloads/{filename}.json")
+    if metadata_bytes:
+        try:
+            parsed = json.loads(metadata_bytes.decode("utf-8"))
+            if isinstance(parsed, dict):
+                metadata.update(parsed)
+        except (ValueError, UnicodeDecodeError):
+            pass
+    return metadata
+
+
+def fetch_repo_download_signed_url(filename: str, *, expiration_seconds: int = 900) -> tuple[dict[str, Any], str] | None:
+    """Return metadata plus a temporary signed URL for one repo bundle.
+
+    The public portal uses this to hand large zip downloads off to GCS instead
+    of proxying tens of megabytes through Cloud Run.
+    """
+    bucket_name = public_gcs_read_bucket()
+    if not bucket_name:
+        return None
+    try:
+        blob = _bucket(bucket_name).blob(f"repo-downloads/{filename}")
+        if not blob.exists():
+            return None
+        url = blob.generate_signed_url(version="v4", expiration=expiration_seconds, method="GET")
+    except Exception:
+        logger.warning("Could not generate signed URL for gs://%s/repo-downloads/%s", bucket_name, filename, exc_info=True)
+        return None
+    metadata: dict[str, Any] = {"filename": filename}
+    metadata_bytes = gcs_read_bytes(bucket_name, f"repo-downloads/{filename}.json")
+    if metadata_bytes:
+        try:
+            parsed = json.loads(metadata_bytes.decode("utf-8"))
+            if isinstance(parsed, dict):
+                metadata.update(parsed)
+        except (ValueError, UnicodeDecodeError):
+            pass
+    return metadata, url
+
+
 def publish_business_insights_dir(root_dir: Path) -> int:
     """Upload reports.json plus all current artifacts (Mac side). Returns file count."""
     bucket_name = public_gcs_publish_bucket()
@@ -230,8 +294,15 @@ def publish_business_insights_dir(root_dir: Path) -> int:
     root_dir = Path(root_dir)
     uploaded = 0
     metadata_path = root_dir / "reports.json"
-    if metadata_path.exists() and gcs_upload_file(bucket_name, metadata_path, "business_insights/reports.json"):
-        uploaded += 1
+    if metadata_path.exists():
+        if gcs_upload_file(bucket_name, metadata_path, "business_insights/reports.json"):
+            uploaded += 1
+        else:
+            logger.warning(
+                "Skipping Business Insights artifact publish because reports.json could not be uploaded to gs://%s",
+                bucket_name,
+            )
+            return uploaded
     artifacts_dir = root_dir / "artifacts"
     if artifacts_dir.is_dir():
         for path in sorted(artifacts_dir.iterdir()):
@@ -262,6 +333,9 @@ def hydrate_business_insights_artifact(root_dir: Path, filename: str) -> bool:
     if not bucket_name or not filename:
         return False
     local_path = Path(root_dir) / "artifacts" / filename
-    if local_path.exists():
-        return True
-    return gcs_fetch_to_file(bucket_name, f"business_insights/artifacts/{filename}", local_path)
+    return gcs_fetch_to_file(
+        bucket_name,
+        f"business_insights/artifacts/{filename}",
+        local_path,
+        max_age_seconds=PUBLIC_GCS_METADATA_TTL_SECONDS,
+    )

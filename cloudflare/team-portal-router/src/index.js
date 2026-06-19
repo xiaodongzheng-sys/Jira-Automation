@@ -18,10 +18,11 @@ const CLOUD_PATH_PATTERNS = [
   // Version Plan: public read view, Firestore-backed on Cloud Run.
   /^\/version-plan(?:\/.*)?$/,
   /^\/api\/team-dashboard\/version-plan(?:\/.*)?$/,
-  // Source Code Repo Download: public page + GCS-backed bundle downloads.
+  // Source Code Repo Download: keep the public landing page on Cloud Run, but
+  // send the actual bundle download API to the Mac-backed origin where the
+  // local-agent repo zip path is already verified for large archives.
   // All other /api/source-code-qa/* (admin chat/config/sync) stay on the Mac.
   /^\/source-code-qa\/?$/,
-  /^\/api\/source-code-qa\/repo-downloads\/.*/,
   /^\/cloud-auth(?:\/.*)?$/,
   /^\/cloud-static(?:\/.*)?$/,
 ];

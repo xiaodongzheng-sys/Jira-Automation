@@ -51,7 +51,9 @@ def _get_source_code_qa_runtime_evidence_store():
 
 
 def _can_access_source_code_qa(settings: Settings) -> bool:
-    return _is_portal_user()
+    if not _shared_portal_enabled(settings):
+        return True
+    return _is_portal_user(settings=settings)
 
 
 def _can_manage_source_code_qa(settings: Settings) -> bool:
@@ -443,9 +445,10 @@ def _source_code_qa_release_gate_payload(settings: Settings) -> dict[str, Any]:
 
 
 def _require_source_code_qa_access(settings: Settings, *, api: bool = False):
-    login_gate = _require_google_login(settings, api=api)
-    if login_gate is not None:
-        return login_gate
+    if _shared_portal_enabled(settings):
+        login_gate = _require_google_login(settings, api=api)
+        if login_gate is not None:
+            return login_gate
     message = "Source Code Q&A is restricted to signed-in NPT users."
     if not _can_access_source_code_qa(settings):
         if api:

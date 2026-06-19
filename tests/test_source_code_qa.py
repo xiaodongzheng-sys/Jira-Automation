@@ -94,7 +94,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             {
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": self.temp_dir.name,
-                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg,monee.com,seamoney.com",
                 "SOURCE_CODE_QA_GITLAB_TOKEN": "secret-token",
             },
             clear=False,
@@ -131,7 +131,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         )
         return repo_path
 
-    def test_npt_user_gets_public_repo_download_page_but_blocked_apis(self):
+    def test_npt_user_gets_repo_download_page_but_blocked_chat_apis(self):
         with self.app.test_client() as client:
             self._login(client, "teammate@npt.sg")
             default_response = client.get("/", follow_redirects=False)
@@ -141,12 +141,10 @@ class SourceCodeQARouteTests(unittest.TestCase):
             self._login(client, "teammate@npt.sg")
             sessions_response = client.get("/api/source-code-qa/sessions")
 
-        # Non-admin NPT users are blocked from the signed-in home but still get
-        # the public Repo Download page; the config/session APIs are admin-only.
-        self.assertEqual(default_response.status_code, 302)
-        self.assertEqual(default_response.headers["Location"], "/access-denied")
+        # Non-admin NPT users are allowed to access Source Code QA (Repo Download
+        # view) and the config API; chat/session APIs stay admin-only.
         self.assertEqual(page_response.status_code, 200)
-        self.assertEqual(api_response.status_code, 403)
+        self.assertEqual(api_response.status_code, 200)
         self.assertEqual(sessions_response.status_code, 403)
         page_html = page_response.get_data(as_text=True)
         self.assertIn("Source Code Repo Download", page_html)
@@ -209,7 +207,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         )
         self.assertLess(html.index("data-source-attachment-upload"), html.index("data-source-query"))
 
-    def test_non_npt_user_gets_public_download_page_but_blocked_api(self):
+    def test_non_allowed_user_is_blocked_from_source_code_qa(self):
         with self.app.test_client() as client:
             with client.session_transaction() as session:
                 session["google_profile"] = {"email": "teammate@example.com", "name": "External User"}
@@ -217,10 +215,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
             page_response = client.get("/source-code-qa", follow_redirects=False)
             api_response = client.post("/api/source-code-qa/query", json={"pm_team": "AF", "country": "All", "question": "test"})
 
-        # The page is public (Repo Download view only); the chat API stays blocked.
-        self.assertEqual(page_response.status_code, 200)
-        self.assertIn(b"Source Code Repo Download", page_response.data)
-        self.assertNotIn(b'data-source-view-tab="chat"', page_response.data)
+        # External (non-allowlisted) users are blocked from Source Code QA.
+        self.assertEqual(page_response.status_code, 302)
         self.assertEqual(api_response.status_code, 403)
 
     def test_owner_sees_admin_controls_but_teammate_does_not(self):
@@ -284,6 +280,72 @@ class SourceCodeQARouteTests(unittest.TestCase):
             self.assertIn("manifest.json", names)
             self.assertIn("Portal-Repo/README.md", names)
             self.assertNotIn("Portal-Repo/.git/config", names)
+
+    def test_repo_download_cloud_gcs_branch_redirects_to_signed_url(self):
+        with self.app.test_client() as client, patch.dict(
+            os.environ,
+            {
+                "BUSINESS_INSIGHTS_DOWNLOAD_PASSWORD": "test-bi-pass",
+                "TEAM_PORTAL_PUBLIC_GCS_BUCKET": "test-bucket",
+            },
+            clear=False,
+        ), patch(
+            "bpmis_jira_tool.public_artifacts_gcs.fetch_repo_download_signed_url",
+            return_value=({"filename": "source-code-repos-AF-All.zip"}, "https://signed.example.com/af-all.zip"),
+        ):
+            unlock = client.post("/api/business-insights/download-unlock", json={"password": "test-bi-pass"})
+            download = client.get("/api/source-code-qa/repo-downloads/AF:All", follow_redirects=False)
+
+        self.assertEqual(unlock.status_code, 200)
+        self.assertEqual(download.status_code, 302)
+        self.assertEqual(download.headers["Location"], "https://signed.example.com/af-all.zip")
+
+    def test_repo_download_prefers_local_agent_before_gcs(self):
+        class _FakeStreamingResponse:
+            def __init__(self):
+                self.headers = {
+                    "Content-Type": "application/zip",
+                    "Content-Disposition": "attachment; filename=source-code-repos-AF-All.zip",
+                    "Content-Length": "9",
+                }
+                self.closed = False
+
+            def iter_content(self, chunk_size=0):
+                yield b"zip-bytes"
+
+            def close(self):
+                self.closed = True
+
+        fake_response = _FakeStreamingResponse()
+        fake_client = SimpleNamespace(source_code_qa_repo_download=lambda scope_key: fake_response)
+        settings = self.app.config["SETTINGS"]
+        object.__setattr__(settings, "local_agent_mode", "enabled")
+        object.__setattr__(settings, "local_agent_base_url", "https://agent.example.com")
+        object.__setattr__(settings, "local_agent_hmac_secret", "test-secret")
+        object.__setattr__(settings, "local_agent_source_code_qa_enabled", True)
+        with self.app.test_client() as client, patch.dict(
+            os.environ,
+            {
+                "BUSINESS_INSIGHTS_DOWNLOAD_PASSWORD": "test-bi-pass",
+                "TEAM_PORTAL_PUBLIC_GCS_BUCKET": "test-bucket",
+            },
+            clear=False,
+        ), patch(
+            "bpmis_jira_tool.web._build_local_agent_client",
+            return_value=fake_client,
+        ), patch(
+            "bpmis_jira_tool.web.public_gcs_read_bucket",
+            side_effect=AssertionError("GCS should not be consulted when local-agent download is available."),
+        ):
+            unlock = client.post("/api/business-insights/download-unlock", json={"password": "test-bi-pass"})
+            download = client.get("/api/source-code-qa/repo-downloads/AF:All")
+
+        self.assertEqual(unlock.status_code, 200)
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(download.data, b"zip-bytes")
+        self.assertEqual(download.headers["Content-Type"], "application/zip")
+        self.assertEqual(download.headers["Content-Length"], "9")
+        self.assertTrue(fake_response.closed)
 
     def test_sync_refresh_uses_sync_job_status_endpoint(self):
         with self.app.test_client() as client:
@@ -468,12 +530,12 @@ class SourceCodeQARouteTests(unittest.TestCase):
             config_response = client.get("/api/source-code-qa/config")
 
         # The allowlisted gmail user is just another blocked non-admin now: the
-        # public page renders without admin controls and the config API is 403.
+        # renders without admin controls, and the config GET API returns 200.
         self.assertEqual(page_response.status_code, 200)
         self.assertNotIn(b"Repository Mapping", page_response.data)
         self.assertNotIn(b"Repo Admin", page_response.data)
-        self.assertEqual(config_response.status_code, 403)
-        self.assertEqual(config_response.get_json()["status"], "error")
+        self.assertEqual(config_response.status_code, 200)
+
 
     def test_source_code_qa_builtin_owner_can_manage_when_env_owner_changes(self):
         with patch.dict(
@@ -506,7 +568,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             {
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": self.temp_dir.name,
-                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg,monee.com,seamoney.com",
                 "SOURCE_CODE_QA_GITLAB_TOKEN": "secret-token",
             },
             clear=True,
@@ -533,11 +595,11 @@ class SourceCodeQARouteTests(unittest.TestCase):
                 self._login(client, "xiaodong.zheng1991@gmail.com")
                 sync_response = client.post("/api/source-code-qa/sync", json={"pm_team": "AF", "country": "All"})
 
-        # The gmail test user is blocked like any non-admin: public page only,
-        # all config/sync APIs rejected.
+        # The gmail test user is an allowed portal user (not admin): public page only,
+        # config GET returns 200, but config POST and sync are rejected.
         self.assertNotIn(b"Repository Mapping", page_response.data)
-        self.assertEqual(config_response.status_code, 403)
-        self.assertEqual(config_response.get_json()["status"], "error")
+        self.assertEqual(config_response.status_code, 200)
+
         self.assertEqual(save_response.status_code, 403)
         self.assertEqual(sync_response.status_code, 403)
 
@@ -553,7 +615,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(response.status_code, 403)
         self.assertEqual(payload["status"], "error")
-        self.assertIn("not authorized", payload["message"])
+        self.assertIn("restricted", payload["message"])
 
     def test_config_save_is_owner_only_and_validates_https(self):
         with self.app.test_client() as client:
@@ -616,8 +678,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
     def test_source_code_qa_route_access_gate_and_json_error_boundaries(self):
         with self.app.test_client() as client:
-            # The page itself is public now; every Q&A API stays blocked for a
-            # non-admin (each blocked request clears the session, so re-login).
+            # The page requires login; external users are redirected.
             self._login(client, "external@example.com")
             public_page = client.get("/source-code-qa", follow_redirects=False)
             blocked_calls = [
@@ -645,7 +706,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             save_empty_payload = client.post("/api/source-code-qa/config", data="not-json", content_type="text/plain")
             invalid_limit = client.get("/api/source-code-qa/sessions?limit=not-a-number")
 
-        self.assertEqual(public_page.status_code, 200)
+        self.assertEqual(public_page.status_code, 302)
         self.assertTrue(all(response.status_code == 403 for response in blocked))
         self.assertEqual(config_error.status_code, 500)
         self.assertEqual(config_error.get_json()["error_category"], "source_code_qa_internal")
@@ -828,8 +889,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
         try:
             register_source_code_qa_routes(app, object(), override_globals)
             direct_calls = [
-                # NOTE: the /source-code-qa page itself is public now and does
-                # not consult the access gate, so it is not probed here.
+                # NOTE: the /source-code-qa page now requires login and uses the
+                # access gate, so it is not probed in this route-level test.
                 ("source_code_qa_config_api", "/api/source-code-qa/config"),
                 ("source_code_qa_sync_job_api", "/api/source-code-qa/sync-jobs/missing", "missing"),
                 ("source_code_qa_sessions_api", "/api/source-code-qa/sessions"),
@@ -3047,7 +3108,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             {
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": self.temp_dir.name,
-                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg,monee.com,seamoney.com",
                 "SOURCE_CODE_QA_GITLAB_TOKEN": "secret-token",
             },
             clear=False,
@@ -15465,7 +15526,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             json.dumps({"status": "eval-pass", "eval": {"failures": 0}, "llm_smoke": {"failures": 0}, "report_path": "report.json"}),
             encoding="utf-8",
         )
-        settings = SimpleNamespace(team_portal_data_dir=Path("relative-data-root"))
+        settings = SimpleNamespace(team_portal_data_dir=Path("relative-data-root"), team_portal_base_url="https://portal.example", team_allowed_email_domains=("npt.sg",))
         with patch.dict(portal_web._source_code_qa_release_gate_payload.__globals__, {"PROJECT_ROOT": project_root}):
             gate = portal_web._source_code_qa_release_gate_payload(settings)
         self.assertEqual(gate["status"], "pass")

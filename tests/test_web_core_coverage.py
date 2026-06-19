@@ -214,11 +214,15 @@ class WebCoreCoverageTests(unittest.TestCase):
                     self.assertEqual(web_module._require_meeting_recorder_access(settings, api=True), ("login", 401))
                     self.assertEqual(web_module._require_team_dashboard_access(settings, api=True), ("login", 401))
                     self.assertEqual(web_module._require_prd_self_assessment_access(settings, api=True), ("login", 401))
-                # Version Plan is fully public now: the access helper never blocks.
-                self.assertTrue(web_module._can_access_team_dashboard_version_plan({"email": "user@npt.sg"}))
-                self.assertTrue(web_module._can_access_team_dashboard_version_plan({"email": ""}))
-                self.assertIsNone(web_module._require_team_dashboard_version_plan_access(settings, api=True))
-                self.assertIsNone(web_module._require_team_dashboard_version_plan_access(settings, api=False))
+                # Version Plan requires login when shared portal is enabled, but the
+                # access helper itself does not block (login gate handles redirect).
+                # Without settings, the helper checks portal user membership.
+                self.assertFalse(web_module._can_access_team_dashboard_version_plan({"email": "user@npt.sg"}))
+                self.assertFalse(web_module._can_access_team_dashboard_version_plan({"email": ""}))
+                # With login mocked as passing, the version plan gate returns None.
+                with patch("bpmis_jira_tool.web._require_google_login", return_value=None):
+                    self.assertIsNone(web_module._require_team_dashboard_version_plan_access(settings, api=True))
+                    self.assertIsNone(web_module._require_team_dashboard_version_plan_access(settings, api=False))
                 with patch("bpmis_jira_tool.web._require_google_login", return_value=None), patch(
                     "bpmis_jira_tool.web._can_access_seatalk_management", return_value=False
                 ):
@@ -989,7 +993,7 @@ class WebCoreCoverageTests(unittest.TestCase):
                 with patch("bpmis_jira_tool.web._require_google_login", return_value=None), patch(
                     "bpmis_jira_tool.web._current_google_user_is_blocked", return_value=True
                 ):
-                    # /source-code-qa is public now; a gated page still redirects
+                    # /source-code-qa requires login now; a gated page still redirects
                     # blocked users.
                     self.assertEqual(client.get("/team-dashboard").status_code, 302)
                 with client.session_transaction() as sess:
