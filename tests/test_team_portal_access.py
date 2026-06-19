@@ -1263,6 +1263,7 @@ class TeamPortalAccessTests(unittest.TestCase):
 
         source_soup = BeautifulSoup(source_response.get_data(as_text=True), "html.parser")
         self.assertIn("Source Code Repo Download", source_soup.get_text(" ", strip=True))
+        self.assertIsNone(source_soup.select_one("[data-download-password-form]"))
         self.assertIsNone(source_soup.select_one("[data-source-view-tab='chat']"))
         self.assertIsNone(source_soup.select_one("[data-source-question]"))
         self.assertIsNone(source_soup.select_one("[data-source-query]"))

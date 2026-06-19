@@ -73,24 +73,6 @@
       {% endif %}
     </main>
 
-      <form class="portal-password-card" data-download-password-form>
-        <h2 data-download-password-title>需要密码 / Password required</h2>
-        <p class="portal-password-help" data-download-password-help>输入密码以下载报表与源码包（本次会话只需输入一次）。</p>
-        <input
-          type="password"
-          class="portal-password-input"
-          data-download-password-input
-          autocomplete="off"
-          autofocus
-          aria-label="Password"
-        >
-        <p class="portal-password-error" data-download-password-error hidden></p>
-        <div class="portal-password-actions">
-          <button type="button" class="button button-secondary" data-download-password-cancel>取消 / Cancel</button>
-          <button type="submit" class="button button-primary" data-download-password-submit>确认 / Unlock</button>
-        </div>
-      </form>
-    </div>
     {% if run_notice %}
       <div class="notice-backdrop" data-run-notice-backdrop>
         <section class="notice-card notice-{{ run_notice.tone }}" role="dialog" aria-modal="true" aria-labelledby="run-notice-title">
