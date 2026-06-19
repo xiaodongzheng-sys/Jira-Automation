@@ -25,42 +25,6 @@
     tab.addEventListener("click", () => setActiveDomain(tab.dataset.businessInsightsTab));
   });
 
-  // ---- Password gate for "Download Excel" / "Open Visualization" ----
-  let downloadsUnlocked = root.dataset.downloadUnlocked === "true";
-  const unlockUrl = root.dataset.downloadUnlockUrl || "/api/business-insights/download-unlock";
-
-  const ensureUnlocked = async () => {
-    if (downloadsUnlocked) return true;
-    if (typeof window.portalDownloadUnlock !== "function") return false;
-    const ok = await window.portalDownloadUnlock(unlockUrl);
-    if (ok) downloadsUnlocked = true;
-    return ok;
-  };
-
-  const isGatedDownloadLink = (el) =>
-    !!el &&
-    typeof el.matches === "function" &&
-    el.matches(
-      "[data-business-insights-download], [data-business-insights-visualization], a[href*='/artifacts/'], a[href*='/visualizations/']"
-    );
-
-  root.addEventListener("click", (event) => {
-    const link = event.target.closest("a");
-    if (!isGatedDownloadLink(link)) return;
-    if (downloadsUnlocked) return; // already verified this session -> normal navigation
-    event.preventDefault();
-    const href = link.getAttribute("href");
-    const openInNewTab = link.target === "_blank";
-    ensureUnlocked().then((ok) => {
-      if (!ok || !href) return;
-      if (openInNewTab) {
-        window.open(href, "_blank", "noopener");
-      } else {
-        window.location.href = href;
-      }
-    });
-  });
-
   // ---- On-demand "Refresh data": run the Data Workbench generator + poll ----
   const POLL_MS = 4000;
 

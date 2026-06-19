@@ -135,7 +135,6 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
             repo_download_scopes=_repo_download_scopes_with_status(),
             can_use_source_code_qa_chat=_can_use_source_code_qa_chat(settings),
             can_manage_source_code_qa=_can_manage_source_code_qa(settings),
-            download_unlocked=bool(_business_insights_downloads_unlocked()),
             # Assets and auth links go through the Cloud Run surface so the
             # public Repo Download page keeps working while the Mac is offline.
             cloud_auth_mode=True,
@@ -144,10 +143,6 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
 
     @app.get("/api/source-code-qa/repo-downloads/<scope_key>")
     def source_code_qa_repo_download_api(scope_key: str):
-        # Public endpoint, but the actual download requires the shared password
-        # (same per-session unlock as Business Insights downloads).
-        if not _business_insights_downloads_unlocked():
-            return jsonify({"status": "error", "message": "Password required."}), HTTPStatus.UNAUTHORIZED
         try:
             scope = resolve_repo_download_scope(scope_key)
             if _local_agent_source_code_qa_enabled(settings):

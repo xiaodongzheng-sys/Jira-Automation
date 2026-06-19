@@ -259,20 +259,13 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn(b'data-source-view-tab="download"', teammate_response.data)
         self.assertNotIn(b"Model Availability", owner_response.data)
 
-    def test_repo_download_endpoint_is_public_after_password_unlock(self):
+    def test_repo_download_endpoint_works_for_logged_in_user(self):
         self._seed_repo_download_scope()
-        with self.app.test_client() as client, patch.dict(
-            os.environ, {"BUSINESS_INSIGHTS_DOWNLOAD_PASSWORD": "test-bi-pass"}, clear=False
-        ):
+        with self.app.test_client() as client:
             self._login(client, "teammate@npt.sg")
-            locked = client.get("/api/source-code-qa/repo-downloads/AF:All")
-            unlock = client.post("/api/business-insights/download-unlock", json={"password": "test-bi-pass"})
             download = client.get("/api/source-code-qa/repo-downloads/AF:All")
 
-        # The endpoint is public but password-gated: 401 until the shared
-        # download password unlocks the session.
-        self.assertEqual(locked.status_code, 401)
-        self.assertEqual(unlock.status_code, 200)
+        # No password gate; login is the only gate.
         self.assertEqual(download.status_code, 200)
         self.assertEqual(download.headers["Content-Type"], "application/zip")
         with zipfile.ZipFile(io.BytesIO(download.data)) as archive:
@@ -285,7 +278,6 @@ class SourceCodeQARouteTests(unittest.TestCase):
         with self.app.test_client() as client, patch.dict(
             os.environ,
             {
-                "BUSINESS_INSIGHTS_DOWNLOAD_PASSWORD": "test-bi-pass",
                 "TEAM_PORTAL_PUBLIC_GCS_BUCKET": "test-bucket",
             },
             clear=False,
@@ -293,10 +285,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
             "bpmis_jira_tool.public_artifacts_gcs.fetch_repo_download_signed_url",
             return_value=({"filename": "source-code-repos-AF-All.zip"}, "https://signed.example.com/af-all.zip"),
         ):
-            unlock = client.post("/api/business-insights/download-unlock", json={"password": "test-bi-pass"})
             download = client.get("/api/source-code-qa/repo-downloads/AF:All", follow_redirects=False)
 
-        self.assertEqual(unlock.status_code, 200)
         self.assertEqual(download.status_code, 302)
         self.assertEqual(download.headers["Location"], "https://signed.example.com/af-all.zip")
 
@@ -326,7 +316,6 @@ class SourceCodeQARouteTests(unittest.TestCase):
         with self.app.test_client() as client, patch.dict(
             os.environ,
             {
-                "BUSINESS_INSIGHTS_DOWNLOAD_PASSWORD": "test-bi-pass",
                 "TEAM_PORTAL_PUBLIC_GCS_BUCKET": "test-bucket",
             },
             clear=False,
@@ -337,10 +326,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
             "bpmis_jira_tool.web.public_gcs_read_bucket",
             side_effect=AssertionError("GCS should not be consulted when local-agent download is available."),
         ):
-            unlock = client.post("/api/business-insights/download-unlock", json={"password": "test-bi-pass"})
             download = client.get("/api/source-code-qa/repo-downloads/AF:All")
 
-        self.assertEqual(unlock.status_code, 200)
         self.assertEqual(download.status_code, 200)
         self.assertEqual(download.data, b"zip-bytes")
         self.assertEqual(download.headers["Content-Type"], "application/zip")

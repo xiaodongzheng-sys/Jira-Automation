@@ -21,7 +21,6 @@
     data-repo-download-url="{{ url_for('source_code_qa_repo_download_api', scope_key='__SCOPE_KEY__') }}"
     data-can-chat="{{ 'true' if can_use_source_code_qa_chat else 'false' }}"
     data-can-manage="{{ 'true' if can_manage_source_code_qa else 'false' }}"
-    data-download-unlocked="{{ 'true' if download_unlocked else 'false' }}"
     data-options='{{ options | tojson }}'
   >
     <div class="panel-head source-qa-hero">

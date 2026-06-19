@@ -73,8 +73,6 @@
       {% endif %}
     </main>
 
-    <div class="portal-password-modal" data-download-password-modal hidden>
-      <div class="portal-password-backdrop" data-download-password-cancel></div>
       <form class="portal-password-card" data-download-password-form>
         <h2 data-download-password-title>需要密码 / Password required</h2>
         <p class="portal-password-help" data-download-password-help>输入密码以下载报表与源码包（本次会话只需输入一次）。</p>
@@ -370,79 +368,6 @@
         if (backdrop) {
           bindNoticeClose(backdrop);
         }
-      })();
-    </script>
-    <script>
-      // Shared in-page password prompt for gated downloads (Business Insights
-      // workbooks/visualizations and Source Code repo bundles). Exposes
-      // window.portalDownloadUnlock(unlockUrl) -> Promise<boolean>.
-      (() => {
-        const modal = document.querySelector('[data-download-password-modal]');
-        if (!modal) return;
-        const form = modal.querySelector('[data-download-password-form]');
-        const input = modal.querySelector('[data-download-password-input]');
-        const errorEl = modal.querySelector('[data-download-password-error]');
-        const submitBtn = modal.querySelector('[data-download-password-submit]');
-        const cancelEls = modal.querySelectorAll('[data-download-password-cancel]');
-        let activeResolve = null;
-        let activeUnlockUrl = '/api/business-insights/download-unlock';
-
-        const close = (result) => {
-          modal.hidden = true;
-          errorEl.hidden = true;
-          input.value = '';
-          submitBtn.disabled = false;
-          const resolve = activeResolve;
-          activeResolve = null;
-          if (resolve) resolve(result);
-        };
-
-        const showError = (message) => {
-          errorEl.textContent = message;
-          errorEl.hidden = false;
-          input.focus();
-          input.select();
-        };
-
-        cancelEls.forEach((el) => el.addEventListener('click', () => close(false)));
-        document.addEventListener('keydown', (event) => {
-          if (event.key === 'Escape' && !modal.hidden) close(false);
-        });
-
-        form.addEventListener('submit', async (event) => {
-          event.preventDefault();
-          const password = input.value;
-          if (!password) { showError('请输入密码 / Enter the password.'); return; }
-          submitBtn.disabled = true;
-          try {
-            const response = await fetch(activeUnlockUrl, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-              body: JSON.stringify({ password }),
-            });
-            if (response.ok) { close(true); return; }
-            submitBtn.disabled = false;
-            if (response.status === 429) {
-              showError('尝试次数过多，请稍后再试 / Too many attempts, try again later.');
-            } else {
-              showError('密码错误 / Incorrect password.');
-            }
-          } catch (error) {
-            submitBtn.disabled = false;
-            showError('网络错误，请重试 / Network error, please retry.');
-          }
-        });
-
-        window.portalDownloadUnlock = (unlockUrl) => {
-          activeUnlockUrl = unlockUrl || activeUnlockUrl;
-          return new Promise((resolve) => {
-            activeResolve = resolve;
-            modal.hidden = false;
-            errorEl.hidden = true;
-            input.value = '';
-            setTimeout(() => input.focus(), 0);
-          });
-        };
       })();
     </script>
     {% block extra_scripts %}{% endblock %}

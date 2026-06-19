@@ -159,26 +159,6 @@
     }
   };
 
-  // ---- Shared password gate for repo source-bundle downloads ----
-  let repoDownloadsUnlocked = root.dataset.downloadUnlocked === 'true';
-
-  const ensureRepoDownloadUnlocked = async () => {
-    if (repoDownloadsUnlocked) return true;
-    if (typeof window.portalDownloadUnlock !== 'function') return false;
-    const ok = await window.portalDownloadUnlock('/api/business-insights/download-unlock');
-    if (ok) repoDownloadsUnlocked = true;
-    return ok;
-  };
-
-  document.addEventListener('click', (event) => {
-    const link = event.target.closest('a[data-source-repo-download]');
-    if (!link || repoDownloadsUnlocked) return;
-    event.preventDefault();
-    const href = link.getAttribute('href');
-    ensureRepoDownloadUnlocked().then((ok) => {
-      if (ok && href) window.location.href = href;
-    });
-  });
 
   const allCountryValue = () => options.all_country || 'All';
   const sharedCodeTeams = ['AF', 'GRC'];
