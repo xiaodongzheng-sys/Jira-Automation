@@ -1347,7 +1347,7 @@ def _searchable_table_panel(
     body_rows = []
     for row in rows:
         cells = "".join(
-            f'<td{" class=\"step\"" if index in step_columns else ""}>'
+            f"<td{' class=step' if index in step_columns else ''}>"
             f"{html.escape(_cell(row[index] if index < len(row) else ''))}</td>"
             for index in range(len(headers))
         )
