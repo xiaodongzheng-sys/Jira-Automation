@@ -811,9 +811,8 @@ class PortalE2ESmokeTest(unittest.TestCase):
         self.assertTrue(captured_review_payloads[-1]["async"])
         self.assertEqual(captured_review_payloads[-1]["selected_section_indexes"], [1, 2])
 
-    def test_team_dashboard_version_plan_remarks_edit_persists_after_render(self) -> None:
+    def test_team_dashboard_version_plan_component_and_release_version_render(self) -> None:
         page = self._new_admin_page()
-        captured_cell_updates: list[dict[str, object]] = []
         version_plan_payload = {
             "status": "ok",
             "priority_order": ["SP", "P0", "P1", "P2", "P3"],
@@ -841,7 +840,9 @@ class PortalE2ESmokeTest(unittest.TestCase):
                             "priority": "P0",
                             "pm": ["Wang Chang"],
                             "productization_efforts": "Y",
-                            "remarks": "Keep this note",
+                            "remarks": "",
+                            "component": "Anti-Fraud",
+                            "release_version": "AF_1.0.76_20260520",
                         }
                     ],
                     "manual_rows": [],
@@ -856,6 +857,8 @@ class PortalE2ESmokeTest(unittest.TestCase):
                     "pm": ["TBC"],
                     "productization_efforts": "",
                     "remarks": "",
+                    "component": "",
+                    "release_version": "",
                 }
             ],
             "archived_bundles": [],
@@ -884,42 +887,19 @@ class PortalE2ESmokeTest(unittest.TestCase):
         def version_plan(route):
             route.fulfill(**json_response(version_plan_payload))
 
-        def save_cell(route):
-            payload = route.request.post_data_json
-            captured_cell_updates.append(payload)
-            target_row_id = str(payload.get("row_id") or "")
-            field = str(payload.get("field") or "")
-            for bundle in version_plan_payload["bundles"]:
-                for row in bundle["synced_rows"]:
-                    if row["row_id"] == target_row_id and field:
-                        row[field] = payload.get("value")
-            route.fulfill(**json_response(version_plan_payload))
-
         page.route("**/api/team-dashboard/config", config)
         page.route(re.compile(r".*/api/team-dashboard/version-plan/af(?:\?.*)?$"), version_plan)
-        page.route("**/api/team-dashboard/version-plan/af/cell", save_cell)
 
         page.goto("/team-dashboard", wait_until="domcontentloaded")
         page.locator('[data-team-dashboard-tab="version-plan"]').click()
         row = page.locator('[data-version-plan-row-id="sync-af-20260520-SPDBP-94945"]')
         row.get_by_text("AMR UIUX Improvement").wait_for(timeout=5000)
 
-        remarks = row.locator('[data-version-plan-cell="remarks"]')
-        self.assertEqual(remarks.input_value(timeout=5000), "Keep this note")
-        remarks.fill("Updated via Playwright")
-        remarks.dispatch_event("change")
-
-        page.wait_for_function(
-            "() => document.querySelector('[data-version-plan-status]')?.textContent?.includes('Saved.')",
-            timeout=5000,
-        )
-        updated_row = page.locator('[data-version-plan-row-id="sync-af-20260520-SPDBP-94945"]')
-        self.assertEqual(updated_row.locator('[data-version-plan-cell="remarks"]').input_value(timeout=5000), "Updated via Playwright")
-        self.assertEqual(captured_cell_updates[-1]["scope"], "bundle")
-        self.assertEqual(captured_cell_updates[-1]["version_id"], "af-20260520")
-        self.assertEqual(captured_cell_updates[-1]["row_id"], "sync-af-20260520-SPDBP-94945")
-        self.assertEqual(captured_cell_updates[-1]["field"], "remarks")
-        self.assertEqual(captured_cell_updates[-1]["value"], "Updated via Playwright")
+        component_cell = row.locator('[data-label="Component"]')
+        self.assertEqual(component_cell.inner_text(timeout=5000), "Anti-Fraud")
+        release_version_cell = row.locator('[data-label="Release Version"]')
+        self.assertEqual(release_version_cell.inner_text(timeout=5000), "AF_1.0.76_20260520")
+        self.assertEqual(row.locator('[data-label="Remarks"]').count(), 0)
 
     def test_team_dashboard_version_plan_manual_row_controls_smoke(self) -> None:
         page = self._new_admin_page()
@@ -941,6 +921,8 @@ class PortalE2ESmokeTest(unittest.TestCase):
                     "pm": ["TBC"],
                     "productization_efforts": "",
                     "remarks": "",
+                    "component": "",
+                    "release_version": "",
                 }
             ],
             "archived_bundles": [],
@@ -979,6 +961,8 @@ class PortalE2ESmokeTest(unittest.TestCase):
                         "pm": ["TBC"],
                         "productization_efforts": "",
                         "remarks": "",
+                        "component": "",
+                        "release_version": "",
                     }
                 )
             elif action == "reorder":
@@ -1064,6 +1048,8 @@ class PortalE2ESmokeTest(unittest.TestCase):
                     "pm": ["TBC"],
                     "productization_efforts": "",
                     "remarks": "",
+                    "component": "",
+                    "release_version": "",
                 }
             ],
             "archived_bundles": [],
@@ -1167,6 +1153,8 @@ class PortalE2ESmokeTest(unittest.TestCase):
                             "pm": ["Zoey"],
                             "productization_efforts": "N",
                             "remarks": "",
+                            "component": "Payment",
+                            "release_version": "DBPSG_v2.85_0526",
                         },
                     ],
                     "manual_rows": [
@@ -1178,6 +1166,8 @@ class PortalE2ESmokeTest(unittest.TestCase):
                             "pm": ["Rene"],
                             "productization_efforts": "Y",
                             "remarks": "",
+                            "component": "",
+                            "release_version": "",
                         }
                     ],
                 }
@@ -1191,6 +1181,8 @@ class PortalE2ESmokeTest(unittest.TestCase):
                     "pm": ["TBC"],
                     "productization_efforts": "",
                     "remarks": "",
+                    "component": "",
+                    "release_version": "",
                 },
                 {
                     "row_id": "pipe-zoey",
@@ -1200,6 +1192,8 @@ class PortalE2ESmokeTest(unittest.TestCase):
                     "pm": ["Zoey"],
                     "productization_efforts": "N",
                     "remarks": "",
+                    "component": "",
+                    "release_version": "",
                 },
             ],
             "archived_bundles": [
@@ -1220,6 +1214,8 @@ class PortalE2ESmokeTest(unittest.TestCase):
                             "pm": ["Jun Wei"],
                             "productization_efforts": "Y",
                             "remarks": "",
+                            "component": "Anti-Fraud",
+                            "release_version": "AF_v1.0.79_20260515",
                         },
                     ],
                 }

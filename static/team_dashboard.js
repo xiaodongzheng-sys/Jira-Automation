@@ -699,10 +699,7 @@
   };
 
   const versionPlanManualField = (row, field, readOnly) => {
-    if (!readOnly && row.row_type === 'synced' && field === 'remarks') {
-      return `<textarea rows="1" spellcheck="true" data-version-plan-cell="remarks">${escapeHtml(row.remarks || '')}</textarea>`;
-    }
-    if (!readOnly && isVersionPlanSyncRunning() && field !== 'remarks') {
+    if (!readOnly && isVersionPlanSyncRunning()) {
       if (field === 'pm') return escapeHtml(versionPlanPmDisplay(row.pm || []));
       return escapeHtml(row[field] || '-');
     }
@@ -760,8 +757,11 @@
           <div class="team-dashboard-version-plan-cell" data-label="Productization Efforts?">
             ${versionPlanManualField(row, 'productization_efforts', readOnly)}
           </div>
-          <div class="team-dashboard-version-plan-cell" data-label="Remarks">
-            ${versionPlanManualField(row, 'remarks', readOnly)}
+          <div class="team-dashboard-version-plan-cell" data-label="Component">
+            ${escapeHtml(row.component || '-')}
+          </div>
+          <div class="team-dashboard-version-plan-cell" data-label="Release Version">
+            ${escapeHtml(row.release_version || '-')}
           </div>
         </div>
       `;
@@ -790,7 +790,8 @@
           <div>Priority</div>
           <div>PM</div>
           <div>Productization Efforts? (Y/N)</div>
-          <div>Remarks</div>
+          <div>Component</div>
+          <div>Release Version</div>
         </div>
         ${body || empty}
         ${addRow}

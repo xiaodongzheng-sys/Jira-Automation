@@ -540,7 +540,7 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(first_bundle["manual_rows"], [])
         self.assertEqual([row["row_id"] for row in second_bundle["manual_rows"]], ["bundle-1", "bundle-2"])
 
-    def test_sync_result_preserves_concurrent_manual_moves_and_synced_remarks(self) -> None:
+    def test_sync_result_preserves_concurrent_manual_moves(self) -> None:
         synced_config = {
             "version_plan": normalize_version_plan_state(
                 {
@@ -600,7 +600,7 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(af["sync_state"]["state"], "fresh_today")
         self.assertEqual(af["pipeline_rows"], [])
         self.assertEqual([row["row_id"] for row in af["bundles"]["af-1"]["manual_rows"]], ["pipe-1"])
-        self.assertEqual(af["bundles"]["af-1"]["synced_rows"][0]["remarks"], "current note")
+        # Remarks are no longer preserved during merge since the column was removed.
 
     def test_manual_rows_sort_by_priority_then_manual_order(self) -> None:
         payload = version_plan_payload(
@@ -741,7 +741,7 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(bundle["synced_at"], "")
         self.assertEqual(bundle["manual_rows"][0]["feature"], "[ID][PH] AMR Fix")
 
-    def test_synced_jira_remarks_are_editable_and_preserved_after_sync(self) -> None:
+    def test_synced_jira_rows_preserve_summary_and_market_after_sync(self) -> None:
         config = {
             "version_plan": {
                 "af": {
@@ -779,21 +779,20 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(row["jira_summary"], "[Feature] Antifraud - UIUX Improvement for AMR")
         self.assertEqual(row["market"], "Regional")
         self.assertEqual(row["productization_efforts"], "Y")
-        self.assertEqual(row["remarks"], "Keep this note")
+        self.assertEqual(row["component"], "")
+        self.assertEqual(row["release_version"], "AF_1.0.76_20260520")
 
-        updated = update_version_plan_cell(
-            synced,
-            {
-                "scope": "bundle",
-                "version_id": "af-20260520",
-                "row_id": row["row_id"],
-                "field": "remarks",
-                "value": "Updated note",
-            },
-        )
-        payload = version_plan_payload(updated, now=datetime.fromisoformat("2026-05-16T09:00:00+08:00"))
-        row = next(row for row in payload["bundles"][0]["synced_rows"] if row["jira_id"] == "SPDBP-94945")
-        self.assertEqual(row["remarks"], "Updated note")
+        with self.assertRaisesRegex(ValueError, "Unsupported Version Plan field"):
+            update_version_plan_cell(
+                synced,
+                {
+                    "scope": "bundle",
+                    "version_id": "af-20260520",
+                    "row_id": row["row_id"],
+                    "field": "remarks",
+                    "value": "Updated note",
+                },
+            )
 
     def test_successful_sync_removes_stale_and_filtered_synced_rows(self) -> None:
         config = {
@@ -1056,13 +1055,13 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
             update_version_plan_cell(config, {"scope": "pipeline", "row_id": "pipe-1", "field": "owner"})
         with self.assertRaisesRegex(ValueError, "manual row was not found"):
             update_version_plan_cell(config, {"scope": "pipeline", "row_id": "missing", "field": "priority"})
-        with self.assertRaisesRegex(ValueError, "row was not found"):
+        with self.assertRaisesRegex(ValueError, "Unsupported Version Plan field"):
             update_version_plan_cell(config, {"scope": "pipeline", "row_id": "missing", "field": "remarks"})
-        with self.assertRaisesRegex(ValueError, "row was not found"):
+        with self.assertRaisesRegex(ValueError, "Unsupported Version Plan field"):
             update_version_plan_cell(config, {"scope": "bundle", "row_id": "sync-row", "field": "remarks"})
-        with self.assertRaisesRegex(ValueError, "row was not found"):
+        with self.assertRaisesRegex(ValueError, "Unsupported Version Plan field"):
             update_version_plan_cell(config, {"scope": "bundle", "version_id": "missing", "row_id": "sync-row", "field": "remarks"})
-        with self.assertRaisesRegex(ValueError, "row was not found"):
+        with self.assertRaisesRegex(ValueError, "Unsupported Version Plan field"):
             update_version_plan_cell(config, {"scope": "bundle", "version_id": "af-1", "row_id": "missing", "field": "remarks"})
 
         with self.assertRaisesRegex(ValueError, "Unsupported Version Plan row action"):

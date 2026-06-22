@@ -1351,7 +1351,7 @@
 }
 
 .team-dashboard-version-plan-sheet {
-  --version-plan-sheet-grid: 32px minmax(320px, 1fr) 76px 116px 118px minmax(150px, 0.45fr);
+  --version-plan-sheet-grid: 32px minmax(320px, 1fr) 76px 116px 118px minmax(120px, 0.4fr) minmax(120px, 0.4fr);
   display: grid;
   gap: 0;
   max-width: 100%;
@@ -1365,7 +1365,7 @@
 .team-dashboard-version-plan-row {
   display: grid;
   grid-template-columns: var(--version-plan-sheet-grid);
-  min-width: 812px;
+  min-width: 1050px;
   border-bottom: 1px solid #d9dde5;
 }
 

@@ -311,7 +311,6 @@ def merge_version_plan_editable_state(synced_config: dict[str, Any], current_con
                 }
             continue
         synced_bundle["manual_rows"] = _normalize_manual_rows(current_bundle.get("manual_rows"))
-        _merge_synced_row_remarks(synced_bundle, current_bundle)
     merged = dict(synced_config)
     merged["version_plan"] = synced_plan
     return merged
@@ -332,22 +331,6 @@ def append_version_plan_audit(
     updated = dict(config)
     updated["version_plan"] = plan
     return updated
-
-
-def _merge_synced_row_remarks(synced_bundle: dict[str, Any], current_bundle: dict[str, Any]) -> None:
-    current_rows = _normalize_synced_rows(current_bundle.get("synced_rows"))
-    current_by_key: dict[str, dict[str, Any]] = {}
-    for row in current_rows:
-        for key in (row.get("jira_id"), row.get("row_id")):
-            normalized_key = str(key or "").strip()
-            if normalized_key:
-                current_by_key[normalized_key] = row
-    synced_rows = _normalize_synced_rows(synced_bundle.get("synced_rows"))
-    for row in synced_rows:
-        current = current_by_key.get(str(row.get("jira_id") or "").strip()) or current_by_key.get(str(row.get("row_id") or "").strip())
-        if current is not None:
-            row["remarks"] = str(current.get("remarks") or "").strip()
-    synced_bundle["synced_rows"] = synced_rows
 
 
 def version_plan_synced_today(config: dict[str, Any], *, now: datetime | None = None) -> bool:
@@ -373,7 +356,7 @@ def version_plan_auto_sync_attempted_today(config: dict[str, Any], *, now: datet
 def update_version_plan_cell(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     plan = normalize_version_plan_state(config.get("version_plan") if isinstance(config, dict) else {})
     field = str(payload.get("field") or "").strip()
-    if field not in {"feature", "priority", "pm", "remarks", "productization_efforts"}:
+    if field not in {"feature", "priority", "pm", "productization_efforts"}:
         raise ValueError("Unsupported Version Plan field.")
     row = _find_version_plan_cell_row(plan, payload, field)
     if field == "priority":
@@ -393,21 +376,7 @@ def _find_version_plan_cell_row(plan: dict[str, Any], payload: dict[str, Any], f
         return _find_manual_row(plan, payload)
     except ValueError:
         pass
-    if field != "remarks":
-        raise ValueError("Version Plan manual row was not found.")
-    row_id = str(payload.get("row_id") or "").strip()
-    scope = str(payload.get("scope") or "").strip().lower()
-    if scope != "bundle":
-        raise ValueError("Version Plan row was not found.")
-    version_id = str(payload.get("version_id") or "").strip()
-    bundle = plan["af"]["bundles"].get(version_id)
-    if not isinstance(bundle, dict):
-        raise ValueError("Version Plan row was not found.")
-    bundle["synced_rows"] = _normalize_synced_rows(bundle.get("synced_rows"))
-    for row in bundle["synced_rows"]:
-        if row.get("row_id") == row_id:
-            return row
-    raise ValueError("Version Plan row was not found.")
+    raise ValueError("Version Plan manual row was not found.")
 
 
 def update_version_plan_rows(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
@@ -506,6 +475,8 @@ def _manual_row(row: dict[str, Any]) -> dict[str, Any]:
         "pm": _normalize_pm_values(row.get("pm")),
         "remarks": str(row.get("remarks") or "").strip(),
         "productization_efforts": str(row.get("productization_efforts") or "").strip().upper() if str(row.get("productization_efforts") or "").strip().upper() in {"Y", "N"} else "",
+        "component": "",
+        "release_version": "",
         "sort_order": _safe_int(row.get("sort_order"), 0),
         "updated_at": str(row.get("updated_at") or "").strip(),
     }
@@ -540,6 +511,8 @@ def _synced_row(row: dict[str, Any]) -> dict[str, Any]:
         "pm": _normalize_pm_values(row.get("pm")),
         "remarks": str(row.get("remarks") or "").strip(),
         "productization_efforts": productization_efforts,
+        "component": str(row.get("component") or "").strip(),
+        "release_version": str(row.get("release_version") or "").strip(),
         "sort_order": _safe_int(row.get("sort_order"), 0),
     }
 
@@ -684,6 +657,8 @@ def _sync_rows_for_bundle(
                     "pm": _extract_pm(raw),
                     "remarks": existing.get("remarks") or "",
                     "productization_efforts": _extract_productization_efforts(raw, jira_id),
+                    "component": _extract_component(raw),
+                    "release_version": _extract_release_version(raw),
                     "sort_order": len(rows),
                 }
             )
@@ -1101,6 +1076,25 @@ def _extract_market_from_jira_board(row: dict[str, Any], jira_id: str = "") -> s
 
 def _extract_productization_efforts(row: dict[str, Any], jira_id: str = "") -> str:
     return "Y" if _jira_board_is_productization(_extract_jira_board(row) or jira_id) else "N"
+
+
+def _extract_component(row: dict[str, Any]) -> str:
+    return _extract_first_text(row, "component", "componentId", "components")
+
+
+def _extract_release_version(row: dict[str, Any]) -> str:
+    text = _extract_first_text(
+        row,
+        "fix_version_name",
+        "fixVersionName",
+        "fixVersion",
+        "fixVersions",
+        "version",
+        "versions",
+    )
+    if text:
+        return text
+    return ", ".join(sorted(_row_jira_version_names(row)))
 
 
 def _extract_jira_board(row: dict[str, Any]) -> str:
