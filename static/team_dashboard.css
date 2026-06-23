@@ -1757,7 +1757,7 @@
 
   .team-dashboard-version-plan-row {
     grid-template-columns: var(--version-plan-sheet-grid);
-    min-width: 812px;
+    min-width: 1050px;
     gap: 0;
     padding: 0;
     border: 0;

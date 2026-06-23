@@ -626,6 +626,7 @@ def _sync_rows_for_bundle(
             release_before=release_before,
         )
     )
+    jira_live_details = _enrich_candidates_with_jira_live_details(bpmis_client, candidates)
     for raw in candidates:
         if _is_closed_or_icebox(raw):
             continue
@@ -637,6 +638,7 @@ def _sync_rows_for_bundle(
         if not jira_id or jira_id in seen:
             continue
         seen.add(jira_id)
+        _apply_jira_live_detail(raw, jira_id, jira_live_details)
         parent = _task_parent_project(raw)
         priority = _extract_sync_row_priority(raw, parent)
         if not priority:
@@ -664,6 +666,43 @@ def _sync_rows_for_bundle(
             )
         )
     return rows
+
+
+def _enrich_candidates_with_jira_live_details(
+    bpmis_client: Any,
+    candidates: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    jira_ids: list[str] = []
+    seen_ids: set[str] = set()
+    for raw in candidates:
+        jira_id = _extract_jira_id(raw)
+        if jira_id and jira_id not in seen_ids:
+            seen_ids.add(jira_id)
+            jira_ids.append(jira_id)
+    if not jira_ids or not hasattr(bpmis_client, "get_jira_ticket_details"):
+        return {}
+    try:
+        return bpmis_client.get_jira_ticket_details(jira_ids) or {}
+    except Exception:
+        return {}
+
+
+def _apply_jira_live_detail(
+    row: dict[str, Any],
+    jira_id: str,
+    live_details: dict[str, dict[str, Any]],
+) -> None:
+    if not live_details:
+        return
+    detail = live_details.get(jira_id) or live_details.get(jira_id.upper())
+    if not detail or not isinstance(detail, dict):
+        return
+    live_components = detail.get("components")
+    if isinstance(live_components, list) and live_components:
+        row["components"] = live_components
+    live_fix_versions = detail.get("fixVersions")
+    if isinstance(live_fix_versions, list) and live_fix_versions:
+        row["fixVersions"] = live_fix_versions
 
 
 def _safe_list_productization_issues_for_version(bpmis_client: Any, version_id: str) -> list[dict[str, Any]]:
@@ -1079,10 +1118,47 @@ def _extract_productization_efforts(row: dict[str, Any], jira_id: str = "") -> s
 
 
 def _extract_component(row: dict[str, Any]) -> str:
-    return _extract_first_text(row, "component", "componentId", "components")
+    components = _extract_all_components(row)
+    return ", ".join(components) if components else ""
+
+
+def _extract_all_components(row: dict[str, Any]) -> list[str]:
+    for key in ("components", "component", "componentId"):
+        if key not in row:
+            continue
+        value = row.get(key)
+        names = _stringify_component_value(value)
+        if names:
+            return names
+    return []
+
+
+def _stringify_component_value(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        for child_key in ("label", "name", "displayName"):
+            child = str(value.get(child_key) or "").strip()
+            if child:
+                return [child]
+        return []
+    if isinstance(value, list):
+        result: list[str] = []
+        for item in value:
+            result.extend(_stringify_component_value(item))
+        return result
+    text = str(value or "").strip()
+    return [text] if text else []
 
 
 def _extract_release_version(row: dict[str, Any]) -> str:
+    names = _collect_all_release_version_names(row)
+    normalized = _normalize_and_dedu_release_version_names(names)
+    return ", ".join(normalized) if normalized else ""
+
+
+def _collect_all_release_version_names(row: dict[str, Any]) -> list[str]:
+    names: list[str] = []
     text = _extract_first_text(
         row,
         "fix_version_name",
@@ -1093,8 +1169,37 @@ def _extract_release_version(row: dict[str, Any]) -> str:
         "versions",
     )
     if text:
-        return text
-    return ", ".join(sorted(_row_jira_version_names(row)))
+        names.extend(part.strip() for part in text.split(",") if part.strip())
+    for name in _row_jira_version_names(row):
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _normalize_and_dedu_release_version_names(names: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw_name in names:
+        for part in str(raw_name or "").split(","):
+            normalized = _normalize_release_version_name(part.strip())
+            if not normalized:
+                continue
+            key = normalized.casefold()
+            if key not in seen:
+                seen.add(key)
+                result.append(normalized)
+    return sorted(result)
+
+
+def _normalize_release_version_name(name: str) -> str:
+    text = str(name or "").strip()
+    if not text:
+        return ""
+    if text.lower().startswith("af_"):
+        return "AF_" + text[3:]
+    if text.startswith("v1.0."):
+        return "AF_" + text
+    return text
 
 
 def _extract_jira_board(row: dict[str, Any]) -> str:

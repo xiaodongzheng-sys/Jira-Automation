@@ -1275,6 +1275,55 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(vplan._sanitize_audit_value(True), True)
         self.assertIn("+08:00", vplan._now_text(datetime(2026, 5, 16, 9, 0)))
         self.assertEqual(vplan._next_sort_order([]), 0)
+    def test_normalize_release_version_name(self) -> None:
+        # af_ prefix gets uppercased to AF_
+        self.assertEqual(vplan._normalize_release_version_name("af_v1.0.82_20260626"), "AF_v1.0.82_20260626")
+        # AF_ prefix stays AF_
+        self.assertEqual(vplan._normalize_release_version_name("AF_v1.0.82_20260626"), "AF_v1.0.82_20260626")
+        # bare v1.0. prefix gets AF_ prepended
+        self.assertEqual(vplan._normalize_release_version_name("v1.0.82_20260626"), "AF_v1.0.82_20260626")
+        # non-AF version stays unchanged
+        self.assertEqual(vplan._normalize_release_version_name("DBPSG_v3.02_0618"), "DBPSG_v3.02_0618")
+        self.assertEqual(vplan._normalize_release_version_name("DBPID_v3.41_0526"), "DBPID_v3.41_0526")
+        # empty stays empty
+        self.assertEqual(vplan._normalize_release_version_name(""), "")
+
+    def test_extract_release_version_deduplicates(self) -> None:
+        row = {
+            "fix_version_name": "af_v1.0.82_20260626, v1.0.82_20260626",
+            "fixVersions": ["af_v1.0.82_20260626", "v1.0.82_20260626"],
+        }
+        result = vplan._extract_release_version(row)
+        self.assertEqual(result, "AF_v1.0.82_20260626")
+
+    def test_extract_release_version_single_af(self) -> None:
+        row = {"version": "AF_1.0.76_20260520"}
+        result = vplan._extract_release_version(row)
+        self.assertEqual(result, "AF_1.0.76_20260520")
+
+    def test_extract_release_version_non_af_unchanged(self) -> None:
+        row = {"version": "DBPSG_v2.85_0526"}
+        result = vplan._extract_release_version(row)
+        self.assertEqual(result, "DBPSG_v2.85_0526")
+
+    def test_extract_component_with_jira_live_names(self) -> None:
+        row = {"components": ["Anti-fraud"]}
+        self.assertEqual(vplan._extract_component(row), "Anti-fraud")
+
+    def test_extract_component_with_multiple_components(self) -> None:
+        row = {"components": ["Anti-fraud", "Core"]}
+        self.assertEqual(vplan._extract_component(row), "Anti-fraud, Core")
+
+    def test_extract_component_with_numeric_id_fallback(self) -> None:
+        row = {"componentId": "19"}
+        self.assertEqual(vplan._extract_component(row), "19")
+
+    def test_extract_component_empty(self) -> None:
+        self.assertEqual(vplan._extract_component({}), "")
+
+    def test_extract_component_dict_with_name(self) -> None:
+        row = {"components": [{"name": "Anti-fraud"}, {"name": "Core"}]}
+        self.assertEqual(vplan._extract_component(row), "Anti-fraud, Core")
 
 
 if __name__ == "__main__":
