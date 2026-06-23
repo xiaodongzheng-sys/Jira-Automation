@@ -1288,13 +1288,29 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         # empty stays empty
         self.assertEqual(vplan._normalize_release_version_name(""), "")
 
-    def test_extract_release_version_deduplicates(self) -> None:
+    def test_extract_release_version_deduplicates_af(self) -> None:
         row = {
             "fix_version_name": "af_v1.0.82_20260626, v1.0.82_20260626",
             "fixVersions": ["af_v1.0.82_20260626", "v1.0.82_20260626"],
         }
         result = vplan._extract_release_version(row)
         self.assertEqual(result, "AF_v1.0.82_20260626")
+
+    def test_extract_release_version_deduplicates_dbpid(self) -> None:
+        row = {
+            "fix_version_name": "DBPID_v3.47_0702, v3.47_0702",
+            "fixVersions": ["DBPID_v3.47_0702", "v3.47_0702"],
+        }
+        result = vplan._extract_release_version(row)
+        self.assertEqual(result, "DBPID_v3.47_0702")
+
+    def test_extract_release_version_deduplicates_dbpsg(self) -> None:
+        row = {
+            "fix_version_name": "DBPSG_v2.85_0526, v2.85_0526",
+            "fixVersions": ["DBPSG_v2.85_0526", "v2.85_0526"],
+        }
+        result = vplan._extract_release_version(row)
+        self.assertEqual(result, "DBPSG_v2.85_0526")
 
     def test_extract_release_version_single_af(self) -> None:
         row = {"version": "AF_1.0.76_20260520"}

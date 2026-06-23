@@ -1178,7 +1178,7 @@ def _collect_all_release_version_names(row: dict[str, Any]) -> list[str]:
 
 def _normalize_and_dedu_release_version_names(names: list[str]) -> list[str]:
     seen: set[str] = set()
-    result: list[str] = []
+    unique: list[str] = []
     for raw_name in names:
         for part in str(raw_name or "").split(","):
             normalized = _normalize_release_version_name(part.strip())
@@ -1187,7 +1187,17 @@ def _normalize_and_dedu_release_version_names(names: list[str]) -> list[str]:
             key = normalized.casefold()
             if key not in seen:
                 seen.add(key)
-                result.append(normalized)
+                unique.append(normalized)
+    # Remove bare versions (e.g. "v3.47_0702") that are suffixes of
+    # prefixed versions (e.g. "DBPID_v3.47_0702") -- BPMIS returns both.
+    result: list[str] = []
+    for name in unique:
+        if name[:1].lower() == "v" and any(
+            other != name and other.lower().endswith(name.lower())
+            for other in unique
+        ):
+            continue
+        result.append(name)
     return sorted(result)
 
 
