@@ -38,6 +38,7 @@ VERSION_PLAN_PM_ALIASES = {
 VERSION_PLAN_TIMEZONE = ZoneInfo("Asia/Singapore")
 VERSION_PLAN_SYNC_OPERATION = "af_version_plan"
 VERSION_PLAN_AUDIT_LIMIT = 500
+VERSION_PLAN_EXCLUDE_SUFFIXES = ("_adhoc",)
 
 
 class VersionPlanSyncUpstreamError(RuntimeError):
@@ -190,7 +191,14 @@ def version_plan_sync(config: dict[str, Any], bpmis_client: Any, *, now: datetim
         current_dt = current_dt.replace(tzinfo=VERSION_PLAN_TIMEZONE)
 
     af_versions = [_version_record(row) for row in _search_versions_or_raise(bpmis_client, "AF_")]
-    af_versions = [row for row in af_versions if row["version_id"] and row["version_name"].startswith("AF_") and row["release_date"]]
+    af_versions = [
+        row
+        for row in af_versions
+        if row["version_id"]
+        and row["version_name"].startswith("AF_")
+        and row["release_date"]
+        and not _is_excluded_version_name(row["version_name"])
+    ]
     if not af_versions:
         af["sync_state"] = {
             **af["sync_state"],
@@ -214,6 +222,14 @@ def version_plan_sync(config: dict[str, Any], bpmis_client: Any, *, now: datetim
     for version in upcoming:
         af["seen_versions"][version["version_id"]] = version
 
+    stale_seen = [
+        vid for vid, ver in af["seen_versions"].items()
+        if _is_excluded_version_name(str(ver.get("version_name") or ""))
+    ]
+    for vid in stale_seen:
+        af["seen_versions"].pop(vid, None)
+        af["bundles"].pop(vid, None)
+
     next_bundles: dict[str, dict[str, Any]] = {}
     all_versions_by_id = dict(af["seen_versions"])
     all_versions_by_id.update({row["version_id"]: row for row in af_versions})
@@ -224,6 +240,8 @@ def version_plan_sync(config: dict[str, Any], bpmis_client: Any, *, now: datetim
             candidate_versions.append(all_versions_by_id.get(str(seen_version.get("version_id") or ""), seen_version))
 
     for version in _dedupe_versions(candidate_versions):
+        if _is_excluded_version_name(str(version.get("version_name") or "")):
+            continue
         version_id = version["version_id"]
         release_date = _parse_date(version["release_date"])
         existing = af["bundles"].get(version_id, {})
@@ -585,6 +603,11 @@ def _archived_bundle_payload(item: dict[str, Any]) -> dict[str, Any]:
 def _version_plan_should_sync_jira(version: dict[str, Any], today: date) -> bool:
     prd_final_date = _parse_date(_offset_date_text(_prd_schedule_base_date(version), -2))
     return bool(prd_final_date and prd_final_date < today)
+
+
+def _is_excluded_version_name(version_name: str) -> bool:
+    name = str(version_name or "").strip().lower()
+    return any(name.endswith(suffix) for suffix in VERSION_PLAN_EXCLUDE_SUFFIXES)
 
 
 def _bundle_should_show_synced_rows(bundle: dict[str, Any], *, today: date) -> bool:
