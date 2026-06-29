@@ -973,11 +973,11 @@
     return payload;
   };
 
-  const saveVersionPlanCell = async (input) => {
+  const saveVersionPlanCell = async (input, retryOnConflict = true) => {
     const row = input.closest('[data-version-plan-row-id]');
     if (!row) return;
     const field = input.dataset.versionPlanCell || '';
-    if (isVersionPlanSyncRunning() && field !== 'remarks') {
+    if (isVersionPlanSyncRunning()) {
       setVersionPlanStatus(versionPlanSyncPausedMessage, 'neutral');
       return;
     }
@@ -1013,6 +1013,15 @@
       }
       setVersionPlanStatus('Saved.', 'success');
     } catch (error) {
+      if (retryOnConflict && error?.payload?.error_category === 'version_plan_conflict') {
+        await refreshVersionPlanRevision();
+        return saveVersionPlanCell(input, false);
+      }
+      if (error?.payload?.error_category === 'version_plan_sync_running') {
+        setVersionPlanStatus(error.message || versionPlanSyncPausedMessage, 'neutral');
+        await refreshVersionPlanRevision();
+        return;
+      }
       setVersionPlanStatus(error.message || 'Could not save Version Plan cell.', 'error');
     }
   };

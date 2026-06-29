@@ -661,8 +661,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         store = _get_version_plan_store()
         try:
             snapshot = _version_plan_load_snapshot(store)
-            field = str(payload.get("field") or "").strip()
-            if field != "remarks" and _version_plan_sync_running(snapshot.config):
+            if _version_plan_sync_running(snapshot.config):
                 return _version_plan_sync_running_response()
             updated = update_version_plan_cell(snapshot.config, payload)
             expected_revision = str(payload.get("document_revision") or payload.get("revision") or "").strip() or None
