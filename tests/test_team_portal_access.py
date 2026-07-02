@@ -988,7 +988,6 @@ class TeamPortalAccessTests(unittest.TestCase):
                     "/prd-briefing/",
                     "/meeting-recorder",
                     "/meeting-translation",
-                    "/team-dashboard",
                     "/reports",
                 ]
                 for path in blocked_pages:
@@ -997,6 +996,12 @@ class TeamPortalAccessTests(unittest.TestCase):
                         response = client.get(path, follow_redirects=False)
                         self.assertEqual(response.status_code, 302)
                         self.assertEqual(response.headers["Location"], "/access-denied")
+                # Non-admin allowed users can access Team Dashboard (Version Plan tab only).
+                self._login_non_admin(client)
+                team_dashboard_page_response = client.get("/team-dashboard", follow_redirects=False)
+                self.assertEqual(team_dashboard_page_response.status_code, 200)
+                self.assertIn(b"data-version-plan-content", team_dashboard_page_response.data)
+
                 # Admin-only POST endpoints reject signed-in non-admins with 403.
                 for method, path, payload in [
                     ("post", "/admin/team-dashboard/members", {"teams": {"AF": {"member_emails": ["teammate@npt.sg"]}}}),
@@ -1189,7 +1194,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     ("get", "/api/productization-upgrade-summary/llm-descriptions?version_id=88", {200}),
                     ("post", "/api/jobs/sync-bpmis-projects", {200}),
                     ("get", "/api/jobs/missing", {404}),
-                    ("get", "/team-dashboard?tab=version-plan", {302}),
+                    ("get", "/team-dashboard?tab=version-plan", {200}),
                     ("get", "/reports", {302}),
                     ("get", "/business-insights", {200}),
                     ("get", "/api/business-insights/reports?domain=credit-risk", {200}),
@@ -1254,8 +1259,8 @@ class TeamPortalAccessTests(unittest.TestCase):
         # Non-admins are blocked from admin-only portal pages...
         self.assertEqual(prd_response.status_code, 302)
         self.assertEqual(prd_response.headers["Location"], "/access-denied")
-        self.assertEqual(team_dashboard_response.status_code, 302)
-        self.assertEqual(team_dashboard_response.headers["Location"], "/access-denied")
+        self.assertEqual(team_dashboard_response.status_code, 200)
+        self.assertIn(b"data-version-plan-content", team_dashboard_response.data)
         # ...while allowed pages render for signed-in non-admin users.
         self.assertEqual(source_response.status_code, 200)
         self.assertEqual(version_plan_response.status_code, 200)

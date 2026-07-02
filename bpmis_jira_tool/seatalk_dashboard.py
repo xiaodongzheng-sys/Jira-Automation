@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -512,22 +513,40 @@ class SeaTalkDashboardService:
         extra_args: list[str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         helper_path = Path(__file__).with_name(helper_name)
-        command = [
-            str(self.seatalk_app_path / "Contents/MacOS/SeaTalk"),
-            str(helper_path),
-            "--data-dir",
-            str(self.seatalk_data_dir),
-            "--days",
-            str(days),
-            "--now",
-            now.isoformat(),
-        ]
+        # SeaTalk 2.9.5+ no longer respects ELECTRON_RUN_AS_NODE, so prefer system node
+        # with the npm-installed better-sqlite3-multiple-ciphers module. Fall back to the
+        # SeaTalk Electron binary for older app versions that still support it.
+        node_binary = str(os.getenv("SEATALK_NODE_BINARY") or "").strip() or shutil.which("node") or ""
+        use_system_node = bool(node_binary)
+        if use_system_node:
+            command = [
+                node_binary,
+                str(helper_path),
+                "--data-dir",
+                str(self.seatalk_data_dir),
+                "--days",
+                str(days),
+                "--now",
+                now.isoformat(),
+            ]
+        else:
+            command = [
+                str(self.seatalk_app_path / "Contents/MacOS/SeaTalk"),
+                str(helper_path),
+                "--data-dir",
+                str(self.seatalk_data_dir),
+                "--days",
+                str(days),
+                "--now",
+                now.isoformat(),
+            ]
         if helper_name == "seatalk_local_export.js" and self.name_overrides_path is not None:
             command.extend(["--name-overrides", str(self.name_overrides_path)])
         if extra_args:
             command.extend(extra_args)
         env = os.environ.copy()
-        env["ELECTRON_RUN_AS_NODE"] = "1"
+        if not use_system_node:
+            env["ELECTRON_RUN_AS_NODE"] = "1"
         runner = self._command_runner or (lambda args: _run_subprocess(args, env=env, timeout=timeout))
         try:
             return runner(command)

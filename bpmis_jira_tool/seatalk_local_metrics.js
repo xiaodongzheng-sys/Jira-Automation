@@ -91,18 +91,46 @@ function createLocalDateRange(nowIso, days) {
   };
 }
 
-function loadDatabase(dataDir, uid) {
+function resolveBundleId() {
   const appResources = '/Applications/SeaTalk.app/Contents/Resources';
-  const Database = require(path.join(appResources, '2_9_3_bundle.asar/node_modules/better-sqlite3-multiple-ciphers/lib/database'));
-  const nativeBinding = path.join(
-    appResources,
-    '2_9_3_bundle.asar.unpacked/node_modules/better-sqlite3-multiple-ciphers/build/Release/better_sqlite3.node',
-  );
+  const versionFile = path.join(appResources, 'default.bundle.version');
+  try {
+    const payload = JSON.parse(fs.readFileSync(versionFile, 'utf8'));
+    if (payload && payload.id) return payload.id;
+  } catch { /* fall through to directory scan */ }
+  try {
+    const entries = fs.readdirSync(appResources);
+    const bundleDirs = entries.filter((name) => /^\d+_\d+_\d+_bundle\.asar$/.test(name));
+    if (bundleDirs.length) {
+      return bundleDirs.sort().pop().replace(/_bundle\.asar$/, '');
+    }
+  } catch { /* fall through to hardcoded default */ }
+  return '2_9_3';
+}
+
+function loadDatabase(dataDir, uid) {
   const dbPath = path.join(dataDir, `main_${uid}.sqlite`);
   if (!fs.existsSync(dbPath)) {
     throw new Error(`SeaTalk desktop database was not found at ${dbPath}.`);
   }
-  const db = new Database(dbPath, { readonly: true, fileMustExist: true, nativeBinding });
+  // Try system-installed better-sqlite3-multiple-ciphers first (works with system node).
+  // Fall back to SeaTalk's bundled module (requires ELECTRON_RUN_AS_NODE, pre-2.9.5).
+  let Database;
+  let nativeBinding;
+  try {
+    Database = require('better-sqlite3-multiple-ciphers/lib/database');
+  } catch {
+    const appResources = '/Applications/SeaTalk.app/Contents/Resources';
+    const bundleId = resolveBundleId();
+    Database = require(path.join(appResources, `${bundleId}_bundle.asar/node_modules/better-sqlite3-multiple-ciphers/lib/database`));
+    nativeBinding = path.join(
+      appResources,
+      `${bundleId}_bundle.asar.unpacked/node_modules/better-sqlite3-multiple-ciphers/build/Release/better_sqlite3.node`,
+    );
+  }
+  const dbOptions = { readonly: true, fileMustExist: true };
+  if (nativeBinding) dbOptions.nativeBinding = nativeBinding;
+  const db = new Database(dbPath, dbOptions);
   db.pragma(`key='40a3884b8b032e6f${uid}'`);
   db.pragma('journal_mode=WAL');
   return { db, dbPath };

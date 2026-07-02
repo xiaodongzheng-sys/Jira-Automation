@@ -1851,5 +1851,182 @@ class ListUsageBusinessInsightsTests(unittest.TestCase):
         self.assertIn("Greylist Detail", html)
 
 
+class _FakeSheetValuesCall:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def execute(self):
+        return self.payload
+
+
+class _FakeSheetValuesResource:
+    def __init__(self, values_by_tab):
+        self.values_by_tab = values_by_tab
+        self.requested_ranges = []
+
+    def batchGet(self, *, spreadsheetId, ranges, majorDimension):
+        self.spreadsheet_id = spreadsheetId
+        self.requested_ranges = list(ranges)
+        value_ranges = []
+        for sheet_range in ranges:
+            tab_name = sheet_range.split("!", 1)[0].strip("'").replace("''", "'")
+            value_ranges.append({"range": sheet_range, "values": self.values_by_tab[tab_name]})
+        return _FakeSheetValuesCall({"spreadsheetId": spreadsheetId, "valueRanges": value_ranges})
+
+
+class _FakeSheetsResource:
+    def __init__(self, values_resource):
+        self._values_resource = values_resource
+
+    def values(self):
+        return self._values_resource
+
+
+class _FakeSheetsService:
+    def __init__(self, values_by_tab):
+        self.values_resource = _FakeSheetValuesResource(values_by_tab)
+
+    def spreadsheets(self):
+        return _FakeSheetsResource(self.values_resource)
+
+
+class BusinessInsightsSheetRefreshTests(unittest.TestCase):
+    def test_sheet_url_and_scheduled_tab_names_match_scheduler_convention(self):
+        from bpmis_jira_tool.business_insights_sheet_refresh import (
+            DEFAULT_BUSINESS_INSIGHTS_SHEET_URL,
+            google_scopes_include_sheets,
+            scheduled_sheet_name,
+            spreadsheet_id_from_url,
+        )
+
+        self.assertEqual(
+            spreadsheet_id_from_url(DEFAULT_BUSINESS_INSIGHTS_SHEET_URL),
+            "1F5MSUwnxg8AbGr3rQN1l8nXYkxrBU680FJYhTGzL9qo",
+        )
+        self.assertEqual(
+            scheduled_sheet_name(AF_SCENARIOS_ACTIONS_REPORT_ID, "Auth Outcome by Scene & Type"),
+            "1_auth_outcome_by_scene_type",
+        )
+        self.assertEqual(
+            scheduled_sheet_name(AF_RULE_EFFECTIVENESS_REPORT_ID, "Scene/Sub-scene/Action Usage"),
+            "3_scene_sub_scene_action_usage",
+        )
+        self.assertEqual(
+            scheduled_sheet_name(AF_CARD_3DS_REPORT_ID, "3DS by Merchant Category (MCC)"),
+            "7_3ds_by_merchant_category_mcc",
+        )
+        self.assertTrue(google_scopes_include_sheets())
+
+    def test_service_account_sheet_credentials_use_sheets_scope(self):
+        from bpmis_jira_tool.business_insights_sheet_refresh import (
+            GOOGLE_SHEETS_SCOPE,
+            load_service_account_google_sheets_credentials,
+        )
+
+        with patch(
+            "bpmis_jira_tool.business_insights_sheet_refresh.service_account.Credentials.from_service_account_info"
+        ) as from_info:
+            expected = object()
+            from_info.return_value = expected
+            credentials = load_service_account_google_sheets_credentials(
+                service_account_json=json.dumps({"client_email": "refresh@example.iam.gserviceaccount.com"})
+            )
+
+        self.assertIs(credentials, expected)
+        from_info.assert_called_once_with(
+            {"client_email": "refresh@example.iam.gserviceaccount.com"},
+            scopes=[GOOGLE_SHEETS_SCOPE],
+        )
+
+    def test_oauth_sheet_credentials_from_json_require_sheets_scope(self):
+        from bpmis_jira_tool.business_insights_sheet_refresh import (
+            GOOGLE_SHEETS_SCOPE,
+            load_oauth_google_sheets_credentials,
+        )
+
+        credentials = load_oauth_google_sheets_credentials(
+            json.dumps(
+                {
+                    "token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "client_id": "client-id",
+                    "client_secret": "client-secret",
+                    "scopes": [GOOGLE_SHEETS_SCOPE],
+                }
+            )
+        )
+
+        self.assertEqual(credentials.refresh_token, "refresh-token")
+        self.assertIn(GOOGLE_SHEETS_SCOPE, credentials.scopes)
+
+    def test_adc_sheet_credentials_use_sheets_scope(self):
+        from bpmis_jira_tool.business_insights_sheet_refresh import (
+            GOOGLE_SHEETS_SCOPE,
+            load_application_default_google_sheets_credentials,
+        )
+
+        expected = object()
+        with patch("bpmis_jira_tool.business_insights_sheet_refresh.google.auth.default") as default:
+            default.return_value = (expected, "project-id")
+            credentials = load_application_default_google_sheets_credentials()
+
+        self.assertIs(credentials, expected)
+        default.assert_called_once_with(scopes=[GOOGLE_SHEETS_SCOPE])
+
+    def test_refresh_from_google_sheet_writes_excel_visualization_and_metadata(self):
+        from bpmis_jira_tool.business_insights_sheet_refresh import (
+            refresh_anti_fraud_reports_from_google_sheet,
+            scheduled_sheet_name,
+        )
+
+        title, builder = REPORT_BUILDERS[AF_RULES_FEATURES_REPORT_ID]
+        sections = extract_sql_sections(builder(snapshot_pt_date=None, now=FIXED_NOW))
+        values_by_tab = {}
+        for section in sections:
+            tab = scheduled_sheet_name(AF_RULES_FEATURES_REPORT_ID, section.sheet_name)
+            if section.sheet_name == "Rules":
+                values_by_tab[tab] = [
+                    ["rule_id", "rule_name", "outcome_type", "rule_status"],
+                    ["R1", "Velocity", "Reject", "Active"],
+                ]
+            elif section.sheet_name == "Features":
+                values_by_tab[tab] = [
+                    ["feature_id", "feature_name", "function_id", "feature_status"],
+                    ["F1", "Login count", "FUNC_1", "Active"],
+                ]
+            elif section.sheet_name == "Function Usage":
+                values_by_tab[tab] = [
+                    ["function_id", "features", "active_features"],
+                    ["FUNC_1", "1", "1"],
+                ]
+            else:
+                values_by_tab[tab] = [["metric", "value"], [section.sheet_name, "1"]]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = _FakeSheetsService(values_by_tab)
+            result = refresh_anti_fraud_reports_from_google_sheet(
+                portal_data_dir=Path(temp_dir),
+                sheets_service=service,
+                report_ids=[AF_RULES_FEATURES_REPORT_ID],
+                now=FIXED_NOW,
+            )
+            metadata_path = Path(temp_dir) / "business_insights" / "reports.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            artifact = metadata["artifacts"][AF_RULES_FEATURES_REPORT_ID]
+            workbook_path = Path(temp_dir) / "business_insights" / "artifacts" / artifact["filename"]
+            visualization_path = Path(temp_dir) / "business_insights" / "artifacts" / artifact["visualization_filename"]
+            workbook = load_workbook(workbook_path, data_only=True)
+            visualization_html = visualization_path.read_text(encoding="utf-8")
+
+        self.assertEqual(result["report_count"], 1)
+        self.assertEqual(result["reports"][0]["report_id"], AF_RULES_FEATURES_REPORT_ID)
+        self.assertEqual(artifact["source_filename"], "google-sheet-scheduled-output")
+        self.assertEqual(artifact["source_google_tabs"][0]["google_tab"], "2_rules")
+        self.assertIn("Rules", workbook.sheetnames)
+        self.assertIn("Features", workbook.sheetnames)
+        self.assertIn("Anti-fraud PH - Rules &amp; Features", visualization_html)
+
+
 if __name__ == "__main__":
     unittest.main()

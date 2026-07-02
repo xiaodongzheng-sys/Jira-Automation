@@ -423,7 +423,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             user_identity=_get_user_identity(settings),
             team_dashboard_config=_get_team_dashboard_config_store().load(),
             can_manage_team_dashboard=_can_manage_team_dashboard(_get_user_identity(settings)),
-            can_access_version_plan=_can_access_team_dashboard_version_plan(_get_user_identity(settings)),
+            can_access_version_plan=_can_access_team_dashboard_version_plan(_get_user_identity(settings), settings),
             can_view_team_dashboard_monthly_report=_can_access_team_dashboard_monthly_report(
                 _get_user_identity(settings)
             ),
@@ -463,7 +463,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             user_identity=_get_user_identity(settings),
             team_dashboard_config=_get_team_dashboard_config_store().load(),
             can_manage_team_dashboard=_can_manage_team_dashboard(_get_user_identity(settings)),
-            can_access_version_plan=_can_access_team_dashboard_version_plan(_get_user_identity(settings)),
+            can_access_version_plan=_can_access_team_dashboard_version_plan(_get_user_identity(settings), settings),
             can_view_team_dashboard_monthly_report=_can_access_team_dashboard_monthly_report(
                 _get_user_identity(settings)
             ),
@@ -1351,6 +1351,8 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         access_gate = _require_team_dashboard_access(settings, api=True)
         if access_gate is not None:
             return access_gate
+        if not _can_manage_team_dashboard(_get_user_identity(settings)):
+            return jsonify({"status": "error", "message": "Team Dashboard admin access is restricted."}), HTTPStatus.FORBIDDEN
         payload = request.get_json(silent=True) or {}
         jira_id = _extract_issue_key_from_text(str(payload.get("jira_id") or payload.get("jira_link") or ""))
         jira_link = str(payload.get("jira_link") or "").strip()

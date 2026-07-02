@@ -97,6 +97,24 @@ secret_exists() {
   "$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} secrets describe "$name" --project "$PROJECT_ID" >/dev/null 2>&1
 }
 
+destroy_old_secret_versions() {
+  local name="$1"
+  local latest
+  latest="$("$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} secrets versions describe latest --secret "$name" --project "$PROJECT_ID" --format='value(name)' 2>/dev/null || true)"
+  local old_versions
+  old_versions="$("$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} secrets versions list "$name" --project "$PROJECT_ID" --filter='state=enabled' --format='value(name)' --sort-by='~name' 2>/dev/null || true)"
+  if [[ -z "$old_versions" ]]; then
+    return 0
+  fi
+  while IFS= read -r v; do
+    if [[ -n "$v" && "$v" != "$latest" ]]; then
+      echo "Destroying old secret version: $name/$v"
+      "$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} secrets versions destroy "$v" --secret "$name" --project "$PROJECT_ID" --quiet 2>/dev/null || true
+    fi
+  done <<< "$old_versions"
+}
+
+
 create_or_update_secret() {
   local name="$1"
   local value="$2"
@@ -110,6 +128,7 @@ create_or_update_secret() {
       fi
     fi
     printf '%s' "$value" | "$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} secrets versions add "$name" --project "$PROJECT_ID" --data-file=-
+    destroy_old_secret_versions "$name"
   else
     printf '%s' "$value" | "$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} secrets create "$name" --project "$PROJECT_ID" --replication-policy=automatic --data-file=-
   fi
@@ -128,6 +147,7 @@ create_or_update_secret_file() {
       fi
     fi
     "$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} secrets versions add "$name" --project "$PROJECT_ID" --data-file="$path"
+    destroy_old_secret_versions "$name"
   else
     "$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} secrets create "$name" --project "$PROJECT_ID" --replication-policy=automatic --data-file="$path"
   fi

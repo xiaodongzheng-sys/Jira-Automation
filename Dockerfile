@@ -17,6 +17,7 @@ COPY app.py local_agent.py ./
 COPY bpmis_jira_tool ./bpmis_jira_tool
 COPY config ./config
 COPY prd_briefing ./prd_briefing
+COPY scripts ./scripts
 COPY static ./static
 COPY templates ./templates
 

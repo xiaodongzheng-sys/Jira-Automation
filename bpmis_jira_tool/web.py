@@ -753,7 +753,7 @@ def create_app() -> Flask:
                 "portal_stage": str(settings.team_portal_stage or "").strip().lower(),
             }
         user_identity = _get_user_identity(settings)
-        can_access_team_dashboard = _can_access_team_dashboard(user_identity)
+        can_access_team_dashboard = _can_access_team_dashboard(user_identity, settings)
         can_access_bpmis_automation = _can_access_bpmis_automation_tool(user_identity)
         can_access_reports = _can_access_team_dashboard_monthly_report(user_identity)
         can_access_business_insights = _can_access_business_insights(settings)
@@ -2616,7 +2616,7 @@ def _require_team_dashboard_access(settings: Settings, *, api: bool = False):
         return login_gate
     user_identity = _get_user_identity(settings)
     message = "Team Dashboard is restricted to admins and AF Version Plan users."
-    if not _can_access_team_dashboard(user_identity):
+    if not _can_access_team_dashboard(user_identity, settings):
         if api:
             return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
         flash(message, "error")
@@ -3048,10 +3048,12 @@ def _can_access_productization_upgrade_summary(user_identity: dict[str, str | No
     return _is_portal_admin(str(user_identity.get("email") or ""))
 
 
-def _can_access_team_dashboard(user_identity: dict[str, str | None]) -> bool:
-    # The full Team Dashboard stays admin-only; the public Version Plan view no
-    # longer grants dashboard access.
-    return _can_manage_team_dashboard(user_identity)
+def _can_access_team_dashboard(user_identity: dict[str, str | None], settings: Settings | None = None) -> bool:
+    # Admins can access the full Team Dashboard.  Non-admin portal users can
+    # also open the page but only see the Version Plan tab.
+    if _can_manage_team_dashboard(user_identity):
+        return True
+    return _can_access_team_dashboard_version_plan(user_identity, settings)
 
 
 def _can_manage_team_dashboard(user_identity: dict[str, str | None]) -> bool:
