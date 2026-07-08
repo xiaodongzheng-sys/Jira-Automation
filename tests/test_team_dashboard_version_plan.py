@@ -305,7 +305,7 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertNotIn("SGDB-planning", [row["jira_id"] for row in bundle["synced_rows"]])
         self.assertNotIn("SGDB-tech", [row["jira_id"] for row in bundle["synced_rows"]])
         self.assertNotIn("SGDB-support", [row["jira_id"] for row in bundle["synced_rows"]])
-        self.assertEqual(bundle["mapped_versions"]["DBPSG"]["version_name"], "DBPSG_v2.85_0526")
+        self.assertEqual(bundle["mapped_versions"]["DBPSG"]["version_name"], "DBPSG_v2.85_0525")
         self.assertEqual(len(client.release_window_calls), 1)
         self.assertEqual(client.release_window_calls[0]["release_after"], "2026-05-20")
         self.assertEqual(client.release_window_calls[0]["release_before"], "2026-05-26")
@@ -1243,6 +1243,18 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
                 {"DBPSG": [{"version_id": "dbp", "version_name": "DBPSG_v1.0_0526", "release_date": "2026-05-26"}]},
             )["DBPSG"]["version_name"],
             "-",
+        )
+        self.assertEqual(
+            vplan._mapped_dbp_versions(
+                {"release_date": "2026-05-20"},
+                {
+                    "DBPSG": [
+                        {"version_id": "too-soon", "version_name": "DBPSG_v1.0_0524", "release_date": "2026-05-24"},
+                        {"version_id": "min-ok", "version_name": "DBPSG_v1.0_0525", "release_date": "2026-05-25"},
+                    ]
+                },
+            )["DBPSG"]["version_name"],
+            "DBPSG_v1.0_0525",
         )
         self.assertEqual(vplan._normalize_pm_values(["", "unknown", "tbc", "xiaodong.zheng@npt.sg", "jun wei"]), ["Xiaodong"])
         self.assertEqual(vplan._normalize_pm_values(["junwei.ong@npt.sg"]), ["Jun Wei"])

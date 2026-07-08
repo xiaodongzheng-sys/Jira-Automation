@@ -80,6 +80,17 @@ GMAIL_EXPORT_CALENDAR_SUBJECT_HINTS = (
     "invitation:",
     "updated invitation:",
 )
+GMAIL_EXPORT_CALENDAR_REMINDER_SUBJECT_HINTS = (
+    "reminder:",
+    "event reminder:",
+    "response:",
+    "cancelled:",
+    "canceled:",
+)
+GMAIL_EXPORT_CALENDAR_SENDER_HINTS = (
+    "calendar-notification@google.com",
+    "googlecalendar-noreply@google.com",
+)
 GMAIL_EXPORT_SELF_DAILY_BRIEF_SENDERS = (
     "xiaodong.zheng@npt.sg",
 )
@@ -401,8 +412,14 @@ def _clean_export_body_text(value: str) -> str:
 
 
 def _is_export_noise(headers: dict[str, str], report_intelligence_config: dict[str, Any] | None = None) -> bool:
-    sender = _first_contact_address(headers.get("from", ""))
+    raw_from = str(headers.get("from") or "")
+    sender = _first_contact_address(raw_from)
     subject = str(headers.get("subject") or "").strip().lower()
+    raw_from_lower = raw_from.strip().lower()
+    google_calendar_sender = (
+        sender in GMAIL_EXPORT_CALENDAR_SENDER_HINTS
+        or "google calendar" in raw_from_lower
+    )
     if report_intelligence_config and is_gmail_noise(headers, config=report_intelligence_config):
         return True
     if sender in GMAIL_EXPORT_SELF_DAILY_BRIEF_SENDERS and subject.startswith("daily brief"):
@@ -414,6 +431,8 @@ def _is_export_noise(headers: dict[str, str], report_intelligence_config: dict[s
     if any(hint in subject for hint in GMAIL_EXPORT_ACCESS_REQUEST_HINTS):
         return True
     if any(hint in subject for hint in GMAIL_EXPORT_CALENDAR_SUBJECT_HINTS):
+        return True
+    if google_calendar_sender and any(hint in subject for hint in GMAIL_EXPORT_CALENDAR_REMINDER_SUBJECT_HINTS):
         return True
     if "calendar" in sender and "invitation" in subject:
         return True

@@ -39,6 +39,7 @@ VERSION_PLAN_TIMEZONE = ZoneInfo("Asia/Singapore")
 VERSION_PLAN_SYNC_OPERATION = "af_version_plan"
 VERSION_PLAN_AUDIT_LIMIT = 500
 VERSION_PLAN_EXCLUDE_SUFFIXES = ("_adhoc",)
+VERSION_PLAN_MARKET_VERSION_MIN_DAYS_AFTER_AF = 5
 
 
 class VersionPlanSyncUpstreamError(RuntimeError):
@@ -887,7 +888,7 @@ def _parent_project_detail(bpmis_client: Any, row: dict[str, Any]) -> dict[str, 
 
 def _mapped_dbp_versions(af_version: dict[str, Any], dbp_versions_by_prefix: dict[str, list[dict[str, Any]]]) -> dict[str, dict[str, Any]]:
     release_date = _parse_date(af_version.get("release_date"))
-    minimum_date = release_date + timedelta(days=6) if release_date else None
+    minimum_date = release_date + timedelta(days=VERSION_PLAN_MARKET_VERSION_MIN_DAYS_AFTER_AF) if release_date else None
     mapped: dict[str, dict[str, Any]] = {}
     for prefix, versions in dbp_versions_by_prefix.items():
         candidates = []

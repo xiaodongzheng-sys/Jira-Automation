@@ -185,6 +185,9 @@ class GmailDashboardServiceTests(unittest.TestCase):
         self.assertTrue(_is_export_noise({"from": "Alice <alice@example.com>", "subject": "requests access to an item"}))
         self.assertTrue(_is_export_noise({"from": "calendar@example.com", "subject": "Project invitation"}))
         self.assertTrue(_is_export_noise({"from": "calendar@example.com", "subject": "Invitation: review"}))
+        self.assertTrue(_is_export_noise({"from": "Google Calendar <calendar-notification@google.com>", "subject": "Reminder: Weekly sync"}))
+        self.assertTrue(_is_export_noise({"from": "Google Calendar <calendar-notification@google.com>", "subject": "Cancelled: Weekly sync"}))
+        self.assertFalse(_is_export_noise({"from": "Alice <alice@example.com>", "subject": "Reminder: please review rollout"}))
         with patch("bpmis_jira_tool.gmail_dashboard.is_gmail_noise", return_value=True):
             self.assertTrue(_is_export_noise({"from": "Alice <alice@example.com>", "subject": "Project"}, {"rules": []}))
         self.assertEqual(_trim_preview_text(""), "")
@@ -930,6 +933,82 @@ class GmailDashboardServiceTests(unittest.TestCase):
         self.assertIn("Message 1 (context only)", content)
         self.assertIn("Use: context only; do not summarize as a new item", content)
         self.assertIn("Old context", content)
+
+    def test_export_thread_history_since_ignores_google_calendar_reminders(self):
+        now = datetime(2026, 4, 21, 19, 0).astimezone()
+        since = now - timedelta(hours=24)
+        query = _build_thread_export_query(since, now)
+        reminder_time = datetime(2026, 4, 21, 8, 30, tzinfo=now.tzinfo)
+        project_time = datetime(2026, 4, 21, 9, 15, tzinfo=now.tzinfo)
+        list_payloads = {
+            (query, None): {
+                "messages": [{"id": "calendar-msg", "threadId": "calendar-thread"}, {"id": "project-msg", "threadId": "project-thread"}],
+            },
+        }
+        message_payloads = {}
+        thread_payloads = {
+            "calendar-thread": {
+                "id": "calendar-thread",
+                "messages": [
+                    {
+                        "id": "calendar-msg",
+                        "threadId": "calendar-thread",
+                        "internalDate": str(int(reminder_time.timestamp() * 1000)),
+                        "labelIds": ["INBOX"],
+                        "payload": {
+                            "headers": [
+                                {"name": "From", "value": "Google Calendar <calendar-notification@google.com>"},
+                                {"name": "To", "value": "xiaodong.zheng@npt.sg"},
+                                {"name": "Subject", "value": "Reminder: Weekly sync"},
+                            ],
+                            "parts": [
+                                {
+                                    "mimeType": "text/plain",
+                                    "body": {"data": base64.urlsafe_b64encode(b"Calendar reminder body").decode("utf-8")},
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+            "project-thread": {
+                "id": "project-thread",
+                "messages": [
+                    {
+                        "id": "project-msg",
+                        "threadId": "project-thread",
+                        "internalDate": str(int(project_time.timestamp() * 1000)),
+                        "labelIds": ["INBOX"],
+                        "payload": {
+                            "headers": [
+                                {"name": "From", "value": "Alice Example <alice@example.com>"},
+                                {"name": "To", "value": "xiaodong.zheng@npt.sg"},
+                                {"name": "Subject", "value": "Project update"},
+                            ],
+                            "parts": [
+                                {
+                                    "mimeType": "text/plain",
+                                    "body": {"data": base64.urlsafe_b64encode(b"Fresh project signal").decode("utf-8")},
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+        }
+        service = GmailDashboardService(
+            credentials=object(),
+            gmail_service=_FakeGmailService(list_payloads, message_payloads, thread_payloads),
+        )
+
+        content = service.export_thread_history_since(since=since, now=now)
+
+        self.assertNotIn("Thread ID: calendar-thread", content)
+        self.assertNotIn("Reminder: Weekly sync", content)
+        self.assertNotIn("Calendar reminder body", content)
+        self.assertIn("Thread ID: project-thread", content)
+        self.assertIn("Project update", content)
+        self.assertIn("Fresh project signal", content)
 
     def test_export_thread_history_since_empty_fallback_future_and_truncated_edges(self):
         now = datetime(2026, 4, 21, 19, 0).astimezone()
