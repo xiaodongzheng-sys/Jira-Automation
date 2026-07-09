@@ -34,6 +34,8 @@ from bpmis_jira_tool.business_insights import (
     AF_RULE_EFFECTIVENESS_REPORT_ID,
     AF_RULES_FEATURES_REPORT_ID,
     AF_SCENARIOS_ACTIONS_REPORT_ID,
+    AF_SCENARIO_GROUP_RELATION_TABLE,
+    AF_SCENARIO_GROUP_TABLE,
     AF_TWO_WAY_TEMPLATE_CONFIG_TABLE,
     AF_TWO_WAY_RELATION_CONFIG_TABLE,
     AF_TWO_WAY_COMMUNICATION_TABLE,
@@ -559,6 +561,8 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
         self.assertIn("pt_date = '2026-05-25'", sql)
         # Auth steps are surfaced via the action type label and the flow-config challenge steps.
         self.assertIn("Authentication (Auth Step)", sql)
+        self.assertIn(AF_SCENARIO_GROUP_RELATION_TABLE, sql)
+        self.assertIn(AF_SCENARIO_GROUP_TABLE, sql)
         self.assertIn("default_step", sql)
         self.assertIn("challenge1_step", sql)
 
@@ -581,6 +585,9 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
             "l2_enum_name",
             "action_name",
             "action_enum_name",
+            "scenario_group_id",
+            "scenario_group_name",
+            "scenario_group_description",
             "default_step",
             "challenge5_step",
         ):
@@ -589,6 +596,8 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
         self.assertIn("s.name = f.scene", flow_section.query)
         self.assertIn("ss.name = f.sub_scene", flow_section.query)
         self.assertIn("a.name = f.action", flow_section.query)
+        self.assertIn("gr.biz_action = f.action", flow_section.query)
+        self.assertIn("sg.group_id = gr.scenario_group_id", flow_section.query)
         self.assertNotIn("s.code = f.scene", flow_section.query)
 
     def test_scenarios_actions_sql_has_authentication_funnel_sections(self):
@@ -617,6 +626,9 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
             "l2_enum_name",
             "action_name",
             "action_enum_name",
+            "scenario_group_id",
+            "scenario_group_name",
+            "scenario_group_description",
             "default_step",
             "challenge1_step",
             "challenge2_step",
@@ -625,8 +637,8 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
             "challenge5_step",
         ]
         flow_rows = [
-            ["Login", "LOGIN", "Password Login", "PWD_LOGIN", "OTP", "SEND_OTP", "step_a", "step_b", "", "", "", ""],
-            ["Transfer", "TRANSFER", "P2P", "P2P_TRANSFER", "Face", "FACE_CHECK", "step_c", "", "", "", "", ""],
+            ["Login", "LOGIN", "Password Login", "PWD_LOGIN", "OTP", "SEND_OTP", "A01", "Login/ Registration/ Onboarding", "All login flows", "step_a", "step_b", "", "", "", ""],
+            ["Transfer", "TRANSFER", "P2P", "P2P_TRANSFER", "Face", "FACE_CHECK", "D01", "Transfers", "Money movement", "step_c", "", "", "", "", ""],
         ]
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = Path(temp_dir) / "visualization.html"
@@ -670,8 +682,12 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
         self.assertIn("<h2>Auth Drop-off by Scene</h2>", html)
         self.assertIn("CHALLENGE_2", html)
         # The scenario flow table keeps the 50ch step-column rendering.
+        self.assertIn('<span class="th-label">scenario_group_id</span>', html)
+        self.assertIn('<span class="th-label">scenario_group_name</span>', html)
+        self.assertIn('<span class="th-label">scenario_group_description</span>', html)
+        self.assertIn("Login/ Registration/ Onboarding", html)
         self.assertIn('<th class="step"><span class="th-label">default_step</span>', html)
-        self.assertIn('<td class="step">step_a</td>', html)
+        self.assertIn("step_a", html)
         self.assertIn("th.step,td.step{width:50ch;min-width:50ch;max-width:50ch;white-space:normal;", html)
         self.assertIn("Password Login", html)
         # Interactive shell + CSV export are shared across every panel.

@@ -92,6 +92,7 @@ PRODUCT_LABEL_COLUMNS: set[str] = {"product", "product_code", "sub-product", "su
 # The AF lake uses two naming styles:
 #   ods.mbs_ph_seabank_anti_fraud_db_<table>_ss        (scene / sub_scene / action)
 #   ods.mbs_ph_seabank_anti_fraud_db_<table>_df        (scenario flow config)
+#   ods.ph_seabank_anti_fraud_db_<table>_df/di         (scenario group mapping)
 #   ods.mbs_anti_fraud_<table>_ss                      (rule / feature config)
 AF_SCENARIOS_ACTIONS_REPORT_ID = "anti-fraud-ph-scenarios-actions-auth-steps"
 AF_RULES_FEATURES_REPORT_ID = "anti-fraud-ph-rules-features"
@@ -108,6 +109,8 @@ AF_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_scene_tab_ss"
 AF_SUB_SCENE_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_sub_scene_tab_ss"
 AF_ACTION_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_action_tab_ss"
 AF_SCENARIO_FLOW_CONFIG_TABLE = "ods.mbs_ph_seabank_anti_fraud_db_biz_scenario_flow_config_tab_df"
+AF_SCENARIO_GROUP_RELATION_TABLE = "ods.ph_seabank_anti_fraud_db_scenario_group_relation_tab_df"
+AF_SCENARIO_GROUP_TABLE = "ods.ph_seabank_anti_fraud_db_scenario_group_tab_di"
 AF_RULE_CONFIG_TABLE = "ods.mbs_anti_fraud_rule_config_tab_ss"
 AF_FEATURE_CONFIG_TABLE = "ods.mbs_anti_fraud_feature_config_tab_ss"
 AF_IDENTIFY_REJECT_TABLE = "ods.mbs_anti_fraud_identify_reject_tab_ss"
@@ -747,6 +750,8 @@ def build_af_scenarios_actions_sql(*, snapshot_pt_date: str | None = None, now: 
     sub_scene_snap = _aliased_snapshot_filter("ss", AF_SUB_SCENE_TABLE, snapshot_pt_date)
     action_snap = _aliased_snapshot_filter("a", AF_ACTION_TABLE, snapshot_pt_date)
     flow_snap = _aliased_snapshot_filter("f", AF_SCENARIO_FLOW_CONFIG_TABLE, snapshot_pt_date)
+    group_relation_snap = _aliased_snapshot_filter("gr", AF_SCENARIO_GROUP_RELATION_TABLE, snapshot_pt_date)
+    group_snap = _aliased_snapshot_filter("sg", AF_SCENARIO_GROUP_TABLE, None)
     # Authentication funnel sections use the DWD action log (daily-incremental), scoped by pt_date over
     # the report window. risk_result: '1' = pass, '0' = reject, '' = not risk-evaluated.
     win = business_insights_window(now)
@@ -810,6 +815,9 @@ select
   ss.enum_name as l2_enum_name,
   a.name as action_name,
   a.enum_name as action_enum_name,
+  gr.scenario_group_id,
+  sg.group_name as scenario_group_name,
+  sg.description as scenario_group_description,
   f.default_step,
   f.challenge1_step,
   f.challenge2_step,
@@ -822,6 +830,12 @@ from {AF_SCENARIO_FLOW_CONFIG_TABLE} f
 left join {AF_SCENE_TABLE} s on s.name = f.scene and {scene_snap}
 left join {AF_SUB_SCENE_TABLE} ss on ss.name = f.sub_scene and {sub_scene_snap}
 left join {AF_ACTION_TABLE} a on a.name = f.action and {action_snap}
+left join {AF_SCENARIO_GROUP_RELATION_TABLE} gr
+  on gr.scene = f.scene
+  and gr.sub_scene = f.sub_scene
+  and gr.biz_action = f.action
+  and {group_relation_snap}
+left join {AF_SCENARIO_GROUP_TABLE} sg on sg.group_id = gr.scenario_group_id and {group_snap}
 where {flow_snap}
 order by f.scene, f.sub_scene, f.action;
 
