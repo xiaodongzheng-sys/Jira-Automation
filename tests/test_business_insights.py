@@ -1791,6 +1791,8 @@ class Card3dsBusinessInsightsTests(unittest.TestCase):
              [["04 Challenge requested (mandate)", "95574786", "562405", "73159766", "0.59"]]),
             ("3DS by Merchant Category (MCC)", ["mcc", "threeds_txns", "authenticated", "auth_rate_pct", "purchase_amount_php"],
              [["5399", "900000", "800000", "88.9", "12500000.00"]]),
+            ("OOB Funnel", ["stage", "txns", "pass_rate_pct"],
+             [["OOB pushed", "1000", "100.0"], ["OOB approved", "870", "87.0"]]),
             ("Card Fraud Cases by MO", ["mo_reason", "sub_mo_reason", "cases"], [["Cards", "Card Not Present Fraud", "42"]]),
             ("Daily 3DS Trend", ["series", "txn_date", "txns"],
              [["Authenticated", "2026-06-01", "150000"], ["Challenge", "2026-06-01", "5000"]]),
@@ -1806,6 +1808,10 @@ class Card3dsBusinessInsightsTests(unittest.TestCase):
         self.assertIn("<h2>Card Fraud Cases by Sub-MO</h2>", html)
         self.assertIn('id="ec-daily-3ds-trend" class="echart"', html)
         self.assertIn("Card Not Present Fraud", html)
+        self.assertIn("<h2>OOB Funnel</h2>", html)
+        self.assertIn("Google Sheet tab 7_oob_funnel", html)
+        self.assertLess(html.index("<h2>3DS by Merchant Category (MCC)</h2>"), html.index("<h2>OOB Funnel</h2>"))
+        self.assertLess(html.index("<h2>OOB Funnel</h2>"), html.index("<h2>Card Fraud Cases by Sub-MO</h2>"))
 
 
 class ListUsageBusinessInsightsTests(unittest.TestCase):
@@ -1865,6 +1871,8 @@ class ListUsageBusinessInsightsTests(unittest.TestCase):
              [["2026-05", "Blacklist", "1200"], ["2026-05", "Whitelist", "3"]]),
             ("Greylist Detail", ["status", "id_type", "source", "listed_reason", "entries"],
              [["Active", "17", "Anti-Fraud", "Others", "4"]]),
+            ("Temporary Whitelist", ["rule_id", "target_value", "expire_time", "source"],
+             [["R1", "uid-1", "2026-07-10 12:00:00", "customer appeal"]]),
         ]
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = Path(temp_dir) / "viz.html"
@@ -1876,6 +1884,8 @@ class ListUsageBusinessInsightsTests(unittest.TestCase):
         self.assertIn("Blacklist Entries by Source", html)
         self.assertIn('id="ec-monthly-additions" class="echart"', html)
         self.assertIn("Greylist Detail", html)
+        self.assertIn("<h2>Temporary Whitelist</h2>", html)
+        self.assertLess(html.index("<h2>Greylist Detail</h2>"), html.index("<h2>Temporary Whitelist</h2>"))
 
 
 class _FakeSheetValuesCall:
@@ -1921,6 +1931,7 @@ class BusinessInsightsSheetRefreshTests(unittest.TestCase):
     def test_sheet_url_and_scheduled_tab_names_match_scheduler_convention(self):
         from bpmis_jira_tool.business_insights_sheet_refresh import (
             DEFAULT_BUSINESS_INSIGHTS_SHEET_URL,
+            EXTRA_GOOGLE_SHEET_SECTIONS_BY_REPORT,
             google_scopes_include_sheets,
             scheduled_sheet_name,
             spreadsheet_id_from_url,
@@ -1942,6 +1953,8 @@ class BusinessInsightsSheetRefreshTests(unittest.TestCase):
             scheduled_sheet_name(AF_CARD_3DS_REPORT_ID, "3DS by Merchant Category (MCC)"),
             "7_3ds_by_merchant_category_mcc",
         )
+        self.assertIn(("OOB Funnel", "7_oob_funnel"), EXTRA_GOOGLE_SHEET_SECTIONS_BY_REPORT[AF_CARD_3DS_REPORT_ID])
+        self.assertIn(("Temporary Whitelist", "8_temporary_whitelist"), EXTRA_GOOGLE_SHEET_SECTIONS_BY_REPORT[AF_LIST_USAGE_REPORT_ID])
         self.assertTrue(google_scopes_include_sheets())
 
     def test_service_account_sheet_credentials_use_sheets_scope(self):

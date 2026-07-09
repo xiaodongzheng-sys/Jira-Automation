@@ -3598,7 +3598,10 @@ def write_visualization(
             "(e.g. whitelist status); Attempted (A) = proof of attempt, not a full verification."
         )
         panels = []
+        oob_funnel = c3_lookup.get("OOB Funnel")
         for sheet_name, headers, rows in sheets:
+            if sheet_name == "OOB Funnel":
+                continue
             if sheet_name == "Outcome by Auth Status":
                 col = {str(c): i for i, c in enumerate(headers)}
                 if "auth_status" in col and "threeds_txns" in col:
@@ -3674,6 +3677,20 @@ def write_visualization(
             panels.append(_searchable_table_panel(
                 sheet_name, _disp(headers), display_rows, placeholder=placeholder,
                 note=table_note, column_notes=col_notes))
+            if sheet_name == "3DS by Merchant Category (MCC)" and oob_funnel:
+                oob_headers, oob_rows = oob_funnel
+                panels.append(_searchable_table_panel(
+                    "OOB Funnel", oob_headers, oob_rows,
+                    placeholder="Search OOB funnel…",
+                    note="Google Sheet tab 7_oob_funnel. Out-of-band authentication funnel detail for card / 3DS flows.",
+                ))
+        if oob_funnel and "3DS by Merchant Category (MCC)" not in c3_lookup:
+            oob_headers, oob_rows = oob_funnel
+            panels.append(_searchable_table_panel(
+                "OOB Funnel", oob_headers, oob_rows,
+                placeholder="Search OOB funnel…",
+                note="Google Sheet tab 7_oob_funnel. Out-of-band authentication funnel detail for card / 3DS flows.",
+            ))
         path.write_text(
             _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro, data_through=_data_through(sheets)),
             encoding="utf-8",

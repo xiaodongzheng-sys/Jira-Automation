@@ -53,6 +53,12 @@ EXTRA_GOOGLE_SHEET_SECTIONS_BY_REPORT: dict[str, tuple[tuple[str, str], ...]] = 
     AF_RULES_FEATURES_REPORT_ID: (
         ("Rule Treatment Config Coverage", "2_rule_treatment_config_coverage"),
     ),
+    AF_CARD_3DS_REPORT_ID: (
+        ("OOB Funnel", "7_oob_funnel"),
+    ),
+    AF_LIST_USAGE_REPORT_ID: (
+        ("Temporary Whitelist", "8_temporary_whitelist"),
+    ),
 }
 
 
