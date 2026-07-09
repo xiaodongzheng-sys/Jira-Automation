@@ -41,10 +41,12 @@ def build_business_insights_handlers(ctx: Any) -> Any:
         return {str(d.get("key")) for d in _visible_domains()}
 
     def _report_domain_visible(report_id: str) -> bool:
+        report = _store().report(report_id)
+        if not report:
+            return False
         if not _anti_fraud_only():
             return True
-        report = _store().report(report_id)
-        return bool(report) and str(report.get("domain") or "") in _visible_domain_keys()
+        return str(report.get("domain") or "") in _visible_domain_keys()
 
     def _visible_artifact_ids() -> set[str]:
         ids: set[str] = set()
@@ -155,6 +157,8 @@ def build_business_insights_handlers(ctx: Any) -> Any:
         access_gate = ctx._require_business_insights_admin(settings, api=True)
         if access_gate is not None:
             return access_gate
+        if not _report_domain_visible(report_id):
+            return jsonify({"status": "error", "message": "Report not found."}), HTTPStatus.NOT_FOUND
         if report_id not in GENERATOR_REPORT_IDS:
             return jsonify({"status": "error", "message": "On-demand refresh is not available for this report."}), HTTPStatus.NOT_FOUND
         try:
@@ -167,6 +171,8 @@ def build_business_insights_handlers(ctx: Any) -> Any:
         access_gate = ctx._require_business_insights_admin(settings, api=True)
         if access_gate is not None:
             return access_gate
+        if not _report_domain_visible(report_id):
+            return jsonify({"status": "error", "message": "Report not found."}), HTTPStatus.NOT_FOUND
         if report_id not in GENERATOR_REPORT_IDS:
             return jsonify({"status": "error", "message": "On-demand refresh is not available for this report."}), HTTPStatus.NOT_FOUND
         job = generation_job_status(root_dir=_store().root_dir, report_id=report_id)

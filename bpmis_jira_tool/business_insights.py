@@ -149,34 +149,6 @@ AF_TWO_WAY_COMMUNICATION_TABLE = "ods.ph_seabank_anti_fraud_db_two_way_communica
 
 SEEDED_REPORTS: tuple[dict[str, str], ...] = (
     {
-        "id": UNDERWRITING_FUNNEL_REPORT_ID,
-        "domain": "credit-risk",
-        "name": "Credit Risk PH - Underwriting Funnel",
-        "type": "underwriting_funnel",
-        "status": "generator_ready",
-    },
-    {
-        "id": PORTFOLIO_REPAYMENT_REPORT_ID,
-        "domain": "credit-risk",
-        "name": "Credit Risk PH - Portfolio Repayment",
-        "type": "portfolio_repayment",
-        "status": "generator_ready",
-    },
-    {
-        "id": LIMIT_UTILIZATION_REPORT_ID,
-        "domain": "credit-risk",
-        "name": "Credit Risk PH - Limit Utilization",
-        "type": "limit_utilization",
-        "status": "generator_ready",
-    },
-    {
-        "id": APPLICATION_DISBURSEMENT_FUNNEL_REPORT_ID,
-        "domain": "credit-risk",
-        "name": "Credit Risk PH - Application to Disbursement Funnel",
-        "type": "application_disbursement_funnel",
-        "status": "generator_ready",
-    },
-    {
         "id": AF_SCENARIOS_ACTIONS_REPORT_ID,
         "domain": "anti-fraud",
         "name": "Anti-fraud PH - L1+L2 Scenarios, Actions & Auth Steps",
