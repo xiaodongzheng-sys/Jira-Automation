@@ -945,9 +945,10 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
              [["F1", "181", "90", "57", "65", "13", "2592000", "Login count 1h | BIN Attack | OTP retries"],
               ["F12", "187", "9", "6", "6", "1", "0", "PN/AR Validation | CRC flow | Soft Token"]]),
             ("Rule Treatment Config Coverage",
-             ["rule_id", "rule_name", "scenario_group_name", "treatment_tag", "coverage_status"],
-             [["R1", "High Velocity Login", "Login", "Two-Way", "Covered"],
-              ["R2", "BIN Attack", "Card Purchase", "Reject", "Missing"]]),
+             ["id", "rule_id", "treatment_type", "two_way_template_id", "one_way_template_id",
+              "source_table", "pt_date"],
+             [["1", "R1", "twoWay", "CR00001", "", "rule_treatment_config_tab", "2026-07-08"],
+              ["2", "R2", "oneWay", "", "CR00002", "rule_treatment_config_tab", "2026-07-08"]]),
         ]
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = Path(temp_dir) / "viz.html"
@@ -966,7 +967,9 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
         self.assertIn("Search function id", html)
         self.assertIn("example_features", html)
         self.assertIn("BIN Attack", html)
-        self.assertIn("<h2>Rule Treatment Config Coverage by Status</h2>", html)
+        self.assertIn("<h2>Rule Treatment Config Coverage Summary</h2>", html)
+        self.assertIn("<h2>Rule Treatment Config Coverage by Treatment Type</h2>", html)
+        self.assertIn("<h2>Rule Treatment Config Coverage by Template Linkage</h2>", html)
         self.assertIn("<h2>Rule Treatment Config Coverage</h2>", html)
         self.assertIn("2_rule_treatment_config_coverage", html)
         self.assertLess(html.index("<h2>Function Usage</h2>"), html.index("<h2>Rule Treatment Config Coverage</h2>"))
@@ -2027,8 +2030,8 @@ class BusinessInsightsSheetRefreshTests(unittest.TestCase):
             else:
                 values_by_tab[tab] = [["metric", "value"], [section.sheet_name, "1"]]
         values_by_tab["2_rule_treatment_config_coverage"] = [
-            ["rule_id", "scenario_group_name", "treatment_tag", "coverage_status"],
-            ["R1", "Login", "Two-Way", "Covered"],
+            ["id", "rule_id", "treatment_type", "two_way_template_id", "one_way_template_id", "source_table", "pt_date"],
+            ["1", "R1", "twoWay", "CR00001", "", "rule_treatment_config_tab", "2026-07-08"],
         ]
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2059,7 +2062,8 @@ class BusinessInsightsSheetRefreshTests(unittest.TestCase):
         self.assertIn("Features", workbook.sheetnames)
         self.assertIn("Rule Treatment Config Coverage", workbook.sheetnames)
         self.assertIn("Anti-fraud PH - Rules &amp; Features", visualization_html)
-        self.assertIn("Rule Treatment Config Coverage by Status", visualization_html)
+        self.assertIn("Rule Treatment Config Coverage by Treatment Type", visualization_html)
+        self.assertIn("Rule Treatment Config Coverage by Template Linkage", visualization_html)
 
 
 if __name__ == "__main__":
