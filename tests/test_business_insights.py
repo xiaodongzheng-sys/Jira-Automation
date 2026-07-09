@@ -967,12 +967,12 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
         self.assertIn("Search function id", html)
         self.assertIn("example_features", html)
         self.assertIn("BIN Attack", html)
-        self.assertIn("<h2>Rule Treatment Config Coverage Summary</h2>", html)
-        self.assertIn("<h2>Rule Treatment Config Coverage by Treatment Type</h2>", html)
-        self.assertIn("<h2>Rule Treatment Config Coverage by Template Linkage</h2>", html)
         self.assertIn("<h2>Rule Treatment Config Coverage</h2>", html)
         self.assertIn("2_rule_treatment_config_coverage", html)
         self.assertLess(html.index("<h2>Function Usage</h2>"), html.index("<h2>Rule Treatment Config Coverage</h2>"))
+        self.assertNotIn("<h2>Rule Treatment Config Coverage Summary</h2>", html)
+        self.assertNotIn("<h2>Rule Treatment Config Coverage by Treatment Type</h2>", html)
+        self.assertNotIn("<h2>Rule Treatment Config Coverage by Template Linkage</h2>", html)
 
 
 class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
@@ -2062,8 +2062,9 @@ class BusinessInsightsSheetRefreshTests(unittest.TestCase):
         self.assertIn("Features", workbook.sheetnames)
         self.assertIn("Rule Treatment Config Coverage", workbook.sheetnames)
         self.assertIn("Anti-fraud PH - Rules &amp; Features", visualization_html)
-        self.assertIn("Rule Treatment Config Coverage by Treatment Type", visualization_html)
-        self.assertIn("Rule Treatment Config Coverage by Template Linkage", visualization_html)
+        self.assertIn("<h2>Rule Treatment Config Coverage</h2>", visualization_html)
+        self.assertNotIn("Rule Treatment Config Coverage by Treatment Type", visualization_html)
+        self.assertNotIn("Rule Treatment Config Coverage by Template Linkage", visualization_html)
 
 
 if __name__ == "__main__":
