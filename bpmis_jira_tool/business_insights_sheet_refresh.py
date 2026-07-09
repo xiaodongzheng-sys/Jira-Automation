@@ -49,6 +49,11 @@ ANTI_FRAUD_SHEET_REPORT_ORDER: tuple[tuple[int, str], ...] = (
 )
 _REPORT_PREFIX_BY_ID = {report_id: prefix for prefix, report_id in ANTI_FRAUD_SHEET_REPORT_ORDER}
 ANTI_FRAUD_SHEET_REPORT_IDS = tuple(report_id for _prefix, report_id in ANTI_FRAUD_SHEET_REPORT_ORDER)
+EXTRA_GOOGLE_SHEET_SECTIONS_BY_REPORT: dict[str, tuple[tuple[str, str], ...]] = {
+    AF_RULES_FEATURES_REPORT_ID: (
+        ("Rule Treatment Config Coverage", "2_rule_treatment_config_coverage"),
+    ),
+}
 
 
 def spreadsheet_id_from_url(value: str) -> str:
@@ -220,6 +225,9 @@ def refresh_anti_fraud_reports_from_google_sheet(
         for section in extract_sql_sections(sql):
             google_tab = scheduled_sheet_name(report_id, section.sheet_name)
             sections.append((section.sheet_name, google_tab))
+            sheet_names.append(google_tab)
+        for display_name, google_tab in EXTRA_GOOGLE_SHEET_SECTIONS_BY_REPORT.get(report_id, ()):
+            sections.append((display_name, google_tab))
             sheet_names.append(google_tab)
         report_sections[report_id] = sections
 

@@ -944,6 +944,10 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
               "distinct_time_windows", "max_window_seconds", "example_features"],
              [["F1", "181", "90", "57", "65", "13", "2592000", "Login count 1h | BIN Attack | OTP retries"],
               ["F12", "187", "9", "6", "6", "1", "0", "PN/AR Validation | CRC flow | Soft Token"]]),
+            ("Rule Treatment Config Coverage",
+             ["rule_id", "rule_name", "scenario_group_name", "treatment_tag", "coverage_status"],
+             [["R1", "High Velocity Login", "Login", "Two-Way", "Covered"],
+              ["R2", "BIN Attack", "Card Purchase", "Reject", "Missing"]]),
         ]
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = Path(temp_dir) / "viz.html"
@@ -962,6 +966,10 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
         self.assertIn("Search function id", html)
         self.assertIn("example_features", html)
         self.assertIn("BIN Attack", html)
+        self.assertIn("<h2>Rule Treatment Config Coverage by Status</h2>", html)
+        self.assertIn("<h2>Rule Treatment Config Coverage</h2>", html)
+        self.assertIn("2_rule_treatment_config_coverage", html)
+        self.assertLess(html.index("<h2>Function Usage</h2>"), html.index("<h2>Rule Treatment Config Coverage</h2>"))
 
 
 class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
@@ -2018,6 +2026,10 @@ class BusinessInsightsSheetRefreshTests(unittest.TestCase):
                 ]
             else:
                 values_by_tab[tab] = [["metric", "value"], [section.sheet_name, "1"]]
+        values_by_tab["2_rule_treatment_config_coverage"] = [
+            ["rule_id", "scenario_group_name", "treatment_tag", "coverage_status"],
+            ["R1", "Login", "Two-Way", "Covered"],
+        ]
 
         with tempfile.TemporaryDirectory() as temp_dir:
             service = _FakeSheetsService(values_by_tab)
@@ -2039,9 +2051,15 @@ class BusinessInsightsSheetRefreshTests(unittest.TestCase):
         self.assertEqual(result["reports"][0]["report_id"], AF_RULES_FEATURES_REPORT_ID)
         self.assertEqual(artifact["source_filename"], "google-sheet-scheduled-output")
         self.assertEqual(artifact["source_google_tabs"][0]["google_tab"], "2_rules")
+        self.assertIn(
+            {"google_tab": "2_rule_treatment_config_coverage", "rows": 1, "sheet": "Rule Treatment Config Coverage"},
+            artifact["source_google_tabs"],
+        )
         self.assertIn("Rules", workbook.sheetnames)
         self.assertIn("Features", workbook.sheetnames)
+        self.assertIn("Rule Treatment Config Coverage", workbook.sheetnames)
         self.assertIn("Anti-fraud PH - Rules &amp; Features", visualization_html)
+        self.assertIn("Rule Treatment Config Coverage by Status", visualization_html)
 
 
 if __name__ == "__main__":

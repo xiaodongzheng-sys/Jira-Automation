@@ -2667,6 +2667,9 @@ def write_visualization(
         func_usage = flow_lookup.get("Function Usage")
         if func_usage and func_usage[1]:
             kpis.append(("Functions in use", _format_number(len(func_usage[1]))))
+        treatment_coverage = flow_lookup.get("Rule Treatment Config Coverage")
+        if treatment_coverage and treatment_coverage[1]:
+            kpis.append(("Treatment coverage rows", _format_number(len(treatment_coverage[1]))))
         intro = _kpi_cards_panel("Catalog Summary", kpis)
         # Governance (folded-in rule change log): KPIs + highlights from the rule_config snapshot diff.
         chg_counts: dict[str, float] = {}
@@ -2784,6 +2787,73 @@ def write_visualization(
                 _searchable_table_panel(
                     "Function Usage", func_usage[0], func_usage[1], placeholder="Search function id…",
                     column_notes={"function_id": _FEATURES_COL_NOTES["function_id"]},
+                )
+            )
+        if treatment_coverage:
+            th, tr = treatment_coverage
+            tc = {str(c).strip().lower(): i for i, c in enumerate(th)}
+
+            def _coverage_col(*candidates: str) -> int | None:
+                for candidate in candidates:
+                    idx = tc.get(candidate)
+                    if idx is not None:
+                        return idx
+                return None
+
+            def _coverage_counts(index: int | None) -> dict[str, float]:
+                if index is None:
+                    return {}
+                counts: dict[str, float] = {}
+                for row in tr:
+                    if index < len(row) and row[index] not in (None, ""):
+                        key = str(row[index]).strip()
+                        if key:
+                            counts[key] = counts.get(key, 0.0) + 1
+                return counts
+
+            status_idx = _coverage_col(
+                "coverage_status", "coverage", "config_coverage", "treatment_config_coverage",
+                "config_status", "status",
+            )
+            treatment_idx = _coverage_col("treatment_tag", "treatment_name", "treatment", "treatment_type")
+            scenario_idx = _coverage_col("scenario_group_name", "scenario_name", "l1_scene_name", "l2_enum_name")
+            if tr:
+                chart_title = ""
+                chart_counts: dict[str, float] = {}
+                chart_note = (
+                    "Google Sheet tab 2_rule_treatment_config_coverage. Distribution is inferred from "
+                    "the strongest available coverage/status/treatment dimension; use the table below for "
+                    "row-level rule and scenario lookup."
+                )
+                status_counts = _coverage_counts(status_idx)
+                if status_counts:
+                    chart_title = "Rule Treatment Config Coverage by Status"
+                    chart_counts = status_counts
+                else:
+                    treatment_counts = _coverage_counts(treatment_idx)
+                    if treatment_counts:
+                        chart_title = "Rule Treatment Config Coverage by Treatment"
+                        chart_counts = treatment_counts
+                    else:
+                        scenario_counts = _coverage_counts(scenario_idx)
+                        if scenario_counts:
+                            chart_title = "Rule Treatment Config Coverage by Scenario"
+                            chart_counts = scenario_counts
+                if chart_counts:
+                    coverage_bar = _bar_panel(
+                        chart_title,
+                        sorted(chart_counts.items(), key=lambda kv: _number(kv[1]), reverse=True)[:15],
+                        note=chart_note,
+                    )
+                    if coverage_bar:
+                        table_panels.append(coverage_bar)
+            table_panels.append(
+                _searchable_table_panel(
+                    "Rule Treatment Config Coverage", th, tr,
+                    placeholder="Search rule, treatment, scenario or coverage…",
+                    note="Google Sheet tab 2_rule_treatment_config_coverage. This bridges rules/scenarios "
+                         "to treatment configuration coverage so gaps can be reviewed directly under "
+                         "Function Usage.",
                 )
             )
         two_way = flow_lookup.get("Two-Way Communication Config")
