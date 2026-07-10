@@ -251,6 +251,11 @@
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
   gap: 18px;
+  align-items: start;
+}
+
+.meeting-recorder-grid > .meeting-recorder-card {
+  min-width: 0;
 }
 
 .meeting-recorder-card,
@@ -421,6 +426,15 @@
   text-align: left;
 }
 
+.meeting-list-item {
+  align-items: flex-start;
+}
+
+.meeting-list-item > :first-child {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
 .meeting-record-row {
   cursor: pointer;
 }
@@ -451,6 +465,7 @@
   justify-content: flex-end;
   gap: 8px;
   flex-wrap: wrap;
+  flex: 0 0 auto;
 }
 
 .meeting-list-actions select {
@@ -463,6 +478,7 @@
 .meeting-start-form label {
   display: grid;
   gap: 6px;
+  min-width: 0;
   font-size: 0.88rem;
   font-weight: 700;
 }
@@ -694,6 +710,12 @@
   padding: 10px 0;
   border-bottom: 1px solid #d0d5dd;
 }
+@media (max-width: 1280px) {
+  .meeting-recorder-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 900px) {
   .meeting-recorder-hero,
   .meeting-recorder-grid,

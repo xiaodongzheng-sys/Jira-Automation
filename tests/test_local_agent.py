@@ -966,7 +966,7 @@ class LocalAgentServerTests(unittest.TestCase):
         service = _build_seatalk_service(Settings.from_env())
 
         self.assertEqual(str(service.daily_cache_dir), os.path.join(self.temp_dir.name, "seatalk", "cache"))
-        self.assertEqual(service.codex_model, "gpt-5.5")
+        self.assertEqual(service.codex_model, "gpt-5.6")
 
     def test_signed_team_dashboard_daily_briefs_read_agent_archive(self):
         store = DailyBriefArchiveStore(daily_brief_archive_path(Path(self.temp_dir.name)))
@@ -2383,10 +2383,9 @@ class LocalAgentServerTests(unittest.TestCase):
 
     def test_local_agent_service_builders_wire_expected_dependencies(self):
         settings = self.app.config["SETTINGS"]
-        # Meeting minutes default to Claude-first (Codex fallback); PRD briefing
-        # below still wires the Codex client.
+        # Meeting minutes and PRD briefing both wire the Codex client.
         with self.app.app_context(), patch(
-            "bpmis_jira_tool.local_agent_server.ClaudeFirstTextGenerationClient",
+            "bpmis_jira_tool.local_agent_server.CodexTextGenerationClient",
             side_effect=lambda **kwargs: {"text_client": kwargs},
         ) as text_client, patch(
             "bpmis_jira_tool.local_agent_server.MeetingProcessingService",

@@ -205,9 +205,9 @@ class TextGenerationClientTests(unittest.TestCase):
             )
 
         payload, primary_model, fallback_model = _FakeCodexProvider.instances[0].calls[0]
-        self.assertEqual(result["model_id"], "gpt-5.5")
-        self.assertEqual(primary_model, "gpt-5.5")
-        self.assertEqual(fallback_model, "gpt-5.5")
+        self.assertEqual(result["model_id"], "gpt-5.6")
+        self.assertEqual(primary_model, "gpt-5.6")
+        self.assertEqual(fallback_model, "gpt-5.6")
         self.assertEqual(payload["codex_prompt_mode"], "prd_reviewer_test")
 
 

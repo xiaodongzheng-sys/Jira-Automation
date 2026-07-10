@@ -2403,10 +2403,10 @@ def _sse_events(events: Any):
 
 
 def _build_meeting_processing_service(settings: Settings) -> MeetingProcessingService:
-    # Meeting minutes prefer the local Claude Code CLI (Opus 4.8) and fall back
-    # to Codex on any Claude failure, to avoid the spend-capped Codex backend.
-    # Set MEETING_RECORDER_INSIGHTS_LLM_PROVIDER=codex_cli_bridge to force Codex.
-    insights_provider = (os.getenv("MEETING_RECORDER_INSIGHTS_LLM_PROVIDER") or "claude_cli_bridge").strip().lower()
+    # Meeting minutes use the same Codex deep route as Daily Brief by default.
+    # Set MEETING_RECORDER_INSIGHTS_LLM_PROVIDER=claude_cli_bridge only when a
+    # local Claude override is intentionally required.
+    insights_provider = (os.getenv("MEETING_RECORDER_INSIGHTS_LLM_PROVIDER") or "codex_cli_bridge").strip().lower()
     text_client_cls = CodexTextGenerationClient if insights_provider == "codex_cli_bridge" else ClaudeFirstTextGenerationClient
     text_client = text_client_cls(
         settings=settings,
