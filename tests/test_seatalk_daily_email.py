@@ -159,7 +159,7 @@ class SeaTalkDailyEmailCodexRoutingTests(unittest.TestCase):
     def test_build_seatalk_service_defaults_to_deep_codex_route(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
-            {"TEAM_PORTAL_DATA_DIR": temp_dir, "SOURCE_CODE_QA_CODEX_MODEL": "gpt-5.6"},
+            {"TEAM_PORTAL_DATA_DIR": temp_dir, "SEATALK_CODEX_MODEL": "gpt-5.6"},
             clear=True,
         ), patch("bpmis_jira_tool.config.find_dotenv", return_value=""):
             service = build_seatalk_service(Settings.from_env(), data_root=Path(temp_dir))

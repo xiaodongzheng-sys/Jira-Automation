@@ -116,7 +116,7 @@ class ConfigTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(resolve_codex_model("cheap"), "gpt-5.4-mini")
             self.assertEqual(resolve_codex_model("balanced"), "gpt-5.4")
-            self.assertEqual(resolve_codex_model("deep"), "gpt-5.6")
+            self.assertEqual(resolve_codex_model("deep"), "gpt-5.5")
             self.assertEqual(resolve_codex_model("compact_deep"), "gpt-5.4")
             self.assertEqual(resolve_codex_model("repair"), "gpt-5.5")
             self.assertEqual(resolve_codex_model("cheap", explicit_model="explicit-model"), "explicit-model")
