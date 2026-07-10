@@ -309,6 +309,7 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(len(client.release_window_calls), 1)
         self.assertEqual(client.release_window_calls[0]["release_after"], "2026-05-20")
         self.assertEqual(client.release_window_calls[0]["release_before"], "2026-05-26")
+        self.assertIn("junwei.ong@npt.sg", client.release_window_calls[0]["emails"])
         rene_row = next(row for row in bundle["synced_rows"] if row["jira_id"] == "SPDBK-130825")
         self.assertEqual(rene_row["pm"], ["Rene"])
         self.assertEqual(rene_row["market"], "ID")

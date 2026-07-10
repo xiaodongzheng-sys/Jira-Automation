@@ -16,6 +16,7 @@ VERSION_PLAN_AF_PM_EMAILS = (
     "chongzj@npt.sg",
     "chang.wang@npt.sg",
     "zoey.luxy@npt.sg",
+    "junwei.ong@npt.sg",
 )
 VERSION_PLAN_PM_ALIASES = {
     "chang.wang@npt.sg": "Wang Chang",
