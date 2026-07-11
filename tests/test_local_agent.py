@@ -963,10 +963,11 @@ class LocalAgentServerTests(unittest.TestCase):
     def test_seatalk_service_uses_agent_daily_cache_dir(self):
         from bpmis_jira_tool.local_agent_server import _build_seatalk_service
 
-        service = _build_seatalk_service(Settings.from_env())
+        with patch.dict(os.environ, {"SEATALK_CODEX_MODEL": "gpt-5.6-luna"}, clear=False):
+            service = _build_seatalk_service(Settings.from_env())
 
         self.assertEqual(str(service.daily_cache_dir), os.path.join(self.temp_dir.name, "seatalk", "cache"))
-        self.assertEqual(service.codex_model, "gpt-5.5")
+        self.assertEqual(service.codex_model, "gpt-5.6-luna")
 
     def test_signed_team_dashboard_daily_briefs_read_agent_archive(self):
         store = DailyBriefArchiveStore(daily_brief_archive_path(Path(self.temp_dir.name)))

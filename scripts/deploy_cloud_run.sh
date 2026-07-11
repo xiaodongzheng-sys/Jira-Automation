@@ -273,6 +273,9 @@ append_optional_env_var TRELLO_API_TOKEN
 append_optional_env_var TRELLO_BOARD_ID
 append_optional_env_var TRELLO_DAILY_LIST_NAME
 append_optional_env_var PRD_BRIEFING_EDGE_MANDARIN_VOICE
+append_optional_env_var PRD_BRIEFING_CODEX_MODEL
+append_optional_env_var SEATALK_CODEX_MODEL
+append_optional_env_var MEETING_RECORDER_INSIGHTS_LLM_PROVIDER
 append_optional_env_var VERSION_PLAN_FIRESTORE_PROJECT
 # Public artifacts bucket: lets Cloud Run serve Business Insights workbooks and
 # repo source bundles from GCS while the Mac host is offline. The .env key is

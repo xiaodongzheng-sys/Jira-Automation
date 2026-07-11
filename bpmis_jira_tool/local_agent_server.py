@@ -2624,6 +2624,7 @@ def _build_seatalk_service(settings: Settings, *, name_overrides_path: str | Pat
         codex_model=resolve_codex_model(
             CODEX_ROUTE_DEEP,
             legacy_env_names=("SEATALK_CODEX_MODEL",),
+            explicit_model=os.getenv("SEATALK_CODEX_MODEL"),
         ),
         codex_timeout_seconds=settings.source_code_qa_codex_timeout_seconds,
         codex_concurrency=settings.source_code_qa_codex_concurrency,
