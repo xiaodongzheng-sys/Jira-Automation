@@ -3224,6 +3224,7 @@ def _generate_with_codex(
     codex_model = resolve_codex_model(
         CODEX_ROUTE_DEEP,
         legacy_env_names=("PRD_REVIEWER_CODEX_MODEL",),
+        explicit_model=os.getenv("PRD_REVIEWER_CODEX_MODEL"),
     )
     result = provider.generate(
         payload={

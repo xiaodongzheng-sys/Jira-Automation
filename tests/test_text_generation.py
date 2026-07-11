@@ -190,7 +190,7 @@ class TextGenerationClientTests(unittest.TestCase):
         _FakeCodexProvider.instances.clear()
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
-            {"SOURCE_CODE_QA_CODEX_MODEL": "gpt-5.4-mini"},
+            {"SOURCE_CODE_QA_CODEX_MODEL": "gpt-5.4-mini", "PRD_REVIEWER_CODEX_MODEL": "gpt-5.6-terra"},
             clear=True,
         ), patch("bpmis_jira_tool.config.find_dotenv", return_value=""), patch(
             "prd_briefing.reviewer.CodexCliBridgeSourceCodeQALLMProvider",
@@ -205,9 +205,9 @@ class TextGenerationClientTests(unittest.TestCase):
             )
 
         payload, primary_model, fallback_model = _FakeCodexProvider.instances[0].calls[0]
-        self.assertEqual(result["model_id"], "gpt-5.5")
-        self.assertEqual(primary_model, "gpt-5.5")
-        self.assertEqual(fallback_model, "gpt-5.5")
+        self.assertEqual(result["model_id"], "gpt-5.6-terra")
+        self.assertEqual(primary_model, "gpt-5.6-terra")
+        self.assertEqual(fallback_model, "gpt-5.6-terra")
         self.assertEqual(payload["codex_prompt_mode"], "prd_reviewer_test")
 
 
