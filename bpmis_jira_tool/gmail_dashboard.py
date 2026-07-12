@@ -95,6 +95,10 @@ GMAIL_EXPORT_CALENDAR_SENDER_HINTS = (
     "calendar-notification@google.com",
     "googlecalendar-noreply@google.com",
 )
+GMAIL_EXPORT_CALENDAR_RSVP_SUBJECT_RE = re.compile(
+    r"^(?:accepted|declined|tentative):.+\s@\s.+\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\s*-\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)\b",
+    re.IGNORECASE,
+)
 GMAIL_EXPORT_SELF_DAILY_BRIEF_SENDERS = (
     "xiaodong.zheng@npt.sg",
 )
@@ -437,6 +441,9 @@ def _is_export_noise(headers: dict[str, str], report_intelligence_config: dict[s
     if any(hint in subject for hint in GMAIL_EXPORT_CALENDAR_SUBJECT_HINTS):
         return True
     if google_calendar_sender and any(hint in subject for hint in GMAIL_EXPORT_CALENDAR_REMINDER_SUBJECT_HINTS):
+        return True
+    # Google Calendar RSVP notifications can show the attendee as the sender.
+    if GMAIL_EXPORT_CALENDAR_RSVP_SUBJECT_RE.match(subject):
         return True
     if "calendar" in sender and "invitation" in subject:
         return True

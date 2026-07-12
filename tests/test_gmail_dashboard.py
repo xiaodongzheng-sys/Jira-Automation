@@ -188,6 +188,8 @@ class GmailDashboardServiceTests(unittest.TestCase):
         self.assertTrue(_is_export_noise({"from": "Google Calendar <calendar-notification@google.com>", "subject": "Reminder: Weekly sync"}))
         self.assertTrue(_is_export_noise({"from": "Google Calendar <calendar-notification@google.com>", "subject": "Cancelled: Weekly sync"}))
         self.assertTrue(_is_export_noise({"from": "Google Calendar <calendar-notification@google.com>", "subject": "Accepted: v3.49 AF PRD Briefing"}))
+        self.assertTrue(_is_export_noise({"from": "Yudi <yudi.suherman@seabank.co.id>", "subject": "Accepted: Phase 4 GRC discussion + Q&A @ Mon 13 Jul 2026 2pm - 3pm (GMT+7)"}))
+        self.assertFalse(_is_export_noise({"from": "Alice <alice@example.com>", "subject": "Accepted: your document was accepted"}))
         self.assertFalse(_is_export_noise({"from": "Alice <alice@example.com>", "subject": "Reminder: please review rollout"}))
         with patch("bpmis_jira_tool.gmail_dashboard.is_gmail_noise", return_value=True):
             self.assertTrue(_is_export_noise({"from": "Alice <alice@example.com>", "subject": "Project"}, {"rules": []}))
