@@ -2530,6 +2530,77 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
 
         self.assertEqual(candidates, [])
 
+    def test_team_member_reminder_candidates_ignore_late_meeting_join_notice(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== PH AAF Small Group (group-101) ===",
+                "[2026-05-20 17:02:13] Pat: @Zheng Xiaodong I will join the small group late due to a short delay.",
+            ]
+        )
+
+        self.assertEqual(_build_team_member_reminder_candidates(history), [])
+
+    def test_resolved_followup_filter_drops_model_todo_after_team_member_answer(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== AF App (group-101) ===",
+                "[2026-05-20 17:02:13] Alice: @Ker Yin please confirm whether Self Service Unlock Card via App for N0/1/2 Block Code has gone live.",
+                "[2026-05-20 17:06:00] Ker Yin: It has gone live; the rollout is complete.",
+            ]
+        )
+        resolved = seatalk_daily_email._build_resolved_team_member_reminder_candidates(history)
+        items = [
+            {
+                "task": "Confirm with Ker Yin whether Self Service Unlock Card via App for N0/1/2 Block Code has gone live.",
+                "source_type": "seatalk",
+            }
+        ]
+
+        self.assertEqual(
+            seatalk_daily_email._filter_resolved_or_meeting_logistics_followups(items, resolved_candidates=resolved),
+            [],
+        )
+
+    def test_build_daily_briefing_drops_model_meeting_delay_todo(self):
+        class MeetingDelayService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [],
+                    "other_updates": [],
+                    "team_member_reminders": [],
+                    "my_todos": [
+                        {
+                            "task": "Acknowledge Pat's request for a short delay in PH AAF Small Group if follow-up is still needed.",
+                            "domain": "General",
+                            "priority": "medium",
+                            "due": "TBD",
+                            "evidence": "PH AAF Small Group",
+                            "source_type": "seatalk",
+                        }
+                    ],
+                    "team_todos": [],
+                }
+
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== PH AAF Small Group (group-101) ===",
+                "[2026-05-20 17:02:13] Pat: @Zheng Xiaodong I will join the small group late due to a short delay.",
+                "=== AF App (group-102) ===",
+                "[2026-05-20 17:05:00] Alice: The rollout decision is documented.",
+            ]
+        )
+
+        payload = build_daily_briefing(
+            MeetingDelayService(history),
+            now=datetime(2026, 5, 20, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+        )
+
+        self.assertEqual(payload["my_todos"], [])
+
     def test_team_member_reminder_candidates_treat_thread_reply_as_named_person_reply(self):
         history = "\n".join(
             [

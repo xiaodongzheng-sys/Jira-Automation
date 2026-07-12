@@ -546,6 +546,7 @@ def build_daily_briefing(
         window_label = f"previous {hours} hours"
     seatalk_validation_history_text = history_text
     history_text = filter_text_by_noise(history_text, config=intelligence_config, source="seatalk")
+    history_text = _filter_daily_brief_meeting_logistics(history_text)
     gmail_history_text = str(gmail_history_text or "").strip()
     seatalk_raw_chars = len(history_text)
     gmail_raw_chars = len(gmail_history_text)
@@ -610,6 +611,7 @@ def build_daily_briefing(
     gmail_compact_chars = len(gmail_history_text)
     unanswered_question_hints = _build_unanswered_seatalk_question_hints(history_text)
     team_member_reminder_candidates = _build_team_member_reminder_candidates(history_text)
+    resolved_team_member_reminder_candidates = _build_resolved_team_member_reminder_candidates(history_text)
     team_member_reminder_hints = _format_team_member_reminder_hints(team_member_reminder_candidates)
     name_mappings = _load_seatalk_name_mappings(service)
     for key, name in _infer_private_chat_name_mappings_from_history(seatalk_validation_history_text).items():
@@ -707,6 +709,14 @@ def build_daily_briefing(
         ),
         text_fields=("person", "reminder"),
     )[:MAX_TEAM_MEMBER_REMINDERS]
+    my_todos = _filter_resolved_or_meeting_logistics_followups(
+        my_todos,
+        resolved_candidates=resolved_team_member_reminder_candidates,
+    )
+    reminders = _filter_resolved_or_meeting_logistics_followups(
+        reminders,
+        resolved_candidates=resolved_team_member_reminder_candidates,
+    )
     evidence_quality_metrics = _apply_daily_brief_evidence_refs(
         project_updates=project_updates,
         other_updates=other_updates,
@@ -1408,6 +1418,7 @@ def _daily_brief_user_prompt(
         "my_todos: include only Xiaodong-owned actions, decisions needed from Xiaodong, follow-ups Xiaodong clearly needs to drive, or watch/delegate items where Xiaodong should ensure another owner follows through. Do not include tasks fully owned by other people with no Xiaodong follow-up value. Max 8 items. Sort high priority first, then earliest due date, then most actionable.\n"
         "For each my_todos item, set action_type=direct_action only when Xiaodong must personally reply, decide, review, approve, attend, provide, or drive the next step. Set action_type=watch_delegate when Xiaodong mainly needs to monitor, ensure, follow up with someone, check with a team, or confirm another owner follows through.\n"
         "If a teammate follow-up topic is already represented as a my_todos watch_delegate item, do not repeat it in team_member_reminders.\n"
+        "Do not create a todo or reminder for an ask when a later human reply in the same SeaTalk group/thread already gives the answer, conclusion, or ownership update.\n"
         "project_updates: include updates from SeaTalk or Gmail where Xiaodong is involved, mentioned, directly asked, or clearly participating. Summarize the decision, milestone, blocker, or current state. Max 10 items. Sort blocked and in_progress before done.\n"
         "other_updates: include useful awareness from SeaTalk or Gmail where Xiaodong is not directly involved but the information may matter to a Digital Banking PM. Prioritize incident, launch, policy/process, risk/compliance, cross-team dependency, leadership decision, and cross-product milestone. useful_awareness should be rare and only included when genuinely PM-relevant, especially when matched to a VIP, priority keyword, or key project. Include at most 5 useful_awareness items and at most 8 other_updates total. Do not include generic chatter, greetings, pure thanks, meeting logistics with no decision, or low-value FYI.\n"
         "team_member_reminders: use SeaTalk only. Never create these from Gmail. Only include people from the explicit allowed reminder list below, including Xiaodong himself when he was @mentioned and did not reply. Max 8 items. Sort by most actionable first.\n\n"
@@ -1423,6 +1434,7 @@ def _daily_brief_user_prompt(
         "Mentions may appear as direct @ mentions, plain names, mapped display names, name variants, or quoted text. Prefer real names in the person field.\n"
         "A cc-only mention is not enough. If a person is only copied after 'cc' and the actual ask is addressed to someone else, do not create a reminder for the cc'd person. If the direct assignee is outside the allowed list and an allowed teammate is only cc'd, produce no team_member_reminders item for that message.\n"
         "Do not include private chats. Do not include bot/system alerts, automated reminders, SDLC Checker output, or SDLC material/approval reminder messages. Do not include items where the named person replied, acknowledged, handled it, or Xiaodong already followed up later.\n"
+        "Do not include @mentions that only say someone will join a meeting late, is delayed, or is temporarily unavailable; these are meeting logistics, not follow-up work.\n"
         "If the source message is annotated as a thread reply, make the reminder and evidence say thread, for example 'UDL数据小群 / thread: PH A-Card Model V2.1 Deployment'. Do not write 'in the group' for thread replies.\n"
         "If the mention looks human and action-relevant but you are unsure whether the named person stayed completely silent after being asked, drop it rather than creating a noisy Follow-up. Set source_type to seatalk.\n\n"
         "## Source And Evidence Rules\n"
@@ -1663,6 +1675,16 @@ def _build_unanswered_seatalk_question_hints(history_text: str) -> str:
 
 
 def _build_team_member_reminder_candidates(history_text: str) -> list[dict[str, str]] | None:
+    unresolved, _ = _scan_team_member_reminder_candidates(history_text)
+    return unresolved
+
+
+def _build_resolved_team_member_reminder_candidates(history_text: str) -> list[dict[str, str]]:
+    _, resolved = _scan_team_member_reminder_candidates(history_text)
+    return resolved
+
+
+def _scan_team_member_reminder_candidates(history_text: str) -> tuple[list[dict[str, str]] | None, list[dict[str, str]]]:
     current_group = ""
     saw_group_header = False
     pending: list[dict[str, Any]] = []
@@ -1678,6 +1700,8 @@ def _build_team_member_reminder_candidates(history_text: str) -> list[dict[str, 
         sender = message_match.group("sender").strip()
         thread = (message_match.group("thread") or "").strip()
         text = message_match.group("text").strip()
+        if _is_meeting_logistics_or_availability_notice(text):
+            continue
         key = (current_group, thread or "__main__")
         sender_person = _canonical_team_member_name(sender)
         sender_is_xiaodong = _sender_is_xiaodong(sender)
@@ -1706,20 +1730,85 @@ def _build_team_member_reminder_candidates(history_text: str) -> list[dict[str, 
             )
 
     if not saw_group_header:
-        return None
+        return None, []
     unresolved = [item for item in pending if not item.get("answered")]
+    resolved = [item for item in pending if item.get("answered")]
     unresolved.sort(key=lambda item: str(item.get("timestamp") or ""), reverse=True)
-    return [
-        {
-            "person": str(item.get("person") or ""),
-            "sender": str(item.get("sender") or ""),
-            "group": str(item.get("group") or ""),
-            "thread": str(item.get("thread") or ""),
-            "timestamp": str(item.get("timestamp") or ""),
-            "text": str(item.get("text") or ""),
-        }
-        for item in unresolved[:MAX_TEAM_MEMBER_REMINDER_HINTS]
-    ]
+    resolved.sort(key=lambda item: str(item.get("timestamp") or ""), reverse=True)
+
+    def serialize(items: list[dict[str, Any]]) -> list[dict[str, str]]:
+        return [
+            {
+                "person": str(item.get("person") or ""),
+                "sender": str(item.get("sender") or ""),
+                "group": str(item.get("group") or ""),
+                "thread": str(item.get("thread") or ""),
+                "timestamp": str(item.get("timestamp") or ""),
+                "text": str(item.get("text") or ""),
+            }
+            for item in items[:MAX_TEAM_MEMBER_REMINDER_HINTS]
+        ]
+
+    return serialize(unresolved), serialize(resolved)
+
+
+def _filter_daily_brief_meeting_logistics(history_text: str) -> str:
+    return "\n".join(
+        line
+        for line in str(history_text or "").splitlines()
+        if not (
+            (match := _SEATALK_HISTORY_MESSAGE_RE.match(line))
+            and _is_meeting_logistics_or_availability_notice(match.group("text"))
+        )
+    )
+
+
+def _is_meeting_logistics_or_availability_notice(text: Any) -> bool:
+    normalized = str(text or "").casefold()
+    meeting_terms = ("meeting", "call", "sync", "standup", "small group", "会议", "开会", "小组")
+    availability_terms = (
+        "join late",
+        "joining late",
+        "late join",
+        "running late",
+        "be late",
+        "will be late",
+        "short delay",
+        "delayed",
+        "delay",
+        "晚点",
+        "迟到",
+        "晚些",
+        "晚一点",
+        "晚点进入",
+        "晚点加入",
+    )
+    return any(term in normalized for term in availability_terms) and any(term in normalized for term in meeting_terms)
+
+
+def _filter_resolved_or_meeting_logistics_followups(
+    items: list[dict[str, Any]],
+    *,
+    resolved_candidates: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for item in items:
+        item_text = _item_text(item, fields=("task", "reminder", "title", "summary"))
+        if _is_meeting_logistics_or_availability_notice(item_text):
+            continue
+        if str(item.get("source_type") or "").strip().lower() in {"seatalk", "mixed"} and any(
+            _item_matches_resolved_followup(item, candidate) for candidate in resolved_candidates
+        ):
+            continue
+        filtered.append(item)
+    return filtered
+
+
+def _item_matches_resolved_followup(item: dict[str, Any], candidate: dict[str, str]) -> bool:
+    item_tokens = _topic_tokens(item, fields=("task", "reminder", "title", "summary"))
+    candidate_tokens = _topic_tokens({"text": candidate.get("text")}, fields=("text",))
+    overlap = item_tokens & candidate_tokens
+    return len(overlap) >= 3 and len(overlap) / max(1, min(len(item_tokens), len(candidate_tokens))) >= 0.5
 
 
 def _format_team_member_reminder_hints(candidates: list[dict[str, str]] | None) -> str:

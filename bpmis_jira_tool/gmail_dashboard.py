@@ -84,6 +84,10 @@ GMAIL_EXPORT_CALENDAR_REMINDER_SUBJECT_HINTS = (
     "reminder:",
     "event reminder:",
     "response:",
+    "accepted:",
+    "declined:",
+    "tentative:",
+    "responded:",
     "cancelled:",
     "canceled:",
 )
