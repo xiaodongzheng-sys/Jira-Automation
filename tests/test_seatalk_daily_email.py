@@ -2615,6 +2615,70 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
 
         self.assertEqual([item["person"] for item in candidates or []], ["Wang Chang"])
 
+    def test_team_member_reminder_candidates_drop_after_substantive_thread_reply(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== PH AAF Issue Troubleshooting Group (group-4445222) ===",
+                "[2026-07-13 17:20:00] Enrico Lim [thread reply under: Failed FV pop up issue]: @Rene Chong please push the SPM team to fix the failed facial-verification pop-up.",
+                "[2026-07-13 17:25:00] Zhang Fan [thread reply under: Failed FV pop up issue]: SPM is passing the redirect URL in the token request.",
+            ]
+        )
+
+        self.assertEqual(_build_team_member_reminder_candidates(history), [])
+
+    def test_team_member_reminder_candidates_drop_after_requester_confirms_fixed(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== PH AAF Issue Troubleshooting Group (group-4445222) ===",
+                "[2026-07-13 17:20:00] Enrico Lim [thread reply under: Failed FV pop up issue]: @Rene Chong please push the SPM team to fix the failed facial-verification pop-up.",
+                "[2026-07-13 19:30:00] Enrico Lim: Our issues are already fixed and tested as expected. Thank you all for the support!",
+            ]
+        )
+
+        self.assertEqual(_build_team_member_reminder_candidates(history), [])
+
+    def test_team_member_reminder_candidates_dedupe_repeated_requests_in_one_thread(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== PH AAF Issue Troubleshooting Group (group-4445222) ===",
+                "[2026-07-13 17:20:00] Alice [thread reply under: CCIC not linked device default]: @Ker Yin please confirm the redirect URL.",
+                "[2026-07-13 17:25:00] Bob [thread reply under: CCIC not linked device default]: @Ker Yin please coordinate the frontend support.",
+            ]
+        )
+
+        candidates = _build_team_member_reminder_candidates(history)
+
+        self.assertEqual(len(candidates or []), 1)
+        self.assertEqual(candidates[0]["person"], "Ker Yin")
+
+    def test_seatalk_reminder_requires_the_matching_group_and_thread_candidate(self):
+        candidates = [
+            {
+                "person": "Ker Yin",
+                "group": "PH AAF Issue Troubleshooting Group",
+                "thread": "CCIC not linked device default",
+                "timestamp": "2026-07-13 17:00:00",
+                "text": "@Ker Yin please coordinate CCIC frontend support.",
+            }
+        ]
+        reminders = [
+            {
+                "domain": "Anti-fraud",
+                "person": "Ker Yin",
+                "reminder": "Check the data PIC for the log_ext table.",
+                "evidence": "[PH] Rules Inquiry / thread: log_ext table data PIC",
+                "source_type": "seatalk",
+            }
+        ]
+
+        self.assertEqual(
+            seatalk_daily_email._filter_seatalk_reminders(reminders, reminder_candidates=candidates),
+            [],
+        )
+
     def test_build_daily_briefing_drops_followup_when_named_person_replied(self):
         class RepliedReminderService(FakeSeaTalkService):
             def _run_codex_insights_prompt(self, *, prompt, system_prompt):

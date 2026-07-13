@@ -185,6 +185,14 @@ class GmailDashboardServiceTests(unittest.TestCase):
         self.assertTrue(_is_export_noise({"from": "Alice <alice@example.com>", "subject": "requests access to an item"}))
         self.assertTrue(_is_export_noise({"from": "calendar@example.com", "subject": "Project invitation"}))
         self.assertTrue(_is_export_noise({"from": "calendar@example.com", "subject": "Invitation: review"}))
+        self.assertTrue(
+            _is_export_noise(
+                {
+                    "from": "Xiaodong Zheng <xiaodong.zheng@npt.sg>",
+                    "subject": "Updated invitation with note: Transaction Pause Period @ Thu 16 Jul 2026 2:30pm - 3:30pm (SGT)",
+                }
+            )
+        )
         self.assertTrue(_is_export_noise({"from": "Google Calendar <calendar-notification@google.com>", "subject": "Reminder: Weekly sync"}))
         self.assertTrue(_is_export_noise({"from": "Google Calendar <calendar-notification@google.com>", "subject": "Cancelled: Weekly sync"}))
         self.assertTrue(_is_export_noise({"from": "Google Calendar <calendar-notification@google.com>", "subject": "Accepted: v3.49 AF PRD Briefing"}))

@@ -1705,13 +1705,25 @@ def _scan_team_member_reminder_candidates(history_text: str) -> tuple[list[dict[
         key = (current_group, thread or "__main__")
         sender_person = _canonical_team_member_name(sender)
         sender_is_xiaodong = _sender_is_xiaodong(sender)
+        is_human_reply = _is_meaningful_human_seatalk_line(sender, text)
         if sender_person or sender_is_xiaodong:
             for item in pending:
                 if _is_same_team_member_reminder_context(item, group=current_group, thread=thread, key=key) and (
                     sender_is_xiaodong or item.get("person") == sender_person
                 ):
                     item["answered"] = True
-        if not _is_meaningful_human_seatalk_line(sender, text) or not _looks_like_team_member_request(text):
+        if thread and is_human_reply and _is_substantive_team_member_followup(text):
+            for item in pending:
+                if (
+                    item.get("sender") != sender
+                    and _is_same_team_member_reminder_context(item, group=current_group, thread=thread, key=key)
+                ):
+                    item["answered"] = True
+        if is_human_reply and _is_explicit_team_member_closure(text):
+            for item in pending:
+                if item.get("sender") == sender and str(item.get("group") or "") == current_group:
+                    item["answered"] = True
+        if not is_human_reply or not _looks_like_team_member_request(text):
             continue
         for person in _mentioned_team_members(text):
             if person == sender_person or _is_cc_only_team_member_mention(text, person):
@@ -1735,6 +1747,8 @@ def _scan_team_member_reminder_candidates(history_text: str) -> tuple[list[dict[
     resolved = [item for item in pending if item.get("answered")]
     unresolved.sort(key=lambda item: str(item.get("timestamp") or ""), reverse=True)
     resolved.sort(key=lambda item: str(item.get("timestamp") or ""), reverse=True)
+    unresolved = _dedupe_team_member_reminder_candidates(unresolved)
+    resolved = _dedupe_team_member_reminder_candidates(resolved)
 
     def serialize(items: list[dict[str, Any]]) -> list[dict[str, str]]:
         return [
@@ -1750,6 +1764,77 @@ def _scan_team_member_reminder_candidates(history_text: str) -> tuple[list[dict[
         ]
 
     return serialize(unresolved), serialize(resolved)
+
+
+def _is_substantive_team_member_followup(text: Any) -> bool:
+    """Treat a non-request reply in the same thread as an answer to its follow-up."""
+    normalized = str(text or "").strip()
+    if not normalized or _is_meeting_logistics_or_availability_notice(normalized):
+        return False
+    if _looks_like_team_member_request(normalized) or re.search(r"[?？吗呢]", normalized):
+        return False
+    lowered = normalized.casefold()
+    answer_cues = (
+        " is ",
+        " are ",
+        " was ",
+        " were ",
+        " passed ",
+        " passing ",
+        " sent ",
+        " shared ",
+        " provided ",
+        " confirmed ",
+        " the reason",
+        "因为",
+        "原因",
+        "目前",
+        "已",
+        "已经",
+        "传给",
+        "通过",
+        "可以",
+    )
+    return any(cue in lowered for cue in answer_cues)
+
+
+def _is_explicit_team_member_closure(text: Any) -> bool:
+    normalized = str(text or "").casefold()
+    closure_terms = (
+        "fixed",
+        "resolved",
+        "closed",
+        "completed",
+        "tested as expected",
+        "no longer reproduce",
+        "issue is gone",
+        "已修复",
+        "已解决",
+        "已关闭",
+        "已处理",
+        "已完成",
+        "修好了",
+        "测试通过",
+        "已验证",
+    )
+    return any(term in normalized for term in closure_terms)
+
+
+def _dedupe_team_member_reminder_candidates(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A person needs one follow-up per group thread, not one per repeated mention."""
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in items:
+        key = (
+            str(item.get("person") or ""),
+            _normalize_thread_match_text(item.get("group")),
+            _normalize_thread_match_text(item.get("thread")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
 
 
 def _filter_daily_brief_meeting_logistics(history_text: str) -> str:
@@ -3641,7 +3726,8 @@ def _filter_seatalk_reminders(
         if not canonical_person:
             continue
         if reminder_candidates is not None and not any(
-            candidate.get("person") == canonical_person for candidate in reminder_candidates
+            _reminder_matches_candidate(item, candidate, canonical_person=canonical_person)
+            for candidate in reminder_candidates
         ):
             continue
         domain = TEAM_MEMBER_REMINDER_DOMAIN_OVERRIDES.get(_normalize_person_key(canonical_person), _display_domain(item.get("domain")))
@@ -3651,6 +3737,24 @@ def _filter_seatalk_reminders(
         item["domain"] = domain
         filtered.append(item)
     return filtered
+
+
+def _reminder_matches_candidate(
+    item: dict[str, Any],
+    candidate: dict[str, str],
+    *,
+    canonical_person: str,
+) -> bool:
+    if candidate.get("person") != canonical_person:
+        return False
+    evidence = _normalize_thread_match_text(item.get("evidence"))
+    group = _normalize_thread_match_text(candidate.get("group"))
+    thread = _normalize_thread_match_text(candidate.get("thread"))
+    if group and group not in evidence:
+        return False
+    if thread and thread not in evidence:
+        return False
+    return True
 
 
 def _filter_reminders_already_covered_by_watch_delegate(
