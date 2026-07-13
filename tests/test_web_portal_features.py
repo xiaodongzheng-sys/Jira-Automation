@@ -1476,8 +1476,8 @@ class WebPortalFeatureTests(unittest.TestCase):
                         "document_revision": "stale-revision",
                         "scope": "pipeline",
                         "row_id": row_id,
-                        "field": "remarks",
-                        "value": "stale update",
+                        "field": "productization_efforts",
+                        "value": "Y",
                     },
                 )
                 rows_response = client.post(
@@ -1536,13 +1536,13 @@ class WebPortalFeatureTests(unittest.TestCase):
                         "value": "P1",
                     },
                 )
-                remarks_response = client.post(
+                productization_response = client.post(
                     "/api/team-dashboard/version-plan/af/cell",
                     json={
                         "scope": "pipeline",
                         "row_id": row_id,
-                        "field": "remarks",
-                        "value": "Can edit during sync",
+                        "field": "productization_efforts",
+                        "value": "Y",
                     },
                 )
                 audit_log = app.config["TEAM_DASHBOARD_CONFIG_STORE"].load()["version_plan"]["af"]["audit_log"]
@@ -1552,12 +1552,9 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(rows_response.get_json()["error_category"], "version_plan_sync_running")
         self.assertEqual(priority_response.status_code, 409)
         self.assertEqual(priority_response.get_json()["error_category"], "version_plan_sync_running")
-        self.assertEqual(remarks_response.status_code, 200)
-        self.assertTrue(
-            any(row["remarks"] == "Can edit during sync" for row in remarks_response.get_json()["pipeline_rows"])
-        )
-        self.assertEqual(audit_log[-1]["action"], "cell_update")
-        self.assertEqual(audit_log[-1]["details"]["field"], "remarks")
+        self.assertEqual(productization_response.status_code, 409)
+        self.assertEqual(productization_response.get_json()["error_category"], "version_plan_sync_running")
+        self.assertEqual(audit_log, [])
 
     def test_team_dashboard_version_plan_route_uses_firestore_store_for_cloud_uat_auto_backend(self):
         from bpmis_jira_tool import team_dashboard_version_plan_store as store_module
@@ -3580,7 +3577,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         styles = Path("static/team_dashboard.css").read_text(encoding="utf-8")
 
         self.assertIn("(PRD Final: ${versionPlanShortDate(bundle.prd_final_date || bundle.af_release_date)})", script)
-        self.assertLess(script.index('<div>Productization Efforts? (Y/N)</div>'), script.index("<div>Remarks</div>"))
+        self.assertLess(script.index('<div>Productization Efforts? (Y/N)</div>'), script.index("<div>Component</div>"))
+        self.assertLess(script.index("<div>Component</div>"), script.index("<div>Release Version</div>"))
         self.assertIn("<div>Productization Efforts? (Y/N)</div>", script)
         self.assertIn("└ ${escapeHtml(line)}", script)
         self.assertIn("renderLink(row.jira_link, `[${jiraId}]`)", script)
@@ -3603,7 +3601,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("aria-label=\"Delete row\"", script)
         self.assertNotIn('data-version-plan-row-action="up"', script)
         self.assertNotIn('data-version-plan-row-action="down"', script)
-        self.assertIn("row.row_type === 'synced' && field === 'remarks'", script)
+        self.assertNotIn("field === 'remarks'", script)
         self.assertIn("Syncing Jira. Row changes are paused until sync finishes.", script)
         self.assertIn("isVersionPlanSyncRunning", script)
         self.assertIn("version_plan_sync_running", script)
@@ -3617,13 +3615,13 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("const pipelineRows = sortVersionPlanManualRowsForDisplay(payload?.pipeline_rows)", script)
         self.assertIn("filterVersionPlanRowsByPm(bundle.synced_rows || [])", script)
         self.assertIn("sortPendingLiveProjects(filterProjectsByKeyProject(filterProjectsByPm(pendingLive, selectedPm)))", script)
-        self.assertIn("32px minmax(320px, 1fr) 76px 116px 118px minmax(150px, 0.45fr)", styles)
+        self.assertIn("32px minmax(320px, 1fr) 76px 116px 118px minmax(120px, 0.4fr) minmax(120px, 0.4fr)", styles)
         self.assertIn("--version-plan-sheet-grid", styles)
         self.assertIn("grid-template-columns: var(--version-plan-sheet-grid)", styles)
         self.assertIn(".team-dashboard-version-plan-pm-filter", styles)
         self.assertIn(".team-dashboard-version-plan-bundle-toggle-row", styles)
         self.assertIn(".team-dashboard-version-plan-delete", styles)
-        self.assertIn("min-width: 812px", styles)
+        self.assertIn("min-width: 1050px", styles)
         self.assertIn(".team-dashboard-version-plan-row.is-drop-before", styles)
         self.assertIn(".team-dashboard-version-plan-row.is-drop-after", styles)
         self.assertIn("resize: none", styles)

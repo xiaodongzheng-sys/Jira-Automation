@@ -341,7 +341,7 @@ class WebTeamDashboardRouteEdgeTests(unittest.TestCase):
                 row_id = client.get("/api/team-dashboard/version-plan/af").get_json()["pipeline_rows"][0]["row_id"]
                 response = client.post(
                     "/api/team-dashboard/version-plan/af/cell",
-                    json={"scope": "pipeline", "row_id": row_id, "field": "remarks", "value": "covered"},
+                    json={"scope": "pipeline", "row_id": row_id, "field": "productization_efforts", "value": "Y"},
                 )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["store_backend"], "team_dashboard_config")
@@ -364,7 +364,7 @@ class WebTeamDashboardRouteEdgeTests(unittest.TestCase):
                 row_id = client.get("/api/team-dashboard/version-plan/af").get_json()["pipeline_rows"][0]["row_id"]
                 response = client.post(
                     "/api/team-dashboard/version-plan/af/cell",
-                    json={"scope": "pipeline", "row_id": row_id, "field": "remarks", "value": "dict"},
+                    json={"scope": "pipeline", "row_id": row_id, "field": "productization_efforts", "value": "Y"},
                 )
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("store_backend", response.get_json())
