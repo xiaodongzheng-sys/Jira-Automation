@@ -140,6 +140,11 @@ TEAM_MEMBER_REMINDER_DETECTION_ALIASES = {
     for alias, person in TEAM_MEMBER_REMINDER_ALLOWED_PEOPLE.items()
     if alias not in {"chang", "zoey"}
 }
+# These exact SeaTalk names are not members of Xiaodong's team. Mask them before
+# matching short aliases so a suffix such as "Mingming" cannot create a false follow-up.
+TEAM_MEMBER_REMINDER_EXCLUDED_NAME_KEYS = {
+    "li mingming",
+}
 ANTI_FRAUD_TEAM_MEMBERS = {
     "ker yin",
     "rene chong",
@@ -1425,7 +1430,7 @@ def _daily_brief_user_prompt(
         "For project_updates, team_member_reminders, and SeaTalk watch_delegate my_todos, evidence_ref_id is required and must be copied exactly from Deterministic Daily Brief Evidence Bundle.evidence_refs. Do not invent evidence_ref_id values.\n"
         "For mixed SeaTalk+Gmail project_updates, evidence_ref_id may contain two comma-separated ids, one st-ref and one gm-ref, only when both refs support the same topic.\n\n"
         "## Team Member Reminder Scan\n"
-        "Before writing team_member_reminders, scan every SeaTalk group conversation for human mentions of these people: Zheng Xiaodong, Ker Yin, Rene Chong, Sabrina Chan, Liye, Hui Xian, Sophia Wang Zijun, Ming Ming, Zoey Lu, Wang Chang, Jireh.\n"
+        "Before writing team_member_reminders, scan every SeaTalk group conversation for human mentions of these people: Zheng Xiaodong, Ker Yin, Rene Chong, Sabrina Chan, Liye, Hui Xian, Sophia Wang Zijun, Ming Ming, Zoey Lu, Wang Chang, Jireh. Ming Ming | 明明 is a team member; Li Mingming is a different person and must never be treated as Ming Ming.\n"
         "Sophia Wang Zijun belongs to Credit Risk. Do not classify Sophia Wang Zijun as Ops Risk.\n"
         "For Anti-fraud domain reminders, only these people are Xiaodong's Anti-fraud team: Ker Yin, Rene Chong, Zoey Lu, Wang Chang, Jireh. Do not put anyone else, including Wendy, under Anti-fraud team_member_reminders.\n"
         "Do not create team_member_reminders for people outside the allowed reminder list, even if they appear in SeaTalk.\n"
@@ -1916,6 +1921,8 @@ def _format_team_member_reminder_hints(candidates: list[dict[str, str]] | None) 
 
 def _mentioned_team_members(text: str) -> list[str]:
     normalized = f" {_normalize_person_key(text)} "
+    for excluded_name in TEAM_MEMBER_REMINDER_EXCLUDED_NAME_KEYS:
+        normalized = normalized.replace(f" {excluded_name} ", " ")
     people: list[str] = []
     for alias, person in sorted(TEAM_MEMBER_REMINDER_DETECTION_ALIASES.items(), key=lambda pair: len(pair[0]), reverse=True):
         if f" {alias} " not in normalized:

@@ -2501,6 +2501,21 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual([item["person"] for item in candidates or []], ["Zoey Lu"])
         self.assertIn("AF next steps", candidates[0]["text"])
 
+    def test_team_member_reminder_candidates_distinguish_li_mingming_from_team_member_ming_ming(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== Cross-functional discussion (group-103) ===",
+                "[2026-07-14 10:00:00] Alice Tan: Hello bosses @Li Mingming @Tan Jing Jie, what do you think about this suggestion?",
+                "[2026-07-14 10:05:00] Bob PM: @Ming Ming please review the rollout proposal.",
+            ]
+        )
+
+        candidates = _build_team_member_reminder_candidates(history)
+
+        self.assertEqual([item["person"] for item in candidates or []], ["Ming Ming"])
+        self.assertIn("rollout proposal", candidates[0]["text"])
+
     def test_team_member_reminder_candidates_include_xiaodong_when_mentioned_and_unanswered(self):
         history = "\n".join(
             [
