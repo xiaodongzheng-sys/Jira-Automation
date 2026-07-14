@@ -42,8 +42,8 @@ business_end = 19 * 60
 is_business_hours = now.weekday() < 5 and business_start <= minutes < business_end
 is_weekday = now.weekday() < 5
 is_live_window = True
-target = "uat_live"
-allowed_targets = ["uat", "live"]
+target = "live"
+allowed_targets = ["live"]
 
 print(
     json.dumps(
@@ -82,7 +82,7 @@ enforce_release_window_target() {
 
   {
     echo "Unknown release target '$requested_target'."
-    echo "Allowed targets: uat,live"
+        echo "Allowed targets: live"
   } >&2
   return 1
 }

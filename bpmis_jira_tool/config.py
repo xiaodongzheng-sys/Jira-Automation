@@ -137,7 +137,6 @@ class Settings:
     version_plan_store_backend: str = "auto"
     version_plan_firestore_project: str | None = None
     version_plan_firestore_document: str | None = None
-    version_plan_firestore_environment: str | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -167,13 +166,12 @@ class Settings:
             team_portal_host=_env_str("TEAM_PORTAL_HOST", "127.0.0.1"),
             team_portal_port=int(_env_str("TEAM_PORTAL_PORT", "5000")),
             team_portal_base_url=_env_str("TEAM_PORTAL_BASE_URL"),
-            team_portal_stage=_env_str("TEAM_PORTAL_STAGE"),
+            team_portal_stage="live",
             cloud_home_enabled=_env_bool("TEAM_PORTAL_CLOUD_HOME_ENABLED", False),
             mac_full_portal_url=_env_str("TEAM_PORTAL_MAC_FULL_PORTAL_URL"),
             version_plan_store_backend=_env_str("VERSION_PLAN_STORE_BACKEND", "auto"),
             version_plan_firestore_project=_env_str("VERSION_PLAN_FIRESTORE_PROJECT", _env_str("GOOGLE_CLOUD_PROJECT")),
             version_plan_firestore_document=_env_str("VERSION_PLAN_FIRESTORE_DOCUMENT"),
-            version_plan_firestore_environment=_env_str("VERSION_PLAN_FIRESTORE_ENVIRONMENT"),
             team_allowed_emails=_env_csv("TEAM_ALLOWED_EMAILS"),
             team_allowed_email_domains=_env_csv("TEAM_ALLOWED_EMAIL_DOMAINS"),
             team_portal_data_dir=Path(_env_str("TEAM_PORTAL_DATA_DIR", ".")),

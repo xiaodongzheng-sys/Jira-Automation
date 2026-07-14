@@ -486,8 +486,8 @@ def _version_plan_firestore_summary() -> tuple[dict[str, str], list[dict[str, st
     from scripts.release_status import _env_value, _load_version_plan_firestore_payload
 
     env = os.environ
-    stage = str(_env_value("VERSION_PLAN_FIRESTORE_ENVIRONMENT", env) or _env_value("TEAM_PORTAL_STAGE", env) or "live").strip().lower()
-    document = str(_env_value("VERSION_PLAN_FIRESTORE_DOCUMENT", env) or f"version_plan_{'uat' if stage == 'uat' else 'live'}").strip()
+    stage = "live"
+    document = str(_env_value("VERSION_PLAN_FIRESTORE_DOCUMENT", env) or "version_plan_live").strip()
     project = str(_env_value("VERSION_PLAN_FIRESTORE_PROJECT", env) or _env_value("GOOGLE_CLOUD_PROJECT", env) or "").strip()
     backend = str(_env_value("VERSION_PLAN_STORE_BACKEND", env) or "").strip().lower()
     summary = {

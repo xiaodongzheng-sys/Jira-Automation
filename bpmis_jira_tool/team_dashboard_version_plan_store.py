@@ -43,11 +43,7 @@ def version_plan_source_hash(version_plan: dict[str, Any]) -> str:
 
 
 def version_plan_environment(settings: Settings) -> str:
-    explicit = str(settings.version_plan_firestore_environment or "").strip().lower()
-    if explicit:
-        return explicit
-    stage = str(settings.team_portal_stage or "").strip().lower()
-    return "uat" if stage == "uat" else "live"
+    return "live"
 
 
 def firestore_document_id(settings: Settings) -> str:
@@ -63,8 +59,8 @@ def should_use_firestore_version_plan(settings: Settings) -> bool:
         return True
     if backend in {"sqlite", "team_dashboard_config", "local", "disabled"}:
         return False
-    stage = str(settings.team_portal_stage or "").strip().lower()
-    return bool(settings.version_plan_firestore_project and stage in {"uat", "live"})
+    stage = str(settings.team_portal_stage or "").strip().lower() or "live"
+    return bool(settings.version_plan_firestore_project and stage == "live")
 
 
 @dataclass(frozen=True)

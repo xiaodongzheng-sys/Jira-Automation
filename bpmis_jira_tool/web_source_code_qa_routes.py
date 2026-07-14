@@ -145,24 +145,6 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
     def source_code_qa_repo_download_api(scope_key: str):
         try:
             scope = resolve_repo_download_scope(scope_key)
-            if _local_agent_source_code_qa_enabled(settings):
-                response = _build_local_agent_client(settings).source_code_qa_repo_download(scope["scope_key"])
-                temp_dir, temp_path, content_type, download_name = _download_local_agent_archive(
-                    response,
-                    fallback_name=scope["filename"],
-                )
-
-                @after_this_request
-                def _cleanup_local_agent_temp(response_obj):
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                    return response_obj
-
-                return send_file(
-                    temp_path,
-                    mimetype=content_type,
-                    download_name=download_name,
-                    as_attachment=True,
-                )
             if public_gcs_read_bucket():
                 # Cloud Run: hydrate the bundle from GCS onto a temporary file
                 # only as a fallback. The preferred path is to redirect the
@@ -195,10 +177,24 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
                         download_name=str(metadata.get("filename") or scope["filename"]),
                         as_attachment=True,
                     )
-                return jsonify({
-                    "status": "error",
-                    "message": "This source bundle has not been published yet. Ask the admin to run a sync.",
-                }), HTTPStatus.NOT_FOUND
+            if _local_agent_source_code_qa_enabled(settings):
+                response = _build_local_agent_client(settings).source_code_qa_repo_download(scope["scope_key"])
+                temp_dir, temp_path, content_type, download_name = _download_local_agent_archive(
+                    response,
+                    fallback_name=scope["filename"],
+                )
+
+                @after_this_request
+                def _cleanup_local_agent_temp(response_obj):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    return response_obj
+
+                return send_file(
+                    temp_path,
+                    mimetype=content_type,
+                    download_name=download_name,
+                    as_attachment=True,
+                )
             metadata, content = build_repo_download_zip(_build_source_code_qa_service(), scope["scope_key"])
             return send_file(
                 io.BytesIO(content),

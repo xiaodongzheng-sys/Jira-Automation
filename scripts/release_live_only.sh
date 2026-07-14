@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 
-# Live-only release: runs the full test gate, then promotes origin/main to the
-# Mac-hosted public Live portal. The Cloud Run UAT environment is intentionally
-# skipped end to end (no UAT deploy, no UAT health checks, no gcloud required).
+# Live release: promotes origin/main to the Mac-hosted public Live portal.
 #
 # Live is served by the Mac host checking out origin/main and restarting the
 # portal/local-agent, so the only prerequisite is that the commit you want live
@@ -29,24 +27,15 @@ current_sha() {
 }
 
 run_gate() {
-  if [[ "${RELEASE_LIVE_ONLY_SKIP_GATE:-${RELEASE_UAT_LIVE_SKIP_GATE:-0}}" == "1" ]]; then
+  if [[ "${RELEASE_LIVE_ONLY_SKIP_GATE:-0}" == "1" ]]; then
     echo "Skipping system full test gate because skip-gate is set."
     return 0
   fi
-  if [[ "${RELEASE_UAT_LIVE_REUSE_VERIFIED_GATE:-1}" == "1" ]]; then
-    if "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/run_system_full_test_gate.py" \
-      --check-proof \
-      --proof-max-age-seconds "${RELEASE_UAT_LIVE_GATE_PROOF_MAX_AGE_SECONDS:-7200}" \
-      --profile "${RELEASE_UAT_LIVE_GATE_PROFILE:-auto}" \
-      --coverage-fail-under "${RELEASE_UAT_LIVE_COVERAGE_FAIL_UNDER:-100}"; then
-      return 0
-    fi
-  fi
   "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/run_system_full_test_gate.py" \
     --skip-smoke \
-    --profile "${RELEASE_UAT_LIVE_GATE_PROFILE:-auto}" \
-    --parallel-workers "${RELEASE_UAT_LIVE_GATE_WORKERS:-4}" \
-    --coverage-fail-under "${RELEASE_UAT_LIVE_COVERAGE_FAIL_UNDER:-100}"
+    --profile "${RELEASE_LIVE_GATE_PROFILE:-auto}" \
+    --parallel-workers "${RELEASE_LIVE_GATE_WORKERS:-4}" \
+    --coverage-fail-under "${RELEASE_LIVE_COVERAGE_FAIL_UNDER:-100}"
 }
 
 resolve_live_url() {
@@ -72,7 +61,7 @@ if [[ "$ORIGIN_MAIN" != "$SHA" ]]; then
   exit 1
 fi
 
-echo "Live-only release for origin/main $SHA (UAT skipped)."
+echo "Live release for origin/main $SHA."
 run_gate
 
 LIVE_URL="$(resolve_live_url)"
@@ -83,11 +72,10 @@ if [[ -n "$LIVE_URL" && "$(live_revision "$LIVE_URL" || true)" == "$SHA" ]]; the
   exit 0
 fi
 
-PROMOTE_LIVE_TARGET=origin_main "$ROOT_DIR/scripts/promote_uat_to_live.sh"
+"$ROOT_DIR/scripts/promote_live.sh"
 
-# promote_uat_to_live.sh already verified Live loopback + public health. Run the
-# host doctor as a final report; by default it does not fail the live deploy
-# (set RELEASE_LIVE_ONLY_STRICT_DOCTOR=1 to make doctor findings fatal).
+# promote_live.sh already verified Live loopback + public health. Run the host
+# doctor as a final report; by default it does not fail the release.
 TEAM_STACK_HOST_ROOT="${TEAM_STACK_HOST_ROOT:-$(recommended_team_stack_root)}"
 doctor_status=0
 "$TEAM_STACK_HOST_ROOT/scripts/run_team_stack.sh" doctor || doctor_status=$?

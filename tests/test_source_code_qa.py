@@ -290,7 +290,35 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(download.status_code, 302)
         self.assertEqual(download.headers["Location"], "https://signed.example.com/af-all.zip")
 
-    def test_repo_download_prefers_local_agent_before_gcs(self):
+    def test_repo_download_prefers_gcs_before_local_agent(self):
+        class _UnexpectedLocalAgentClient:
+            def source_code_qa_repo_download(self, scope_key):
+                raise AssertionError(f"local-agent should not be called when signed GCS URL exists: {scope_key}")
+
+        settings = self.app.config["SETTINGS"]
+        object.__setattr__(settings, "local_agent_mode", "enabled")
+        object.__setattr__(settings, "local_agent_base_url", "https://agent.example.com")
+        object.__setattr__(settings, "local_agent_hmac_secret", "test-secret")
+        object.__setattr__(settings, "local_agent_source_code_qa_enabled", True)
+        with self.app.test_client() as client, patch.dict(
+            os.environ,
+            {
+                "TEAM_PORTAL_PUBLIC_GCS_BUCKET": "test-bucket",
+            },
+            clear=False,
+        ), patch(
+            "bpmis_jira_tool.public_artifacts_gcs.fetch_repo_download_signed_url",
+            return_value=({"filename": "source-code-repos-AF-All.zip"}, "https://signed.example.com/af-all.zip"),
+        ), patch(
+            "bpmis_jira_tool.web._build_local_agent_client",
+            return_value=_UnexpectedLocalAgentClient(),
+        ):
+            download = client.get("/api/source-code-qa/repo-downloads/AF:All", follow_redirects=False)
+
+        self.assertEqual(download.status_code, 302)
+        self.assertEqual(download.headers["Location"], "https://signed.example.com/af-all.zip")
+
+    def test_repo_download_falls_back_to_local_agent_when_gcs_unavailable(self):
         class _FakeStreamingResponse:
             def __init__(self):
                 self.headers = {
@@ -323,8 +351,11 @@ class SourceCodeQARouteTests(unittest.TestCase):
             "bpmis_jira_tool.web._build_local_agent_client",
             return_value=fake_client,
         ), patch(
+            "bpmis_jira_tool.public_artifacts_gcs.fetch_repo_download_signed_url",
+            return_value=None,
+        ), patch(
             "bpmis_jira_tool.web.public_gcs_read_bucket",
-            side_effect=AssertionError("GCS should not be consulted when local-agent download is available."),
+            return_value="test-bucket",
         ):
             download = client.get("/api/source-code-qa/repo-downloads/AF:All")
 

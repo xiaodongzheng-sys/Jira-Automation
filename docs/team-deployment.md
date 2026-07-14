@@ -7,7 +7,7 @@ This guide describes the supported **shared-team** setup:
 - teammates sign in with `@npt.sg` Google accounts
 - each teammate stores their own config and BPMIS token inside the portal
 
-This Mac-hosted Cloudflare Tunnel URL is the primary teammate entrypoint and the default release target. Cloud Run can remain available as a UAT/backup surface, but routine deploy/release/live requests should update and verify only the Mac-hosted tunnel portal. Deploy or validate Cloud Run only when the request explicitly says Cloud Run.
+This portal has one business environment: Live. Every release updates the Mac-hosted Cloudflare Tunnel portal and the Cloud Run Live service.
 
 ## Host Configuration
 

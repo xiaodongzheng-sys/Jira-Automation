@@ -30,7 +30,6 @@ def _git_revision() -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--environment", choices=["uat", "live"], required=True)
     parser.add_argument("--data-root", default=os.environ.get("TEAM_PORTAL_DATA_DIR"))
     parser.add_argument("--project", default=os.environ.get("VERSION_PLAN_FIRESTORE_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT"))
     args = parser.parse_args(argv)
@@ -42,17 +41,16 @@ def main(argv: list[str] | None = None) -> int:
 
     backup_dir = data_root / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
-    backup_path = backup_dir / f"version_plan_sqlite_backup_{args.environment}.json"
+    backup_path = backup_dir / "version_plan_sqlite_backup_live.json"
     if not backup_path.exists():
         backup_path.write_text(json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
     env = dict(os.environ)
     env["VERSION_PLAN_STORE_BACKEND"] = "firestore"
-    env["VERSION_PLAN_FIRESTORE_ENVIRONMENT"] = args.environment
     if args.project:
         env["VERSION_PLAN_FIRESTORE_PROJECT"] = args.project
         env["GOOGLE_CLOUD_PROJECT"] = args.project
-    env["TEAM_PORTAL_STAGE"] = args.environment
+    env["TEAM_PORTAL_STAGE"] = "live"
     with _patched_environ(env):
         settings = Settings.from_env()
         firestore_store = FirestoreVersionPlanStore(settings=settings, config_store=store)

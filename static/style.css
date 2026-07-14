@@ -650,12 +650,6 @@ body {
   text-transform: uppercase;
 }
 
-.environment-banner-uat {
-  border: 1px solid rgba(180, 83, 9, 0.28);
-  background: #fff7ed;
-  color: #7c2d12;
-}
-
 .session-bar {
   display: flex;
   align-items: center;

@@ -50,7 +50,7 @@
     {
       "id": "deploy_timings",
       "path": ".team-portal/run/deploy_timings.jsonl",
-      "summary": "Recent UAT and live deployment timing records showed local-agent health checks and live promotion checks."
+    "summary": "Recent Live deployment timing records showed local-agent health checks and Live promotion checks."
     }
   ],
   "excluded_evidence": [
@@ -144,7 +144,7 @@
             "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_cloud_home_opens_standalone_version_plan_smoke",
             "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_team_dashboard_version_plan_manual_row_controls_smoke",
             "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_version_plan_api_rejects_stale_revision",
-            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_version_plan_route_uses_firestore_store_for_cloud_uat_auto_backend"
+            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_version_plan_route_uses_firestore_store_for_cloud_auto_backend"
           ]
         }
       ]
@@ -156,18 +156,16 @@
         {"source": "host_access_log", "signal": "POST /api/local-agent/team-dashboard/config/load", "count": 208, "last_seen": "2026-05-24"},
         {"source": "host_access_log", "signal": "POST /api/local-agent/bpmis/config/load", "count": 6, "last_seen": "2026-05-24"},
         {"source": "host_access_log", "signal": "POST /api/local-agent/bpmis/call", "count": 42, "last_seen": "2026-05-24"},
-        {"source": "host_access_log", "signal": "GET /uat-local-agent/api/local-agent/healthz", "count": 7, "last_seen": "2026-05-23"}
       ],
       "scenarios": [
         {
-          "id": "public_and_uat_proxy_health_and_signed_forwarding",
-          "description": "Observed public/UAT local-agent proxy traffic is covered for health, bypass, signing, and forwarding.",
+          "id": "public_proxy_health_and_signed_forwarding",
+          "description": "Observed public local-agent proxy traffic is covered for health, signing, and forwarding.",
           "tests": [
             "tests.test_team_portal_access.TeamPortalAccessTests.test_public_local_agent_proxy_forwards_signed_request_to_loopback_agent",
             "tests.test_team_portal_access.TeamPortalAccessTests.test_public_local_agent_proxy_forwards_healthz_to_loopback_agent_health",
-            "tests.test_team_portal_access.TeamPortalAccessTests.test_uat_local_agent_proxy_forwards_to_isolated_loopback_agent",
-            "tests.test_team_portal_access.TeamPortalAccessTests.test_uat_local_agent_health_proxy_forwards_to_isolated_loopback_healthz",
-            "tests.test_team_portal_access.TeamPortalAccessTests.test_uat_local_agent_proxy_bypasses_google_login_gate"
+            "tests.test_team_portal_access.TeamPortalAccessTests.test_public_local_agent_proxy_forwards_signed_request_to_loopback_agent",
+            "tests.test_team_portal_access.TeamPortalAccessTests.test_public_local_agent_proxy_forwards_healthz_to_loopback_agent_health"
           ]
         },
         {

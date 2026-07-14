@@ -42,7 +42,6 @@ echo "Cloud Build config: cloudbuild.yaml"
 if [[ "${CLOUD_RUN_BUILD_IMAGE_DRY_RUN:-0}" == "1" ]]; then
   echo "Dry run only; unset CLOUD_RUN_BUILD_IMAGE_DRY_RUN to submit the build."
   echo "Deploy after build with: CLOUD_RUN_IMAGE=$IMAGE_URI ./scripts/deploy_cloud_run.sh"
-  echo "Deploy UAT after build with: CLOUD_RUN_IMAGE=$IMAGE_URI ./scripts/deploy_cloud_run_uat.sh"
   exit 0
 fi
 require_gcloud_noninteractive_deploy_auth "$GCLOUD_BIN" "$PROJECT_ID" "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED"
@@ -123,4 +122,3 @@ fi
 FINISHED_AT="$(date +%s)"
 echo "Cloud Build image completed in $((FINISHED_AT - STARTED_AT))s"
 echo "Deploy with: CLOUD_RUN_IMAGE=$IMAGE_URI ./scripts/deploy_cloud_run.sh"
-echo "Deploy UAT with: CLOUD_RUN_IMAGE=$IMAGE_URI ./scripts/deploy_cloud_run_uat.sh"

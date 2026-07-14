@@ -13,14 +13,14 @@ class ConfigTests(unittest.TestCase):
             settings = Settings.from_env()
             self.assertIsNone(settings.bpmis_api_access_token)
 
-    def test_from_env_loads_team_portal_stage(self):
-        with patch.dict(os.environ, {"TEAM_PORTAL_STAGE": "uat"}, clear=True), patch(
+    def test_from_env_always_uses_live_portal_stage(self):
+        with patch.dict(os.environ, {"TEAM_PORTAL_STAGE": "live"}, clear=True), patch(
             "bpmis_jira_tool.config.find_dotenv",
             return_value="",
         ):
             settings = Settings.from_env()
 
-        self.assertEqual(settings.team_portal_stage, "uat")
+        self.assertEqual(settings.team_portal_stage, "live")
 
     def test_from_env_accepts_blank_env_file_and_default_google_secret(self):
         with patch.dict(os.environ, {"ENV_FILE": ""}, clear=True), patch(

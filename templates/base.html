@@ -11,12 +11,6 @@
   </head>
   <body>
     <main class="page-shell{% block page_shell_class %}{% endblock %}">
-      {% if portal_stage == "uat" %}
-        <section class="environment-banner environment-banner-uat" aria-label="Portal environment">
-          <strong>UAT</strong>
-          <span>Testing environment</span>
-        </section>
-      {% endif %}
       {# The session bar renders only for the signed-in admin. Anonymous visitors
          go straight to the public content; the Admin Sign In link lives in the
          page footer instead of a prominent button. #}

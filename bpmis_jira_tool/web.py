@@ -889,8 +889,6 @@ def create_app() -> Flask:
             return jsonify(build_health_payload(_current_release_revision)), HTTPStatus.OK
         if request.path.startswith("/api/local-agent/"):
             return None
-        if request.path.startswith("/uat-local-agent/"):
-            return None
         if request.endpoint in {
             None,
             "static",
@@ -1434,14 +1432,6 @@ def create_app() -> Flask:
     @app.route("/api/local-agent/<path:agent_path>", methods=["GET", "POST", "PATCH", "DELETE"])
     def local_agent_public_proxy(agent_path: str):
         return _proxy_local_agent_request(agent_path)
-
-    @app.route("/uat-local-agent/healthz", methods=["GET"])
-    def uat_local_agent_health_proxy():
-        return _proxy_local_agent_request("healthz", base_url=_uat_local_agent_loopback_base_url(), use_api_prefix=False)
-
-    @app.route("/uat-local-agent/api/local-agent/<path:agent_path>", methods=["GET", "POST", "PATCH", "DELETE"])
-    def uat_local_agent_public_proxy(agent_path: str):
-        return _proxy_local_agent_request(agent_path, base_url=_uat_local_agent_loopback_base_url(), use_api_prefix=True)
 
     register_productization_routes(
         app,
@@ -2305,15 +2295,6 @@ def _proxy_local_agent_request(agent_path: str, *, base_url: str | None = None, 
 def _local_agent_loopback_base_url() -> str:
     host = str(os.environ.get("LOCAL_AGENT_HOST") or "127.0.0.1").strip() or "127.0.0.1"
     port = str(os.environ.get("LOCAL_AGENT_PORT") or "7007").strip() or "7007"
-    return f"http://{host}:{port}".rstrip("/")
-
-
-def _uat_local_agent_loopback_base_url() -> str:
-    value = str(os.environ.get("UAT_LOCAL_AGENT_LOOPBACK_BASE_URL") or "").strip().rstrip("/")
-    if value:
-        return value
-    host = str(os.environ.get("UAT_LOCAL_AGENT_HOST") or "127.0.0.1").strip() or "127.0.0.1"
-    port = str(os.environ.get("UAT_LOCAL_AGENT_PORT") or "7008").strip() or "7008"
     return f"http://{host}:{port}".rstrip("/")
 
 

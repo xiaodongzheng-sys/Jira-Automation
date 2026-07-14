@@ -145,7 +145,7 @@ Recommended speed/stability profiles:
 - Fast redeploy after a prebuilt image: `CLOUD_RUN_IMAGE=asia-southeast1-docker.pkg.dev/... ./scripts/deploy_cloud_run.sh`.
 - Faster prebuilt image builds when dependencies or Docker cache are cold: `CLOUD_RUN_BUILD_MACHINE_TYPE=e2-highcpu-8 ./scripts/build_cloud_run_image.sh`, then deploy the printed `CLOUD_RUN_IMAGE=...` command.
 - The default Cloud Build config uses BuildKit inline cache plus `latest` and `buildcache` image tags, so dependency layers are reused when `Dockerfile` and `requirements-cloud-run.txt` are unchanged.
-- The full UAT/live release orchestrator reuses the newest existing SHA image when the current commit only changed docs, tests, or release scripts. That avoids waiting for a first SHA image build when the Cloud Run container bytes did not change.
+- The Live release orchestrator reuses the newest existing SHA image when the current commit only changed docs, tests, or release scripts. That avoids waiting for a first SHA image build when the Cloud Run container bytes did not change.
 - Lower cold-start latency for the shared portal: set `CLOUD_RUN_MIN_INSTANCES=1` and `CLOUD_RUN_CPU_BOOST=true`. This improves first-hit responsiveness, but it can increase Cloud Run cost.
 - Faster failure on a broken public local-agent tunnel: set `LOCAL_AGENT_CONNECT_TIMEOUT_SECONDS=3` or `5` while keeping `LOCAL_AGENT_TIMEOUT_SECONDS=300` for long-running Source Code Q&A responses.
 

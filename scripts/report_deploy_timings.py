@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize recent UAT/live deployment timing records."""
+"""Summarize recent Live deployment timing records."""
 
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ def _print_summary(records: list[dict[str, object]], limit: int) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Summarize recent UAT/live deployment timing records.")
+    parser = argparse.ArgumentParser(description="Summarize recent Live deployment timing records.")
     parser.add_argument("--file", type=Path, default=_default_timing_file(), help="Path to deploy_timings.jsonl.")
     parser.add_argument("--limit", type=int, default=20, help="Number of recent records to show.")
     parser.add_argument("--no-summary", action="store_true", help="Only print raw recent records.")

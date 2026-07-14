@@ -535,7 +535,3 @@ is_protected_mac_path() {
 recommended_team_stack_root() {
   printf '%s\n' "$HOME/Workspace/jira-creation-stack-host"
 }
-
-recommended_uat_team_stack_root() {
-  printf '%s\n' "$HOME/Workspace/jira-creation-stack-uat-host"
-}

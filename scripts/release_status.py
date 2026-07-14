@@ -222,9 +222,9 @@ def _mac_portal_availability_status(*, env: Mapping[str, str], runner: Any = _ru
 
 def _version_plan_firestore_status(*, env: Mapping[str, str]) -> str:
     backend = _env_value("VERSION_PLAN_STORE_BACKEND", env).strip().lower()
-    stage = (_env_value("VERSION_PLAN_FIRESTORE_ENVIRONMENT", env) or _env_value("TEAM_PORTAL_STAGE", env) or "live").strip().lower()
+    stage = "live"
     project = _env_value("VERSION_PLAN_FIRESTORE_PROJECT", env) or _env_value("GOOGLE_CLOUD_PROJECT", env)
-    document = _env_value("VERSION_PLAN_FIRESTORE_DOCUMENT", env) or f"version_plan_{'uat' if stage == 'uat' else 'live'}"
+    document = _env_value("VERSION_PLAN_FIRESTORE_DOCUMENT", env) or "version_plan_live"
     if backend not in {"firestore", "cloud_firestore"} and not project:
         return "status=not_configured"
     try:
@@ -353,7 +353,6 @@ def build_status_report(*, env: Mapping[str, str] | None = None, runner: Any = _
 
     service = _env_value("CLOUD_RUN_SERVICE", env) or "team-portal"
     region = _env_value("CLOUD_RUN_REGION", env) or "asia-southeast1"
-    uat_tag = _env_value("CLOUD_RUN_UAT_TAG", env) or "uat"
     cloud_role = _cloud_run_role(env)
     project = _env_value("GOOGLE_CLOUD_PROJECT", env)
     gcloud_bin = _gcloud_binary(env=env)
@@ -397,37 +396,6 @@ def build_status_report(*, env: Mapping[str, str] | None = None, runner: Any = _
             )
         else:
             traffic = service_payload.get("status", {}).get("traffic", [])
-            uat_matches = [item for item in traffic if item.get("tag") == uat_tag]
-            if uat_matches:
-                uat = uat_matches[0]
-                uat_revision = str(uat.get("revisionName") or "")
-                uat_release = _revision_release_value(
-                    uat_revision,
-                    gcloud_bin=gcloud_bin,
-                    project_args=project_args,
-                    account_args=account_args,
-                    region=region,
-                    env=env,
-                    runner=runner,
-                )
-                lines.append(
-                    "Cloud Run UAT tag: "
-                    f"tag={uat_tag} revision={uat_revision or '<missing>'} "
-                    f"git_revision={uat_release or '<missing>'} url={uat.get('url') or '<missing>'}"
-                )
-                if expected_revision and uat_release and uat_release != expected_revision:
-                    message = _cloud_run_mismatch_message(
-                        cloud_role,
-                        f"Cloud Run UAT tag serves {uat_release}, expected {expected_revision}.",
-                    )
-                    cloud_run_readiness_or_info("cloud_run_uat_revision_mismatch", message)
-                elif expected_revision and not uat_release:
-                    message = "Cloud Run UAT revision did not expose TEAM_PORTAL_RELEASE_REVISION."
-                    cloud_run_readiness_or_info("cloud_run_uat_revision_unknown", message)
-            else:
-                lines.append(f"Cloud Run UAT tag: tag={uat_tag} revision=<missing>")
-                cloud_run_readiness_or_info("cloud_run_uat_tag_missing", f"Cloud Run UAT tag is missing: {uat_tag}.")
-
             live_traffic = [item for item in traffic if item.get("percent")]
             if live_traffic:
                 for item in live_traffic:

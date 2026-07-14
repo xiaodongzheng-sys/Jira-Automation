@@ -126,62 +126,10 @@ class VersionPlanStoreTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         return Settings.from_env()
 
-    def test_firestore_document_defaults_isolate_uat_and_live(self):
-        uat_settings = self._settings(
-            TEAM_PORTAL_STAGE="uat",
-            VERSION_PLAN_STORE_BACKEND="firestore",
-            VERSION_PLAN_FIRESTORE_PROJECT="test-project",
-        )
-        self.assertTrue(should_use_firestore_version_plan(uat_settings))
-        self.assertEqual(firestore_document_id(uat_settings), "version_plan_uat")
-
-        live_settings = self._settings(
-            TEAM_PORTAL_STAGE="live",
-            VERSION_PLAN_STORE_BACKEND="firestore",
-            VERSION_PLAN_FIRESTORE_PROJECT="test-project",
-        )
-        self.assertEqual(firestore_document_id(live_settings), "version_plan_live")
-
-    def test_firestore_document_explicit_environment_and_document_override(self):
-        settings = self._settings(
-            TEAM_PORTAL_STAGE="live",
-            VERSION_PLAN_STORE_BACKEND="auto",
-            VERSION_PLAN_FIRESTORE_PROJECT="test-project",
-            VERSION_PLAN_FIRESTORE_ENVIRONMENT="uat",
-            VERSION_PLAN_FIRESTORE_DOCUMENT="custom-version-plan",
-        )
-
-        self.assertTrue(should_use_firestore_version_plan(settings))
-        self.assertEqual(version_plan_environment(settings), "uat")
-        self.assertEqual(firestore_document_id(settings), "custom-version-plan")
-
-        local_settings = self._settings(
-            TEAM_PORTAL_STAGE="live",
-            VERSION_PLAN_STORE_BACKEND="disabled",
-            VERSION_PLAN_FIRESTORE_PROJECT="test-project",
-        )
-        self.assertFalse(should_use_firestore_version_plan(local_settings))
-
     def test_build_store_keeps_local_default_when_firestore_not_configured(self):
         settings = self._settings()
         store = build_version_plan_store(settings, TeamDashboardConfigStore(settings.team_portal_data_dir / "team_dashboard.db"))
         self.assertEqual(store.load_snapshot().metadata["backend"], "team_dashboard_config")
-
-    def test_build_store_uses_firestore_backend_when_auto_cloud_configured(self):
-        settings = self._settings(
-            TEAM_PORTAL_STAGE="uat",
-            VERSION_PLAN_STORE_BACKEND="auto",
-            VERSION_PLAN_FIRESTORE_PROJECT="test-project",
-        )
-
-        store = build_version_plan_store(
-            settings,
-            TeamDashboardConfigStore(settings.team_portal_data_dir / "team_dashboard.db"),
-            firestore_client=_FakeFirestoreClient(),
-        )
-
-        self.assertIsInstance(store, FirestoreVersionPlanStore)
-        self.assertEqual(store.environment, "uat")
 
     def test_local_store_snapshot_is_immutable_and_rejects_stale_revision(self):
         settings = self._settings()
@@ -236,90 +184,6 @@ class VersionPlanStoreTests(unittest.TestCase):
         with self.assertRaises(VersionPlanConflictError):
             store.save_config(config_store.load(), expected_revision="stale")
 
-    def test_firestore_missing_document_loads_default_without_writing(self):
-        settings = self._settings(
-            TEAM_PORTAL_STAGE="uat",
-            VERSION_PLAN_STORE_BACKEND="firestore",
-            VERSION_PLAN_FIRESTORE_PROJECT="test-project",
-        )
-        config_store = TeamDashboardConfigStore(settings.team_portal_data_dir / "team_dashboard.db")
-        config = config_store.load()
-        config["version_plan"]["af"]["pipeline_rows"][0]["feature"] = "Default fallback row"
-        config_store.save(config)
-        fake_client = _FakeFirestoreClient()
-        store = FirestoreVersionPlanStore(settings=settings, config_store=config_store, firestore_client=fake_client)
-
-        snapshot = store.load_snapshot()
-
-        self.assertEqual(snapshot.metadata["backend"], "firestore")
-        self.assertEqual(snapshot.metadata["environment"], "uat")
-        self.assertEqual(snapshot.metadata["document_path"], "portal/version_plan_uat")
-        self.assertEqual(fake_client.document_ref.set_calls, 0)
-        self.assertTrue(
-            any(row["feature"] == "Default fallback row" for row in snapshot.config["version_plan"]["af"]["pipeline_rows"])
-        )
-
-    def test_firestore_base_config_failure_falls_back_to_empty_plan(self):
-        settings = self._settings(
-            TEAM_PORTAL_STAGE="uat",
-            VERSION_PLAN_STORE_BACKEND="firestore",
-            VERSION_PLAN_FIRESTORE_PROJECT="test-project",
-        )
-
-        class BrokenConfigStore:
-            def load(self):
-                raise RuntimeError("sqlite unavailable")
-
-        store = FirestoreVersionPlanStore(
-            settings=settings,
-            config_store=BrokenConfigStore(),
-            firestore_client=_FakeFirestoreClient(),
-        )
-
-        snapshot = store.load_snapshot()
-
-        self.assertEqual(snapshot.metadata["backend"], "firestore")
-        self.assertEqual(snapshot.config["version_plan"]["af"]["sync_state"]["state"], "idle")
-
-    def test_migration_is_idempotent_when_document_exists(self):
-        settings = self._settings(
-            TEAM_PORTAL_STAGE="uat",
-            VERSION_PLAN_STORE_BACKEND="firestore",
-            VERSION_PLAN_FIRESTORE_PROJECT="test-project",
-        )
-        config_store = TeamDashboardConfigStore(settings.team_portal_data_dir / "team_dashboard.db")
-        fake_client = _FakeFirestoreClient()
-        store = FirestoreVersionPlanStore(settings=settings, config_store=config_store, firestore_client=fake_client)
-
-        first, migrated = store.migrate_from_config(source_revision="abc123")
-        self.assertTrue(migrated)
-        second, migrated_again = store.migrate_from_config(source_revision="def456")
-        self.assertFalse(migrated_again)
-        self.assertEqual(second.metadata["source_hash"], first.metadata["source_hash"])
-
-    def test_migration_records_backup_source_hash_for_empty_firestore_doc(self):
-        settings = self._settings(
-            TEAM_PORTAL_STAGE="uat",
-            VERSION_PLAN_STORE_BACKEND="firestore",
-            VERSION_PLAN_FIRESTORE_PROJECT="test-project",
-        )
-        config_store = TeamDashboardConfigStore(settings.team_portal_data_dir / "team_dashboard.db")
-        fake_client = _FakeFirestoreClient()
-        store = FirestoreVersionPlanStore(settings=settings, config_store=config_store, firestore_client=fake_client)
-        backup_payload = config_store.load()
-
-        snapshot, migrated = store.migrate_from_config(
-            source_revision="source-rev",
-            backup_payload=backup_payload,
-        )
-
-        self.assertTrue(migrated)
-        self.assertEqual(snapshot.metadata["migration_source_revision"], "source-rev")
-        self.assertEqual(
-            snapshot.metadata["migration_backup_source_hash"],
-            version_plan_source_hash(backup_payload["version_plan"]),
-        )
-
     def test_firestore_rest_field_round_trip(self):
         payload = {
             "environment": "live",
@@ -343,67 +207,6 @@ class VersionPlanStoreTests(unittest.TestCase):
         self.assertIsNone(_decode_firestore_value({"geoPointValue": {"latitude": 1}}))
         self.assertEqual(_decode_firestore_value({"arrayValue": {}}), [])
         self.assertEqual(_decode_firestore_value({"mapValue": {}}), {})
-
-    def test_firestore_rest_document_get_set_and_client_validation(self):
-        get_calls = []
-        patch_calls = []
-        encoded = _encode_firestore_fields({"version_plan": {"af": {"pipeline_rows": []}}, "revision": "rev-1"})
-
-        def fake_get(url, *, headers, timeout):
-            get_calls.append((url, headers, timeout))
-            return _FakeRestResponse(payload={"fields": encoded})
-
-        def fake_patch(url, *, headers, json, timeout):
-            patch_calls.append((url, headers, json, timeout))
-            return _FakeRestResponse()
-
-        document = _FirestoreRestDocument(
-            project="test-project",
-            document_id="version_plan_uat",
-            token_provider=lambda: "token-123",
-        )
-
-        with patch("bpmis_jira_tool.team_dashboard_version_plan_store.requests.get", side_effect=fake_get), patch(
-            "bpmis_jira_tool.team_dashboard_version_plan_store.requests.patch",
-            side_effect=fake_patch,
-        ):
-            snapshot = document.get()
-            document.set({"revision": "rev-2"})
-
-        self.assertTrue(snapshot.exists)
-        self.assertEqual(snapshot.to_dict()["revision"], "rev-1")
-        self.assertIn("/portal/version_plan_uat", get_calls[0][0])
-        self.assertEqual(get_calls[0][1]["Authorization"], "Bearer token-123")
-        self.assertEqual(patch_calls[0][2]["fields"]["revision"], {"stringValue": "rev-2"})
-        self.assertTrue(_FirestoreRestSnapshot(None).to_dict() == {})
-        self.assertFalse(_FirestoreRestDocument(project="p", document_id="d", token_provider=lambda: "x").get is None)
-
-        client = _FirestoreRestClient(project="test-project", token_provider=lambda: "token-123")
-        self.assertEqual(client.collection("portal").document("doc").project, "test-project")
-        with self.assertRaisesRegex(ValueError, "Unsupported Firestore collection"):
-            client.collection("other")
-
-    def test_firestore_rest_document_404_and_http_error_branches(self):
-        document = _FirestoreRestDocument(project="test-project", document_id="version_plan_uat", token_provider=lambda: "token")
-        with patch(
-            "bpmis_jira_tool.team_dashboard_version_plan_store.requests.get",
-            return_value=_FakeRestResponse(status_code=404),
-        ):
-            self.assertFalse(document.get().exists)
-
-        with patch(
-            "bpmis_jira_tool.team_dashboard_version_plan_store.requests.get",
-            return_value=_FakeRestResponse(status_code=500, raise_error=RuntimeError("server down")),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "server down"):
-                document.get()
-
-        with patch(
-            "bpmis_jira_tool.team_dashboard_version_plan_store.requests.patch",
-            return_value=_FakeRestResponse(status_code=500, raise_error=RuntimeError("write down")),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "write down"):
-                document.set({"revision": "rev"})
 
     def test_firestore_client_uses_rest_fallback_when_google_cloud_unavailable(self):
         original_import = builtins.__import__

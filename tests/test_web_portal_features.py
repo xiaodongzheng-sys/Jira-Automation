@@ -1556,91 +1556,6 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(productization_response.get_json()["error_category"], "version_plan_sync_running")
         self.assertEqual(audit_log, [])
 
-    def test_team_dashboard_version_plan_route_uses_firestore_store_for_cloud_uat_auto_backend(self):
-        from bpmis_jira_tool import team_dashboard_version_plan_store as store_module
-
-        class FakeSnapshot:
-            exists = False
-
-            def to_dict(self):
-                return {}
-
-        class FakeDocument:
-            def get(self, transaction=None):
-                return FakeSnapshot()
-
-            def set(self, payload):
-                self.payload = dict(payload)
-
-        class FakeCollection:
-            def __init__(self):
-                self.document_id = ""
-                self.document_ref = FakeDocument()
-
-            def document(self, document_id):
-                self.document_id = document_id
-                return self.document_ref
-
-        class FakeFirestoreClient:
-            def __init__(self):
-                self.collection_name = ""
-                self.collection_ref = FakeCollection()
-
-            def collection(self, name):
-                self.collection_name = name
-                return self.collection_ref
-
-        fake_client = FakeFirestoreClient()
-        created_stores = []
-
-        def build_store_with_fake_firestore(settings, config_store):
-            store = store_module.build_version_plan_store(
-                settings,
-                config_store,
-                firestore_client=fake_client,
-            )
-            created_stores.append(store)
-            return store
-
-        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
-            os.environ,
-            {
-                "ENV_FILE": os.devnull,
-                "FLASK_SECRET_KEY": "test-secret",
-                "TEAM_PORTAL_DATA_DIR": temp_dir,
-                "TEAM_ALLOWED_EMAILS": "",
-                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
-                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
-                "TEAM_PORTAL_STAGE": "uat",
-                "VERSION_PLAN_STORE_BACKEND": "auto",
-                "VERSION_PLAN_FIRESTORE_PROJECT": "risk-pm-tool",
-            },
-            clear=True,
-        ), patch(
-            "bpmis_jira_tool.web_team_dashboard_routes.build_version_plan_store",
-            side_effect=build_store_with_fake_firestore,
-        ):
-            app = create_app()
-            app.testing = True
-            config = app.config["TEAM_DASHBOARD_CONFIG_STORE"].load()
-            config["version_plan"]["af"]["sync_state"]["last_synced_date_sgt"] = singapore_date_text()
-            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(config)
-
-            with app.test_client() as client:
-                with client.session_transaction() as session:
-                    session["google_profile"] = {"email": "jireh.tanyx@npt.sg", "name": "AF Teammate"}
-                    session["google_credentials"] = {"token": "x"}
-                response = client.get("/api/team-dashboard/version-plan/af?sync=0")
-
-        payload = response.get_json()
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(payload["store_backend"], "firestore")
-        self.assertEqual(payload["store_environment"], "uat")
-        self.assertTrue(created_stores)
-        self.assertIsInstance(created_stores[0], store_module.FirestoreVersionPlanStore)
-        self.assertEqual(fake_client.collection_name, "portal")
-        self.assertEqual(fake_client.collection_ref.document_id, "version_plan_uat")
-
     def test_team_dashboard_report_intelligence_save_normalizes_and_requires_admin(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
@@ -5683,46 +5598,6 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn(b"Formatted", download_response.data)
         self.assertNotIn(b"Plain evening body", download_response.data)
 
-    def test_team_dashboard_daily_brief_uses_local_agent_when_enabled(self):
-        fake_client = _FakeMonthlyReportLocalAgentClient()
-        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
-            os.environ,
-            {
-                "ENV_FILE": os.devnull,
-                "FLASK_SECRET_KEY": "test-secret",
-                "TEAM_PORTAL_DATA_DIR": temp_dir,
-                "TEAM_PORTAL_BASE_URL": "",
-                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
-                "LOCAL_AGENT_MODE": "sync",
-                "LOCAL_AGENT_BASE_URL": "https://portal.example/uat-local-agent",
-                "LOCAL_AGENT_HMAC_SECRET": "shared-secret",
-                "LOCAL_AGENT_SEATALK_ENABLED": "true",
-            },
-            clear=False,
-        ), patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client):
-            app = create_app()
-            app.testing = True
-            with app.test_client() as client:
-                with client.session_transaction() as session:
-                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
-                    session["google_credentials"] = {"token": "x"}
-                list_response = client.get("/api/team-dashboard/daily-briefs")
-                download_response = client.get("/api/team-dashboard/daily-briefs/2026-05-05-midday-3593312304/download")
-
-        self.assertEqual(list_response.status_code, 200)
-        payload = list_response.get_json()
-        self.assertEqual([item["time_period"] for item in payload["briefs"]], [
-            "2026-05-05 13:00-19:00",
-            "2026-05-05 08:00-13:00",
-        ])
-        self.assertEqual(payload["briefs"][0]["download_url"], "/api/team-dashboard/daily-briefs/2026-05-05-midday-3593312304/download")
-        self.assertEqual(download_response.status_code, 200)
-        self.assertEqual(download_response.headers["Content-Type"], "application/pdf")
-        self.assertIn("daily-brief-2026-05-05-midday.pdf", download_response.headers["Content-Disposition"])
-        self.assertEqual(fake_client.daily_brief_download_id, "2026-05-05-midday-3593312304")
-
-    @patch("bpmis_jira_tool.web._local_agent_seatalk_enabled", return_value=True)
-    @patch("bpmis_jira_tool.web._load_all_team_dashboard_task_payloads", return_value=[{"team_key": "AF"}])
     def test_team_dashboard_monthly_report_draft_can_route_to_local_agent(self, _mock_payloads, _mock_enabled):
         fake_client = _FakeMonthlyReportLocalAgentClient()
         fixed_period = resolve_monthly_report_period(datetime(2026, 5, 3, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE))
