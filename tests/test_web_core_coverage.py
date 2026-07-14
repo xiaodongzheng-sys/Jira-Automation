@@ -296,9 +296,9 @@ class WebCoreCoverageTests(unittest.TestCase):
                     "bpmis_jira_tool.web._can_access_team_dashboard_version_plan", return_value=False
                 ):
                     self.assertEqual(web_module._cloud_home_default_post_login_redirect(replace(settings, cloud_home_enabled=True), {"email": "af@npt.sg"}), "")
-                self.assertEqual(web_module._uat_local_agent_loopback_base_url(), "http://127.0.0.1:7008")
-                with patch.dict(os.environ, {"UAT_LOCAL_AGENT_LOOPBACK_BASE_URL": "http://uat-agent/"}, clear=False):
-                    self.assertEqual(web_module._uat_local_agent_loopback_base_url(), "http://uat-agent")
+                self.assertEqual(web_module._local_agent_loopback_base_url(), "http://127.0.0.1:7007")
+                with patch.dict(os.environ, {"LOCAL_AGENT_HOST": "uat-agent", "LOCAL_AGENT_PORT": "7008"}, clear=False):
+                    self.assertEqual(web_module._local_agent_loopback_base_url(), "http://uat-agent:7008")
                 self.assertIsNotNone(web_module._build_local_agent_client(remote_settings))
                 with patch("bpmis_jira_tool.web.get_google_credentials", return_value=SimpleNamespace()), patch(
                     "bpmis_jira_tool.web.GoogleCalendarMeetingService", return_value="calendar"

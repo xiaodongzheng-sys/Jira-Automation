@@ -5598,7 +5598,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn(b"Formatted", download_response.data)
         self.assertNotIn(b"Plain evening body", download_response.data)
 
-    def test_team_dashboard_monthly_report_draft_can_route_to_local_agent(self, _mock_payloads, _mock_enabled):
+    @patch("bpmis_jira_tool.web._load_all_team_dashboard_task_payloads", return_value=[{"team_key": "AF"}])
+    def test_team_dashboard_monthly_report_draft_can_route_to_local_agent(self, _mock_payloads):
         fake_client = _FakeMonthlyReportLocalAgentClient()
         fixed_period = resolve_monthly_report_period(datetime(2026, 5, 3, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE))
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -5607,8 +5608,12 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
-                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "LOCAL_AGENT_MODE": "sync",
+                "LOCAL_AGENT_BASE_URL": "https://agent.example.test",
+                "LOCAL_AGENT_HMAC_SECRET": "secret",
+                "LOCAL_AGENT_BPMIS_ENABLED": "true",
             },
             clear=False,
         ), patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client), patch(
@@ -5636,14 +5641,14 @@ class WebPortalFeatureTests(unittest.TestCase):
                         break
                     time.sleep(0.05)
         self.assertEqual(job_payload["state"], "completed")
-        self.assertEqual(job_payload["results"][0]["draft_markdown"], "## Remote Monthly Report")
-        self.assertEqual(fake_client.draft_payload["template"], "# Template")
-        self.assertEqual(fake_client.draft_payload["team_payloads"], [{"team_key": "AF"}])
-        self.assertEqual(fake_client.draft_payload["period_start"], "2026-04-13T00:00:00+08:00")
-        self.assertEqual(fake_client.draft_payload["period_end"], "2026-05-03")
-        self.assertEqual(fake_client.draft_payload["period_end_exclusive"], "2026-05-04T00:00:00+08:00")
-        self.assertEqual(fake_client.draft_payload["highlight_topics"], ["CIB Phase 2"])
-        self.assertEqual(fake_client.draft_payload["product_scope"], ["Anti-fraud", "Credit Risk", "Ops Risk"])
+        self.assertEqual(job_payload["results"][0]["draft_markdown"], "## Shared Remote Monthly Report")
+        self.assertEqual(fake_client.started_payload["template"], DEFAULT_MONTHLY_REPORT_TEMPLATE)
+        self.assertEqual(fake_client.started_payload["team_payloads"], [{"team_key": "AF"}])
+        self.assertEqual(fake_client.started_payload["period_start"], "2026-04-13T00:00:00+08:00")
+        self.assertEqual(fake_client.started_payload["period_end"], "2026-05-03")
+        self.assertEqual(fake_client.started_payload["period_end_exclusive"], "2026-05-04T00:00:00+08:00")
+        self.assertEqual(fake_client.started_payload["highlight_topics"], ["CIB Phase 2"])
+        self.assertEqual(fake_client.started_payload["product_scope"], ["Anti-fraud", "Credit Risk", "Ops Risk"])
 
     @patch("bpmis_jira_tool.web._load_all_team_dashboard_task_payloads", return_value=[{"team_key": "AF"}])
     def test_team_dashboard_monthly_report_uses_shared_local_agent_jobs_when_remote_config_enabled(self, _mock_payloads):
