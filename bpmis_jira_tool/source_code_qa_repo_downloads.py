@@ -116,7 +116,6 @@ def build_repo_download_zip(service: SourceCodeQAService, scope_key: str) -> tup
     }
     if archive_path.exists():
         content = archive_path.read_bytes()
-        _publish_archive_best_effort(metadata, content)
         return metadata, content
 
     buffer = io.BytesIO()
@@ -125,19 +124,36 @@ def build_repo_download_zip(service: SourceCodeQAService, scope_key: str) -> tup
         for item in repo_items:
             _write_repo_to_archive(archive, repo_path=item["path"], archive_root=item["folder"])
     archive_path.write_bytes(buffer.getvalue())
-    _publish_archive_best_effort(metadata, buffer.getvalue())
     return metadata, buffer.getvalue()
 
 
-def _publish_archive_best_effort(metadata: dict[str, Any], content: bytes) -> None:
-    # Mirror freshly built bundles to the public GCS bucket (no-op unless the
-    # publish bucket env is configured on the producing host).
+def existing_repo_download_archive(service: SourceCodeQAService, scope_key: str) -> tuple[dict[str, Any], Path] | None:
+    scope = resolve_repo_download_scope(scope_key)
+    data_root = getattr(service, "data_root", None)
+    if not isinstance(data_root, Path):
+        return None
+    archive_path = data_root / "repo_downloads" / scope["filename"]
+    if not archive_path.is_file():
+        return None
+    metadata: dict[str, Any] = {
+        "scope_key": scope["scope_key"],
+        "scope_label": scope["label"],
+        "filename": scope["filename"],
+    }
     try:
-        from bpmis_jira_tool.public_artifacts_gcs import publish_repo_download_archive
-
-        publish_repo_download_archive(metadata, content)
-    except Exception:  # noqa: BLE001 - publishing must never break the download
-        pass
+        with zipfile.ZipFile(archive_path) as archive:
+            if "manifest.json" in archive.namelist():
+                parsed = json.loads(archive.read("manifest.json").decode("utf-8"))
+                if isinstance(parsed, dict):
+                    generated_at = parsed.get("generated_at")
+                    if generated_at:
+                        metadata["generated_at"] = generated_at
+                    repos = parsed.get("repos")
+                    if isinstance(repos, list):
+                        metadata["repo_count"] = len(repos)
+    except (OSError, ValueError, zipfile.BadZipFile):
+        return None
+    return metadata, archive_path
 
 
 def _manifest_signature(manifest: dict[str, Any]) -> str:

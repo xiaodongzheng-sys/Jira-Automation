@@ -126,6 +126,7 @@ from bpmis_jira_tool.source_code_qa_jobs import SourceCodeQAQueryScheduler
 from bpmis_jira_tool.source_code_qa_llm_providers import LLM_PROVIDER_ALLOWED_QUERY_CHOICES, LLM_PROVIDER_CODEX_CLI_BRIDGE
 from bpmis_jira_tool.source_code_qa_repo_downloads import (
     build_repo_download_zip,
+    existing_repo_download_archive,
     repo_download_scope_definitions,
     resolve_repo_download_scope,
 )
@@ -885,7 +886,7 @@ def create_app() -> Flask:
     @app.before_request
     def enforce_team_access():
         g.request_id = uuid.uuid4().hex[:12]
-        if request.path.rstrip("/") == "/healthz":
+        if request.path.rstrip("/") in {"/healthz", "/cloud-healthz"}:
             return jsonify(build_health_payload(_current_release_revision)), HTTPStatus.OK
         if request.path.startswith("/api/local-agent/"):
             return None
@@ -1169,6 +1170,7 @@ def create_app() -> Flask:
         )
 
     @app.get("/healthz")
+    @app.get("/cloud-healthz")
     def healthz():
         return jsonify(
             {

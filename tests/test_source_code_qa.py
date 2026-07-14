@@ -290,6 +290,41 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(download.status_code, 302)
         self.assertEqual(download.headers["Location"], "https://signed.example.com/af-all.zip")
 
+    def test_repo_download_prefers_local_prebuilt_archive_before_gcs(self):
+        archive_dir = Path(self.temp_dir.name) / "source_code_qa" / "repo_downloads"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = archive_dir / "source-code-repos-AF-All.zip"
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                "manifest.json",
+                json.dumps(
+                    {
+                        "generated_at": "2026-07-14T10:00:00Z",
+                        "repos": [{"display_name": "real-af-repo"}],
+                        "scope_key": "AF:All",
+                        "scope_label": "AF-All",
+                    }
+                ),
+            )
+            archive.writestr("real-af-repo/README.md", "real bundle")
+
+        with self.app.test_client() as client, patch.dict(
+            os.environ,
+            {
+                "TEAM_PORTAL_PUBLIC_GCS_BUCKET": "test-bucket",
+            },
+            clear=False,
+        ), patch(
+            "bpmis_jira_tool.public_artifacts_gcs.fetch_repo_download_signed_url",
+            side_effect=AssertionError("GCS should not be consulted when a local prebuilt archive exists"),
+        ):
+            self._login(client, "teammate@npt.sg")
+            download = client.get("/api/source-code-qa/repo-downloads/AF:All")
+
+        self.assertEqual(download.status_code, 200)
+        with zipfile.ZipFile(io.BytesIO(download.data)) as archive:
+            self.assertIn("real-af-repo/README.md", archive.namelist())
+
     def test_repo_download_prefers_gcs_before_local_agent(self):
         class _UnexpectedLocalAgentClient:
             def source_code_qa_repo_download(self, scope_key):

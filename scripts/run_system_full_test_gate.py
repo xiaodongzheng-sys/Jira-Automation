@@ -287,6 +287,12 @@ def _join_url(base_url: str, path: str) -> str:
     return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
 
+def _portal_health_url(base_url: str) -> str:
+    lowered = (base_url or "").strip().lower()
+    health_path = "/cloud-healthz" if ".run.app" in lowered else "/healthz"
+    return _join_url(base_url, health_path)
+
+
 def _fetch_json(url: str) -> dict[str, Any]:
     request = Request(url, headers={"User-Agent": "team-portal-release-gate/1.0"}, method="GET")
     with urlopen(request, timeout=10) as response:
@@ -299,7 +305,7 @@ def _fetch_json(url: str) -> dict[str, Any]:
 def _smoke_check(*, live_url: str, expected_revision: str) -> GateStep:
     checks: list[dict[str, Any]] = []
     try:
-        live_health_url = _join_url(live_url, "/healthz")
+        live_health_url = _portal_health_url(live_url)
         live_agent_url = _join_url(live_url, "/api/local-agent/healthz")
 
         live_health = _fetch_json(live_health_url)

@@ -64,8 +64,21 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
 
     def _repo_download_scopes_with_status() -> list:
         scopes = repo_download_scope_definitions()
+        service = _build_source_code_qa_service()
         for scope in scopes:
             scope["meta"] = ""
+            local_archive = existing_repo_download_archive(service, scope["scope_key"])
+            if local_archive is not None:
+                local_metadata, local_path = local_archive
+                parts = []
+                generated = _format_generated_at(local_metadata.get("generated_at"))
+                if generated:
+                    parts.append(f"Updated {generated}")
+                size = _human_size(local_path.stat().st_size)
+                if size:
+                    parts.append(size)
+                scope["meta"] = " · ".join(parts)
+                continue
             status = None
             try:
                 from bpmis_jira_tool.public_artifacts_gcs import fetch_repo_download_status, public_gcs_read_bucket
@@ -145,6 +158,16 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
     def source_code_qa_repo_download_api(scope_key: str):
         try:
             scope = resolve_repo_download_scope(scope_key)
+            service = _build_source_code_qa_service()
+            local_archive = existing_repo_download_archive(service, scope["scope_key"])
+            if local_archive is not None:
+                metadata, archive_path = local_archive
+                return send_file(
+                    archive_path,
+                    mimetype="application/zip",
+                    download_name=str(metadata.get("filename") or scope["filename"]),
+                    as_attachment=True,
+                )
             if public_gcs_read_bucket():
                 # Cloud Run: hydrate the bundle from GCS onto a temporary file
                 # only as a fallback. The preferred path is to redirect the
@@ -195,7 +218,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
                     download_name=download_name,
                     as_attachment=True,
                 )
-            metadata, content = build_repo_download_zip(_build_source_code_qa_service(), scope["scope_key"])
+            metadata, content = build_repo_download_zip(service, scope["scope_key"])
             return send_file(
                 io.BytesIO(content),
                 mimetype="application/zip",

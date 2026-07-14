@@ -448,6 +448,7 @@ class SmallModuleCoverageTests(unittest.TestCase):
             "https://app.example/portal-home?x=1&workspace=run",
         )
         self.assertEqual(portal_health_url("https://app.example/portal-home?workspace=run"), "https://app.example/healthz")
+        self.assertEqual(portal_health_url("https://team-portal-example.run.app"), "https://team-portal-example.run.app/cloud-healthz")
 
     def test_source_code_qa_answer_generation_reports_unavailable_llm(self):
         service = Mock()

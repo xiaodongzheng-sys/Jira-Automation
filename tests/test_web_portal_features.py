@@ -701,6 +701,29 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.headers.get("X-Request-ID"))
 
+    def test_cloud_healthz_alias_sets_request_id_header(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "ENV_FILE": os.devnull,
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                response = client.get("/cloud-healthz")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.headers.get("X-Request-ID"))
+
     def test_shared_mode_blocks_anonymous_save(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
