@@ -942,11 +942,13 @@ class TeamPortalAccessTests(unittest.TestCase):
                         response = client.get(path, follow_redirects=False)
                         self.assertEqual(response.status_code, 302)
                         self.assertEqual(response.headers["Location"], "/access-denied")
-                # Non-admin allowed users can access Team Dashboard (Version Plan tab only).
+                # The legacy Team Dashboard route remains reachable, but Version Plan is
+                # now exposed through the top-level navigation instead of an inner tab.
                 self._login_non_admin(client)
                 team_dashboard_page_response = client.get("/team-dashboard", follow_redirects=False)
                 self.assertEqual(team_dashboard_page_response.status_code, 200)
                 self.assertIn(b"data-version-plan-content", team_dashboard_page_response.data)
+                self.assertNotIn(b'data-team-dashboard-tab="version-plan"', team_dashboard_page_response.data)
 
                 # Admin-only POST endpoints reject signed-in non-admins with 403.
                 for method, path, payload in [

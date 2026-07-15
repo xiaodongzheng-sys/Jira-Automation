@@ -402,8 +402,8 @@ class PortalE2ESmokeTest(unittest.TestCase):
             )
 
         teammate.route(re.compile(r".*/api/team-dashboard/version-plan/af(?:\?.*)?$"), teammate_version_plan)
-        teammate.goto("/team-dashboard", wait_until="domcontentloaded")
-        teammate.locator('[data-team-dashboard-tab="version-plan"]').wait_for(timeout=5000)
+        teammate.goto("/version-plan", wait_until="domcontentloaded")
+        teammate.locator('[data-version-plan-content]').wait_for(timeout=5000)
         self.assertEqual(teammate.locator('[data-team-dashboard-tab="tasks"]').count(), 0)
         self.assertEqual(teammate.locator('[data-team-dashboard-tab="admin"]').count(), 0)
         self.assertEqual(teammate.locator('[data-team-dashboard-tab="monthly-report"]').count(), 0)
@@ -890,8 +890,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
         page.route("**/api/team-dashboard/config", config)
         page.route(re.compile(r".*/api/team-dashboard/version-plan/af(?:\?.*)?$"), version_plan)
 
-        page.goto("/team-dashboard", wait_until="domcontentloaded")
-        page.locator('[data-team-dashboard-tab="version-plan"]').click()
+        page.goto("/version-plan", wait_until="domcontentloaded")
         row = page.locator('[data-version-plan-row-id="sync-af-20260520-SPDBP-94945"]')
         row.get_by_text("AMR UIUX Improvement").wait_for(timeout=5000)
 
@@ -989,8 +988,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
         page.route("**/api/team-dashboard/version-plan/af/rows", save_rows)
         page.route("**/api/team-dashboard/version-plan/af/cell", save_cell)
 
-        page.goto("/team-dashboard", wait_until="domcontentloaded")
-        page.locator('[data-team-dashboard-tab="version-plan"]').click()
+        page.goto("/version-plan", wait_until="domcontentloaded")
         page.locator('[data-version-plan-row-id="pipe-1"]').get_by_text("Existing pipeline row").wait_for(timeout=5000)
 
         page.locator('[data-version-plan-row-action="add"][data-version-plan-scope="pipeline"]').click()
@@ -1108,8 +1106,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
         page.route(re.compile(r".*/api/team-dashboard/version-plan/af(?:\?.*)?$"), version_plan)
         page.route("**/api/team-dashboard/version-plan/af/rows", save_rows)
 
-        page.goto("/team-dashboard", wait_until="domcontentloaded")
-        page.locator('[data-team-dashboard-tab="version-plan"]').click()
+        page.goto("/version-plan", wait_until="domcontentloaded")
         page.locator('[data-version-plan-row-id="pipe-1"]').get_by_text("Existing conflict row").wait_for(timeout=5000)
 
         page.locator('[data-version-plan-row-action="add"][data-version-plan-scope="pipeline"]').click()
@@ -1246,8 +1243,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
         page.route("**/api/team-dashboard/config", config)
         page.route(re.compile(r".*/api/team-dashboard/version-plan/af(?:\?.*)?$"), version_plan)
 
-        page.goto("/team-dashboard", wait_until="domcontentloaded")
-        page.locator('[data-team-dashboard-tab="version-plan"]').click()
+        page.goto("/version-plan", wait_until="domcontentloaded")
         page.locator('[data-version-plan-row-id="sync-zoey"]').get_by_text("Zoey synced row").wait_for(timeout=5000)
 
         pm_filter = page.locator('[data-version-plan-pm-filter]')

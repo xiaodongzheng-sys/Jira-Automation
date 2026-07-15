@@ -62,9 +62,6 @@
       {% if can_manage_team_dashboard %}
         <button class="workspace-tab {% if initial_team_dashboard_tab == 'tasks' %}is-active{% endif %}" type="button" role="tab" aria-selected="{{ 'true' if initial_team_dashboard_tab == 'tasks' else 'false' }}" data-team-dashboard-tab="tasks">Task List</button>
       {% endif %}
-      {% if can_access_version_plan %}
-        <button class="workspace-tab {% if initial_team_dashboard_tab == 'version-plan' %}is-active{% endif %}" type="button" role="tab" aria-selected="{{ 'true' if initial_team_dashboard_tab == 'version-plan' else 'false' }}" data-team-dashboard-tab="version-plan">Version Plan</button>
-      {% endif %}
       {% if can_manage_team_dashboard %}
         <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="link-biz-project">Link Biz Project</button>
       {% endif %}

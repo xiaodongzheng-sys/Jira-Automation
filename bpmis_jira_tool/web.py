@@ -322,6 +322,7 @@ if _dotenv_path:
 MARKET_KEYS = ["ID", "SG", "PH", "Regional"]
 PORTAL_ADMIN_EMAIL = "xiaodong.zheng@npt.sg"
 PORTAL_TEST_USER_EMAIL = "xiaodong.zheng1991@gmail.com"
+VERSION_PLAN_NAV_URL = "https://app.bankpmtool.uk/version-plan"
 TEAM_PROFILE_ADMIN_EMAIL = PORTAL_ADMIN_EMAIL
 SYNC_EMAIL_EDIT_ALLOWLIST = {PORTAL_ADMIN_EMAIL}
 SOURCE_CODE_QA_BUILTIN_ADMIN_EMAILS = {PORTAL_ADMIN_EMAIL}
@@ -760,6 +761,13 @@ def create_app() -> Flask:
         can_access_business_insights = _can_access_business_insights(settings)
         site_tabs = []
         show_admin_tool_entries = _is_portal_admin()
+        site_tabs.append(
+            {
+                "label": "Version Plan",
+                "href": VERSION_PLAN_NAV_URL,
+                "active": request.path.startswith("/version-plan"),
+            }
+        )
         if _can_access_source_code_qa(settings):
             site_tabs.append(
                 {
@@ -837,7 +845,7 @@ def create_app() -> Flask:
                     "active": current_endpoint == "reports_page",
                 }
             )
-        if project_tabs:
+        if show_admin_tool_entries and project_tabs:
             site_tabs.append(_nav_group("Projects", project_tabs[0]["href"], project_tabs))
         if can_access_business_insights:
             active_business_domain = str(request.args.get("domain") or "anti-fraud").strip().lower()
