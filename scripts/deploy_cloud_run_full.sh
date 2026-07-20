@@ -235,6 +235,12 @@ ENV_VARS=(
   "GOOGLE_CLOUD_OAUTH_REDIRECT_URI=$GOOGLE_CLOUD_REDIRECT_URI"
   "PRD_BRIEFING_EDGE_MANDARIN_VOICE=${PRD_BRIEFING_EDGE_MANDARIN_VOICE:-$(read_env_value PRD_BRIEFING_EDGE_MANDARIN_VOICE)}"
 )
+# Public artifacts bucket: Cloud Run serves Business Insights workbooks and
+# repo source bundles from GCS while the Mac host remains the producer.
+PUBLIC_GCS_BUCKET_RESOLVED="${CLOUD_RUN_PUBLIC_GCS_BUCKET:-$(read_env_value CLOUD_RUN_PUBLIC_GCS_BUCKET)}"
+if [[ -n "$PUBLIC_GCS_BUCKET_RESOLVED" ]]; then
+  ENV_VARS+=("TEAM_PORTAL_PUBLIC_GCS_BUCKET=$PUBLIC_GCS_BUCKET_RESOLVED")
+fi
 if [[ -n "$BASE_URL" ]]; then
   ENV_VARS+=("TEAM_PORTAL_BASE_URL=$BASE_URL")
 fi
