@@ -71,6 +71,10 @@ def build_business_insights_handlers(ctx: Any) -> Any:
                     artifact["visualization_url"] = url_for("business_insights_visualization", artifact_id=artifact_id)
                 artifact["created_at_display"] = format_gmt8(artifact.get("created_at"))
                 item["artifact"] = artifact
+        source_url = str(item.get("source_url") or (artifact or {}).get("source_google_sheet_url") or "").strip()
+        if source_url:
+            item["source_url"] = source_url
+            item["source_label"] = str(item.get("source_label") or (artifact or {}).get("source_label") or "Source")
         item["sql_url"] = url_for("business_insights_report_sql", report_id=item["id"])
         item["ingest_url"] = url_for("business_insights_report_ingest", report_id=item["id"])
         # The on-demand "Refresh data" button re-runs the Data Workbench generator; admins only.

@@ -95,6 +95,7 @@ PRODUCT_LABEL_COLUMNS: set[str] = {"product", "product_code", "sub-product", "su
 #   ods.ph_seabank_anti_fraud_db_<table>_df/di         (scenario group mapping)
 #   ods.mbs_anti_fraud_<table>_ss                      (rule / feature config)
 AF_SCENARIOS_ACTIONS_REPORT_ID = "anti-fraud-ph-scenarios-actions-auth-steps"
+AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID = "anti-fraud-id-scenarios-auth-rules-features"
 AF_RULES_FEATURES_REPORT_ID = "anti-fraud-ph-rules-features"
 AF_RULE_EFFECTIVENESS_REPORT_ID = "anti-fraud-ph-rule-effectiveness"
 AF_FRAUD_LOSS_REPORT_ID = "anti-fraud-ph-fraud-loss-cases"
@@ -148,6 +149,15 @@ AF_TWO_WAY_RELATION_CONFIG_TABLE = "ods.ph_seabank_anti_fraud_db_two_way_templat
 AF_TWO_WAY_COMMUNICATION_TABLE = "ods.ph_seabank_anti_fraud_db_two_way_communication_tab_di"
 
 SEEDED_REPORTS: tuple[dict[str, str], ...] = (
+    {
+        "id": AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID,
+        "domain": "anti-fraud",
+        "name": "Anti-fraud ID - Scenarios, Auth Steps, Rules, Features",
+        "type": "af_sheet_backed",
+        "status": "ready",
+        "source_label": "Google Sheet",
+        "source_url": "https://docs.google.com/spreadsheets/d/1423Y-u5kl24TD62yScFqatEl3tzB9RXGY6vI4cxeMOg/edit?gid=0#gid=0",
+    },
     {
         "id": AF_SCENARIOS_ACTIONS_REPORT_ID,
         "domain": "anti-fraud",

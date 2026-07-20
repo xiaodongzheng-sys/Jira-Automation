@@ -22,6 +22,7 @@ from bpmis_jira_tool.business_insights import (
     AF_DEVICE_RISK_REPORT_ID,
     AF_FACIAL_VERIFICATION_REPORT_ID,
     AF_FRAUD_LOSS_REPORT_ID,
+    AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID,
     AF_LIST_USAGE_REPORT_ID,
     AF_RULE_EFFECTIVENESS_REPORT_ID,
     AF_RULES_FEATURES_REPORT_ID,
@@ -38,6 +39,7 @@ DEFAULT_BUSINESS_INSIGHTS_SHEET_URL = (
 GOOGLE_SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 
 ANTI_FRAUD_SHEET_REPORT_ORDER: tuple[tuple[int, str], ...] = (
+    (0, AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID),
     (1, AF_SCENARIOS_ACTIONS_REPORT_ID),
     (2, AF_RULES_FEATURES_REPORT_ID),
     (3, AF_RULE_EFFECTIVENESS_REPORT_ID),
@@ -50,6 +52,11 @@ ANTI_FRAUD_SHEET_REPORT_ORDER: tuple[tuple[int, str], ...] = (
 _REPORT_PREFIX_BY_ID = {report_id: prefix for prefix, report_id in ANTI_FRAUD_SHEET_REPORT_ORDER}
 ANTI_FRAUD_SHEET_REPORT_IDS = tuple(report_id for _prefix, report_id in ANTI_FRAUD_SHEET_REPORT_ORDER)
 EXTRA_GOOGLE_SHEET_SECTIONS_BY_REPORT: dict[str, tuple[tuple[str, str], ...]] = {
+    AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID: (
+        ("Scenario Action Auth Flow", "scenario_action_auth_flow"),
+        ("Rules", "rules"),
+        ("Features", "features"),
+    ),
     AF_RULES_FEATURES_REPORT_ID: (
         ("Rule Treatment Config Coverage", "2_rule_treatment_config_coverage"),
     ),
@@ -222,20 +229,27 @@ def refresh_anti_fraud_reports_from_google_sheet(
     sql_by_report: dict[str, str] = {}
     for report_id in selected_report_ids:
         config = REPORT_BUILDERS.get(report_id)
-        if config is None:
+        if config is None and report_id != AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID:
             raise ToolError(f"No Business Insights builder configured for {report_id}.")
-        _title, builder = config
-        sql = builder(snapshot_pt_date=None, now=active_now)
+        if report_id == AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID:
+            title = "Anti-fraud ID - Scenarios, Auth Steps, Rules, Features"
+            sql = ""
+            sections = []
+        else:
+            title, builder = config
+            sql = builder(snapshot_pt_date=None, now=active_now)
+            sections = []
+            for section in extract_sql_sections(sql):
+                google_tab = scheduled_sheet_name(report_id, section.sheet_name)
+                sections.append((section.sheet_name, google_tab))
+                sheet_names.append(google_tab)
         sql_by_report[report_id] = sql
-        sections = []
-        for section in extract_sql_sections(sql):
-            google_tab = scheduled_sheet_name(report_id, section.sheet_name)
-            sections.append((section.sheet_name, google_tab))
-            sheet_names.append(google_tab)
         for display_name, google_tab in EXTRA_GOOGLE_SHEET_SECTIONS_BY_REPORT.get(report_id, ()):
             sections.append((display_name, google_tab))
             sheet_names.append(google_tab)
         report_sections[report_id] = sections
+        if report_id == AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID:
+            REPORT_BUILDERS.setdefault(report_id, (title, lambda **_kwargs: ""))
 
     fetched = _fetch_sheet_values(
         sheets_service,
@@ -274,6 +288,7 @@ def refresh_anti_fraud_reports_from_google_sheet(
             "visualization_filename": html_filename,
             "source_filename": "google-sheet-scheduled-output",
             "source_google_sheet_url": sheet_url,
+            "source_label": "Google Sheet",
             "source_google_tabs": source_tabs,
             "row_count": sum(len(rows) for _sheet, _headers, rows in sheets),
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

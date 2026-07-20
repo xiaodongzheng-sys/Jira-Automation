@@ -68,6 +68,13 @@
                           <span class="business-insights-placeholder">Not generated yet.</span>
                         {% endif %}
 
+                        {% if report.source_url %}
+                          <span class="business-insights-meta">
+                            {{ report.source_label or 'Source' }} -
+                            <a href="{{ report.source_url }}" target="_blank" rel="noopener">Open source</a>
+                          </span>
+                        {% endif %}
+
                         <div class="business-insights-actions">
                           {% if artifact and artifact.visualization_url %}
                             <a class="button button-secondary" href="{{ artifact.visualization_url }}" target="_blank" rel="noopener" data-business-insights-visualization>Open Visualization</a>

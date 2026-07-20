@@ -14,6 +14,7 @@ from openpyxl import load_workbook
 from bpmis_jira_tool.business_insights import (
     AF_FEATURE_CONFIG_TABLE,
     AF_ACTION_LOG_TABLE,
+    AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID,
     AF_DETECTION_EFFECTIVENESS_REPORT_ID,
     AF_CARD_3DS_REPORT_ID,
     AF_DEVICE_RISK_REPORT_ID,
@@ -496,6 +497,15 @@ class BusinessInsightsLoginRequiredTests(unittest.TestCase):
 
 
 class AntiFraudBusinessInsightsTests(unittest.TestCase):
+    def test_seeded_reports_put_id_sheet_report_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = BusinessInsightsStore(Path(tmp))
+            reports = store.reports("anti-fraud")
+        self.assertEqual(reports[0]["id"], AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID)
+        self.assertEqual(reports[0]["name"], "Anti-fraud ID - Scenarios, Auth Steps, Rules, Features")
+        self.assertEqual(reports[0]["status"], "ready")
+        self.assertIn("docs.google.com/spreadsheets", reports[0]["source_url"])
+
     def test_seeded_reports_include_scenarios_actions_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = BusinessInsightsStore(Path(tmp))
@@ -769,6 +779,7 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
         self.assertEqual(
             returned_ids,
             {
+                AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID,
                 AF_SCENARIOS_ACTIONS_REPORT_ID,
                 AF_RULES_FEATURES_REPORT_ID,
                 AF_RULE_EFFECTIVENESS_REPORT_ID,
@@ -783,9 +794,19 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
         self.assertNotIn(AF_DETECTION_EFFECTIVENESS_REPORT_ID, returned_ids)
         self.assertNotIn(AF_RULE_CHANGE_LOG_REPORT_ID, returned_ids)
         self.assertEqual(page_response.status_code, 200)
+        page_body = page_response.get_data(as_text=True)
+        self.assertIn(
+            "Anti-fraud ID - Scenarios, Auth Steps, Rules, Features",
+            page_body,
+        )
+        self.assertIn("Open source", page_body)
+        self.assertTrue(
+            page_body.index("Anti-fraud ID - Scenarios, Auth Steps, Rules, Features")
+            < page_body.index("Anti-fraud PH - L1+L2 Scenarios, Actions &amp; Auth Steps")
+        )
         self.assertIn(
             "Anti-fraud PH - L1+L2 Scenarios, Actions &amp; Auth Steps",
-            page_response.get_data(as_text=True),
+            page_body,
         )
 
 
@@ -2041,6 +2062,46 @@ class BusinessInsightsSheetRefreshTests(unittest.TestCase):
         self.assertIn("<h2>Rule Treatment Config Coverage</h2>", visualization_html)
         self.assertNotIn("Rule Treatment Config Coverage by Treatment Type", visualization_html)
         self.assertNotIn("Rule Treatment Config Coverage by Template Linkage", visualization_html)
+
+    def test_refresh_from_google_sheet_supports_id_sheet_backed_report(self):
+        from bpmis_jira_tool.business_insights_sheet_refresh import (
+            refresh_anti_fraud_reports_from_google_sheet,
+        )
+
+        values_by_tab = {
+            "scenario_action_auth_flow": [
+                ["scenario", "auth_step", "action"],
+                ["Login", "OTP", "Challenge"],
+            ],
+            "rules": [
+                ["rule_id", "rule_name", "outcome_type", "rule_status"],
+                ["RID-1", "Velocity", "Reject", "Active"],
+            ],
+            "features": [
+                ["feature_id", "feature_name", "function_id", "feature_status"],
+                ["FID-1", "Device Count", "FUNC_1", "Active"],
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = _FakeSheetsService(values_by_tab)
+            result = refresh_anti_fraud_reports_from_google_sheet(
+                portal_data_dir=Path(temp_dir),
+                sheets_service=service,
+                report_ids=[AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID],
+                now=FIXED_NOW,
+            )
+            metadata_path = Path(temp_dir) / "business_insights" / "reports.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            artifact = metadata["artifacts"][AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID]
+            workbook_path = Path(temp_dir) / "business_insights" / "artifacts" / artifact["filename"]
+            workbook = load_workbook(workbook_path, data_only=True)
+
+        self.assertEqual(result["report_count"], 1)
+        self.assertEqual(result["reports"][0]["report_id"], AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID)
+        self.assertEqual(artifact["source_filename"], "google-sheet-scheduled-output")
+        self.assertEqual(artifact["source_label"], "Google Sheet")
+        self.assertEqual(workbook.sheetnames, ["Scenario Action Auth Flow", "Rules", "Features"])
 
 
 if __name__ == "__main__":
