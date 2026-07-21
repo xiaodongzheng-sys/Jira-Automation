@@ -874,7 +874,11 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
         rule_headers = ["rule_id", "rule_name", "outcome_type", "rule_status"]
         rule_rows = [["R1", "High Velocity Login", "Challenge", "Active"], ["R2", "Device Spoof", "Reject", "Active"]]
         feature_headers = ["feature_id", "feature_name", "threshold", "feature_status"]
-        feature_rows = [["F1", "Login count 1h", "5", "Active"], ["F2", "Distinct device 24h", "3", "Inactive"]]
+        feature_rows = [
+            ["F1", "Login count 1h", "5", "Active"],
+            ["F2", "Distinct device 24h", "3", "Inactive"],
+            ["F3", "Legacy device velocity", "8", "2"],
+        ]
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = Path(temp_dir) / "viz.html"
             write_visualization(
@@ -916,6 +920,8 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
         self.assertIn("Total rules", html)
         self.assertIn("Rules by Outcome Type", html)
         self.assertIn("Features by Status", html)
+        self.assertIn("Status 1 and status 2 are treated as Active", html)
+        self.assertNotIn("Retired (status 2)", html)
 
     def test_visualization_renders_function_usage_dimension(self):
         sheets = [
@@ -2102,6 +2108,67 @@ class BusinessInsightsSheetRefreshTests(unittest.TestCase):
         self.assertEqual(artifact["source_filename"], "google-sheet-scheduled-output")
         self.assertEqual(artifact["source_label"], "Google Sheet")
         self.assertEqual(workbook.sheetnames, ["Scenario Action Auth Flow", "Rules", "Features"])
+
+    def test_id_sheet_backed_visualization_renders_summary_and_charts(self):
+        flow_headers = [
+            "scene_name",
+            "sub_scene_name",
+            "action_name",
+            "auth_step",
+            "scenario_group_name",
+            "default_step",
+            "challenge1_step",
+        ]
+        flow_rows = [
+            ["Login", "Password Login", "LOGIN", "OTP", "Login/ Registration/ Onboarding", "step_a", "step_b"],
+            ["Transfer", "P2P", "TRANSFER", "FACE", "Transfers", "step_c", ""],
+            ["Transfer", "P2P", "TRANSFER_CONFIRM", "OTP", "Transfers", "step_d", "step_e"],
+        ]
+        rule_headers = ["rule_id", "rule_name", "outcome_type", "rule_status"]
+        rule_rows = [
+            ["RID-1", "Velocity", "Reject", "Active"],
+            ["RID-2", "Device Risk", "Reject", "Inactive"],
+            ["RID-3", "Face Check", "Challenge", "Active"],
+        ]
+        feature_headers = ["feature_id", "feature_name", "function_id", "feature_status"]
+        feature_rows = [
+            ["FID-1", "Device Count", "FUNC_1", "Active"],
+            ["FID-2", "Face Score", "FUNC_1", "Active"],
+            ["FID-3", "History Count", "FUNC_2", "Inactive"],
+            ["FID-4", "Legacy Device Count", "FUNC_2", "2"],
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "visualization.html"
+            write_visualization(
+                output_path,
+                report_title="Anti-fraud ID - Scenarios, Auth Steps, Rules, Features",
+                snapshot_pt_date="Google Sheet latest scheduled output",
+                sheets=[
+                    ("Scenario Action Auth Flow", flow_headers, flow_rows),
+                    ("Rules", rule_headers, rule_rows),
+                    ("Features", feature_headers, feature_rows),
+                ],
+                report_id=AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID,
+            )
+            html = output_path.read_text(encoding="utf-8")
+
+        self.assertIn("Snapshot Summary", html)
+        self.assertIn("Scenario mappings", html)
+        self.assertIn("Top Scenario Groups by Mapping Count", html)
+        self.assertIn("Top Auth Steps by Mapping Count", html)
+        self.assertIn("Rules by Outcome Type", html)
+        self.assertIn("Features by Status", html)
+        self.assertIn("Feature status interpretation: status 1 and status 2 are Active", html)
+        self.assertIn("2 = Active (alternate/legacy active encoding)", html)
+        self.assertIn("Top Function IDs by Feature Count", html)
+        self.assertIn("Largest scenario group", html)
+        self.assertIn("Most-used auth step", html)
+        self.assertIn("Most-reused function", html)
+        self.assertIn("Search scene, action or auth step", html)
+        self.assertIn("Source tab: scenario_action_auth_flow", html)
+        self.assertIn("Source tab: rules", html)
+        self.assertIn("Source tab: features", html)
 
 
 if __name__ == "__main__":

@@ -46,6 +46,7 @@ from bpmis_jira_tool.business_insights import (  # noqa: E402
     AF_FACIAL_VERIFICATION_REPORT_ID,
     AF_FACIAL_VERIFICATION_TABLE,
     AF_FRAUD_LOSS_REPORT_ID,
+    AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID,
     AF_LIST_USAGE_REPORT_ID,
     AF_REQUEST_STATISTIC_TABLE,
     AF_REVIEW_CASE_TABLE,
@@ -733,6 +734,32 @@ def _group_sum(headers: list[str], rows: list[list[Any]], label_column: str, val
             label = _product_display_label(label, header=label_column.lower())
         value = _number(row[value_offset] if value_offset < len(row) else None)
         grouped[label] = grouped.get(label, 0.0) + value
+    return sorted(grouped.items(), key=lambda item: item[1], reverse=True)
+
+
+def _group_count(headers: list[str], rows: list[list[Any]], label_column: str) -> list[tuple[str, float]]:
+    index = _sheet_index(headers)
+    if label_column not in index:
+        return []
+    grouped: dict[str, float] = {}
+    label_offset = index[label_column]
+    for row in rows:
+        label = str(row[label_offset] if label_offset < len(row) and row[label_offset] not in (None, "") else "UNKNOWN")
+        grouped[label] = grouped.get(label, 0.0) + 1.0
+    return sorted(grouped.items(), key=lambda item: item[1], reverse=True)
+
+
+_FEATURE_STATUS_LABELS = {"1": "Active", "2": "Active", "-1": "Inactive"}
+
+
+def _relabel_group_counts(
+    pairs: list[tuple[str, float]],
+    labels: dict[str, str],
+) -> list[tuple[str, float]]:
+    grouped: dict[str, float] = {}
+    for key, count in pairs:
+        label = labels.get(str(key), str(key))
+        grouped[label] = grouped.get(label, 0.0) + count
     return sorted(grouped.items(), key=lambda item: item[1], reverse=True)
 
 
@@ -2628,7 +2655,7 @@ def write_visualization(
         # Raw engine codes that older artifacts (or unmapped values) leave in the data; charts show the
         # OutcomeType/FeatureStatus meaning instead of a bare digit.
         outcome_code_labels = {"4": "Reject+Punish", "5": "Challenge+Punish", "6": "Pass", "3": "Notification"}
-        feature_status_labels = {"2": "Retired (status 2)", "1": "Active", "-1": "Inactive"}
+        feature_status_labels = _FEATURE_STATUS_LABELS
 
         def _relabel(agg: dict[str, float], labels: dict[str, str]) -> dict[str, float]:
             relabelled: dict[str, float] = {}
@@ -2735,7 +2762,7 @@ def write_visualization(
             fbar = _bar_panel(
                 "Features by Status",
                 sorted(fstatus_chart.items(), key=lambda kv: kv[1], reverse=True),
-                note="Feature config rows per status. Only Active (status 1) is loaded by the engine; Inactive is -1; 'Retired (status 2)' rows are superseded config kept in the snapshot but not live (1=valid / 2=invalid convention).",
+                note="Feature config rows per status. Status 1 and status 2 are treated as Active in this report; status -1 is Inactive. The original status value remains visible in the Features table.",
             )
             if fbar:
                 chart_panels.append(fbar)
@@ -2762,10 +2789,9 @@ def write_visualization(
             "rules as 'Punish'; bare digits are codes the label map did not cover."
         )
         feature_status_note = (
-            "Engine FeatureStatus enum defines only 1 = Active and -1 = Inactive; the rule engine loads "
-            "ONLY status = 1. status = 2 is not in that enum — it is a retired/superseded config row "
-            "(the codebase's wider convention is 1 = 生效/valid, 2 = 失效/invalid), kept in the snapshot "
-            "but not live. So only the Active (1) count reflects features currently in force."
+            "Feature status interpretation for this report: 1 = Active, 2 = Active (alternate/legacy "
+            "active encoding), and -1 = Inactive. The raw source value is preserved in this column; the "
+            "status 1 and status 2 rows are both counted as Active in the visualization."
         )
         table_panels: list[str] = []
         if rules:
@@ -3195,6 +3221,206 @@ def write_visualization(
             )
         path.write_text(
             _searchable_tables_document(report_title, snapshot_pt_date, panels, intro_html=intro, data_through=_data_through(sheets)),
+            encoding="utf-8",
+        )
+        return
+    if report_id == AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID:
+        flow_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
+        flow = flow_lookup.get("Scenario Action Auth Flow")
+        rules = flow_lookup.get("Rules")
+        features = flow_lookup.get("Features")
+
+        summary_cards: list[tuple[str, str]] = []
+        insight_cards: list[tuple[str, str, str]] = []
+        chart_panels: list[str] = []
+        table_panels: list[str] = []
+
+        if flow:
+            flow_headers, flow_rows = flow
+            header_index = _sheet_index(flow_headers)
+            summary_cards.append(("Scenario mappings", _format_number(len(flow_rows))))
+
+            for label, column in (
+                ("L1 scenes", "scene_name"),
+                ("L2 sub-scenes", "sub_scene_name"),
+                ("Actions", "action_name"),
+                ("Auth steps", "auth_step"),
+            ):
+                if column in header_index:
+                    distinct = {
+                        str(row[header_index[column]]).strip()
+                        for row in flow_rows
+                        if header_index[column] < len(row) and str(row[header_index[column]]).strip()
+                    }
+                    if distinct:
+                        summary_cards.append((label, _format_number(len(distinct))))
+
+            scenario_group_count = _group_count(flow_headers, flow_rows, "scenario_group_name")
+            if scenario_group_count:
+                panel = _bar_panel(
+                    "Top Scenario Groups by Mapping Count",
+                    scenario_group_count[:12],
+                    note="Number of scenario-action-auth-step mappings under each scenario group.",
+                )
+                if panel:
+                    chart_panels.append(panel)
+                top_group, top_group_count = scenario_group_count[0]
+                insight_cards.append((
+                    "Largest scenario group",
+                    f"{top_group} — {_format_number(top_group_count)} mappings",
+                    "",
+                ))
+
+            auth_step_count = _group_count(flow_headers, flow_rows, "auth_step")
+            if auth_step_count:
+                panel = _bar_panel(
+                    "Top Auth Steps by Mapping Count",
+                    auth_step_count[:12],
+                    note="How often each auth step appears in the scenario-action mapping sheet.",
+                )
+                if panel:
+                    chart_panels.append(panel)
+                top_auth, top_auth_count = auth_step_count[0]
+                insight_cards.append((
+                    "Most-used auth step",
+                    f"{top_auth} — {_format_number(top_auth_count)} mappings",
+                    "",
+                ))
+
+            action_count = _group_count(flow_headers, flow_rows, "action_name")
+            if action_count:
+                panel = _bar_panel(
+                    "Top Actions by Mapping Count",
+                    action_count[:12],
+                    note="Which product actions carry the most configured auth-step mappings.",
+                )
+                if panel:
+                    chart_panels.append(panel)
+
+            step_columns = {i for i, h in enumerate(flow_headers) if str(h).strip().lower().endswith("_step")}
+            populated_steps = 0
+            for row in flow_rows:
+                populated_steps += sum(1 for idx in step_columns if idx < len(row) and str(row[idx]).strip())
+            if step_columns:
+                avg_steps = populated_steps / max(len(flow_rows), 1)
+                insight_cards.append((
+                    "Average configured steps",
+                    f"{avg_steps:.1f} per mapping",
+                    "Includes default + challenge step columns with non-empty config.",
+                ))
+
+            table_panels.append(
+                _searchable_table_panel(
+                    "Scenario Action Auth Flow",
+                    flow_headers,
+                    flow_rows,
+                    placeholder="Search scene, action or auth step…",
+                    step_columns=step_columns,
+                    column_notes={
+                        "scene_name": "Business-facing L1 scenario name.",
+                        "sub_scene_name": "Granular L2 sub-scenario name under the L1 scene.",
+                        "action_name": "User or system action that triggers the auth flow.",
+                        "auth_step": "Primary authentication method or step configured for the mapping.",
+                        "scenario_group_name": "Scenario group used for governance and rollout management.",
+                    },
+                    note="Source tab: scenario_action_auth_flow from the scheduled Google Sheet output.",
+                )
+            )
+
+        if rules:
+            rule_headers, rule_rows = rules
+            summary_cards.append(("Rules", _format_number(len(rule_rows))))
+            outcome_counts = _group_count(rule_headers, rule_rows, "outcome_type")
+            if outcome_counts:
+                panel = _bar_panel(
+                    "Rules by Outcome Type",
+                    outcome_counts[:12],
+                    note="Distribution of configured rules by outcome type from the Google Sheet snapshot.",
+                )
+                if panel:
+                    chart_panels.append(panel)
+                top_outcome, top_outcome_count = outcome_counts[0]
+                insight_cards.append((
+                    "Dominant rule outcome",
+                    f"{top_outcome} — {_format_number(top_outcome_count)} rules",
+                    "",
+                ))
+
+            status_counts = _group_count(rule_headers, rule_rows, "rule_status")
+            if status_counts:
+                panel = _bar_panel(
+                    "Rules by Status",
+                    status_counts[:12],
+                    note="Configured rule status split in the latest sheet export.",
+                )
+                if panel:
+                    chart_panels.append(panel)
+
+            table_panels.append(
+                _searchable_table_panel(
+                    "Rules",
+                    rule_headers,
+                    rule_rows,
+                    placeholder="Search rule id or rule name…",
+                    note="Source tab: rules from the scheduled Google Sheet output.",
+                )
+            )
+
+        if features:
+            feature_headers, feature_rows = features
+            summary_cards.append(("Features", _format_number(len(feature_rows))))
+            status_counts = _group_count(feature_headers, feature_rows, "feature_status")
+            if status_counts:
+                panel = _bar_panel(
+                    "Features by Status",
+                    _relabel_group_counts(status_counts, _FEATURE_STATUS_LABELS)[:12],
+                    note="Feature status interpretation: status 1 and status 2 are Active; status -1 is Inactive. The original status value remains visible in the Features table.",
+                )
+                if panel:
+                    chart_panels.append(panel)
+
+            function_counts = _group_count(feature_headers, feature_rows, "function_id")
+            if function_counts:
+                panel = _bar_panel(
+                    "Top Function IDs by Feature Count",
+                    function_counts[:12],
+                    note="How many features map to each function_id in the sheet snapshot.",
+                )
+                if panel:
+                    chart_panels.append(panel)
+                top_func, top_func_count = function_counts[0]
+                insight_cards.append((
+                    "Most-reused function",
+                    f"{top_func} — {_format_number(top_func_count)} features",
+                    "",
+                ))
+
+            table_panels.append(
+                _searchable_table_panel(
+                    "Features",
+                    feature_headers,
+                    feature_rows,
+                    placeholder="Search feature id, feature name or function id…",
+                    column_notes={"feature_status": "Feature status: 1 = Active, 2 = Active (alternate/legacy active encoding), -1 = Inactive. The raw source value is preserved."},
+                    note="Source tab: features from the Google Sheet snapshot.",
+                )
+            )
+
+        intro_parts: list[str] = []
+        if insight_cards:
+            intro_parts.append(_insight_panel("Highlights", insight_cards))
+        if summary_cards:
+            intro_parts.append(_kpi_cards_panel("Snapshot Summary", summary_cards))
+        intro = "".join(intro_parts)
+        panels = chart_panels + table_panels
+        path.write_text(
+            _searchable_tables_document(
+                report_title,
+                snapshot_pt_date,
+                panels,
+                intro_html=intro,
+                data_through=_data_through(sheets),
+            ),
             encoding="utf-8",
         )
         return

@@ -16,6 +16,20 @@ if [[ ! -f "$TEMPLATE_PATH" ]]; then
   exit 1
 fi
 
+if is_protected_mac_path "$ROOT_DIR" && [[ "${TEAM_STACK_ALLOW_PROTECTED_ROOT:-0}" != "1" ]]; then
+  echo "launchd install blocked: repo is under a macOS protected folder:"
+  echo "  $ROOT_DIR"
+  echo
+  echo "Recommended fix:"
+  echo "  ./scripts/setup_team_stack_host_workspace.sh"
+  echo
+  echo "Then install the Business Insights refresh job from the host workspace."
+  echo
+  echo "If you really want to force install from here:"
+  echo "  TEAM_STACK_ALLOW_PROTECTED_ROOT=1 ./scripts/install_business_insights_sheet_refresh_launchd.sh"
+  exit 1
+fi
+
 OWNER_EMAIL="${BUSINESS_INSIGHTS_GOOGLE_OWNER_EMAIL:-$(read_env_value BUSINESS_INSIGHTS_GOOGLE_OWNER_EMAIL)}"
 if [[ -z "$OWNER_EMAIL" ]]; then
   echo "BUSINESS_INSIGHTS_GOOGLE_OWNER_EMAIL is required in $ENV_FILE or the current environment."
