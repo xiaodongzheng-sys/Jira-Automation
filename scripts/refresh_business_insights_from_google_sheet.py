@@ -92,7 +92,12 @@ def main() -> int:
     portal_data_dir = Path(args.portal_data_dir).expanduser().resolve()
     credentials = load_google_sheets_credentials(args)
     service = build_sheets_service(credentials)
-    report_ids = args.report_id or list(ANTI_FRAUD_SHEET_REPORT_IDS)
+    configured_report_ids = [
+        value.strip()
+        for value in os.getenv("BUSINESS_INSIGHTS_REFRESH_REPORT_IDS", "").split(",")
+        if value.strip()
+    ]
+    report_ids = args.report_id or configured_report_ids or list(ANTI_FRAUD_SHEET_REPORT_IDS)
     try:
         result = refresh_anti_fraud_reports_from_google_sheet(
             portal_data_dir=portal_data_dir,
