@@ -38,6 +38,14 @@ SHEET_URL="${BUSINESS_INSIGHTS_GOOGLE_SHEET_URL:-$(read_env_value BUSINESS_INSIG
 SHEET_URL="${SHEET_URL:-https://docs.google.com/spreadsheets/d/1F5MSUwnxg8AbGr3rQN1l8nXYkxrBU680FJYhTGzL9qo/edit?gid=2125394335#gid=2125394335}"
 PORTAL_DATA_DIR="${BUSINESS_INSIGHTS_REFRESH_PORTAL_DATA_DIR:-/tmp/team-portal-runtime}"
 PUBLIC_GCS_BUCKET="${TEAM_PORTAL_PUBLIC_GCS_PUBLISH_BUCKET:-${CLOUD_RUN_PUBLIC_GCS_BUCKET:-$(read_env_value CLOUD_RUN_PUBLIC_GCS_BUCKET)}}"
+# The scheduled-output Sheet contains the PH report tabs. The ID report uses a
+# separate Google Sheet and is refreshed by its dedicated 13:00 automation.
+REFRESH_REPORT_IDS="${BUSINESS_INSIGHTS_REFRESH_REPORT_IDS:-anti-fraud-ph-scenarios-actions-auth-steps anti-fraud-ph-rules-features anti-fraud-ph-rule-effectiveness anti-fraud-ph-fraud-loss-cases anti-fraud-ph-facial-verification anti-fraud-ph-device-identity-risk anti-fraud-ph-card-3ds anti-fraud-ph-blacklist-whitelist-greylist}"
+JOB_ARGS="scripts/refresh_business_insights_from_google_sheet.py"
+for report_id in $REFRESH_REPORT_IDS; do
+  JOB_ARGS+=" ,--report-id,$report_id"
+done
+JOB_ARGS="${JOB_ARGS// /}"
 
 CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED="${CLOUD_RUN_DEPLOY_ACCOUNT:-$(read_env_value CLOUD_RUN_DEPLOY_ACCOUNT)}"
 ACCOUNT_ARGS=()
@@ -150,7 +158,7 @@ run_cmd "$GCLOUD_BIN" run jobs deploy "$JOB_NAME" \
   --image "$IMAGE_URI" \
   --service-account "$JOB_SERVICE_ACCOUNT" \
   --command python \
-  --args scripts/refresh_business_insights_from_google_sheet.py \
+  --args "$JOB_ARGS" \
   --tasks 1 \
   --max-retries "${BUSINESS_INSIGHTS_REFRESH_MAX_RETRIES:-1}" \
   --task-timeout "${BUSINESS_INSIGHTS_REFRESH_TASK_TIMEOUT:-1800s}" \
