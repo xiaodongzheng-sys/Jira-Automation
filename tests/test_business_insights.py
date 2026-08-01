@@ -15,6 +15,7 @@ from bpmis_jira_tool.business_insights import (
     AF_FEATURE_CONFIG_TABLE,
     AF_ACTION_LOG_TABLE,
     AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID,
+    AF_SG_SCENARIOS_AUTH_FEATURES_REPORT_ID,
     AF_DETECTION_EFFECTIVENESS_REPORT_ID,
     AF_CARD_3DS_REPORT_ID,
     AF_DEVICE_RISK_REPORT_ID,
@@ -497,14 +498,22 @@ class BusinessInsightsLoginRequiredTests(unittest.TestCase):
 
 
 class AntiFraudBusinessInsightsTests(unittest.TestCase):
-    def test_seeded_reports_put_id_sheet_report_first(self):
+    def test_seeded_reports_put_sg_static_report_first(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = BusinessInsightsStore(Path(tmp))
             reports = store.reports("anti-fraud")
-        self.assertEqual(reports[0]["id"], AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID)
-        self.assertEqual(reports[0]["name"], "Anti-fraud ID - Scenarios, Auth Steps, Rules, Features")
+        self.assertEqual(reports[0]["id"], AF_SG_SCENARIOS_AUTH_FEATURES_REPORT_ID)
+        self.assertEqual(reports[0]["name"], "Anti-fraud SG - Scenarios, Auth Steps, Features")
         self.assertEqual(reports[0]["status"], "ready")
-        self.assertIn("docs.google.com/spreadsheets", reports[0]["source_url"])
+
+    def test_sg_static_report_is_not_generator_backed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = BusinessInsightsStore(Path(tmp))
+            report = store.report(AF_SG_SCENARIOS_AUTH_FEATURES_REPORT_ID)
+        self.assertEqual(report["status"], "ready")
+        self.assertIsNone(report["artifact"])
+        with self.assertRaises(ToolError):
+            store.sql_for_report(AF_SG_SCENARIOS_AUTH_FEATURES_REPORT_ID)
 
     def test_seeded_reports_include_scenarios_actions_report(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -779,6 +788,7 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
         self.assertEqual(
             returned_ids,
             {
+                AF_SG_SCENARIOS_AUTH_FEATURES_REPORT_ID,
                 AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID,
                 AF_SCENARIOS_ACTIONS_REPORT_ID,
                 AF_RULES_FEATURES_REPORT_ID,
@@ -796,6 +806,14 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
         self.assertEqual(page_response.status_code, 200)
         page_body = page_response.get_data(as_text=True)
         self.assertIn(
+            "Anti-fraud SG - Scenarios, Auth Steps, Features",
+            page_body,
+        )
+        self.assertTrue(
+            page_body.index("Anti-fraud SG - Scenarios, Auth Steps, Features")
+            < page_body.index("Anti-fraud ID - Scenarios, Auth Steps, Rules, Features")
+        )
+        self.assertIn(
             "Anti-fraud ID - Scenarios, Auth Steps, Rules, Features",
             page_body,
         )
@@ -808,6 +826,30 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
             "Anti-fraud PH - L1+L2 Scenarios, Actions &amp; Auth Steps",
             page_body,
         )
+
+    def test_sg_static_visualization_renders_only_requested_tables(self):
+        flow_headers = ["l1_scene_name", "action_name", "default_step", "challenge1_step"]
+        flow_rows = [["Login", "LOGIN", "OTP", "FACE"]]
+        feature_headers = ["feature_id", "feature_name", "function_id", "feature_status"]
+        feature_rows = [["F1", "Login Count", "FUNC_1", "2"], ["F2", "Device Risk", "FUNC_2", "-1"]]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "sg.html"
+            write_visualization(
+                output,
+                report_title="Anti-fraud SG - Scenarios, Auth Steps, Features",
+                snapshot_pt_date="2026-07-31",
+                sheets=[
+                    ("Scenario Action Auth Flow", flow_headers, flow_rows),
+                    ("Features", feature_headers, feature_rows),
+                ],
+                report_id=AF_SG_SCENARIOS_AUTH_FEATURES_REPORT_ID,
+            )
+            html = output.read_text(encoding="utf-8")
+        self.assertIn("Scenario Action Auth Flow", html)
+        self.assertIn("Features", html)
+        self.assertIn("Features by Status", html)
+        self.assertIn("status 1 and status 2 are Active", html)
+        self.assertNotIn("Scenario Config Sheet", html)
 
 
 class RulesFeaturesBusinessInsightsTests(unittest.TestCase):

@@ -47,6 +47,7 @@ from bpmis_jira_tool.business_insights import (  # noqa: E402
     AF_FACIAL_VERIFICATION_TABLE,
     AF_FRAUD_LOSS_REPORT_ID,
     AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID,
+    AF_SG_SCENARIOS_AUTH_FEATURES_REPORT_ID,
     AF_LIST_USAGE_REPORT_ID,
     AF_REQUEST_STATISTIC_TABLE,
     AF_REVIEW_CASE_TABLE,
@@ -2512,6 +2513,59 @@ def write_visualization(
     sheets: list[tuple[str, list[str], list[list[Any]]]],
     report_id: str = "",
 ) -> None:
+    if report_id == AF_SG_SCENARIOS_AUTH_FEATURES_REPORT_ID:
+        sg_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
+        flow = sg_lookup.get("Scenario Action Auth Flow")
+        features = sg_lookup.get("Features")
+        summary_cards: list[tuple[str, str]] = []
+        panels: list[str] = []
+        if flow:
+            flow_headers, flow_rows = flow
+            summary_cards.append(("Scenario / auth mappings", _format_number(len(flow_rows))))
+            step_columns = {i for i, h in enumerate(flow_headers) if str(h).strip().lower().endswith("_step")}
+            panels.append(_searchable_table_panel(
+                "Scenario Action Auth Flow",
+                flow_headers,
+                flow_rows,
+                placeholder="Search scenario, action or auth step…",
+                step_columns=step_columns,
+                note="Source tab: 1_scenario_action_auth_flow from the uploaded SG Anti Fraud workbook.",
+            ))
+        if features:
+            feature_headers, feature_rows = features
+            summary_cards.append(("Features", _format_number(len(feature_rows))))
+            status_counts = _group_count(feature_headers, feature_rows, "feature_status")
+            if status_counts:
+                summary_cards.append(("Feature statuses", _format_number(len(status_counts))))
+                status_panel = _bar_panel(
+                    "Features by Status",
+                    _relabel_group_counts(status_counts, _FEATURE_STATUS_LABELS),
+                    note="Feature status interpretation: status 1 and status 2 are Active; status -1 is Inactive.",
+                )
+                if status_panel:
+                    panels.append(status_panel)
+            panels.append(_searchable_table_panel(
+                "Features",
+                feature_headers,
+                feature_rows,
+                placeholder="Search feature, function or scenario…",
+                column_notes={
+                    "feature_status": "Feature status: 1 = Active, 2 = Active (alternate/legacy active encoding), -1 = Inactive.",
+                },
+                note="Source tab: 2_features from the uploaded SG Anti Fraud workbook.",
+            ))
+        intro = _kpi_cards_panel("Snapshot Summary", summary_cards) if summary_cards else ""
+        path.write_text(
+            _searchable_tables_document(
+                report_title,
+                snapshot_pt_date,
+                panels,
+                intro_html=intro,
+                data_through=_data_through(sheets),
+            ),
+            encoding="utf-8",
+        )
+        return
     if report_id == AF_SCENARIOS_ACTIONS_REPORT_ID:
         sc_lookup = {sheet_name: (headers, rows) for sheet_name, headers, rows in sheets}
         flow = sc_lookup.get("Scenario Action Auth Flow")
@@ -4281,6 +4335,7 @@ def refresh_existing_visualizations(portal_data_dir: Path, *, report_ids: list[s
     root = artifacts_dir(portal_data_dir)
     title_by_report = {
         UNDERWRITING_FUNNEL_REPORT_ID: "Credit Risk PH - Underwriting Funnel",
+        AF_SG_SCENARIOS_AUTH_FEATURES_REPORT_ID: "Anti-fraud SG - Scenarios, Auth Steps, Features",
         **{report_id: title for report_id, (title, _builder) in REPORT_BUILDERS.items()},
     }
     for report_id, artifact in artifacts.items():
@@ -4314,6 +4369,7 @@ def normalize_existing_product_labels(portal_data_dir: Path, *, report_ids: list
     root = artifacts_dir(portal_data_dir)
     title_by_report = {
         UNDERWRITING_FUNNEL_REPORT_ID: "Credit Risk PH - Underwriting Funnel",
+        AF_SG_SCENARIOS_AUTH_FEATURES_REPORT_ID: "Anti-fraud SG - Scenarios, Auth Steps, Features",
         **{report_id: title for report_id, (title, _builder) in REPORT_BUILDERS.items()},
     }
     for report_id, artifact in artifacts.items():

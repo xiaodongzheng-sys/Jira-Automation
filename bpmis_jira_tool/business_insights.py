@@ -96,6 +96,7 @@ PRODUCT_LABEL_COLUMNS: set[str] = {"product", "product_code", "sub-product", "su
 #   ods.mbs_anti_fraud_<table>_ss                      (rule / feature config)
 AF_SCENARIOS_ACTIONS_REPORT_ID = "anti-fraud-ph-scenarios-actions-auth-steps"
 AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID = "anti-fraud-id-scenarios-auth-rules-features"
+AF_SG_SCENARIOS_AUTH_FEATURES_REPORT_ID = "anti-fraud-sg-scenarios-auth-steps-features"
 AF_RULES_FEATURES_REPORT_ID = "anti-fraud-ph-rules-features"
 AF_RULE_EFFECTIVENESS_REPORT_ID = "anti-fraud-ph-rule-effectiveness"
 AF_FRAUD_LOSS_REPORT_ID = "anti-fraud-ph-fraud-loss-cases"
@@ -149,6 +150,14 @@ AF_TWO_WAY_RELATION_CONFIG_TABLE = "ods.ph_seabank_anti_fraud_db_two_way_templat
 AF_TWO_WAY_COMMUNICATION_TABLE = "ods.ph_seabank_anti_fraud_db_two_way_communication_tab_di"
 
 SEEDED_REPORTS: tuple[dict[str, str], ...] = (
+    {
+        "id": AF_SG_SCENARIOS_AUTH_FEATURES_REPORT_ID,
+        "domain": "anti-fraud",
+        "name": "Anti-fraud SG - Scenarios, Auth Steps, Features",
+        "type": "af_static_workbook",
+        "status": "ready",
+        "source_label": "Uploaded Excel",
+    },
     {
         "id": AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID,
         "domain": "anti-fraud",
