@@ -848,7 +848,9 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
         self.assertIn("Scenario Action Auth Flow", html)
         self.assertIn("Features", html)
         self.assertIn("Features by Status", html)
+        self.assertIn("Top Function IDs by Feature Count", html)
         self.assertIn("status 1 and status 2 are Active", html)
+        self.assertIn(">Active</td>", html)
         self.assertNotIn("Scenario Config Sheet", html)
 
 
@@ -994,7 +996,7 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
             html = output_path.read_text(encoding="utf-8")
         # Function-usage KPI, ranking bar chart, and searchable table all render.
         self.assertIn("Functions in use", html)
-        self.assertIn("<h2>Top Functions by Feature Count</h2>", html)
+        self.assertIn("<h2>Top Function IDs by Feature Count</h2>", html)
         self.assertIn("<h2>Function Usage</h2>", html)
         self.assertIn("Search function id", html)
         self.assertIn("example_features", html)
@@ -1005,6 +1007,30 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
         self.assertNotIn("<h2>Rule Treatment Config Coverage Summary</h2>", html)
         self.assertNotIn("<h2>Rule Treatment Config Coverage by Treatment Type</h2>", html)
         self.assertNotIn("<h2>Rule Treatment Config Coverage by Template Linkage</h2>", html)
+
+    def test_function_chart_excludes_inactive_features_and_labels_status_two_active(self):
+        sheets = [
+            ("Rules", ["rule_id", "rule_status"], [["R1", "Active"]]),
+            ("Features", ["feature_id", "function_id", "feature_status"], [
+                ["F1", "FUNC_ACTIVE", "Active"],
+                ["F2", "FUNC_ACTIVE", "2"],
+                ["F3", "FUNC_INACTIVE", "Inactive"],
+            ]),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "viz.html"
+            write_visualization(
+                output_path,
+                report_title="Anti-fraud PH - Rules & Features",
+                snapshot_pt_date="2026-06-08",
+                sheets=sheets,
+                report_id=AF_RULES_FEATURES_REPORT_ID,
+            )
+            html = output_path.read_text(encoding="utf-8")
+        chart = html.split("Top Function IDs by Feature Count", 1)[1].split("</section>", 1)[0]
+        self.assertIn("FUNC_ACTIVE", chart)
+        self.assertNotIn("FUNC_INACTIVE", chart)
+        self.assertIn(">Active</td>", html)
 
 
 class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
@@ -2197,14 +2223,14 @@ class BusinessInsightsSheetRefreshTests(unittest.TestCase):
 
         self.assertIn("Snapshot Summary", html)
         self.assertIn("Scenario mappings", html)
-        self.assertIn("Top Scenario Groups by Mapping Count", html)
+        self.assertNotIn("Top Scenario Groups by Mapping Count", html)
         self.assertIn("Top Auth Steps by Mapping Count", html)
         self.assertIn("Rules by Outcome Type", html)
         self.assertIn("Features by Status", html)
         self.assertIn("Feature status interpretation: status 1 and status 2 are Active", html)
         self.assertIn("2 = Active (alternate/legacy active encoding)", html)
         self.assertIn("Top Function IDs by Feature Count", html)
-        self.assertIn("Largest scenario group", html)
+        self.assertNotIn("Largest scenario group", html)
         self.assertIn("Most-used auth step", html)
         self.assertIn("Most-reused function", html)
         self.assertIn("Search scene, action or auth step", html)

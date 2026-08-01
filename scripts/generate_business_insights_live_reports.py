@@ -753,6 +753,18 @@ def _group_count(headers: list[str], rows: list[list[Any]], label_column: str) -
 _FEATURE_STATUS_LABELS = {"1": "Active", "2": "Active", "-1": "Inactive"}
 
 
+def _active_feature_rows(headers: list[str], rows: list[list[Any]]) -> list[list[Any]]:
+    """Return feature rows encoded as Active or status 2 (plus raw status 1)."""
+    status_index = next((i for i, header in enumerate(headers) if str(header).strip().lower() == "feature_status"), None)
+    if status_index is None:
+        return rows
+    active_values = {"active", "1", "2"}
+    return [
+        row for row in rows
+        if status_index < len(row) and str(row[status_index]).strip().lower() in active_values
+    ]
+
+
 def _relabel_group_counts(
     pairs: list[tuple[str, float]],
     labels: dict[str, str],
@@ -1369,14 +1381,22 @@ def _searchable_table_panel(
 
     header_html = "".join(_th(index, header) for index, header in enumerate(headers))
 
-    def _cell(value: Any) -> str:
-        return "" if value is None else str(value)
+    def _cell(header: str, value: Any) -> str:
+        if value is None:
+            return ""
+        if str(header).strip().lower() == "feature_status":
+            status = str(value).strip()
+            if status in {"1", "2", "Active", "active"}:
+                return "Active"
+            if status in {"-1", "Inactive", "inactive"}:
+                return "Inactive"
+        return str(value)
 
     body_rows = []
     for row in rows:
         cells = "".join(
             f"<td{' class=step' if index in step_columns else ''}>"
-            f"{html.escape(_cell(row[index] if index < len(row) else ''))}</td>"
+            f"{html.escape(_cell(headers[index], row[index] if index < len(row) else ''))}</td>"
             for index in range(len(headers))
         )
         body_rows.append(f"<tr>{cells}</tr>")
@@ -2544,6 +2564,15 @@ def write_visualization(
                 )
                 if status_panel:
                     panels.append(status_panel)
+            function_counts = _group_count(feature_headers, _active_feature_rows(feature_headers, feature_rows), "function_id")
+            if function_counts:
+                function_panel = _bar_panel(
+                    "Top Function IDs by Feature Count",
+                    function_counts[:12],
+                    note="Active features only: status Active, 1, or 2; inactive features are excluded.",
+                )
+                if function_panel:
+                    panels.append(function_panel)
             panels.append(_searchable_table_panel(
                 "Features",
                 feature_headers,
@@ -2820,18 +2849,17 @@ def write_visualization(
             )
             if fbar:
                 chart_panels.append(fbar)
-        if func_usage and func_usage[1]:
-            uc = {str(c): i for i, c in enumerate(func_usage[0])}
-            if "function_id" in uc and "features" in uc:
-                pairs = [
-                    (str(r[uc["function_id"]]), r[uc["features"]])
-                    for r in func_usage[1]
-                    if uc["function_id"] < len(r) and uc["features"] < len(r)
-                ]
+        if features:
+            active_function_counts = _group_count(
+                features[0],
+                _active_feature_rows(features[0], features[1]),
+                "function_id",
+            )
+            if active_function_counts:
                 ubar = _bar_panel(
-                    "Top Functions by Feature Count",
-                    sorted(pairs, key=lambda kv: _number(kv[1]), reverse=True)[:15],
-                    note="Metric functions (function_id) ranked by how many configured features use them.",
+                    "Top Function IDs by Feature Count",
+                    active_function_counts[:15],
+                    note="Active features only: status Active, 1, or 2; inactive features are excluded.",
                 )
                 if ubar:
                     chart_panels.append(ubar)
@@ -3309,22 +3337,6 @@ def write_visualization(
                     if distinct:
                         summary_cards.append((label, _format_number(len(distinct))))
 
-            scenario_group_count = _group_count(flow_headers, flow_rows, "scenario_group_name")
-            if scenario_group_count:
-                panel = _bar_panel(
-                    "Top Scenario Groups by Mapping Count",
-                    scenario_group_count[:12],
-                    note="Number of scenario-action-auth-step mappings under each scenario group.",
-                )
-                if panel:
-                    chart_panels.append(panel)
-                top_group, top_group_count = scenario_group_count[0]
-                insight_cards.append((
-                    "Largest scenario group",
-                    f"{top_group} — {_format_number(top_group_count)} mappings",
-                    "",
-                ))
-
             auth_step_count = _group_count(flow_headers, flow_rows, "auth_step")
             if auth_step_count:
                 panel = _bar_panel(
@@ -3340,16 +3352,6 @@ def write_visualization(
                     f"{top_auth} — {_format_number(top_auth_count)} mappings",
                     "",
                 ))
-
-            action_count = _group_count(flow_headers, flow_rows, "action_name")
-            if action_count:
-                panel = _bar_panel(
-                    "Top Actions by Mapping Count",
-                    action_count[:12],
-                    note="Which product actions carry the most configured auth-step mappings.",
-                )
-                if panel:
-                    chart_panels.append(panel)
 
             step_columns = {i for i, h in enumerate(flow_headers) if str(h).strip().lower().endswith("_step")}
             populated_steps = 0
@@ -3433,7 +3435,7 @@ def write_visualization(
                 if panel:
                     chart_panels.append(panel)
 
-            function_counts = _group_count(feature_headers, feature_rows, "function_id")
+            function_counts = _group_count(feature_headers, _active_feature_rows(feature_headers, feature_rows), "function_id")
             if function_counts:
                 panel = _bar_panel(
                     "Top Function IDs by Feature Count",
