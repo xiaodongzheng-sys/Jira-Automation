@@ -471,19 +471,16 @@ class BusinessInsightsLoginRequiredTests(unittest.TestCase):
         self.assertEqual(r["source_code"].status_code, 200)
         self.assertEqual(r["version_plan"].status_code, 200)
 
-    def test_monee_and_seamoney_users_see_anti_fraud_only(self):
+    def test_monee_and_seamoney_users_are_blocked(self):
         for email in ("analyst@monee.com", "analyst@seamoney.com"):
             with self.subTest(email=email):
                 r = self._probe(email)
-                self.assertEqual(r["bi_page"].status_code, 200)
-                html = r["bi_page"].get_data(as_text=True)
-                self.assertIn('data-business-insights-tab="anti-fraud"', html)
-                self.assertNotIn('data-business-insights-tab="credit-risk"', html)
-                self.assertNotIn("data-download-password-form", html)
-                self.assertEqual(r["cr_reports"].get_json()["reports"], [])
-                self.assertEqual(r["cr_sql"].status_code, 404)
-                self.assertEqual(r["source_code"].status_code, 200)
-                self.assertEqual(r["version_plan"].status_code, 200)
+                for page in (r["bi_page"], r["source_code"], r["version_plan"], r["landing"]):
+                    self.assertEqual(page.status_code, 302)
+                    self.assertEqual(page.headers["Location"], "/access-denied")
+                self.assertEqual(r["af_reports"].status_code, 403)
+                self.assertEqual(r["cr_reports"].status_code, 403)
+                self.assertEqual(r["cr_sql"].status_code, 403)
 
     def test_external_domain_user_is_blocked(self):
         r = self._probe("stranger@external.com")
@@ -753,6 +750,36 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
             "business_insights/artifacts/viz.html",
             Path(temp_dir) / "artifacts" / "viz.html",
             max_age_seconds=public_gcs.PUBLIC_GCS_METADATA_TTL_SECONDS,
+        )
+
+    def test_cloud_run_bucket_is_a_valid_metadata_read_fallback(self):
+        from bpmis_jira_tool import public_artifacts_gcs as public_gcs
+
+        with patch.dict(
+            os.environ,
+            {
+                "TEAM_PORTAL_PUBLIC_GCS_BUCKET": "",
+                "CLOUD_RUN_PUBLIC_GCS_BUCKET": "public-bucket",
+            },
+            clear=False,
+        ):
+            self.assertEqual(public_gcs.public_gcs_read_bucket(), "public-bucket")
+
+    def test_forced_metadata_hydration_skips_the_local_ttl(self):
+        from bpmis_jira_tool import public_artifacts_gcs as public_gcs
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"TEAM_PORTAL_PUBLIC_GCS_BUCKET": "public-bucket"},
+            clear=False,
+        ), patch.object(public_gcs, "gcs_fetch_to_file", return_value=True) as fetch:
+            self.assertTrue(public_gcs.hydrate_business_insights_metadata(Path(temp_dir), max_age_seconds=0))
+
+        fetch.assert_called_once_with(
+            "public-bucket",
+            "business_insights/reports.json",
+            Path(temp_dir) / "reports.json",
+            max_age_seconds=0,
         )
 
     def test_generator_report_builders_include_scenarios_actions(self):

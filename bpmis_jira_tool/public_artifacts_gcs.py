@@ -41,7 +41,11 @@ _CLIENT: Any = None
 
 
 def public_gcs_read_bucket() -> str:
-    return str(os.environ.get(PUBLIC_GCS_READ_BUCKET_ENV) or "").strip()
+    return str(
+        os.environ.get(PUBLIC_GCS_READ_BUCKET_ENV)
+        or os.environ.get(CLOUD_RUN_PUBLIC_GCS_BUCKET_ENV)
+        or ""
+    ).strip()
 
 
 def public_gcs_publish_bucket() -> str:
@@ -336,7 +340,11 @@ def publish_business_insights_dir(root_dir: Path) -> int:
     return uploaded
 
 
-def hydrate_business_insights_metadata(root_dir: Path) -> bool:
+def hydrate_business_insights_metadata(
+    root_dir: Path,
+    *,
+    max_age_seconds: float | None = PUBLIC_GCS_METADATA_TTL_SECONDS,
+) -> bool:
     """Refresh the local reports.json copy from GCS (Cloud Run side)."""
     bucket_name = public_gcs_read_bucket()
     if not bucket_name:
@@ -345,7 +353,7 @@ def hydrate_business_insights_metadata(root_dir: Path) -> bool:
         bucket_name,
         "business_insights/reports.json",
         Path(root_dir) / "reports.json",
-        max_age_seconds=PUBLIC_GCS_METADATA_TTL_SECONDS,
+        max_age_seconds=max_age_seconds,
     )
 
 

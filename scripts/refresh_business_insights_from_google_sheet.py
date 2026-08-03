@@ -24,7 +24,10 @@ from bpmis_jira_tool.business_insights_sheet_refresh import (
     load_stored_google_sheets_credentials,
     refresh_anti_fraud_reports_from_google_sheet,
 )
-from bpmis_jira_tool.public_artifacts_gcs import hydrate_business_insights_metadata
+from bpmis_jira_tool.public_artifacts_gcs import (
+    hydrate_business_insights_metadata,
+    public_gcs_read_bucket,
+)
 from scripts.generate_business_insights_live_reports import DEFAULT_PORTAL_DATA_DIR, _publish_to_public_gcs
 
 
@@ -94,8 +97,11 @@ def main() -> int:
     # Cloud Run Jobs use an ephemeral directory. Keep metadata for reports
     # refreshed by another source (for example, the ID Sheet) when publishing
     # the PH-only refresh back to the shared bucket.
-    if os.getenv("TEAM_PORTAL_PUBLIC_GCS_BUCKET", "").strip():
-        hydrate_business_insights_metadata(portal_data_dir / "business_insights")
+    if public_gcs_read_bucket():
+        hydrate_business_insights_metadata(
+            portal_data_dir / "business_insights",
+            max_age_seconds=0,
+        )
     credentials = load_google_sheets_credentials(args)
     service = build_sheets_service(credentials)
     configured_report_ids = [
