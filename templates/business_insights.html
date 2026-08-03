@@ -82,7 +82,7 @@
                           {% if artifact and artifact.url %}
                             <a class="button button-secondary" href="{{ artifact.url }}" data-business-insights-download>Download Excel</a>
                           {% endif %}
-                          {% if report.status == "generator_ready" %}
+                          {% if report.status == "generator_ready" and report.show_manual_data_actions %}
                             <a
                               class="button button-secondary"
                               data-business-insights-sql
@@ -99,7 +99,7 @@
                             {% endif %}
                           {% endif %}
                         </div>
-                        {% if report.status == "generator_ready" %}
+                        {% if report.status == "generator_ready" and report.show_manual_data_actions %}
                           <p class="business-insights-status" data-business-insights-status></p>
                         {% endif %}
                       </div>

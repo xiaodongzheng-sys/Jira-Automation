@@ -349,7 +349,8 @@ class BusinessInsightsTests(unittest.TestCase):
         # Detection-effectiveness and rule-change-log are folded into other reports, not standalone.
         self.assertNotIn("Anti-fraud PH - Detection Effectiveness &amp; Loss Prevented", response.get_data(as_text=True))
         self.assertNotIn("Anti-fraud PH - Rule Change Log &amp; Governance", response.get_data(as_text=True))
-        self.assertEqual(response.get_data(as_text=True).count("Download SQL"), 8)
+        self.assertNotIn("Download SQL", response.get_data(as_text=True))
+        self.assertNotIn("Refresh data", response.get_data(as_text=True))
         self.assertNotIn("Upload Export", response.get_data(as_text=True))
         self.assertIsNone(soup.select_one("[data-business-insights-upload]"))
 
@@ -1672,7 +1673,7 @@ class BusinessInsightsGenerationRouteTests(unittest.TestCase):
             session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
             session["google_credentials"] = {"token": "x"}
 
-    def test_refresh_button_renders_for_generator_reports(self):
+    def test_ph_generator_controls_are_hidden_from_the_portal(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, self._client_env(temp_dir), clear=True):
             app = create_app()
             app.testing = True
@@ -1681,10 +1682,12 @@ class BusinessInsightsGenerationRouteTests(unittest.TestCase):
                 page = client.get("/business-insights?domain=anti-fraud")
                 reports = client.get("/api/business-insights/reports?domain=anti-fraud").get_json()
         soup = BeautifulSoup(page.get_data(as_text=True), "html.parser")
-        self.assertTrue(soup.select("[data-business-insights-generate]"))
+        self.assertFalse(soup.select("[data-business-insights-generate]"))
+        self.assertFalse(soup.select("[data-business-insights-sql]"))
         rule_eff = next(r for r in reports["reports"] if r["id"] == AF_RULE_EFFECTIVENESS_REPORT_ID)
-        self.assertTrue(rule_eff["can_generate"])
-        self.assertIn("/generate", rule_eff["generate_url"])
+        self.assertFalse(rule_eff["show_manual_data_actions"])
+        self.assertFalse(rule_eff["can_generate"])
+        self.assertNotIn("generate_url", rule_eff)
         funnel = next((r for r in reports["reports"] if r["id"] == UNDERWRITING_FUNNEL_REPORT_ID), None)
         if funnel is not None:
             self.assertFalse(funnel["can_generate"])

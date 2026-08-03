@@ -77,8 +77,16 @@ def build_business_insights_handlers(ctx: Any) -> Any:
             item["source_label"] = str(item.get("source_label") or (artifact or {}).get("source_label") or "Source")
         item["sql_url"] = url_for("business_insights_report_sql", report_id=item["id"])
         item["ingest_url"] = url_for("business_insights_report_ingest", report_id=item["id"])
+        # PH Anti-fraud reports are refreshed by their scheduled Google Sheet job.
+        # Keep the underlying endpoints for operations, but do not expose manual
+        # SQL download or Data Workbench refresh controls in the portal.
+        item["show_manual_data_actions"] = not str(item["id"]).startswith("anti-fraud-ph-")
         # The on-demand "Refresh data" button re-runs the Data Workbench generator; admins only.
-        item["can_generate"] = item["id"] in GENERATOR_REPORT_IDS and bool(ctx._can_refresh_business_insights(settings))
+        item["can_generate"] = (
+            item["show_manual_data_actions"]
+            and item["id"] in GENERATOR_REPORT_IDS
+            and bool(ctx._can_refresh_business_insights(settings))
+        )
         if item["can_generate"]:
             item["generate_url"] = url_for("business_insights_report_generate", report_id=item["id"])
             item["generate_status_url"] = url_for("business_insights_report_generate_status", report_id=item["id"])
