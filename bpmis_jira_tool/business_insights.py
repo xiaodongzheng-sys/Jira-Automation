@@ -154,9 +154,10 @@ SEEDED_REPORTS: tuple[dict[str, str], ...] = (
         "id": AF_SG_SCENARIOS_AUTH_FEATURES_REPORT_ID,
         "domain": "anti-fraud",
         "name": "Anti-fraud SG - Scenarios, Auth Steps, Features",
-        "type": "af_static_workbook",
+        "type": "af_sheet_backed",
         "status": "ready",
-        "source_label": "Uploaded Excel",
+        "source_label": "Google Sheet",
+        "source_url": "https://docs.google.com/spreadsheets/d/1YanQTsmi5s467uWRVRccqfJtr8xgj2kDujM4kG0r-eI/edit?gid=1061387676#gid=1061387676",
     },
     {
         "id": AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID,
@@ -981,7 +982,8 @@ def build_af_rules_features_sql(*, snapshot_pt_date: str | None = None, now: dat
 -- real_time = 1 else Punish, 2=Challenge, 3=Notification, 4=Reject+Punish, 5=Challenge+Punish, 6=Pass.
 -- rule status (engine RuleStatus enum): 1 = Active (live, enforcing the outcome), 2 = Collect Data
 -- (dry-run / shadow — the rule evaluates and logs hits but does NOT enforce its action), -1 = Inactive.
--- feature status 1=Active / -1=Inactive.
+-- feature status: the source DDL defines status > 0 as effective. In this report, 1 and 2 are both
+-- displayed as Active; -1 is Inactive.
 
 -- 1. Rules
 select
@@ -1021,7 +1023,7 @@ select
   fc.feature_id,
   fc.feature_name,
   fc.function_id,
-  case fc.status when 1 then 'Active' when -1 then 'Inactive' else cast(fc.status as string) end as feature_status,
+  case when fc.status in (1, 2) then 'Active' when fc.status = -1 then 'Inactive' else cast(fc.status as string) end as feature_status,
   fc.type as feature_type,
   fc.base_obj,
   fc.count_obj,
@@ -1037,7 +1039,7 @@ select
   fc.business_category
 from {AF_FEATURE_CONFIG_TABLE} fc
 where {feature_snap}
-order by case when fc.status = 1 then 0 else 1 end, fc.feature_id;
+order by case when fc.status > 0 then 0 else 1 end, fc.feature_id;
 
 -- 3. Function Usage
 -- The metric Function (function_id) dimension: every function used in the live feature config, with how
@@ -1047,7 +1049,7 @@ order by case when fc.status = 1 then 0 else 1 end, fc.feature_id;
 select
   fc.function_id,
   count(1) as features,
-  sum(case when fc.status = 1 then 1 else 0 end) as active_features,
+  sum(case when fc.status > 0 then 1 else 0 end) as active_features,
   count(distinct nullif(trim(fc.scene), '')) as distinct_scenes,
   count(distinct nullif(trim(fc.action), '')) as distinct_actions,
   count(distinct nullif(trim(fc.time_range), '')) as distinct_time_windows,

@@ -26,6 +26,7 @@ from bpmis_jira_tool.business_insights import (
     AF_LIST_USAGE_REPORT_ID,
     AF_RULE_EFFECTIVENESS_REPORT_ID,
     AF_RULES_FEATURES_REPORT_ID,
+    AF_SG_SCENARIOS_AUTH_FEATURES_REPORT_ID,
     AF_SCENARIOS_ACTIONS_REPORT_ID,
 )
 from bpmis_jira_tool.errors import ConfigError, ToolError
@@ -51,12 +52,22 @@ ANTI_FRAUD_SHEET_REPORT_ORDER: tuple[tuple[int, str], ...] = (
 )
 _REPORT_PREFIX_BY_ID = {report_id: prefix for prefix, report_id in ANTI_FRAUD_SHEET_REPORT_ORDER}
 ANTI_FRAUD_SHEET_REPORT_IDS = tuple(report_id for _prefix, report_id in ANTI_FRAUD_SHEET_REPORT_ORDER)
-EXTRA_GOOGLE_SHEET_SECTIONS_BY_REPORT: dict[str, tuple[tuple[str, str], ...]] = {
+DIRECT_GOOGLE_SHEET_SECTIONS_BY_REPORT: dict[str, tuple[tuple[str, str], ...]] = {
     AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID: (
         ("Scenario Action Auth Flow", "scenario_action_auth_flow"),
         ("Rules", "rules"),
         ("Features", "features"),
     ),
+    AF_SG_SCENARIOS_AUTH_FEATURES_REPORT_ID: (
+        ("Scenario Action Auth Flow", "1_scenario_action_auth_flow"),
+        ("Features", "2_features"),
+    ),
+}
+DIRECT_GOOGLE_SHEET_REPORT_TITLES = {
+    AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID: "Anti-fraud ID - Scenarios, Auth Steps, Rules, Features",
+    AF_SG_SCENARIOS_AUTH_FEATURES_REPORT_ID: "Anti-fraud SG - Scenarios, Auth Steps, Features",
+}
+EXTRA_GOOGLE_SHEET_SECTIONS_BY_REPORT: dict[str, tuple[tuple[str, str], ...]] = {
     AF_RULES_FEATURES_REPORT_ID: (
         ("Rule Treatment Config Coverage", "2_rule_treatment_config_coverage"),
     ),
@@ -220,22 +231,26 @@ def refresh_anti_fraud_reports_from_google_sheet(
 
     active_now = now or datetime.now(ZoneInfo("Asia/Singapore"))
     selected_report_ids = report_ids or list(ANTI_FRAUD_SHEET_REPORT_IDS)
-    unsupported = [report_id for report_id in selected_report_ids if report_id not in _REPORT_PREFIX_BY_ID]
+    supported_report_ids = set(_REPORT_PREFIX_BY_ID) | set(DIRECT_GOOGLE_SHEET_SECTIONS_BY_REPORT)
+    unsupported = [report_id for report_id in selected_report_ids if report_id not in supported_report_ids]
     if unsupported:
         raise ToolError(f"Unsupported sheet-backed report ids: {', '.join(unsupported)}")
 
     report_sections: dict[str, list[tuple[str, str]]] = {}
     sheet_names: list[str] = []
     sql_by_report: dict[str, str] = {}
+    report_titles: dict[str, str] = {}
     for report_id in selected_report_ids:
-        config = REPORT_BUILDERS.get(report_id)
-        if config is None and report_id != AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID:
-            raise ToolError(f"No Business Insights builder configured for {report_id}.")
-        if report_id == AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID:
-            title = "Anti-fraud ID - Scenarios, Auth Steps, Rules, Features"
+        direct_sections = DIRECT_GOOGLE_SHEET_SECTIONS_BY_REPORT.get(report_id)
+        if direct_sections:
+            title = DIRECT_GOOGLE_SHEET_REPORT_TITLES[report_id]
             sql = ""
-            sections = []
+            sections = list(direct_sections)
+            sheet_names.extend(google_tab for _display_name, google_tab in sections)
         else:
+            config = REPORT_BUILDERS.get(report_id)
+            if config is None:
+                raise ToolError(f"No Business Insights builder configured for {report_id}.")
             title, builder = config
             sql = builder(snapshot_pt_date=None, now=active_now)
             sections = []
@@ -248,7 +263,8 @@ def refresh_anti_fraud_reports_from_google_sheet(
             sections.append((display_name, google_tab))
             sheet_names.append(google_tab)
         report_sections[report_id] = sections
-        if report_id == AF_ID_SCENARIOS_AUTH_RULES_FEATURES_REPORT_ID:
+        report_titles[report_id] = title
+        if report_id in DIRECT_GOOGLE_SHEET_REPORT_TITLES:
             REPORT_BUILDERS.setdefault(report_id, (title, lambda **_kwargs: ""))
 
     fetched = _fetch_sheet_values(
@@ -261,7 +277,7 @@ def refresh_anti_fraud_reports_from_google_sheet(
     artifact_root.mkdir(parents=True, exist_ok=True)
     refreshed: list[dict[str, Any]] = []
     for report_id in selected_report_ids:
-        title, _builder = REPORT_BUILDERS[report_id]
+        title = report_titles[report_id]
         sheets = []
         source_tabs = []
         for display_name, google_tab in report_sections[report_id]:

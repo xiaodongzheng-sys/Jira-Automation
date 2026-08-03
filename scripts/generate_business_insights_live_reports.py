@@ -2496,7 +2496,15 @@ _RULES_COL_NOTES = {
     ),
 }
 _FEATURES_COL_NOTES = {
+    "feature_id": "Unique identifier of this feature configuration record.",
+    "feature_name": "Business name of the feature referenced by rules and used in risk evaluation.",
     "feature_type": "Engine feature type code (rule_config feature taxonomy). 1 = the standard metric-based feature.",
+    "base_obj": "Base object the feature evaluates or counts, as configured in feature_config_tab.",
+    "count_obj": "Object counted or aggregated by the feature. Its interpretation depends on the selected function_id.",
+    "count_window_seconds": "Feature time window in seconds (feature_config_tab.time_range).",
+    "time_range": "Feature time window in seconds. The visualization keeps the raw configured value.",
+    "operator": "Comparison operator used when the feature result is evaluated against threshold.",
+    "threshold": "Configured threshold for the feature comparison. It is a rule input, not an observed hit rate.",
     "event_status": (
         "Engine EventStatus the feature counts: 0 = Fail events only, 1 = Success events only, 2 = All "
         "events (pass + fail)."
@@ -2511,6 +2519,35 @@ _FEATURES_COL_NOTES = {
         "engine's function catalog / design docs; the Function Usage sheet lists how each is used."
     ),
     "consecutive": "Whether the feature requires consecutive occurrences (Y) or any occurrences (N).",
+    "scene": "L1 business scenario covered by this feature (feature_config_tab.scene).",
+    "sub_scene": "L2 business scenario covered by this feature. The flow-config convention uses All when no L2-specific scope applies.",
+    "action": "Business action covered by this feature (feature_config_tab.action).",
+    "create_date": "Feature configuration creation timestamp in milliseconds since Unix epoch.",
+    "modify_date": "Feature configuration last-modified timestamp in milliseconds since Unix epoch.",
+    "creator": "User or system that created the configuration record.",
+    "modifier": "User or system that last modified the configuration record.",
+}
+_SCENARIO_FLOW_COL_NOTES = {
+    "scene": "L1 business scenario (biz_scenario_flow_config_tab.scene).",
+    "sub_scene": "L2 business scenario. The source convention uses All when no L2-specific configuration applies.",
+    "action": "Business action to which the authentication flow applies.",
+    "l1_scene_name": "Human-readable L1 business scenario name.",
+    "l1_enum_name": "L1 scenario enum identifier used by the anti-fraud engine.",
+    "l2_sub_scene_name": "Human-readable L2 business scenario name.",
+    "l2_enum_name": "L2 scenario enum identifier used by the anti-fraud engine.",
+    "action_name": "Human-readable business action name.",
+    "action_enum_name": "Business action enum identifier used by the anti-fraud engine.",
+    "scenario_group_id": "Identifier of the scenario group mapped to this action.",
+    "scenario_group_name": "Display name of the scenario group mapped to this action.",
+    "scenario_group_description": "Business description of the mapped scenario group.",
+    "default_step": "Authentication steps for the default risk outcome (no step-up challenge).",
+    "challenge1_step": "Authentication steps for challenge tier 1.",
+    "challenge2_step": "Authentication steps for challenge tier 2.",
+    "challenge3_step": "Authentication steps for challenge tier 3.",
+    "challenge4_step": "Authentication steps for challenge tier 4.",
+    "challenge5_step": "Authentication steps for challenge tier 5.",
+    "create_date": "Flow configuration creation timestamp in milliseconds since Unix epoch.",
+    "modify_date": "Flow configuration last-modified timestamp in milliseconds since Unix epoch.",
 }
 _REJECT_TYPE_NOTE = (
     "Engine RejectType family (output class): 1 = hard reject (black-list / punish-list / realtime "
@@ -2549,7 +2586,8 @@ def write_visualization(
                 flow_rows,
                 placeholder="Search scenario, action or auth step…",
                 step_columns=step_columns,
-                note="Source tab: 1_scenario_action_auth_flow from the uploaded SG Anti Fraud workbook.",
+                column_notes=_SCENARIO_FLOW_COL_NOTES,
+                note="Source tab: 1_scenario_action_auth_flow from the SG Google Sheet.",
             ))
         if features:
             feature_headers, feature_rows = features
@@ -2579,9 +2617,10 @@ def write_visualization(
                 feature_rows,
                 placeholder="Search feature, function or scenario…",
                 column_notes={
-                    "feature_status": "Feature status: 1 = Active, 2 = Active (alternate/legacy active encoding), -1 = Inactive.",
+                    "feature_status": "Feature status: the source DDL defines status > 0 as effective. Status 1 and 2 are both displayed as Active; -1 is Inactive.",
+                    **_FEATURES_COL_NOTES,
                 },
-                note="Source tab: 2_features from the uploaded SG Anti Fraud workbook.",
+                note="Source tab: 2_features from the SG Google Sheet.",
             ))
         intro = _kpi_cards_panel("Snapshot Summary", summary_cards) if summary_cards else ""
         path.write_text(

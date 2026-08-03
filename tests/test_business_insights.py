@@ -851,6 +851,8 @@ class AntiFraudBusinessInsightsTests(unittest.TestCase):
         self.assertIn("Top Function IDs by Feature Count", html)
         self.assertIn("status 1 and status 2 are Active", html)
         self.assertIn(">Active</td>", html)
+        self.assertIn("Source tab: 1_scenario_action_auth_flow from the SG Google Sheet.", html)
+        self.assertIn("Unique identifier of this feature configuration record.", html)
         self.assertNotIn("Scenario Config Sheet", html)
 
 
@@ -1031,6 +1033,11 @@ class RulesFeaturesBusinessInsightsTests(unittest.TestCase):
         self.assertIn("FUNC_ACTIVE", chart)
         self.assertNotIn("FUNC_INACTIVE", chart)
         self.assertIn(">Active</td>", html)
+
+    def test_rules_features_sql_treats_positive_feature_statuses_as_active(self):
+        sql = build_af_rules_features_sql(snapshot_pt_date="2026-06-08", now=FIXED_NOW)
+        self.assertIn("case when fc.status in (1, 2) then 'Active'", sql)
+        self.assertIn("sum(case when fc.status > 0 then 1 else 0 end) as active_features", sql)
 
 
 class RuleEffectivenessBusinessInsightsTests(unittest.TestCase):
@@ -2176,6 +2183,46 @@ class BusinessInsightsSheetRefreshTests(unittest.TestCase):
         self.assertEqual(artifact["source_filename"], "google-sheet-scheduled-output")
         self.assertEqual(artifact["source_label"], "Google Sheet")
         self.assertEqual(workbook.sheetnames, ["Scenario Action Auth Flow", "Rules", "Features"])
+
+    def test_refresh_from_google_sheet_supports_sg_two_tab_report(self):
+        from bpmis_jira_tool.business_insights_sheet_refresh import (
+            refresh_anti_fraud_reports_from_google_sheet,
+        )
+
+        values_by_tab = {
+            "1_scenario_action_auth_flow": [
+                ["scene", "sub_scene", "action", "default_step", "challenge1_step"],
+                ["Login", "All", "LOGIN", "OTP", "FACE"],
+            ],
+            "2_features": [
+                ["feature_id", "feature_name", "function_id", "feature_status", "scene"],
+                ["SG-F1", "Login count", "FUNC_1", "2", "Login"],
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = refresh_anti_fraud_reports_from_google_sheet(
+                portal_data_dir=Path(temp_dir),
+                sheets_service=_FakeSheetsService(values_by_tab),
+                sheet_url="https://docs.google.com/spreadsheets/d/1YanQTsmi5s467uWRVRccqfJtr8xgj2kDujM4kG0r-eI/edit?gid=1061387676#gid=1061387676",
+                report_ids=[AF_SG_SCENARIOS_AUTH_FEATURES_REPORT_ID],
+                now=FIXED_NOW,
+            )
+            metadata = json.loads((Path(temp_dir) / "business_insights" / "reports.json").read_text(encoding="utf-8"))
+            artifact = metadata["artifacts"][AF_SG_SCENARIOS_AUTH_FEATURES_REPORT_ID]
+            html = (Path(temp_dir) / "business_insights" / "artifacts" / artifact["visualization_filename"]).read_text(encoding="utf-8")
+
+        self.assertEqual(result["report_count"], 1)
+        self.assertEqual(artifact["row_count"], 2)
+        self.assertEqual(
+            artifact["source_google_tabs"],
+            [
+                {"sheet": "Scenario Action Auth Flow", "google_tab": "1_scenario_action_auth_flow", "rows": 1},
+                {"sheet": "Features", "google_tab": "2_features", "rows": 1},
+            ],
+        )
+        self.assertIn("Source tab: 1_scenario_action_auth_flow from the SG Google Sheet.", html)
+        self.assertIn("Source tab: 2_features from the SG Google Sheet.", html)
 
     def test_id_sheet_backed_visualization_renders_summary_and_charts(self):
         flow_headers = [
