@@ -2224,6 +2224,38 @@ class BusinessInsightsSheetRefreshTests(unittest.TestCase):
         self.assertIn("Source tab: 1_scenario_action_auth_flow from the SG Google Sheet.", html)
         self.assertIn("Source tab: 2_features from the SG Google Sheet.", html)
 
+    def test_sheet_normalisation_removes_only_empty_trailing_columns(self):
+        from bpmis_jira_tool.business_insights_sheet_refresh import _normalise_values
+
+        headers, rows = _normalise_values([
+            ["feature_id", "feature_name", ""],
+            ["F1", "Login count", ""],
+        ])
+
+        self.assertEqual(headers, ["feature_id", "feature_name"])
+        self.assertEqual(rows, [["F1", "Login count"]])
+
+    def test_latest_rule_and_feature_columns_have_source_notes(self):
+        sheets = [
+            ("Rules", ["rule_id", "feature_expr", "ab_test", "notification_type"], [["R1", "F1 > 3", "1", "0"]]),
+            ("Features", ["feature_id", "script", "ext_attrs", "filter_script", "str1"], [["F1", "count()", "{}", "", ""]]),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "viz.html"
+            write_visualization(
+                output_path,
+                report_title="Anti-fraud PH - Rules & Features",
+                snapshot_pt_date="2026-08-03",
+                sheets=sheets,
+                report_id=AF_RULES_FEATURES_REPORT_ID,
+            )
+            html = output_path.read_text(encoding="utf-8")
+
+        self.assertIn("Expression that combines feature results", html)
+        self.assertIn("Whether the rule supports A/B testing", html)
+        self.assertIn("Configured feature calculation script", html)
+        self.assertIn("Reserved string extension field", html)
+
     def test_id_sheet_backed_visualization_renders_summary_and_charts(self):
         flow_headers = [
             "scene_name",

@@ -2475,6 +2475,9 @@ def _device_risk_signal_glossary_panel() -> str:
 
 # Shared column info-notes for backend-coded columns, so raw enum codes are explained inline.
 _RULES_COL_NOTES = {
+    "rule_id": "Unique identifier of the rule configuration record.",
+    "rule_name": "Business name of the configured anti-fraud rule.",
+    "feature_expr": "Expression that combines feature results for the rule decision.",
     "rule_status": (
         "Engine RuleStatus: Active = live and enforcing its outcome; Collect Data = dry-run / shadow "
         "(the rule evaluates and logs hits but does NOT enforce its action — used to observe a rule before "
@@ -2484,16 +2487,46 @@ _RULES_COL_NOTES = {
         "Raw rule status integer from rule_config: 1 = Active, 2 = Collect Data (dry-run/shadow), "
         "-1 = Inactive. See the rule_status column for the label."
     ),
+    "execution_mode": "Whether the rule is evaluated in real time (1) or non-real time / batch (0).",
+    "risk_level": "Configured risk severity classification for the rule.",
+    "priority": "Configured rule evaluation priority.",
     "review_priority": "Manual review priority assigned to cases this rule challenges (higher = reviewed sooner).",
+    "punish_action": "Business action(s) to which the configured punishment applies.",
+    "punish_scene": "L1 business scenario(s) to which the configured punishment applies.",
+    "punish_sub_scene": "L2 business scenario(s) to which the configured punishment applies.",
     "punish_length_sec": (
         "Configured punishment duration in seconds (rule_config.punish_length). Negative = no limit "
         "(permanent block); empty/null = not a punish rule. The punish_duration column shows it in hours."
     ),
     "punish_duration": "Human-readable punishment duration derived from punish_length_sec.",
+    "notice_template": "Configured customer notification template for the rule.",
+    "challenge_type": "Challenge type used when the rule outcome is Challenge.",
+    "punish_json": "JSON payload containing the configured punishment parameters.",
     "transify_key": (
         "Transify (i18n) key configured for the rejection — resolves to the localized error message / "
         "error code shown to the customer when this rule rejects. Empty for rules that don't reject."
     ),
+    "create_date": "Rule configuration creation timestamp in milliseconds since Unix epoch.",
+    "modify_date": "Rule configuration last-modified timestamp in milliseconds since Unix epoch.",
+    "version": "Configuration data version.",
+    "punish_target": "Target identifier or subject to which the configured punishment applies.",
+    "error_code": "Configured error code associated with the rule outcome.",
+    "punish_oneday": "Whether the configured punishment is limited to one day.",
+    "punish_desc": "Free-text description of the configured punishment.",
+    "unlock_condition": "Configured condition for lifting the punishment or restriction.",
+    "scenario_type": "Rule scenario scope: 0 uses the punish scenario; 1 uses the trigger/effective scenario.",
+    "ab_test": "Whether the rule supports A/B testing: 1 = enabled, 0 = disabled.",
+    "ab_test_group_type": "Configured A/B test grouping type.",
+    "ab_test_group_ratio": "Configured A/B test group ratio on a 1-1000 scale.",
+    "ab_test_start_time": "A/B test start timestamp.",
+    "ab_test_group_refresh_cycle": "A/B test group refresh cycle in days.",
+    "notification_type": "Notification type: 0 = general scam notification; 1 = card scam notification.",
+    "notification_title": "Configured customer notification title.",
+    "notification_content": "Configured customer notification content.",
+    "notification_primary_button": "Configured primary action label in the customer notification.",
+    "notification_second_button": "Configured secondary action label in the customer notification.",
+    "business_category": "Customer segment: 0 = Retail, 1 = Corporate.",
+    "uplift_noti_template_id": "Notification template identifier for an uplift flow.",
 }
 _FEATURES_COL_NOTES = {
     "feature_id": "Unique identifier of this feature configuration record.",
@@ -2518,6 +2551,9 @@ _FEATURES_COL_NOTES = {
         "Metric function the feature calls (e.g. F1, F10). The function's calculation logic lives in the "
         "engine's function catalog / design docs; the Function Usage sheet lists how each is used."
     ),
+    "script": "Configured feature calculation script.",
+    "ext_attrs": "JSON extension attributes configured for the feature.",
+    "version": "Configuration data version.",
     "consecutive": "Whether the feature requires consecutive occurrences (Y) or any occurrences (N).",
     "scene": "L1 business scenario covered by this feature (feature_config_tab.scene).",
     "sub_scene": "L2 business scenario covered by this feature. The flow-config convention uses All when no L2-specific scope applies.",
@@ -2526,6 +2562,22 @@ _FEATURES_COL_NOTES = {
     "modify_date": "Feature configuration last-modified timestamp in milliseconds since Unix epoch.",
     "creator": "User or system that created the configuration record.",
     "modifier": "User or system that last modified the configuration record.",
+    "str1": "Reserved string extension field; the source DDL does not assign a business meaning.",
+    "str2": "Reserved string extension field; the source DDL does not assign a business meaning.",
+    "str3": "Reserved string extension field; the source DDL does not assign a business meaning.",
+    "str4": "Reserved string extension field; the source DDL does not assign a business meaning.",
+    "str5": "Reserved string extension field; the source DDL does not assign a business meaning.",
+    "lon1": "Reserved long-integer extension field; the source DDL does not assign a business meaning.",
+    "lon2": "Reserved long-integer extension field; the source DDL does not assign a business meaning.",
+    "lon3": "Reserved long-integer extension field; the source DDL does not assign a business meaning.",
+    "in1": "Reserved integer extension field; the source DDL does not assign a business meaning.",
+    "in2": "Reserved integer extension field; the source DDL does not assign a business meaning.",
+    "in3": "Reserved integer extension field; the source DDL does not assign a business meaning.",
+    "in4": "Reserved integer extension field; the source DDL does not assign a business meaning.",
+    "in5": "Reserved integer extension field; the source DDL does not assign a business meaning.",
+    "filter_script": "Configured filter script applied to the feature.",
+    "depend_metric": "Metric dependency configured for the feature.",
+    "source": "Feature source: 1 = business; other values = rule system.",
 }
 _SCENARIO_FLOW_COL_NOTES = {
     "scene": "L1 business scenario (biz_scenario_flow_config_tab.scene).",

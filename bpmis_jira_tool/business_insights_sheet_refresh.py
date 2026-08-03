@@ -116,6 +116,14 @@ def _normalise_values(values: list[list[Any]]) -> tuple[list[str], list[list[Any
         return [], []
     headers = [str(value or "").strip() for value in values[0]]
     rows = [list(row) for row in values[1:] if any(value not in (None, "") for value in row)]
+    # Google Sheets can retain formatted-but-empty columns. Only discard a trailing
+    # blank header when that entire column is empty, so populated source data is kept.
+    while headers and not headers[-1] and all(
+        len(row) < len(headers) or row[len(headers) - 1] in (None, "")
+        for row in rows
+    ):
+        headers.pop()
+        rows = [row[:len(headers)] for row in rows]
     return headers, rows
 
 
