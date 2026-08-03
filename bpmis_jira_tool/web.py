@@ -322,6 +322,7 @@ if _dotenv_path:
 MARKET_KEYS = ["ID", "SG", "PH", "Regional"]
 PORTAL_ADMIN_EMAIL = "xiaodong.zheng@npt.sg"
 PORTAL_TEST_USER_EMAIL = "xiaodong.zheng1991@gmail.com"
+PORTAL_BLOCKED_EMAIL_DOMAINS = frozenset({"monee.com", "seamoney.com"})
 VERSION_PLAN_NAV_URL = "https://app.bankpmtool.uk/version-plan"
 TEAM_PROFILE_ADMIN_EMAIL = PORTAL_ADMIN_EMAIL
 SYNC_EMAIL_EDIT_ALLOWLIST = {PORTAL_ADMIN_EMAIL}
@@ -2006,6 +2007,9 @@ def _is_allowed_portal_user(email: str | None = None, settings: Settings | None 
     current_email = str(email or _current_google_email() or "").strip().lower()
     if not current_email:
         return False
+    domain = current_email.rsplit("@", 1)[-1] if "@" in current_email else ""
+    if domain in PORTAL_BLOCKED_EMAIL_DOMAINS:
+        return False
     if current_email == PORTAL_ADMIN_EMAIL:
         return True
     if current_email == PORTAL_TEST_USER_EMAIL:
@@ -2013,7 +2017,6 @@ def _is_allowed_portal_user(email: str | None = None, settings: Settings | None 
     if settings is not None:
         if current_email in {e.lower() for e in settings.team_allowed_emails}:
             return True
-        domain = current_email.rsplit("@", 1)[-1] if "@" in current_email else ""
         if domain and domain in {d.lower() for d in settings.team_allowed_email_domains}:
             return True
     return False

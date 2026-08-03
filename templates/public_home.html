@@ -12,7 +12,7 @@
     <div class="dashboard-grid public-home-grid">
       <article class="dashboard-card" data-public-home-sign-in>
         <h3>Sign In Required</h3>
-        <p>Approved @npt.sg, @monee.com, and @seamoney.com accounts can sign in with Google.</p>
+        <p>Approved @npt.sg accounts and individually allowlisted Google accounts can sign in. @monee.com and @seamoney.com accounts are not allowed.</p>
         <a class="button button-primary" href="{{ url_for('cloud_google_login') if cloud_auth_mode|default(false) else url_for('google_login') }}">Sign in with Google</a>
       </article>
     </div>

@@ -5,7 +5,9 @@
 .env.*
 .secrets/
 .venv/
+.venv*/
 .team-portal/
+.team-portal*/
 .team-portal-uat/
 __pycache__/
 *.pyc

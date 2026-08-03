@@ -5,7 +5,9 @@
 .env
 .env.*
 .venv/
+.venv*/
 .team-portal/
+.team-portal*/
 __pycache__/
 *.pyc
 .DS_Store

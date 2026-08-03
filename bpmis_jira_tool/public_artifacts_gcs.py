@@ -287,7 +287,7 @@ def fetch_repo_download_signed_url(filename: str, *, expiration_seconds: int = 9
 
 
 def publish_business_insights_dir(root_dir: Path) -> int:
-    """Upload reports.json plus all current artifacts (Mac side). Returns file count."""
+    """Upload reports.json plus only its referenced artifacts (Mac side)."""
     bucket_name = public_gcs_publish_bucket()
     if not bucket_name:
         return 0
@@ -303,10 +303,32 @@ def publish_business_insights_dir(root_dir: Path) -> int:
                 bucket_name,
             )
             return uploaded
+    referenced_names: set[str] = set()
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+            def collect_references(value: Any) -> None:
+                if isinstance(value, dict):
+                    for key, child in value.items():
+                        if key in {"filename", "visualization_filename"} and isinstance(child, str):
+                            referenced_names.add(Path(child.split("?", 1)[0]).name)
+                        elif key != "source_filename":
+                            collect_references(child)
+                elif isinstance(value, list):
+                    for child in value:
+                        collect_references(child)
+
+            collect_references(metadata)
+        except (OSError, ValueError, TypeError):
+            logger.warning("Skipping Business Insights artifact publish because reports.json could not be parsed")
+            return uploaded
     artifacts_dir = root_dir / "artifacts"
     if artifacts_dir.is_dir():
         for path in sorted(artifacts_dir.iterdir()):
             if not path.is_file() or path.name.startswith("."):
+                continue
+            if path.name not in referenced_names:
                 continue
             if gcs_upload_file(bucket_name, path, f"business_insights/artifacts/{path.name}"):
                 uploaded += 1

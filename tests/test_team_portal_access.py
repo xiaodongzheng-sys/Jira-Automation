@@ -127,6 +127,8 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(b"Risk PM Workspace", response.data)
                 self.assertIn(b"data-public-home-sign-in", response.data)
+                self.assertIn(b"@npt.sg accounts and individually allowlisted Google accounts", response.data)
+                self.assertIn(b"@monee.com and @seamoney.com accounts are not allowed", response.data)
                 self.assertIn(b"Sign in with Google", response.data)
                 self.assertNotIn(b"Open Reports", response.data)
                 self.assertNotIn(b"Open Version Plan", response.data)
@@ -693,6 +695,32 @@ class TeamPortalAccessTests(unittest.TestCase):
                 response = client.get("/", follow_redirects=False)
                 self.assertEqual(response.status_code, 302)
                 self.assertEqual(response.headers["Location"], "/access-denied")
+
+    def test_blocked_google_domains_are_denied_even_if_allowlisted_by_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg,monee.com,seamoney.com",
+                "TEAM_ALLOWED_EMAILS": "blocked@monee.com,blocked@seamoney.com",
+                "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                for email in ("blocked@monee.com", "blocked@seamoney.com"):
+                    with self.subTest(email=email):
+                        with client.session_transaction() as session:
+                            session["google_profile"] = {"email": email, "name": "Blocked User"}
+                            session["google_credentials"] = {"token": "x"}
+
+                        response = client.get("/", follow_redirects=False)
+                        self.assertEqual(response.status_code, 302)
+                        self.assertEqual(response.headers["Location"], "/access-denied")
 
     def test_access_denied_page_renders(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

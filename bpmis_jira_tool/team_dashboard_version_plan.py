@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 
 VERSION_PLAN_PRIORITY_ORDER = ("SP", "P0", "P1", "P2", "P3")
-VERSION_PLAN_PM_OPTIONS = ("Wang Chang", "Zoey", "Jireh", "Ker Yin", "Rene", "Jun Wei", "Xiaodong")
+VERSION_PLAN_PM_OPTIONS = ("Wang Chang", "Zoey", "Jireh", "Ker Yin", "Rene", "Jun Wei", "Xiaodong", "Sabrina", "Wei Lin")
 VERSION_PLAN_AF_PM_EMAILS = (
     "jireh.tanyx@npt.sg",
     "keryin.lim@npt.sg",
@@ -17,6 +17,8 @@ VERSION_PLAN_AF_PM_EMAILS = (
     "chang.wang@npt.sg",
     "zoey.luxy@npt.sg",
     "junwei.ong@npt.sg",
+    "sabrina.chan@npt.sg",
+    "weilin.ang@npt.sg",
 )
 VERSION_PLAN_PM_ALIASES = {
     "chang.wang@npt.sg": "Wang Chang",
@@ -35,6 +37,10 @@ VERSION_PLAN_PM_ALIASES = {
     "junwei.ong@npt.sg": "Jun Wei",
     "xiaodong.zheng@npt.sg": "Xiaodong",
     "xiaodong": "Xiaodong",
+    "sabrina.chan@npt.sg": "Sabrina",
+    "sabrina": "Sabrina",
+    "weilin.ang@npt.sg": "Wei Lin",
+    "wei lin": "Wei Lin",
 }
 VERSION_PLAN_TIMEZONE = ZoneInfo("Asia/Singapore")
 VERSION_PLAN_SYNC_OPERATION = "af_version_plan"
@@ -655,6 +661,8 @@ def _sync_rows_for_bundle(
     for raw in candidates:
         if _is_closed_or_icebox(raw):
             continue
+        if _is_sabrina_grc_ticket(raw):
+            continue
         if _row_has_excluded_task_type(raw):
             continue
         if _row_has_planning_version(raw):
@@ -753,6 +761,27 @@ def _row_has_excluded_task_type(row: dict[str, Any]) -> bool:
 
 def _row_has_planning_version(row: dict[str, Any]) -> bool:
     return any(name.startswith("planning") for name in _row_jira_version_names(row))
+
+
+def _is_sabrina_grc_ticket(row: dict[str, Any]) -> bool:
+    """Exclude Sabrina's Jira tickets whose Jira name contains GRC."""
+    reporter = row.get("reporter")
+    if isinstance(reporter, dict):
+        email = str(reporter.get("email") or reporter.get("name") or "").strip().casefold()
+    else:
+        email = ""
+    if not email:
+        email = _extract_first_text(row, "reporterEmail", "reporter_email", "pm_email").casefold()
+    if email != "sabrina.chan@npt.sg":
+        return False
+    jira_name = _extract_first_text(row, "jira_title", "summary", "title", "jiraSummary", "name")
+    if not jira_name:
+        raw_jira = row.get("raw_jira")
+        if isinstance(raw_jira, dict):
+            fields = raw_jira.get("fields")
+            if isinstance(fields, dict):
+                jira_name = str(fields.get("summary") or "").strip()
+    return "grc" in jira_name.casefold()
 
 
 def _row_jira_version_names(row: dict[str, Any]) -> set[str]:
@@ -1053,6 +1082,8 @@ def _is_af_reporter(row: dict[str, Any]) -> bool:
         "chongzj@npt.sg",
         "chang.wang@npt.sg",
         "zoey.luxy@npt.sg",
+        "sabrina.chan@npt.sg",
+        "weilin.ang@npt.sg",
     }
 
 
