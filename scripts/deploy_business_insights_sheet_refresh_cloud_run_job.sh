@@ -121,6 +121,15 @@ fi
 SECRET_ARGS=()
 OAUTH_JSON_SECRET="${BUSINESS_INSIGHTS_GOOGLE_OAUTH_CREDENTIALS_JSON_SECRET:-$(read_env_value BUSINESS_INSIGHTS_GOOGLE_OAUTH_CREDENTIALS_JSON_SECRET)}"
 SA_JSON_SECRET="${BUSINESS_INSIGHTS_GOOGLE_SERVICE_ACCOUNT_JSON_SECRET:-$(read_env_value BUSINESS_INSIGHTS_GOOGLE_SERVICE_ACCOUNT_JSON_SECRET)}"
+# The production refresh jobs were originally provisioned with this OAuth
+# secret. Keep it as the default when no per-environment override is supplied;
+# falling back to ADC can silently remove access to a private Google Sheet.
+if [[ -z "$OAUTH_JSON_SECRET" && -z "$SA_JSON_SECRET" ]] && "$GCLOUD_BIN" secrets describe \
+  business-insights-google-oauth-credentials-json \
+  "${PROJECT_ARGS[@]}" \
+  ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} >/dev/null 2>&1; then
+  OAUTH_JSON_SECRET="business-insights-google-oauth-credentials-json"
+fi
 if [[ -n "$OAUTH_JSON_SECRET" ]]; then
   SECRET_ARGS=(--set-secrets "BUSINESS_INSIGHTS_GOOGLE_OAUTH_CREDENTIALS_JSON=$OAUTH_JSON_SECRET:latest")
 elif [[ -n "$SA_JSON_SECRET" ]]; then
