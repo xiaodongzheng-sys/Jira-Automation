@@ -56,11 +56,13 @@ LEGACY_SLOT = "daily"
 DAILY_EMAIL_SLOTS = {MORNING_SLOT, MIDDAY_SLOT}
 DAILY_EMAIL_WEEKDAY_RUNS = {0, 1, 2, 3, 4}
 GMAIL_EXPORT_TIMEOUT_SECONDS = 90
-MAX_MY_TODOS = 8
-MAX_PROJECT_UPDATES = 10
-MAX_OTHER_UPDATES = 8
-MAX_TEAM_MEMBER_REMINDERS = 8
-MAX_USEFUL_AWARENESS_OTHER_UPDATES = 5
+# A brief is a decision aid, not a transcript. Tight section caps force the
+# model to select the few items that materially change Xiaodong's next step.
+MAX_MY_TODOS = 6
+MAX_PROJECT_UPDATES = 6
+MAX_OTHER_UPDATES = 5
+MAX_TEAM_MEMBER_REMINDERS = 6
+MAX_USEFUL_AWARENESS_OTHER_UPDATES = 2
 MAX_UNANSWERED_SEATALK_QUESTION_HINTS = 10
 MAX_TEAM_MEMBER_REMINDER_HINTS = 12
 MAX_TOP_FOCUS_ITEMS = 3
@@ -134,6 +136,8 @@ TEAM_MEMBER_REMINDER_ALLOWED_PEOPLE = {
     "chang": "Wang Chang",
     "wang chang": "Wang Chang",
     "jireh": "Jireh",
+    "ang wei lin": "Ang Wei Lin",
+    "angweilin": "Ang Wei Lin",
 }
 TEAM_MEMBER_REMINDER_DETECTION_ALIASES = {
     alias: person
@@ -151,6 +155,7 @@ ANTI_FRAUD_TEAM_MEMBERS = {
     "zoey lu",
     "wang chang",
     "jireh",
+    "ang wei lin",
 }
 TEAM_MEMBER_REMINDER_DOMAIN_OVERRIDES = {
     "zheng xiaodong": "General",
@@ -1352,7 +1357,8 @@ def _daily_brief_system_prompt() -> str:
         "You are an expert Digital Banking Product Manager preparing Xiaodong Zheng's Daily Brief. "
         "Return only valid JSON. Synthesize SeaTalk logs and Gmail threads into clear actions, project updates, awareness updates, and unresolved team-member reminders. "
         "Do not copy raw transcripts or write conversational play-by-plays. Prefer precise, concise, business-readable sentences. "
-        "Every item must keep traceability through a short evidence field. Prefer real names over UIDs whenever names are available."
+        "Every item must keep traceability through a short evidence field. Prefer real names over UIDs whenever names are available. "
+        "Favor omission over speculation: an unsupported, generic, or ambiguous item is worse than an empty section."
     )
 
 
@@ -1418,21 +1424,25 @@ def _daily_brief_user_prompt(
         "action_type: direct_action or watch_delegate.\n"
         "source_type: seatalk, gmail, mixed. Use mixed only when one synthesized item is supported by both SeaTalk and Gmail.\n"
         "other_updates.signal_type: incident, launch, policy_process, risk_compliance, cross_team_dependency, leadership_decision, cross_product_milestone, useful_awareness.\n"
-        "If an other_updates item is useful but does not fit a stronger signal type, set signal_type to useful_awareness. Do not omit signal_type.\n\n"
+        "useful_awareness is a compatibility fallback, not a default category. Use it only for a directly evidenced PM impact that does not fit a stronger signal type. Do not omit signal_type.\n\n"
+        "## Evidence Gate\n"
+        "Before including any item, verify that the source explicitly supports all of: (1) the actor or owner when relevant, (2) the concrete request, decision, milestone, blocker, or outcome, and (3) the PM impact or next action. If any part is inferred, generic, or ambiguous, omit the item.\n"
+        "Do not turn a question, @mention, meeting invitation, meeting logistics, acknowledgement, thanks, or discussion into an action, decision, status, or risk unless a source explicitly states that result. Do not invent owners, deadlines, commitments, severity, or dependencies.\n"
+        "Each item must be atomic: one actionable request or one material state change. Merge only duplicate evidence for the same event, never separate events merely because they share a project name.\n\n"
         "## Section Rules\n"
-        "my_todos: include only Xiaodong-owned actions, decisions needed from Xiaodong, follow-ups Xiaodong clearly needs to drive, or watch/delegate items where Xiaodong should ensure another owner follows through. Do not include tasks fully owned by other people with no Xiaodong follow-up value. Max 8 items. Sort high priority first, then earliest due date, then most actionable.\n"
+        "my_todos: include only Xiaodong-owned actions, decisions needed from Xiaodong, follow-ups Xiaodong clearly needs to drive, or watch/delegate items where Xiaodong should ensure another owner follows through. Do not include tasks fully owned by other people with no Xiaodong follow-up value. Max 6 items. Sort high priority first, then earliest due date, then most actionable.\n"
         "For each my_todos item, set action_type=direct_action only when Xiaodong must personally reply, decide, review, approve, attend, provide, or drive the next step. Set action_type=watch_delegate when Xiaodong mainly needs to monitor, ensure, follow up with someone, check with a team, or confirm another owner follows through.\n"
         "If a teammate follow-up topic is already represented as a my_todos watch_delegate item, do not repeat it in team_member_reminders.\n"
         "Do not create a todo or reminder for an ask when a later human reply in the same SeaTalk group/thread already gives the answer, conclusion, or ownership update.\n"
-        "project_updates: include updates from SeaTalk or Gmail where Xiaodong is involved, mentioned, directly asked, or clearly participating. Summarize the decision, milestone, blocker, or current state. Max 10 items. Sort blocked and in_progress before done.\n"
-        "other_updates: include useful awareness from SeaTalk or Gmail where Xiaodong is not directly involved but the information may matter to a Digital Banking PM. Prioritize incident, launch, policy/process, risk/compliance, cross-team dependency, leadership decision, and cross-product milestone. useful_awareness should be rare and only included when genuinely PM-relevant, especially when matched to a VIP, priority keyword, or key project. Include at most 5 useful_awareness items and at most 8 other_updates total. Do not include generic chatter, greetings, pure thanks, meeting logistics with no decision, or low-value FYI.\n"
-        "team_member_reminders: use SeaTalk only. Never create these from Gmail. Only include people from the explicit allowed reminder list below, including Xiaodong himself when he was @mentioned and did not reply. Max 8 items. Sort by most actionable first.\n\n"
+        "project_updates: include only a material decision, delivered milestone, changed delivery date, active blocker, or current execution state from SeaTalk or Gmail where Xiaodong is involved, mentioned, directly asked, or clearly participating. Never summarize a meeting plan, open question, or generic discussion as a project update. Max 6 items. Sort blocked and in_progress before done.\n"
+        "other_updates: include only directly evidenced high-value awareness where Xiaodong is not directly involved: incident, launch, policy/process, risk/compliance, cross-team dependency, leadership decision, or cross-product milestone. useful_awareness must be exceptional, directly PM-relevant, and limited to 2 items. Include at most 5 other_updates total. Do not include generic chatter, greetings, pure thanks, meeting logistics with no decision, or low-value FYI.\n"
+        "team_member_reminders: use SeaTalk only. Never create these from Gmail. Only include people from the explicit allowed reminder list below, including Xiaodong himself when he was @mentioned and did not reply. Max 6 items. Sort by most actionable first. Write the reminder in third person, referring to the named owner as he or she rather than you.\n\n"
         "For project_updates, team_member_reminders, and SeaTalk watch_delegate my_todos, evidence_ref_id is required and must be copied exactly from Deterministic Daily Brief Evidence Bundle.evidence_refs. Do not invent evidence_ref_id values.\n"
         "For mixed SeaTalk+Gmail project_updates, evidence_ref_id may contain two comma-separated ids, one st-ref and one gm-ref, only when both refs support the same topic.\n\n"
         "## Team Member Reminder Scan\n"
-        "Before writing team_member_reminders, scan every SeaTalk group conversation for human mentions of these people: Zheng Xiaodong, Ker Yin, Rene Chong, Sabrina Chan, Liye, Hui Xian, Sophia Wang Zijun, Ming Ming, Zoey Lu, Wang Chang, Jireh. Ming Ming | 明明 is a team member; Li Mingming is a different person and must never be treated as Ming Ming.\n"
+        "Before writing team_member_reminders, scan every SeaTalk group conversation for human mentions of these people: Zheng Xiaodong, Ker Yin, Rene Chong, Sabrina Chan, Liye, Hui Xian, Sophia Wang Zijun, Ming Ming, Zoey Lu, Wang Chang, Jireh, Ang Wei Lin. Ming Ming | 明明 is a team member; Li Mingming is a different person and must never be treated as Ming Ming.\n"
         "Sophia Wang Zijun belongs to Credit Risk. Do not classify Sophia Wang Zijun as Ops Risk.\n"
-        "For Anti-fraud domain reminders, only these people are Xiaodong's Anti-fraud team: Ker Yin, Rene Chong, Zoey Lu, Wang Chang, Jireh. Do not put anyone else, including Wendy, under Anti-fraud team_member_reminders.\n"
+        "For Anti-fraud domain reminders, only these people are Xiaodong's Anti-fraud team: Ker Yin, Rene Chong, Zoey Lu, Wang Chang, Jireh, Ang Wei Lin. Do not put anyone else, including Wendy, under Anti-fraud team_member_reminders.\n"
         "Do not create team_member_reminders for people outside the allowed reminder list, even if they appear in SeaTalk.\n"
         "For Zheng Xiaodong, only include a reminder when the source directly @mentions or clearly asks Xiaodong and no later Xiaodong reply is visible in the same group/thread during the window.\n"
         "A valid reminder exists when a human in a SeaTalk group asks, mentions, assigns, blocks on, or appears to need follow-up from one of those people, and neither the named person nor Xiaodong follows up later in that same group during the available window.\n"

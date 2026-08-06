@@ -2369,6 +2369,9 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertIn("already represented as a my_todos watch_delegate item", prompt)
         self.assertIn("Report Intelligence Matches", prompt)
         self.assertIn("Use these matches only as prioritization hints", prompt)
+        self.assertIn("## Evidence Gate", prompt)
+        self.assertIn("Ang Wei Lin", prompt)
+        self.assertIn("useful_awareness is a compatibility fallback", prompt)
 
     def test_build_daily_briefing_compacts_prompt_sources_and_records_token_ledger(self):
         history = "\n".join(
@@ -2500,6 +2503,19 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
 
         self.assertEqual([item["person"] for item in candidates or []], ["Zoey Lu"])
         self.assertIn("AF next steps", candidates[0]["text"])
+
+    def test_team_member_reminder_candidates_include_ang_wei_lin(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== AF launch follow-up (group-104) ===",
+                "[2026-08-06 10:00:00] Alice Tan: @Ang Wei Lin please confirm whether the fraud-rule rollout has completed.",
+            ]
+        )
+
+        candidates = _build_team_member_reminder_candidates(history)
+
+        self.assertEqual([item["person"] for item in candidates or []], ["Ang Wei Lin"])
 
     def test_team_member_reminder_candidates_distinguish_li_mingming_from_team_member_ming_ming(self):
         history = "\n".join(
