@@ -2801,7 +2801,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         summary = seatalk_daily_email._synthesize_project_update_summary(
             {
                 "title": "[Anti Fraud fall back logic] high-signal update",
-                "summary": "If AF is unavailable, a fallback may be needed; serious incidents must be reported to MAS and assessed for impact.",
+                "summary": "If AF is unavailable, a fall back may be needed; serious incidents must be reported to MAS and assessed for impact.",
                 "evidence": "Mari Stock Trading / thread: Anti Fraud fall back logic",
             }
         )

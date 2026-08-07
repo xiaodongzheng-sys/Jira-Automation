@@ -4552,7 +4552,7 @@ def _synthesize_project_update_summary(item: dict[str, Any]) -> str:
         return "State: AF cannot map originalTransactionAmount and upstream must provide the fix; IV logs use foreignTransactionAmount. Impact: the upstream dependency blocks correct QRIS cross-border logging. Next: align the upstream fix and IV log field mapping."
     if "mas" in lowered and any(term in lowered for term in ("scheduled transfer", "schedule transfer", "drainage rule")):
         return "State: Scheduled-transfer controls remain pending MAS confirmation on the drainage-rule check. Impact: public launch depends on regulatory confirmation. Next: obtain the MAS response and update launch readiness."
-    if "mas" in lowered and "fallback" in lowered:
+    if "mas" in lowered and ("fallback" in lowered or "fall back" in lowered):
         return "State: Anti-fraud fallback handling is being assessed for AF unavailability; MAS reporting and impact assessment are required if a serious incident occurs. Impact: the fallback decision affects both customer access and regulatory risk. Next: agree the fallback control and escalation path with the AF and bank technical owners."
     if "mas" in lowered and any(term in lowered for term in ("compliance", "reg compliance", "bccr", "regulatory")):
         return "State: MAS compliance documentation requirements for the BCCR are still being confirmed with Regulatory Compliance. Impact: the unresolved regulatory requirement can affect launch readiness. Next: confirm the required documentation and its accountable owner."
