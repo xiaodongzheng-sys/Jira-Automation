@@ -2695,6 +2695,72 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
 
         self.assertEqual(candidates, [])
 
+    def test_xiaodong_commitment_stays_open_and_becomes_his_todo(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== ID AF & PM, Reg AF (group-3758590) ===",
+                "[2026-08-07 14:42:15] Wendy: [need advice] Rule A/B testing",
+                "[2026-08-07 14:42:20] Wendy [thread reply under: [need advice] Rule A/B testing]: hi @Rene Chong may I seek ur advice for A/B testing rule behavior? S0141 stopped triggering on Saturday and Sunday.",
+                "[2026-08-07 17:08:58] Zheng Xiaodong [thread reply under: [need advice] Rule A/B testing]: Can share screenshot how you set up A/B testing?",
+                "[2026-08-07 17:12:15] Zheng Xiaodong [thread reply under: [need advice] Rule A/B testing]: Did ID use A/B testing before?",
+                "[2026-08-07 17:34:24] Zheng Xiaodong [thread reply under: [need advice] Rule A/B testing]: I see. Will check and get back",
+            ]
+        )
+
+        self.assertEqual([item["person"] for item in (_build_team_member_reminder_candidates(history) or [])], ["Rene Chong"])
+        candidates = seatalk_daily_email._build_xiaodong_followup_candidates(history)
+        self.assertEqual(len(candidates), 1)
+        refs = seatalk_daily_email._build_daily_brief_evidence_refs(history, xiaodong_followup_candidates=candidates)
+        todos = seatalk_daily_email._build_xiaodong_followup_items(candidates, evidence_refs=refs, existing_items=[])
+
+        self.assertEqual(len(todos), 1)
+        self.assertEqual(todos[0]["action_type"], "direct_action")
+        self.assertIn("A/B testing", todos[0]["task"])
+
+    def test_private_chat_never_creates_team_member_reminder(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== Rene Chong (buddy-341874) ===",
+                "[2026-08-07 15:46:00] Zheng Xiaodong: Can take a look at those scenarios with 2 actions and align with Zuhua.",
+                "[2026-08-07 16:09:00] Zheng Xiaodong: Can check with Wang Chang how we handled this.",
+            ]
+        )
+
+        self.assertEqual(_build_team_member_reminder_candidates(history), [])
+
+    def test_same_followup_event_keeps_direct_todo_and_suppresses_reminder(self):
+        reminder = {
+            "domain": "Anti-fraud",
+            "person": "Wang Chang",
+            "reminder": "Follow up on how the two-action authentication case was handled.",
+            "evidence": "Rene Chong",
+            "evidence_ref_id": "st-ref-001",
+        }
+        todo = {
+            "domain": "Anti-fraud",
+            "task": "Follow up on how the two-action authentication case was handled with Wang Chang and Zuhua.",
+            "evidence": "Rene Chong",
+            "evidence_ref_id": "st-ref-001",
+        }
+
+        self.assertTrue(seatalk_daily_email._brief_items_refer_to_same_topic(reminder, todo))
+
+    def test_project_update_summary_is_synthesized_not_a_chat_quote(self):
+        item = {
+            "domain": "General",
+            "title": "Mari Stock Trading integration",
+            "summary": "Hi @Yao Baohui urgent, Payment BC API has questions about FX rate precision and SOF breakdown ownership. Context: more API alignment is pending.",
+        }
+
+        summary = seatalk_daily_email._synthesize_project_update_summary(item)
+
+        self.assertTrue(summary.startswith("State:"))
+        self.assertIn("Impact:", summary)
+        self.assertIn("Next:", summary)
+        self.assertNotIn("Context:", summary)
+
     def test_team_member_reminder_candidates_ignore_late_meeting_join_notice(self):
         history = "\n".join(
             [
@@ -4272,7 +4338,8 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         reminders = seatalk_daily_email._build_team_member_reminder_candidates(history)
         self.assertIsNotNone(reminders)
         reminder_hints = seatalk_daily_email._format_team_member_reminder_hints(reminders)
-        self.assertIn("Bob PM asked Rene Chong", reminder_hints)
+        self.assertEqual(reminders, [])
+        self.assertNotIn("Bob PM asked Rene Chong", reminder_hints)
         self.assertEqual(seatalk_daily_email._format_team_member_reminder_hints([]), "No valid unresolved team-member mention candidates were found.")
         self.assertTrue(seatalk_daily_email._looks_like_team_member_request("Rene?"))
         self.assertFalse(seatalk_daily_email._is_meaningful_human_seatalk_line("Alert Bot", "please check"))
