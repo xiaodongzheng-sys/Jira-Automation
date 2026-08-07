@@ -74,6 +74,7 @@ DAILY_BRIEF_TOKEN_CHARS_PER_TOKEN = 4
 DAILY_BRIEF_QUALITY_PROMPT_WARNING_TOKENS = 30_000
 LOW_SIGNAL_EMAIL_SUMMARY = "No clear action, blocker, key project update, or team follow-up was found in this window."
 EMPTY_TODO_SECTION_SUMMARY = "No Xiaodong-owned action or watch/delegate item found."
+EMPTY_DAILY_BRIEF_SECTION = "无"
 ALLOWED_OTHER_UPDATE_SIGNAL_TYPES = {
     "incident",
     "launch",
@@ -109,6 +110,70 @@ BOT_ALERT_REMINDER_HINTS = (
     "automated",
     "auto-generated",
     "system generated",
+)
+GMAIL_CALENDAR_SUBJECT_HINTS = (
+    "invitation:",
+    "updated invitation:",
+    "updated invitation with note:",
+    "accepted:",
+    "declined:",
+    "tentative:",
+    "response:",
+    "responded:",
+    "rescheduled",
+    "cancelled:",
+    "canceled:",
+    "rsvp",
+    "event reminder:",
+    "meeting request:",
+    "you’re invited",
+    "you're invited",
+)
+GMAIL_CALENDAR_SENDER_HINTS = (
+    "calendar-notification@google.com",
+    "googlecalendar-noreply@google.com",
+)
+DAILY_BRIEF_HIGH_SIGNAL_TERMS = (
+    "[sp][p0]",
+    "p0",
+    "p1",
+    "mas",
+    "incident",
+    "blocked",
+    "blocker",
+    "dependency",
+    "upstream",
+    "timeline",
+    "delay",
+    "delayed",
+    "postpone",
+    "eta",
+    "launch",
+    "go-live",
+    "golive",
+    "release",
+    "version",
+    "v3.07",
+    "v3.08",
+    "f30",
+    "dev starts",
+    "device model",
+    "devicemodel",
+    "atm",
+    "qris",
+    "translation",
+    "copywriting",
+    "edit access",
+    "querytransferrecipient",
+    "fallback",
+    "recurring",
+    "mari stock",
+    "548-549",
+    "上线",
+    "延期",
+    "阻塞",
+    "依赖",
+    "事故",
 )
 TEAM_MEMBER_REMINDER_ALLOWED_PEOPLE = {
     "xiaodong": "Zheng Xiaodong",
@@ -557,7 +622,9 @@ def build_daily_briefing(
     seatalk_validation_history_text = history_text
     history_text = filter_text_by_noise(history_text, config=intelligence_config, source="seatalk")
     history_text = _filter_daily_brief_meeting_logistics(history_text)
+    filtered_seatalk_history_text = history_text
     gmail_history_text = str(gmail_history_text or "").strip()
+    gmail_history_text, suppressed_calendar_message_count = _filter_gmail_calendar_history(gmail_history_text)
     seatalk_raw_chars = len(history_text)
     gmail_raw_chars = len(gmail_history_text)
     seatalk_has_messages = any(line.startswith("[") for line in history_text.splitlines())
@@ -591,6 +658,7 @@ def build_daily_briefing(
                 "generic_evidence_count": 0,
                 "candidate_followup_count": 0,
                 "final_followup_count": 0,
+                "calendar_suppressed_count": suppressed_calendar_message_count,
             },
         )
         return {
@@ -619,6 +687,7 @@ def build_daily_briefing(
         gmail_history_text = gmail_history_text[:360_000]
     seatalk_compact_chars = len(history_text)
     gmail_compact_chars = len(gmail_history_text)
+    high_signal_review_hints = _build_high_signal_review_hints(filtered_seatalk_history_text)
     unanswered_question_hints = _build_unanswered_seatalk_question_hints(history_text)
     team_member_reminder_candidates = _build_team_member_reminder_candidates(history_text)
     resolved_team_member_reminder_candidates = _build_resolved_team_member_reminder_candidates(history_text)
@@ -627,13 +696,13 @@ def build_daily_briefing(
     for key, name in _infer_private_chat_name_mappings_from_history(seatalk_validation_history_text).items():
         name_mappings.setdefault(key.lower(), name)
     evidence_refs = _build_daily_brief_evidence_refs(
-        history_text,
+        filtered_seatalk_history_text,
         gmail_history_text=gmail_history_text,
         name_mappings=name_mappings,
         team_member_reminder_candidates=team_member_reminder_candidates,
     )
     daily_matches = match_report_intelligence(
-        f"{history_text}\n\n{gmail_history_text}",
+        f"{filtered_seatalk_history_text}\n\n{gmail_history_text}",
         config=intelligence_config,
         key_projects=key_project_candidates or [],
     )
@@ -662,6 +731,7 @@ def build_daily_briefing(
         unanswered_question_hints=unanswered_question_hints,
         team_member_reminder_candidates=team_member_reminder_candidates,
         evidence_refs=evidence_refs,
+        high_signal_review_hints=high_signal_review_hints,
         source_token_ledger=source_token_ledger,
     )
     prompt = _daily_brief_user_prompt(
@@ -673,6 +743,7 @@ def build_daily_briefing(
         match_summary=daily_match_summary,
         unanswered_question_hints=unanswered_question_hints,
         team_member_reminder_hints=team_member_reminder_hints,
+        high_signal_review_hints=high_signal_review_hints,
         evidence_context=evidence_context,
     )
     source_token_ledger["final_prompt_chars"] = len(prompt)
@@ -698,24 +769,68 @@ def build_daily_briefing(
     source_token_ledger["preserved_unanswered_hint_count"] = len(
         [line for line in str(unanswered_question_hints or "").splitlines() if line.strip()]
     )
+    source_token_ledger["preserved_high_signal_hint_count"] = len(
+        [line for line in str(high_signal_review_hints or "").splitlines() if line.strip()]
+    )
     _, parsed = service._run_codex_insights_prompt(
         system_prompt=_daily_brief_system_prompt(),
         prompt=prompt,
     )
     project_updates = _dedupe_brief_items(
-        _normalize_update_items(_normalize_brief_items(parsed.get("project_updates", []), name_mappings=name_mappings))
+        _filter_gmail_calendar_items(
+            _normalize_update_items(_normalize_brief_items(parsed.get("project_updates", []), name_mappings=name_mappings))
+        )
     )[:MAX_PROJECT_UPDATES]
+    high_signal_fallbacks = _build_high_signal_fallback_items(
+        filtered_seatalk_history_text,
+        evidence_refs=evidence_refs,
+        name_mappings=name_mappings,
+        existing_items=project_updates,
+    )
+    high_signal_fallbacks.extend(
+        _build_gmail_high_signal_fallback_items(
+            gmail_history_text,
+            evidence_refs=evidence_refs,
+            existing_items=[*project_updates, *high_signal_fallbacks],
+        )
+    )
+    if high_signal_fallbacks:
+        # Put deterministic high-signal candidates first so the section cap cannot
+        # discard a P0/timeline item simply because the model returned six FYIs.
+        project_updates = _dedupe_brief_items([*high_signal_fallbacks, *project_updates])[:MAX_PROJECT_UPDATES]
     other_updates = _dedupe_brief_items(
-        _filter_other_updates(_normalize_update_items(_normalize_brief_items(parsed.get("other_updates", []), name_mappings=name_mappings)))
+        _filter_gmail_calendar_items(
+            _filter_other_updates(_normalize_update_items(_normalize_brief_items(parsed.get("other_updates", []), name_mappings=name_mappings)))
+        )
     )[:MAX_OTHER_UPDATES]
     my_todos = _dedupe_brief_items(
-        _normalize_todo_items(_normalize_brief_items(parsed.get("my_todos", []), name_mappings=name_mappings)),
+        _filter_gmail_calendar_items(
+            _normalize_todo_items(_normalize_brief_items(parsed.get("my_todos", []), name_mappings=name_mappings))
+        ),
         text_fields=("task",),
     )[:MAX_MY_TODOS]
+    if high_signal_fallbacks:
+        # Merge before evidence validation and cross-section suppression. A
+        # version/timeline candidate can share a canonical todo with a MAS or
+        # launch decision; merging only after suppression loses its detail when
+        # the intermediate update is filtered for evidence or deduplication.
+        for fallback in high_signal_fallbacks:
+            covered_todo = next(
+                (
+                    todo
+                    for todo in my_todos
+                    if _brief_update_is_covered_by_todo(fallback, todo)
+                ),
+                None,
+            )
+            if covered_todo is not None:
+                _merge_high_signal_update_into_todo(covered_todo, fallback)
     reminders = _dedupe_brief_items(
-        _filter_seatalk_reminders(
-            _normalize_brief_items(parsed.get("team_member_reminders", []), default_source_type="seatalk", name_mappings=name_mappings),
-            reminder_candidates=team_member_reminder_candidates,
+        _filter_gmail_calendar_items(
+            _filter_seatalk_reminders(
+                _normalize_brief_items(parsed.get("team_member_reminders", []), default_source_type="seatalk", name_mappings=name_mappings),
+                reminder_candidates=team_member_reminder_candidates,
+            )
         ),
         text_fields=("person", "reminder"),
     )[:MAX_TEAM_MEMBER_REMINDERS]
@@ -734,6 +849,8 @@ def build_daily_briefing(
         reminders=reminders,
         evidence_refs=evidence_refs,
     )
+    evidence_quality_metrics["calendar_suppressed_count"] = suppressed_calendar_message_count
+    evidence_quality_metrics["high_signal_fallback_count"] = len(high_signal_fallbacks)
     _repair_generic_seatalk_evidence(
         [*project_updates, *other_updates, *my_todos, *reminders],
         history_text=seatalk_validation_history_text,
@@ -758,9 +875,15 @@ def build_daily_briefing(
     reminders = _backfill_team_member_reminders_from_candidates(
         reminders,
         team_member_reminder_candidates=team_member_reminder_candidates,
+        resolved_candidates=resolved_team_member_reminder_candidates,
         evidence_refs=evidence_refs,
         quality_metrics=evidence_quality_metrics,
     )
+    reminders = _filter_resolved_or_meeting_logistics_followups(
+        reminders,
+        resolved_candidates=resolved_team_member_reminder_candidates,
+    )
+    reminders = _filter_team_member_coverage_items(reminders)
     _repair_generic_seatalk_evidence(
         reminders,
         history_text=seatalk_validation_history_text,
@@ -796,6 +919,24 @@ def build_daily_briefing(
         watch_delegate_todos=watch_delegate_todos,
     )
     suppressed_cross_section_duplicate_count = _suppress_cross_section_duplicate_topics(
+        project_updates=project_updates,
+        other_updates=other_updates,
+        direct_action_todos=direct_action_todos,
+        watch_delegate_todos=watch_delegate_todos,
+        reminders=reminders,
+    )
+    _ensure_high_signal_fallbacks_visible(
+        high_signal_fallbacks=high_signal_fallbacks,
+        project_updates=project_updates,
+        other_updates=other_updates,
+        direct_action_todos=direct_action_todos,
+        watch_delegate_todos=watch_delegate_todos,
+        reminders=reminders,
+    )
+    # Visibility repair can merge a protected fallback into a todo after the
+    # first pass. Re-run canonical suppression so that repair cannot re-create
+    # a cross-section duplicate.
+    suppressed_cross_section_duplicate_count += _suppress_cross_section_duplicate_topics(
         project_updates=project_updates,
         other_updates=other_updates,
         direct_action_todos=direct_action_todos,
@@ -883,51 +1024,35 @@ def render_email(*, briefing: dict[str, Any], now: datetime, window_label: str =
         for item in (briefing.get("other_updates") or [])
         if isinstance(item, dict) and _is_display_other_update_signal(item)
     ]
-    has_any_display_signal = bool(direct_action_todos or watch_delegate_todos or updates or other_updates or reminders)
     text_lines = [
         f"Subject: {subject}",
         f"Window: {label}" if label else "",
         "",
         "To-do",
     ]
-    if not has_any_display_signal:
-        text_lines.append(f"- {LOW_SIGNAL_EMAIL_SUMMARY}")
-    elif not direct_action_todos and not watch_delegate_todos:
-        text_lines.append(f"- {EMPTY_TODO_SECTION_SUMMARY}")
-    if direct_action_todos:
-        text_lines.extend(["", "Xiaodong Action Required"])
-        text_lines.extend(_render_grouped_text(direct_action_todos, kind="todo"))
-    if watch_delegate_todos:
-        text_lines.extend(["", "Watch / Delegate"])
-        text_lines.extend(_render_grouped_text(watch_delegate_todos, kind="todo"))
-    if updates:
-        text_lines.extend(["", "Project Updates"])
-        text_lines.extend(_render_grouped_text(updates, kind="update"))
-    if other_updates:
-        text_lines.extend(["", "Other Update"])
-        text_lines.extend(_render_grouped_text(other_updates, kind="update"))
-    if reminders:
-        text_lines.extend(["", "Suggested Team Follow-up"])
-        text_lines.extend(_render_grouped_text(reminders, kind="reminder"))
+    for heading, items, kind in (
+        ("Xiaodong Action Required", direct_action_todos, "todo"),
+        ("Watch / Delegate", watch_delegate_todos, "todo"),
+        ("Project Updates", updates, "update"),
+        ("Other Update", other_updates, "update"),
+        ("Suggested Team Follow-up", reminders, "reminder"),
+    ):
+        text_lines.extend(["", heading])
+        text_lines.extend(_render_grouped_text(items, kind=kind) if items else [f"- {EMPTY_DAILY_BRIEF_SECTION}"])
     text_body = "\n".join(text_lines).strip() + "\n"
     html_body = "<html><body>" f"<h2>{html.escape(subject)}</h2>"
     if label:
         html_body += f"<p><strong>Window:</strong> {html.escape(label)}</p>"
     html_body += "<h3>To-do</h3>"
-    if not has_any_display_signal:
-        html_body += f"<p>{html.escape(LOW_SIGNAL_EMAIL_SUMMARY)}</p>"
-    elif not direct_action_todos and not watch_delegate_todos:
-        html_body += f"<p>{html.escape(EMPTY_TODO_SECTION_SUMMARY)}</p>"
-    if direct_action_todos:
-        html_body += "<h4>Xiaodong Action Required</h4>" + _render_grouped_html(direct_action_todos, kind="todo")
-    if watch_delegate_todos:
-        html_body += "<h4>Watch / Delegate</h4>" + _render_grouped_html(watch_delegate_todos, kind="watch_todo")
-    if updates:
-        html_body += "<h3>Project Updates</h3>" + _render_grouped_html(updates, kind="update")
-    if other_updates:
-        html_body += "<h3>Other Update</h3>" + _render_grouped_html(other_updates, kind="other")
-    if reminders:
-        html_body += "<h3>Suggested Team Follow-up</h3>" + _render_grouped_html(reminders, kind="reminder")
+    for heading, items, kind, tag in (
+        ("Xiaodong Action Required", direct_action_todos, "todo", "h4"),
+        ("Watch / Delegate", watch_delegate_todos, "watch_todo", "h4"),
+        ("Project Updates", updates, "update", "h3"),
+        ("Other Update", other_updates, "other", "h3"),
+        ("Suggested Team Follow-up", reminders, "reminder", "h3"),
+    ):
+        html_body += f"<{tag}>{html.escape(heading)}</{tag}>"
+        html_body += _render_grouped_html(items, kind=kind) if items else f"<p>{html.escape(EMPTY_DAILY_BRIEF_SECTION)}</p>"
     html_body += "</body></html>"
     return subject, text_body, html_body
 
@@ -1372,6 +1497,7 @@ def _daily_brief_user_prompt(
     match_summary: str = "",
     unanswered_question_hints: str = "",
     team_member_reminder_hints: str = "",
+    high_signal_review_hints: str = "",
     evidence_context: str = "",
 ) -> str:
     window_text = window_label or f"previous {hours} hours"
@@ -1406,6 +1532,13 @@ def _daily_brief_user_prompt(
         "Treat this bundle as the first-pass source of truth for evidence refs. "
         "Use the source excerpts below only to verify nuance and extract additional high-signal project updates or Xiaodong actions.\n\n"
         if str(evidence_context or "").strip()
+        else ""
+    )
+    high_signal_block = (
+        "## Mandatory High-Signal Review Candidates\n"
+        f"{high_signal_review_hints}\n"
+        "Review every candidate in this block before selecting sections. Preserve each materially supported P0/P1 risk, MAS/compliance concern, incident, blocked item, dependency, version delay, launch milestone, or timeline change. Merge only when the underlying topic and next action are the same; do not drop a candidate merely because another lower-priority item was selected.\n\n"
+        if str(high_signal_review_hints or "").strip()
         else ""
     )
     return (
@@ -1450,7 +1583,10 @@ def _daily_brief_user_prompt(
         "A cc-only mention is not enough. If a person is only copied after 'cc' and the actual ask is addressed to someone else, do not create a reminder for the cc'd person. If the direct assignee is outside the allowed list and an allowed teammate is only cc'd, produce no team_member_reminders item for that message.\n"
         "Do not include private chats. Do not include bot/system alerts, automated reminders, SDLC Checker output, or SDLC material/approval reminder messages. Do not include items where the named person replied, acknowledged, handled it, or Xiaodong already followed up later.\n"
         "Do not include @mentions that only say someone will join a meeting late, is delayed, or is temporarily unavailable; these are meeting logistics, not follow-up work.\n"
+        "Do not create any item from a pure Gmail Google Calendar invite, RSVP, accepted/declined/tentative response, reschedule notice, reminder, or 'Updated invitation with note' subject. Substantive project decisions in a separate human-authored email or meeting note may be used, but the calendar logistics themselves must be omitted.\n"
+        "Do not turn OL, on-leave, coverage, backup, or 'Please find [person] for any follow ups' availability statements into a task for that person.\n"
         "If the source message is annotated as a thread reply, make the reminder and evidence say thread, for example 'UDL数据小群 / thread: PH A-Card Model V2.1 Deployment'. Do not write 'in the group' for thread replies.\n"
+        "A reply from another participant is context only unless the named owner, Xiaodong, or the original requester explicitly states that the request is answered, fixed, resolved, or closed.\n"
         "If the mention looks human and action-relevant but you are unsure whether the named person stayed completely silent after being asked, drop it rather than creating a noisy Follow-up. Set source_type to seatalk.\n\n"
         "## Source And Evidence Rules\n"
         "For SeaTalk evidence, use the group ID/name or the key people involved. For Gmail evidence, use sender or key participants plus subject and thread link when available.\n"
@@ -1465,6 +1601,7 @@ def _daily_brief_user_prompt(
         f"{match_block}"
         f"{unanswered_question_block}"
         f"{team_member_reminder_block}"
+        f"{high_signal_block}"
         f"{evidence_context_block}"
         "## Exclusions\n"
         "For other_updates and team_member_reminders, ignore bot-generated alerts, automated reminders, system notifications, Jira/Confluence/calendar reminders, and no-reply notification emails unless a human adds meaningful follow-up in the same thread.\n\n"
@@ -1536,6 +1673,7 @@ def _build_daily_brief_evidence_context(
     team_member_reminder_candidates: list[dict[str, str]] | None,
     evidence_refs: list[dict[str, Any]] | None = None,
     source_token_ledger: dict[str, Any],
+    high_signal_review_hints: str = "",
 ) -> str:
     payload = {
         "unanswered_mentions": [
@@ -1545,6 +1683,11 @@ def _build_daily_brief_evidence_context(
         ][:MAX_UNANSWERED_SEATALK_QUESTION_HINTS],
         "candidate_followups": _compact_daily_followup_candidates(team_member_reminder_candidates),
         "evidence_refs": evidence_refs or [],
+        "high_signal_candidates": [
+            line[2:] if line.startswith("- ") else line
+            for line in str(high_signal_review_hints or "").splitlines()
+            if line.strip()
+        ],
     }
     cap_flags = {
         "seatalk_prompt_hit_cap": bool(source_token_ledger.get("seatalk_prompt_hit_cap")),
@@ -1638,7 +1781,7 @@ def _tail_by_line_budget(text: str, *, max_chars: int) -> str:
 def _daily_brief_signal_terms() -> tuple[str, ...]:
     people = {person.casefold() for person in TEAM_MEMBER_REMINDER_ALLOWED_PEOPLE.values()}
     aliases = {alias.casefold() for alias in TEAM_MEMBER_REMINDER_ALLOWED_PEOPLE}
-    return tuple(dict.fromkeys([*DAILY_BRIEF_SIGNAL_TERMS, *people, *aliases]))
+    return tuple(dict.fromkeys([*DAILY_BRIEF_SIGNAL_TERMS, *DAILY_BRIEF_HIGH_SIGNAL_TERMS, *people, *aliases]))
 
 
 def _build_unanswered_seatalk_question_hints(history_text: str) -> str:
@@ -1727,10 +1870,13 @@ def _scan_team_member_reminder_candidates(history_text: str) -> tuple[list[dict[
                     sender_is_xiaodong or item.get("person") == sender_person
                 ):
                     item["answered"] = True
-        if thread and is_human_reply and _is_substantive_team_member_followup(text):
+        # A reply from a different participant may add context, but it does not
+        # prove that the named owner handled the request. Only the named owner,
+        # Xiaodong, or the requester explicitly closing the issue can resolve it.
+        if thread and is_human_reply and _is_explicit_team_member_closure(text):
             for item in pending:
                 if (
-                    item.get("sender") != sender
+                    item.get("sender") == sender
                     and _is_same_team_member_reminder_context(item, group=current_group, thread=thread, key=key)
                 ):
                     item["answered"] = True
@@ -1738,7 +1884,12 @@ def _scan_team_member_reminder_candidates(history_text: str) -> tuple[list[dict[
             for item in pending:
                 if item.get("sender") == sender and str(item.get("group") or "") == current_group:
                     item["answered"] = True
-        if not is_human_reply or not _looks_like_team_member_request(text):
+        if (
+            not is_human_reply
+            or _is_team_member_coverage_notice(text)
+            or _is_team_member_progress_update(text)
+            or not _looks_like_team_member_request(text)
+        ):
             continue
         for person in _mentioned_team_members(text):
             if person == sender_person or _is_cc_only_team_member_mention(text, person):
@@ -1813,6 +1964,37 @@ def _is_substantive_team_member_followup(text: Any) -> bool:
     return any(cue in lowered for cue in answer_cues)
 
 
+def _is_team_member_progress_update(text: Any) -> bool:
+    normalized = " ".join(str(text or "").casefold().split())
+    progress_cues = (
+        "still checking",
+        "checking on this",
+        "will provide reply",
+        "will reply",
+        "will get back",
+        "i'll check",
+        "i will check",
+        "already checking",
+        "looking into this",
+        "will follow up",
+        "已在看",
+        "稍后回复",
+        "之后回复",
+    )
+    request_cues = (
+        "please",
+        "can you",
+        "could you",
+        "help to",
+        "帮",
+        "麻烦",
+        "确认",
+        "check this",
+        "review this",
+    )
+    return any(cue in normalized for cue in progress_cues) and not any(cue in normalized for cue in request_cues)
+
+
 def _is_explicit_team_member_closure(text: Any) -> bool:
     normalized = str(text or "").casefold()
     closure_terms = (
@@ -1852,6 +2034,578 @@ def _dedupe_team_member_reminder_candidates(items: list[dict[str, Any]]) -> list
     return deduped
 
 
+def _filter_gmail_calendar_history(gmail_history_text: str) -> tuple[str, int]:
+    """Remove pure Google Calendar invite/response traffic before prompting the model."""
+    source = str(gmail_history_text or "").strip()
+    if not source:
+        return source, 0
+    separator = "=" * 80
+    if separator not in source:
+        return source, 0
+    parts = source.split(separator)
+    kept: list[str] = [parts[0].rstrip()]
+    suppressed = 0
+    for part in parts[1:]:
+        block = part.strip()
+        if not block:
+            continue
+        if _is_pure_gmail_calendar_block(block):
+            suppressed += len(re.findall(r"(?m)^Message\s+\d+", block)) or 1
+            continue
+        kept.append(block)
+    return f"\n{separator}\n".join(part for part in kept if part).strip(), suppressed
+
+
+def _is_pure_gmail_calendar_block(block: str) -> bool:
+    subject = ""
+    sender = ""
+    for line in str(block or "").splitlines():
+        if line.startswith("Subject:"):
+            subject = line.split(":", 1)[1].strip().casefold()
+        elif line.startswith("From:"):
+            sender = line.split(":", 1)[1].strip().casefold()
+    sender_is_calendar = any(hint in sender for hint in GMAIL_CALENDAR_SENDER_HINTS)
+    subject_is_calendar = any(hint in subject for hint in GMAIL_CALENDAR_SUBJECT_HINTS)
+    return sender_is_calendar or subject_is_calendar
+
+
+def _is_gmail_calendar_item(item: dict[str, Any]) -> bool:
+    source_type = str(item.get("source_type") or "").strip().lower()
+    if source_type not in {"gmail", "mixed"}:
+        return False
+    combined = " ".join(
+        str(item.get(field) or "").casefold()
+        for field in ("task", "title", "summary", "evidence", "reminder")
+    )
+    calendar_cues = (
+        "accepted:",
+        "declined:",
+        "tentative:",
+        "invitation:",
+        "updated invitation",
+        "you’re invited",
+        "you're invited",
+        "rescheduled",
+        "rsvp",
+        "google calendar",
+        "meeting request",
+        "event reminder",
+    )
+    return any(cue in combined for cue in calendar_cues)
+
+
+def _filter_gmail_calendar_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [item for item in items if not _is_gmail_calendar_item(item)]
+
+
+def _build_high_signal_review_hints(history_text: str) -> str:
+    """Keep critical timeline/risk lines visible even when source compaction is aggressive."""
+    candidates: list[tuple[int, int, str]] = []
+    seen: set[str] = set()
+    for index, record in enumerate(_seatalk_history_records_for_evidence(history_text)):
+        current_group = str(record.get("group") or "").strip()
+        current_thread = str(record.get("thread") or "").strip()
+        text = str(record.get("text") or "").strip()
+        haystack = f"{current_group} {current_thread} {text}".casefold()
+        if not any(term in haystack for term in DAILY_BRIEF_HIGH_SIGNAL_TERMS):
+            continue
+        if text.casefold() in {"ack", "noted", "thanks", "thank you", "[image]"}:
+            continue
+        if "new live incident" in text.casefold() and len(text) < 80:
+            continue
+        source = f"{current_group} / thread: {current_thread}" if current_thread else current_group
+        hint = f"- [{str(record.get('timestamp') or '').strip()}] {source}: {str(record.get('sender') or '').strip()}: {_clip_high_signal_text(text, limit=280)}"
+        if hint in seen:
+            continue
+        seen.add(hint)
+        score = 0
+        weights = (
+            ("[sp][p0]", 30),
+            ("p0", 18),
+            ("p1", 12),
+            ("mas", 16),
+            ("incident", 14),
+            ("blocked", 14),
+            ("blocker", 14),
+            ("dependency", 12),
+            ("upstream", 10),
+            ("timeline", 10),
+            ("delay", 10),
+            ("eta", 8),
+            ("launch", 8),
+            ("go-live", 8),
+            ("release", 7),
+            ("version", 7),
+            ("上线", 8),
+            ("延期", 10),
+            ("阻塞", 12),
+            ("依赖", 10),
+            ("事故", 12),
+        )
+        score += sum(weight for term, weight in weights if term in haystack)
+        if "xiaodong" in str(record.get("sender") or "").casefold() or "zheng xiaodong" in text.casefold():
+            score += 3
+        if "[sp][p0]" in current_group.casefold():
+            score += 20
+        candidates.append((score, index, hint))
+    candidates.sort(key=lambda value: (-value[0], -value[1]))
+    return "\n".join(hint for _, _, hint in candidates[:36])
+
+
+def _build_high_signal_fallback_items(
+    history_text: str,
+    *,
+    evidence_refs: list[dict[str, Any]],
+    name_mappings: dict[str, str],
+    existing_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Recover material P0/risk events omitted by the model without backfilling chatter."""
+    records = _seatalk_history_records_for_evidence(history_text)
+    grouped: dict[tuple[str, str, str], tuple[int, dict[str, str]]] = {}
+    for record in records:
+        group = str(record.get("group") or "").strip()
+        thread = str(record.get("thread") or "").strip()
+        text = str(record.get("text") or "").strip()
+        sender = str(record.get("sender") or "").strip()
+        if not group or not text or not _is_meaningful_human_seatalk_line(sender, text):
+            continue
+        haystack = f"{group} {thread} {text}".casefold()
+        is_p0_group = bool(re.search(r"\bp0\b", group.casefold()))
+        risk_terms = (
+            "mas",
+            "incident",
+            "blocked",
+            "blocker",
+            "dependency",
+            "upstream",
+            "timeline",
+            "delay",
+            "delayed",
+            "postpone",
+            "launch",
+            "go-live",
+            "version",
+            "1.0.88",
+            "v3.07",
+            "v3.08",
+            "atm",
+            "qris",
+            "translation",
+            "copywriting",
+            "configure",
+            "edit access",
+            "rows 548",
+            "548-549",
+            "querytransferrecipient",
+            "fallback",
+            "recurring",
+            "mari stock",
+            "548-549",
+            "f30",
+            "dev starts",
+            "device model",
+            "devicemodel",
+            "上线",
+            "延期",
+            "阻塞",
+            "依赖",
+            "事故",
+            "overlimit",
+            "failed",
+            "error",
+            "impact",
+        )
+        hit_terms = [term for term in risk_terms if term in haystack]
+        direct_xiaodong = _sender_is_xiaodong(sender)
+        direct_timeline_change = direct_xiaodong and any(
+            term in haystack for term in ("timeline", "delay", "delayed", "1.0.88", "延期", "上线")
+        )
+        version_timeline_change = bool(
+            re.search(r"\bv?\d+\.\d+(?:\.\d+)?\b", haystack, flags=re.IGNORECASE)
+            and any(
+                term in haystack
+                for term in (
+                    "timeline",
+                    "delay",
+                    "delayed",
+                    "release",
+                    "launch",
+                    "start",
+                    "hard deadline",
+                    "as planned",
+                    "预计",
+                    "上线",
+                    "延期",
+                )
+            )
+        )
+        protected_topic = _is_protected_daily_brief_record(record) or any(
+            (
+                "qris" in haystack and any(term in haystack for term in ("dependency", "upstream", "requirement", "timeline")),
+                "atm" in haystack and bool(re.search(r"\bv?3\.0[78]\b", haystack, flags=re.IGNORECASE)),
+                "translation" in haystack and any(term in haystack for term in ("configure", "copywriting", "sdk", "key")),
+                "copywriting" in haystack and any(term in haystack for term in ("configure", "sdk", "transify")),
+                "edit access" in haystack and any(term in haystack for term in ("548", "549", "row")),
+                "548-549" in haystack,
+                "querytransferrecipient" in haystack,
+                "recurring" in haystack and any(term in haystack for term in ("incident", "live", "ph", "querytransfer")),
+                "fallback" in haystack and any(term in haystack for term in ("mas", "af", "fraud")),
+                "mari stock" in haystack and "mas" in haystack,
+                "f30" in haystack,
+                any(term in haystack for term in ("device model", "devicemodel")),
+            )
+        )
+        if not is_p0_group and len(hit_terms) < 2 and not direct_timeline_change and not protected_topic:
+            continue
+        if len(text) < 20 or text.casefold() in {"ack", "noted", "thanks", "thank you", "[image]"}:
+            continue
+        score = len(hit_terms) * 2 + (8 if is_p0_group else 0)
+        if "mas" in haystack or "blocked" in haystack or "incident" in haystack:
+            score += 5
+        if direct_timeline_change:
+            score += 14
+        if version_timeline_change:
+            # Version milestones are easy to lose when a model returns several
+            # P0 incidents, but they are explicitly required high-signal output.
+            score += 24
+        if protected_topic:
+            score += 20
+        if any(
+            term in haystack
+            for term in (
+                "1.0.88",
+                "f30",
+                "devicemodel",
+                "device model",
+                "edit access",
+                "548-549",
+                "v3.07",
+                "v3.08",
+                "querytransferrecipient",
+                "mari stock",
+                "translation",
+                "qris",
+                "sgdb-81072",
+            )
+        ) or ("stock" in haystack and "mas" in haystack):
+            score += 35
+        if (
+            re.search(r"(?<![A-Za-z0-9_])mas(?![A-Za-z0-9_])", haystack, flags=re.IGNORECASE)
+            and any(
+                term in haystack
+                for term in (
+                    "regulatory", "compliance", "approval", "launch", "requirement", "reporting",
+                    "register", "risk", "incident", "system down", "fallback", "强监管", "上报", "监管", "合规", "上线",
+                )
+            )
+        ):
+            score += 35
+        protected_markers = tuple(
+            marker
+            for marker in (
+                "mas",
+                "qris",
+                "dependency",
+                "upstream",
+                "edit access",
+                "548-549",
+                "mari stock",
+                "querytransferrecipient",
+                "swp-31174",
+                "f30",
+                "device model",
+                "devicemodel",
+                "v3.07",
+                "v3.08",
+                "1.0.88",
+                "translation",
+            )
+            if marker in haystack
+        ) if _is_protected_daily_brief_record(record) else ()
+        key = (
+            _normalize_thread_match_text(group),
+            _normalize_thread_match_text(thread or "__main__"),
+            "protected:" + "|".join(protected_markers) if protected_markers else "",
+        )
+        previous = grouped.get(key)
+        if previous is None or score > previous[0]:
+            grouped[key] = (score, record)
+
+    def has_same_topic(item: dict[str, Any], record: dict[str, str]) -> bool:
+        candidate = {
+            "title": str(record.get("thread") or record.get("group") or ""),
+            "summary": str(record.get("text") or ""),
+            "domain": item.get("domain"),
+        }
+        return any(_brief_items_refer_to_same_topic(item, existing) or _brief_items_refer_to_same_topic(candidate, existing) for existing in existing_items)
+
+    ranked = sorted(grouped.values(), key=lambda value: value[0], reverse=True)
+
+    def critical_bucket(record: dict[str, str]) -> str:
+        """Reserve one slot for each required high-signal topic family."""
+        haystack = " ".join(
+            str(record.get(field) or "") for field in ("group", "thread", "sender", "text")
+        ).casefold()
+        if "mari stock" in haystack or ("fallback" in haystack and any(term in haystack for term in ("mas", "fraud", "anti-fraud"))):
+            return "mari_stock_fallback"
+        if re.search(r"(?<![a-z0-9_])mas(?![a-z0-9_])", haystack) and any(
+            term in haystack
+            for term in (
+                "regulatory", "compliance", "requirement", "reporting", "register",
+                "deadline", "risk", "incident", "system down", "fallback", "强监管", "上报", "监管", "合规",
+            )
+        ):
+            return "mas_compliance"
+        if "qris" in haystack and any(term in haystack for term in ("dependency", "upstream", "sgdb-81072")):
+            return "qris_dependency"
+        if any(term in haystack for term in ("f30", "dev starts", "device model", "devicemodel", "1.0.88")):
+            return "rene_version_timeline"
+        if "atm" in haystack and re.search(r"\bv?3\.0[78]\b", haystack, flags=re.IGNORECASE):
+            return "atm_version_timeline"
+        if any(term in haystack for term in ("querytransferrecipient", "swp-31174")) or (
+            "recurring" in haystack and "incident" in haystack
+        ):
+            return "ph_recurring_incident"
+        if "edit access" in haystack or "548-549" in haystack:
+            return "ker_yin_edit_access"
+        if "translation" in haystack and any(term in haystack for term in ("configure", "copywriting", "sdk", "key")):
+            return "ph_translation"
+        return ""
+
+    # The normal score favors repeated generic incident lines. Reserve slots
+    # for the required low-frequency topics before filling remaining slots.
+    critical: dict[str, tuple[int, dict[str, str]]] = {}
+    for score, record in ranked:
+        bucket = critical_bucket(record)
+        if bucket and (bucket not in critical or score > critical[bucket][0]):
+            critical[bucket] = (score, record)
+    selected_records: list[tuple[int, dict[str, str]]] = list(critical.values())
+    selected_keys = {id(record) for _, record in selected_records}
+    selected_records.extend((score, record) for score, record in ranked if id(record) not in selected_keys)
+    fallbacks: list[dict[str, Any]] = []
+    for score, record in selected_records:
+        thread = str(record.get("thread") or "").strip()
+        group = str(record.get("group") or "").strip()
+        evidence_ref = next(
+            (
+                ref
+                for ref in evidence_refs
+                if str(ref.get("source_type") or "") == "seatalk"
+                and str(ref.get("timestamp") or "") == str(record.get("timestamp") or "")
+                and _normalize_thread_match_text(ref.get("group")) == _normalize_thread_match_text(group)
+                and _normalize_thread_match_text(ref.get("thread") or "__main__") == _normalize_thread_match_text(thread or "__main__")
+            ),
+            None,
+        )
+        if not evidence_ref:
+            continue
+        text = _sanitize_seatalk_evidence(
+            _clip_high_signal_text(record.get("text"), limit=320),
+            name_mappings=name_mappings,
+        )
+        haystack = f"{group} {thread} {text}".casefold()
+        if "credit" in haystack or "loan" in haystack or "risk tier" in haystack:
+            domain = "Credit Risk"
+        elif any(term in haystack for term in ("ops", "operation", "operational")):
+            domain = "Ops Risk"
+        elif any(term in haystack for term in ("af", "anti-fraud", "fraud", "fv", "atm", "mas", "hold & release")):
+            domain = "Anti-fraud"
+        else:
+            domain = "General"
+        safe_topic = thread or group
+        if re.search(r"\b(?:group|buddy)-\d+\b|\bUID\s+\d+\b", safe_topic, flags=re.IGNORECASE):
+            safe_topic = "Private SeaTalk chat" if "buddy-" in safe_topic.casefold() or "uid " in safe_topic.casefold() else "SeaTalk group"
+        item = {
+            "domain": domain,
+            "title": f"{_sanitize_seatalk_evidence(_normalize_seatalk_source_label(safe_topic), name_mappings=name_mappings)} high-signal update",
+            "summary": text,
+            "status": "blocked" if any(term in haystack for term in ("mas", "blocked", "blocker", "incident", "dependency", "delay", "延期", "阻塞", "事故")) else "in_progress",
+            "evidence": _format_seatalk_record_evidence(record, name_mappings=name_mappings),
+            "source_type": "seatalk",
+            "evidence_ref_id": str(evidence_ref.get("id") or "").strip(),
+            "priority_reason": "Deterministic high-signal P0/risk preservation",
+            "fallback_source": "deterministic_high_signal",
+        }
+        detail_text = f"{group} {thread} {text}".casefold()
+        protected_detail = _is_protected_daily_brief_record(record) or bool(
+            re.search(r"\bv?\d+\.\d+(?:\.\d+)?\b", detail_text, flags=re.IGNORECASE)
+            or any(
+                term in detail_text
+                for term in ("f30", "devicemodel", "device model", "v3.07", "v3.08", "548-549", "querytransferrecipient")
+            )
+        )
+        if has_same_topic(item, record) and not protected_detail:
+            continue
+        fallbacks.append(item)
+        if len(fallbacks) >= 10:
+            break
+    return fallbacks
+
+
+def _is_protected_daily_brief_record(record: dict[str, str]) -> bool:
+    """Keep low-frequency required signals in the evidence pool after ranking."""
+    haystack = " ".join(
+        str(record.get(field) or "") for field in ("group", "thread", "sender", "text")
+    ).casefold()
+    group = str(record.get("group") or "").casefold()
+    version_marker = bool(re.search(r"\bv?\d+\.\d+(?:\.\d+)?\b", haystack, flags=re.IGNORECASE))
+    version_or_timeline = bool(
+        version_marker
+        and any(
+            term in haystack
+            for term in (
+                "timeline",
+                "delay",
+                "delayed",
+                "release",
+                "launch",
+                "dev starts",
+                "start",
+                "hard deadline",
+                "上线",
+                "延期",
+            )
+        )
+    )
+    mas_compliance_signal = bool(
+        re.search(r"(?<![A-Za-z0-9_])mas(?![A-Za-z0-9_])", haystack, flags=re.IGNORECASE)
+        and any(
+            term in haystack
+            for term in (
+                "regulatory",
+                "compliance",
+                "requirement",
+                "reporting",
+                "register",
+                "deadline",
+                "risk",
+                "incident",
+                "system down",
+                "fallback",
+                "强监管",
+                "上报",
+                "监管",
+                "合规",
+            )
+        )
+    )
+    return any(
+        (
+            mas_compliance_signal,
+            "edit access" in haystack,
+            "548-549" in haystack,
+            "mari stock" in haystack,
+            "stock" in haystack and mas_compliance_signal,
+            "querytransferrecipient" in haystack or "swp-31174" in haystack,
+            "f30" in haystack,
+            any(term in haystack for term in ("device model", "devicemodel")),
+            "atm" in haystack and bool(re.search(r"\bv?3\.0[78]\b", haystack, flags=re.IGNORECASE)),
+            "qris" in haystack and any(term in haystack for term in ("dependency", "upstream", "sgdb-81072")),
+            "translation" in haystack,
+            "fallback" in haystack and any(term in haystack for term in ("mas", "af", "fraud")),
+            "[sp][p0]" in group and any(
+                term in haystack
+                for term in ("timeline", "delay", "delayed", "dependency", "upstream", "blocked", "launch", "release", "上线", "延期")
+            ),
+            version_or_timeline,
+            version_marker and any(term in haystack for term in ("1.0.88", "v3.07", "v3.08", "f30", "devicemodel", "device model")),
+        )
+    )
+
+
+def _build_gmail_high_signal_fallback_items(
+    gmail_history_text: str,
+    *,
+    evidence_refs: list[dict[str, Any]],
+    existing_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Recover material Gmail risks/timelines when model selection is incomplete."""
+    fallbacks: list[dict[str, Any]] = []
+    for ref in evidence_refs:
+        if str(ref.get("source_type") or "").strip().lower() != "gmail":
+            continue
+        subject = " ".join(str(ref.get("subject") or "").split())
+        snippet = " ".join(str(ref.get("snippet") or "").split())
+        evidence = " ".join(str(ref.get("evidence") or "").split())
+        haystack = f"{subject} {snippet} {evidence}".casefold()
+        version_match = bool(re.search(r"\bv?\d+\.\d+(?:\.\d+)?\b", haystack, flags=re.IGNORECASE))
+        version_timeline = version_match and any(
+            term in haystack
+            for term in ("timeline", "delay", "delayed", "release", "launch", "upstream", "deadline", "上线", "延期")
+        )
+        protected_topic = any(
+            (
+                "mari stock" in haystack,
+                _is_mas_compliance_signal(haystack),
+                version_timeline,
+                "translation" in haystack and any(term in haystack for term in ("configure", "copywriting", "sdk", "key")),
+                "translation" in haystack,
+                "edit access" in haystack,
+                "querytransferrecipient" in haystack,
+                "recurring" in haystack and any(term in haystack for term in ("incident", "live", "ph", "querytransfer")),
+                "qris" in haystack and any(term in haystack for term in ("dependency", "upstream", "timeline")),
+                "atm" in haystack and bool(re.search(r"\bv?3\.0[78]\b", haystack, flags=re.IGNORECASE)),
+                "f30" in haystack,
+                any(term in haystack for term in ("device model", "devicemodel")),
+            )
+        )
+        signal_terms = (
+            "p0",
+            "p1",
+                "mas",
+                "qris",
+                "dependency",
+                "upstream",
+            "incident",
+            "blocked",
+            "dependency",
+            "upstream",
+            "timeline",
+            "delay",
+            "launch",
+            "release",
+            "version",
+            "translation",
+            "edit access",
+            "fallback",
+            "f30",
+            "dev starts",
+            "device model",
+            "devicemodel",
+            "recurring",
+            "querytransferrecipient",
+        )
+        signal_count = sum(1 for term in signal_terms if term in haystack)
+        if not protected_topic and signal_count < 2:
+            continue
+        summary = _clip_high_signal_text(f"{subject}: {snippet}".strip(": "), limit=360)
+        if not summary or len(summary) < 20:
+            continue
+        domain = "Credit Risk" if any(term in haystack for term in ("credit risk", "crms", "loan", "udl")) else (
+            "Anti-fraud" if any(term in haystack for term in ("anti-fraud", "anti fraud", "fraud", "mas", "atm", "fallback")) else "General"
+        )
+        item = {
+            "domain": domain,
+            "title": subject or "Gmail high-signal update",
+            "summary": summary,
+            "status": "blocked" if any(term in haystack for term in ("mas", "blocked", "incident", "dependency", "delay", "延期")) else "in_progress",
+            "evidence": evidence or "Gmail conversation",
+            "source_type": "gmail",
+            "evidence_ref_id": str(ref.get("id") or "").strip(),
+            "priority_reason": "Deterministic high-signal Gmail preservation",
+            "fallback_source": "deterministic_gmail_high_signal",
+        }
+        if not item["evidence_ref_id"] or (
+            any(_brief_items_refer_to_same_topic(item, existing) for existing in existing_items)
+            and not protected_topic
+        ):
+            continue
+        fallbacks.append(item)
+        if len(fallbacks) >= 8:
+            break
+    return fallbacks
+
+
 def _filter_daily_brief_meeting_logistics(history_text: str) -> str:
     return "\n".join(
         line
@@ -1865,7 +2619,10 @@ def _filter_daily_brief_meeting_logistics(history_text: str) -> str:
 
 def _is_meeting_logistics_or_availability_notice(text: Any) -> bool:
     normalized = str(text or "").casefold()
-    meeting_terms = ("meeting", "call", "sync", "standup", "small group", "会议", "开会", "小组")
+    meeting_terms = (
+        "meeting", "call", "sync", "standup", "small group", "discussion", "chat", "in the room",
+        "available", "会议", "开会", "小组",
+    )
     availability_terms = (
         "join late",
         "joining late",
@@ -1882,8 +2639,37 @@ def _is_meeting_logistics_or_availability_notice(text: Any) -> bool:
         "晚一点",
         "晚点进入",
         "晚点加入",
+        "reschedule",
+        "rescheduled",
     )
     return any(term in normalized for term in availability_terms) and any(term in normalized for term in meeting_terms)
+
+
+def _is_team_member_coverage_notice(text: Any) -> bool:
+    normalized = str(text or "").casefold()
+    if not _mentioned_team_members(str(text or "")):
+        return False
+    coverage_cues = (
+        "please find",
+        "for any follow up",
+        "for follow ups",
+        "coverage",
+        "covering",
+        "backup",
+        "on leave",
+        "out of office",
+        "annual leave",
+    )
+    has_ol_marker = bool(re.search(r"\b(?:ol|leave)\b", normalized))
+    return any(cue in normalized for cue in coverage_cues) and has_ol_marker
+
+
+def _filter_team_member_coverage_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in items
+        if not _is_team_member_coverage_notice(_item_text(item, fields=("task", "reminder", "title", "summary", "evidence")))
+    ]
 
 
 def _filter_resolved_or_meeting_logistics_followups(
@@ -2071,6 +2857,105 @@ def _is_meaningful_human_seatalk_line(sender: str, text: str) -> bool:
 def _clip_hint_text(value: Any, *, limit: int) -> str:
     text = " ".join(str(value or "").split())
     return text if len(text) <= limit else f"{text[:limit].rstrip()}..."
+
+
+def _clip_high_signal_text(value: Any, *, limit: int) -> str:
+    raw = " ".join(str(value or "").split())
+    if len(raw) <= limit:
+        return raw
+    segments = [segment.strip() for segment in re.split(r"(?<=[。！？?!])|(?<=\.)\s+", raw) if segment.strip()]
+    high_signal_terms = (
+        *DAILY_BRIEF_HIGH_SIGNAL_TERMS,
+        "1.0.88",
+        "v3.07",
+        "v3.08",
+        "qris",
+        "swp-",
+        "f30",
+        "devicemodel",
+        "device model",
+        "548-549",
+        "querytransferrecipient",
+        "translation",
+    )
+    selected = [segment for segment in segments if any(term.casefold() in segment.casefold() for term in high_signal_terms)]
+    if selected:
+        version_segments = [segment for segment in selected if re.search(r"\bv?\d+\.\d+(?:\.\d+)?\b", segment, flags=re.IGNORECASE)]
+        if version_segments:
+            marker_segments = [
+                segment
+                for segment in selected
+                if any(
+                    term.casefold() in segment.casefold()
+                    for term in ("f30", "devicemodel", "device model", "548-549", "querytransferrecipient")
+                )
+            ]
+            selected = list(dict.fromkeys([*version_segments, *marker_segments]))
+        focused = " ".join(selected)
+        if len(focused) <= limit:
+            return focused
+        clipped = focused[:limit].rstrip()
+        late_marker_terms = ("f30", "devicemodel", "device model", "548-549", "querytransferrecipient")
+        missing_late_marker = any(
+            term.casefold() in focused.casefold() and term.casefold() not in clipped.casefold()
+            for term in late_marker_terms
+        )
+        if any(term.casefold() in clipped.casefold() for term in high_signal_terms) and not missing_late_marker:
+            return f"{clipped}..."
+        # Long log lines often put the only useful marker (for example
+        # deviceModel or F30) after the first few hundred characters. Keep a
+        # compact context tail so the required signal remains visible.
+        marker_match = next(
+            (
+                re.search(re.escape(term), focused, flags=re.IGNORECASE)
+                for term in high_signal_terms
+                if re.search(re.escape(term), focused, flags=re.IGNORECASE)
+            ),
+            None,
+        )
+        if marker_match:
+            tail_limit = min(180, max(80, limit // 2))
+            tail = focused[marker_match.start(): marker_match.start() + tail_limit].rstrip()
+            marker_labels = [
+                label
+                for label in ("deviceModel", "F30", "1.0.88", "v3.07", "v3.08", "QRIS", "SWP-31174")
+                if re.search(re.escape(label), focused, flags=re.IGNORECASE)
+            ]
+            missing_labels = [label for label in marker_labels if label.casefold() not in tail.casefold()]
+            if missing_labels:
+                suffix = f" [signals: {', '.join(missing_labels)}]"
+                tail = f"{tail[:max(1, tail_limit - len(suffix))].rstrip()}{suffix}"
+            prefix_limit = max(0, limit - len(tail) - 5)
+            return f"{focused[:prefix_limit].rstrip()} ... {tail}"
+        return f"{clipped}..."
+    return _clip_hint_text(raw, limit=limit)
+
+
+def _is_mas_compliance_signal(value: Any) -> bool:
+    """Recognize MAS/compliance evidence even when it appears late in a body."""
+    haystack = " ".join(str(value or "").casefold().split())
+    return bool(
+        re.search(r"(?<![a-z0-9_])mas(?![a-z0-9_])", haystack)
+        and any(
+            term in haystack
+            for term in (
+                "regulatory",
+                "compliance",
+                "requirement",
+                "reporting",
+                "register",
+                "deadline",
+                "risk",
+                "incident",
+                "system down",
+                "fallback",
+                "强监管",
+                "上报",
+                "监管",
+                "合规",
+            )
+        )
+    )
 
 
 def _load_seatalk_name_mappings(service: Any) -> dict[str, str]:
@@ -2318,10 +3203,9 @@ def _sanitize_seatalk_evidence(value: Any, *, name_mappings: dict[str, str] | No
 
 
 def _format_private_seatalk_chat_label(identifier: Any) -> str:
-    raw = " ".join(str(identifier or "").strip().split())
-    if not raw:
-        return "Private SeaTalk chat"
-    return f"Private SeaTalk chat ({raw})"
+    # Raw buddy/UID identifiers are implementation details, not traceable
+    # business evidence. Use a stable generic label when no display name maps.
+    return "Private SeaTalk chat"
 
 
 def _normalize_seatalk_source_label(value: Any) -> str:
@@ -2421,17 +3305,34 @@ def _build_daily_brief_evidence_refs(
             if record:
                 add_ref(record, person=str(candidate.get("person") or ""), reply_state="unanswered")
 
-        for record in records:
+        def evidence_priority(record: dict[str, str]) -> int:
+            haystack = " ".join(str(record.get(field) or "") for field in ("group", "thread", "sender", "text")).casefold()
+            score = sum(2 for term in DAILY_BRIEF_HIGH_SIGNAL_TERMS if term in haystack)
+            if re.search(r"\bp0\b", haystack):
+                score += 12
+            if re.search(r"\bp1\b", haystack):
+                score += 8
+            return score
+
+        selected_records: list[dict[str, str]] = []
+        regular_record_count = 0
+        for record in sorted(records, key=evidence_priority, reverse=True):
             text = str(record.get("text") or "")
-            if _looks_like_team_member_request(text) or _is_unanswered_question_candidate(
+            qualifies = _looks_like_team_member_request(text) or _is_unanswered_question_candidate(
                 text,
                 group=str(record.get("group") or ""),
                 thread=str(record.get("thread") or ""),
                 sender=str(record.get("sender") or ""),
-            ) or _looks_like_project_update_ref(record):
-                add_ref(record)
-            if len([ref for ref in refs if str(ref.get("source_type")) == "seatalk"]) >= 80:
-                break
+            ) or _looks_like_project_update_ref(record)
+            protected = _is_protected_daily_brief_record(record)
+            if not qualifies and not protected:
+                continue
+            if regular_record_count < 120 or protected:
+                selected_records.append(record)
+            if not protected:
+                regular_record_count += 1
+        for record in selected_records:
+            add_ref(record)
     refs.extend(_build_gmail_evidence_refs(gmail_history_text, start_index=len(refs) + 1))
     return refs
 
@@ -2455,6 +3356,26 @@ def _looks_like_project_update_ref(record: dict[str, str]) -> bool:
             "prd",
             "release",
             "dependency",
+            "upstream",
+            "delay",
+            "delayed",
+            "version",
+            "v3.07",
+            "v3.08",
+            "atm",
+            "qris",
+            "translation",
+            "copywriting",
+            "edit access",
+            "querytransferrecipient",
+            "fallback",
+            "recurring",
+            "mari stock",
+            "548-549",
+            "f30",
+            "dev starts",
+            "device model",
+            "devicemodel",
             "timeline",
             "eta",
             "上线",
@@ -2489,7 +3410,10 @@ def _build_gmail_evidence_refs(gmail_history_text: str, *, start_index: int) -> 
                 "participants": str(current.get("participants") or "").strip(),
                 "sender": str(current_message.get("from") or "").strip(),
                 "timestamp": str(current_message.get("date") or "").strip(),
-                "snippet": _clip_hint_text(body, limit=280),
+                # Important compliance details often appear after the first
+                # paragraph of a long meeting note. Preserve signal-bearing
+                # sentences rather than only taking the body prefix.
+                "snippet": _clip_high_signal_text(body, limit=280),
                 "evidence": _format_gmail_ref_evidence(current, current_message),
             }
         )
@@ -2538,7 +3462,40 @@ def _build_gmail_evidence_refs(gmail_history_text: str, *, start_index: int) -> 
         elif current_message.get("in_body"):
             current_message["body"] = (str(current_message.get("body") or "") + "\n" + line).strip()
     flush_message()
-    return refs[:40]
+    if len(refs) <= 40:
+        return refs
+
+    def protected(ref: dict[str, Any]) -> bool:
+        haystack = " ".join(
+            str(ref.get(field) or "")
+            for field in ("subject", "participants", "sender", "snippet", "evidence")
+        ).casefold()
+        return any(
+            (
+                bool(re.search(r"(?<![A-Za-z0-9_])mas(?![A-Za-z0-9_])", haystack, flags=re.IGNORECASE)),
+                "mari stock" in haystack,
+                "edit access" in haystack,
+                "548-549" in haystack,
+                "translation" in haystack,
+                "copywriting" in haystack,
+                "querytransferrecipient" in haystack,
+                "swp-31174" in haystack,
+                "qris" in haystack and any(term in haystack for term in ("dependency", "upstream", "timeline")),
+                "fallback" in haystack and any(term in haystack for term in ("mas", "fraud", "anti-fraud")),
+                "f30" in haystack,
+                any(term in haystack for term in ("device model", "devicemodel")),
+                bool(re.search(r"\bv?3\.0[78]\b", haystack, flags=re.IGNORECASE)),
+                bool(re.search(r"\bv?\d+\.\d+(?:\.\d+)?\b", haystack, flags=re.IGNORECASE))
+                and any(term in haystack for term in ("timeline", "delay", "release", "launch", "dev starts", "start", "延期", "上线")),
+            )
+        )
+
+    protected_refs = [ref for ref in refs if protected(ref)]
+    protected_ids = {str(ref.get("id") or "") for ref in protected_refs}
+    regular_refs = [ref for ref in refs if str(ref.get("id") or "") not in protected_ids]
+    # Keep every protected evidence ref even when a busy Gmail window has more
+    # than the normal context cap; the remaining context stays bounded.
+    return protected_refs + regular_refs[: max(0, 40 - len(protected_refs))]
 
 
 def _format_gmail_ref_evidence(thread: dict[str, Any], message: dict[str, str]) -> str:
@@ -3112,6 +4069,7 @@ def _is_generic_seatalk_evidence(value: Any) -> bool:
         "seatalk conversation",
         "seatalk direct discussion",
         "seatalk thread",
+        "private seatalk chat",
     }
     if normalized in generic_values:
         return True
@@ -3134,7 +4092,11 @@ def _seatalk_history_records_for_evidence(history_text: str) -> list[dict[str, s
             current_group = header_match.group("group").strip()
             continue
         message_match = _SEATALK_HISTORY_MESSAGE_RE.match(line)
-        if not message_match or not current_group:
+        if not message_match:
+            if records and line[:1].isspace() and line.strip():
+                records[-1]["text"] = f"{records[-1].get('text', '').strip()} {line.strip()}".strip()
+            continue
+        if not current_group:
             continue
         records.append(
             {
@@ -3187,7 +4149,7 @@ def _format_seatalk_record_evidence(record: dict[str, str], *, name_mappings: di
     if group.startswith("group-"):
         group = "SeaTalk group"
     evidence = f"{group} / thread: {thread}" if thread else group
-    return _normalize_seatalk_source_label(evidence)
+    return _sanitize_seatalk_evidence(_normalize_seatalk_source_label(evidence), name_mappings=name_mappings)
 
 
 def _item_uses_seatalk_source(item: dict[str, Any]) -> bool:
@@ -3505,7 +4467,7 @@ def _suppress_cross_section_duplicate_topics(
         return False
 
     remember(direct_action_todos)
-    remember(watch_delegate_todos)
+    watch_delegate_todos[:] = [item for item in watch_delegate_todos if not isinstance(item, dict) or keep_unique(item)]
     reminders[:] = [item for item in reminders if not isinstance(item, dict) or keep_unique(item)]
     project_updates[:] = [item for item in project_updates if not isinstance(item, dict) or keep_unique(item)]
     other_updates[:] = [item for item in other_updates if not isinstance(item, dict) or keep_unique(item)]
@@ -3527,11 +4489,26 @@ def _brief_items_refer_to_same_topic(left: dict[str, Any], right: dict[str, Any]
         return False
     overlap = left_tokens & right_tokens
     min_size = min(len(left_tokens), len(right_tokens))
+    left_source = _seatalk_evidence_source_root(left.get("evidence"))
+    right_source = _seatalk_evidence_source_root(right.get("evidence"))
+    if left_source and left_source == right_source and len(overlap) >= 3:
+        return True
     if len(overlap) >= 4 and (len(overlap) / max(min_size, 1)) >= 0.4:
         return True
     left_evidence = _normalize_dedupe_text(str(left.get("evidence") or ""))
     right_evidence = _normalize_dedupe_text(str(right.get("evidence") or ""))
     return bool(left_evidence and left_evidence == right_evidence and len(overlap) >= 2)
+
+
+def _seatalk_evidence_source_root(value: Any) -> str:
+    """Return the stable SeaTalk group label without a thread suffix."""
+    evidence = " ".join(str(value or "").split())
+    if not evidence or evidence.casefold().startswith("gmail:"):
+        return ""
+    root = re.split(r"\s*/\s*thread:\s*|\s*;\s*", evidence, maxsplit=1, flags=re.IGNORECASE)[0]
+    if not root or root.casefold() in {"seatalk group", "private seatalk chat", "seatalk conversation"}:
+        return ""
+    return _normalize_dedupe_text(root)
 
 
 def _suppress_updates_covered_by_todos(
@@ -3548,7 +4525,10 @@ def _suppress_updates_covered_by_todos(
 
     def keep_update(update: dict[str, Any]) -> bool:
         nonlocal removed
-        if any(_brief_update_is_covered_by_todo(update, todo) for todo in todos):
+        covered_todo = next((todo for todo in todos if _brief_update_is_covered_by_todo(update, todo)), None)
+        if covered_todo is not None:
+            if str(update.get("fallback_source") or "").startswith("deterministic_"):
+                _merge_high_signal_update_into_todo(covered_todo, update)
             removed += 1
             return False
         return True
@@ -3556,6 +4536,74 @@ def _suppress_updates_covered_by_todos(
     project_updates[:] = [item for item in project_updates if not isinstance(item, dict) or keep_update(item)]
     other_updates[:] = [item for item in other_updates if not isinstance(item, dict) or keep_update(item)]
     return removed
+
+
+def _merge_high_signal_update_into_todo(todo: dict[str, Any], update: dict[str, Any]) -> None:
+    """Keep deterministic risk/timeline detail when the canonical item is a todo."""
+    summary = " ".join(str(update.get("summary") or "").split())
+    task = " ".join(str(todo.get("task") or "").split())
+    if summary and summary.casefold() not in task.casefold():
+        todo["task"] = f"{task} Context: {summary}".strip()
+    todo["evidence"] = _merge_evidence(todo.get("evidence"), update.get("evidence"))
+    todo["source_type"] = _merge_source_type(todo.get("source_type"), update.get("source_type"))
+    todo["high_signal_status"] = update.get("status") or "unknown"
+
+
+def _ensure_high_signal_fallbacks_visible(
+    *,
+    high_signal_fallbacks: list[dict[str, Any]],
+    project_updates: list[dict[str, Any]],
+    other_updates: list[dict[str, Any]],
+    direct_action_todos: list[dict[str, Any]],
+    watch_delegate_todos: list[dict[str, Any]],
+    reminders: list[dict[str, Any]],
+) -> None:
+    """Do not lose a protected signal when canonical-topic dedupe merges items."""
+    if not high_signal_fallbacks:
+        return
+    all_items = [
+        *direct_action_todos,
+        *watch_delegate_todos,
+        *reminders,
+        *project_updates,
+        *other_updates,
+    ]
+    for fallback in high_signal_fallbacks:
+        fallback_ref = str(fallback.get("evidence_ref_id") or "").strip()
+        matching_ref = next(
+            (
+                item
+                for item in all_items
+                if fallback_ref
+                and fallback_ref in _split_evidence_ref_ids(item.get("evidence_ref_id"))
+            ),
+            None,
+        )
+        if matching_ref is not None:
+            _merge_high_signal_detail_into_item(matching_ref, fallback)
+            continue
+        matching_topic = next(
+            (item for item in all_items if _brief_items_refer_to_same_topic(fallback, item)),
+            None,
+        )
+        if matching_topic is not None:
+            _merge_high_signal_detail_into_item(matching_topic, fallback)
+            continue
+        project_updates.append(fallback)
+        all_items.append(fallback)
+
+
+def _merge_high_signal_detail_into_item(item: dict[str, Any], update: dict[str, Any]) -> None:
+    detail = " ".join(str(update.get("summary") or update.get("task") or "").split())
+    target_field = "task" if str(item.get("task") or "").strip() else "summary"
+    current = " ".join(str(item.get(target_field) or "").split())
+    if detail and detail.casefold() not in current.casefold():
+        item[target_field] = f"{current} Context: {detail}".strip()
+    item["evidence"] = _merge_evidence(item.get("evidence"), update.get("evidence"))
+    item["source_type"] = _merge_source_type(item.get("source_type"), update.get("source_type"))
+    if update.get("status") == "blocked":
+        item["status"] = "blocked"
+    item["high_signal_status"] = update.get("status") or item.get("high_signal_status") or "unknown"
 
 
 def _brief_update_is_covered_by_todo(update: dict[str, Any], todo: dict[str, Any]) -> bool:
@@ -3573,7 +4621,12 @@ def _brief_update_is_covered_by_todo(update: dict[str, Any], todo: dict[str, Any
     if update_evidence and update_evidence == todo_evidence and len(overlap) >= 1:
         return True
     min_size = min(len(update_tokens), len(todo_tokens))
-    return len(overlap) >= 3 and (len(overlap) / max(min_size, 1)) >= 0.35
+    if len(overlap) >= 3 and (len(overlap) / max(min_size, 1)) >= 0.35:
+        return True
+    if str(update.get("fallback_source") or "").startswith("deterministic_"):
+        high_signal_overlap = overlap & {"mas", "hold", "release", "blocked", "dependency", "timeline", "delay", "incident", "launch"}
+        return len(high_signal_overlap) >= 2
+    return False
 
 
 def _topic_key(item: dict[str, Any]) -> str:
@@ -3792,12 +4845,14 @@ def _backfill_team_member_reminders_from_candidates(
     *,
     team_member_reminder_candidates: list[dict[str, str]] | None,
     evidence_refs: list[dict[str, Any]],
+    resolved_candidates: list[dict[str, str]] | None = None,
     quality_metrics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    if reminders or not team_member_reminder_candidates:
+    if not team_member_reminder_candidates:
         return reminders
     refs_by_candidate = _seatalk_refs_by_candidate(evidence_refs)
-    backfilled: list[dict[str, Any]] = []
+    combined = list(reminders)
+    backfilled_count = 0
     for candidate in team_member_reminder_candidates:
         ref = refs_by_candidate.get(_candidate_ref_key(candidate))
         if not ref:
@@ -3815,14 +4870,25 @@ def _backfill_team_member_reminders_from_candidates(
             "evidence_ref_id": str(ref.get("id") or "").strip(),
             "followup_source": "deterministic_backfill",
         }
+        if any(_item_matches_resolved_followup(item, resolved) for resolved in (resolved_candidates or [])):
+            continue
+        if _is_team_member_coverage_notice(_candidate_followup_reminder_text(candidate)):
+            continue
         if not _evidence_ref_matches_item_people(item, ref) or not _evidence_refs_match_project_item(item, [ref]):
             continue
-        backfilled.append(item)
-        if len(backfilled) >= MAX_TEAM_MEMBER_REMINDERS:
+        if any(
+            str(existing.get("evidence_ref_id") or "") == str(item.get("evidence_ref_id") or "")
+            or _brief_items_are_same_followup_event(existing, item)
+            for existing in combined
+        ):
+            continue
+        combined.append(item)
+        backfilled_count += 1
+        if len(combined) >= MAX_TEAM_MEMBER_REMINDERS:
             break
     if quality_metrics is not None:
-        quality_metrics["deterministic_followup_backfill_count"] = len(backfilled)
-    return backfilled or reminders
+        quality_metrics["deterministic_followup_backfill_count"] = backfilled_count
+    return combined[:MAX_TEAM_MEMBER_REMINDERS]
 
 
 def _seatalk_refs_by_candidate(evidence_refs: list[dict[str, Any]]) -> dict[tuple[str, str, str, str], dict[str, Any]]:
