@@ -2761,6 +2761,54 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertIn("Next:", summary)
         self.assertNotIn("Context:", summary)
 
+    def test_project_update_summary_preserves_atm_version_timeline(self):
+        item = {
+            "title": "[SP][P0] ATM rollout high-signal update",
+            "summary": "ATM v3.07 toggle is delayed; ATM withdrawal testing is planned for v3.08 and depends on Cards.",
+            "evidence": "Anti-fraud / thread: ATM rollout",
+        }
+
+        summary = seatalk_daily_email._synthesize_project_update_summary(item)
+
+        self.assertIn("v3.07", summary)
+        self.assertIn("v3.08", summary)
+        self.assertTrue(summary.startswith("State:"))
+        self.assertIn("Impact:", summary)
+        self.assertIn("Next:", summary)
+
+    def test_project_update_summary_preserves_mas_and_recurring_incident(self):
+        mas_summary = seatalk_daily_email._synthesize_project_update_summary(
+            {
+                "title": "MAS scheduled transfer high-signal update",
+                "summary": "Scheduled transfer launch is pending the MAS drainage rule confirmation.",
+                "evidence": "AF P0 timeline",
+            }
+        )
+        incident_summary = seatalk_daily_email._synthesize_project_update_summary(
+            {
+                "title": "PH recurring incident high-signal update",
+                "summary": "QueryTransferRecipient continues to recur under SWP-31174.",
+                "evidence": "PH incident group",
+            }
+        )
+
+        self.assertIn("MAS", mas_summary)
+        self.assertIn("regulatory confirmation", mas_summary)
+        self.assertIn("recurring live incident", incident_summary)
+        self.assertIn("SWP-31174", incident_summary)
+
+    def test_meeting_time_slot_availability_question_is_not_a_follow_up(self):
+        text = "Is 2-3pm ok? PH is not available at 11-12. @Zheng Xiaodong"
+
+        self.assertTrue(seatalk_daily_email._is_meeting_logistics_or_availability_notice(text))
+        self.assertEqual(
+            seatalk_daily_email._filter_resolved_or_meeting_logistics_followups(
+                [{"task": text, "source_type": "seatalk"}],
+                resolved_candidates=[],
+            ),
+            [],
+        )
+
     def test_team_member_reminder_candidates_ignore_late_meeting_join_notice(self):
         history = "\n".join(
             [

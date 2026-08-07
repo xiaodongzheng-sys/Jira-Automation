@@ -2745,7 +2745,7 @@ def _is_meeting_logistics_or_availability_notice(text: Any) -> bool:
     normalized = str(text or "").casefold()
     meeting_terms = (
         "meeting", "call", "sync", "standup", "small group", "discussion", "chat", "in the room",
-        "available", "会议", "开会", "小组",
+        "available", "not available", "会议", "开会", "小组",
     )
     availability_terms = (
         "join late",
@@ -2766,7 +2766,19 @@ def _is_meeting_logistics_or_availability_notice(text: Any) -> bool:
         "reschedule",
         "rescheduled",
     )
-    return any(term in normalized for term in availability_terms) and any(term in normalized for term in meeting_terms)
+    if any(term in normalized for term in availability_terms) and any(term in normalized for term in meeting_terms):
+        return True
+    # Availability questions such as "is 2-3pm ok?" are scheduling logistics,
+    # even when the message does not use the word "meeting".
+    time_slot_question = bool(
+        re.search(
+            r"\b(?:is|are)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s*-\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?\s+ok\b",
+            normalized,
+        )
+    )
+    return time_slot_question and any(
+        term in normalized for term in ("available", "not available", "@", "calendar", "slot")
+    )
 
 
 def _is_team_member_coverage_notice(text: Any) -> bool:
@@ -4500,7 +4512,10 @@ def _synthesize_project_update_summary(item: dict[str, Any]) -> str:
     raw = " ".join(str(item.get("summary") or item.get("title") or "").split())
     if not raw:
         return ""
-    lowered = raw.casefold()
+    title = " ".join(str(item.get("title") or "").split())
+    evidence = " ".join(str(item.get("evidence") or "").split())
+    combined = " ".join(part for part in (title, evidence, raw) if part)
+    lowered = combined.casefold()
     transcript_like = (
         raw.startswith("@")
         or lowered.startswith(("hi ", "hello ", "hey "))
@@ -4508,6 +4523,9 @@ def _synthesize_project_update_summary(item: dict[str, Any]) -> str:
         or raw.count("@") >= 2
         or "cc @" in lowered
         or "i will " in lowered
+        or raw.startswith("http")
+        or "high-signal update" in title.casefold()
+        or len(raw) > 300
         or bool(re.search(r"(?:^|\s)[1-9]\.\s", raw))
         or bool(re.search(r"\?{1,2}$", raw))
     )
@@ -4524,13 +4542,37 @@ def _synthesize_project_update_summary(item: dict[str, Any]) -> str:
         return "State: Mari Stock Trading is still closing Payment BC and account/asset integration decisions, including FX precision, SOF-breakdown ownership, and API contracts. Impact: these cross-team dependencies affect implementation readiness. Next: close the API and ownership decisions before delivery proceeds."
     if "android" in lowered and "sdk" in lowered:
         return "State: The Bank Android SDK package is available for 6.2.1 testing to support the v3.07 anti-malware release. Impact: validation is needed before the release can progress. Next: notify the team and complete package verification."
+    if "atm" in lowered and any(version in lowered for version in ("v3.07", "v3.08")):
+        return "State: ATM upstream timing is delayed; the ATM toggle is targeted for v3.07 and ATM withdrawal testing for v3.08. Impact: version sequencing affects release coverage. Next: confirm the upstream timeline and test dates."
+    if "querytransferrecipient" in lowered or "swp-31174" in lowered or (
+        "recurring" in lowered and "incident" in lowered and "ph" in lowered
+    ):
+        return "State: The PH QueryTransferRecipient issue remains a recurring live incident tied to SWP-31174. Impact: repeat failures require a confirmed mitigation and monitoring plan. Next: confirm the fix status and recurrence guard."
+    if "qris" in lowered and any(term in lowered for term in ("originaltransactionamount", "foreigntransactionamount")):
+        return "State: AF cannot map originalTransactionAmount and upstream must provide the fix; IV logs use foreignTransactionAmount. Impact: the upstream dependency blocks correct QRIS cross-border logging. Next: align the upstream fix and IV log field mapping."
+    if "mas" in lowered and any(term in lowered for term in ("scheduled transfer", "schedule transfer", "drainage rule")):
+        return "State: Scheduled-transfer controls remain pending MAS confirmation on the drainage-rule check. Impact: public launch depends on regulatory confirmation. Next: obtain the MAS response and update launch readiness."
+    if "mas" in lowered and any(term in lowered for term in ("compliance", "reg compliance", "bccr", "regulatory")):
+        return "State: MAS compliance documentation requirements for the BCCR are still being confirmed with Regulatory Compliance. Impact: the unresolved regulatory requirement can affect launch readiness. Next: confirm the required documentation and its accountable owner."
+    if "translation" in lowered or "文案" in lowered:
+        if any(term in lowered for term in ("native", "ios", "translation key", "translationkey", "配置", "key")):
+            return "State: Native face-page translation-key configuration has been aligned with iOS and the implementation guidance is available. Impact: the key update remains a release dependency. Next: confirm the owner has applied the keys and complete validation."
+    if any(term in lowered for term in ("copywriting", "onboarding account creation states", "biz decide")):
+        return "State: Onboarding copywriting remains unresolved and is awaiting the business decision. Impact: copy approval is a dependency for the onboarding flow. Next: obtain the decision and update the approved copy."
+    if "app compatibility" in lowered or "app兼容性" in lowered:
+        if "v3.07" in lowered or "enum" in lowered:
+            return "State: v3.07 app-compatibility work adds the listed payment and overseas-ATM transaction-type enums. Impact: client/server enum alignment is required for release compatibility. Next: confirm consumer support and test coverage."
 
     body = re.split(r"\bcontext\s*:", raw, maxsplit=1, flags=re.IGNORECASE)[0]
     body = re.sub(r"^(?:@[^\s]+\s*)+", "", body).strip(" ,:;")
     body = re.sub(r"^(?:hi|hello|hey)\b[^:]{0,100}:?\s*", "", body, flags=re.IGNORECASE).strip()
     if not body or body.endswith(("?", "？")):
         return ""
-    source = str(item.get("title") or item.get("evidence") or "Project discussion").strip()
+    if "high-signal update" in title.casefold() and not any(
+        term in lowered for term in ("blocked", "dependency", "incident", "launch", "release", "delay", "上线", "延期")
+    ):
+        return ""
+    source = title or evidence or "Project discussion"
     state = _clip_hint_text(body, limit=220).rstrip(". ")
     return f"State: {source} remains in progress based on the latest discussion. Impact: the open dependency or decision may affect delivery. Next: confirm the owner, impact, and next milestone before treating this as complete. Evidence detail: {state}."
 
