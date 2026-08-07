@@ -715,6 +715,23 @@ class WebTeamDashboardRouteEdgeTests(unittest.TestCase):
         self.assertEqual(template_denied.status_code, 403)
         self.assertEqual(report_intelligence_denied.status_code, 403)
 
+    def test_team_dashboard_daily_brief_uses_local_agent_when_enabled(self):
+        local_agent = _FakeLocalAgentClient()
+        app, _store, _version_store = self._build_app(
+            seatalk_enabled=True,
+            local_agent=local_agent,
+        )
+
+        with app.test_client() as client:
+            briefs = client.get("/api/team-dashboard/daily-briefs")
+            download = client.get("/api/team-dashboard/daily-briefs/b1/download")
+
+        self.assertEqual(briefs.status_code, 200)
+        self.assertEqual(briefs.get_json()["briefs"][0]["brief_id"], "b1")
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(download.data, b"%PDF")
+        self.assertEqual(download.headers["Content-Type"], "application/pdf")
+
     def test_monthly_report_local_latest_empty_and_legacy(self):
         app, _store, _version_store = self._build_app()
         with app.test_client() as client:

@@ -105,7 +105,7 @@
           "tests": [
             "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_admin_homepage_loads_without_browser_errors",
             "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_cloud_home_opens_standalone_version_plan_smoke",
-            "tests.test_web_core_coverage.WebCoreCoverageTests.test_create_app_route_edges_for_callbacks_jobs_and_vpn"
+            "tests.test_team_portal_access.TeamPortalAccessTests.test_portal_home_lands_on_version_plan_and_bpmis_is_admin_only"
           ]
         }
       ]
@@ -144,7 +144,7 @@
             "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_cloud_home_opens_standalone_version_plan_smoke",
             "tests.e2e.portal_smoke_e2e.PortalE2ESmokeTest.test_team_dashboard_version_plan_manual_row_controls_smoke",
             "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_version_plan_api_rejects_stale_revision",
-            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_version_plan_route_uses_firestore_store_for_cloud_auto_backend"
+            "tests.test_team_dashboard_version_plan_store.VersionPlanStoreTests.test_auto_backend_uses_firestore_for_live_project"
           ]
         }
       ]
@@ -155,7 +155,7 @@
       "observed_usage": [
         {"source": "host_access_log", "signal": "POST /api/local-agent/team-dashboard/config/load", "count": 208, "last_seen": "2026-05-24"},
         {"source": "host_access_log", "signal": "POST /api/local-agent/bpmis/config/load", "count": 6, "last_seen": "2026-05-24"},
-        {"source": "host_access_log", "signal": "POST /api/local-agent/bpmis/call", "count": 42, "last_seen": "2026-05-24"},
+        {"source": "host_access_log", "signal": "POST /api/local-agent/bpmis/call", "count": 42, "last_seen": "2026-05-24"}
       ],
       "scenarios": [
         {

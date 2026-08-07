@@ -236,7 +236,7 @@
           "description": "Team Dashboard daily brief routes list archives, download PDF, and local-agent fallback.",
           "tests": [
             "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_daily_brief_list_and_download_pdf",
-            "tests.test_web_portal_features.WebPortalFeatureTests.test_team_dashboard_daily_brief_uses_local_agent_when_enabled",
+            "tests.test_web_team_dashboard_routes_edges.WebTeamDashboardRouteEdgeTests.test_team_dashboard_daily_brief_uses_local_agent_when_enabled",
             "tests.test_web_portal_features.WebPortalFeatureTests.test_daily_brief_pdf_prefers_html_formatting"
           ]
         }

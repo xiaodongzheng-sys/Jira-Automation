@@ -131,6 +131,15 @@ class VersionPlanStoreTests(unittest.TestCase):
         store = build_version_plan_store(settings, TeamDashboardConfigStore(settings.team_portal_data_dir / "team_dashboard.db"))
         self.assertEqual(store.load_snapshot().metadata["backend"], "team_dashboard_config")
 
+    def test_auto_backend_uses_firestore_for_live_project(self):
+        settings = self._settings(
+            TEAM_PORTAL_STAGE="live",
+            VERSION_PLAN_STORE_BACKEND="auto",
+            VERSION_PLAN_FIRESTORE_PROJECT="test-project",
+        )
+
+        self.assertTrue(should_use_firestore_version_plan(settings))
+
     def test_local_store_snapshot_is_immutable_and_rejects_stale_revision(self):
         settings = self._settings()
         config_store = TeamDashboardConfigStore(settings.team_portal_data_dir / "team_dashboard.db")
