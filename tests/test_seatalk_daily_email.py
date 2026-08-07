@@ -2797,6 +2797,19 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertIn("recurring live incident", incident_summary)
         self.assertIn("SWP-31174", incident_summary)
 
+    def test_project_update_summary_preserves_mas_fallback_risk(self):
+        summary = seatalk_daily_email._synthesize_project_update_summary(
+            {
+                "title": "[Anti Fraud fall back logic] high-signal update",
+                "summary": "If AF is unavailable, a fallback may be needed; serious incidents must be reported to MAS and assessed for impact.",
+                "evidence": "Mari Stock Trading / thread: Anti Fraud fall back logic",
+            }
+        )
+
+        self.assertIn("MAS", summary)
+        self.assertIn("regulatory risk", summary)
+        self.assertTrue(summary.startswith("State:"))
+
     def test_meeting_time_slot_availability_question_is_not_a_follow_up(self):
         text = "Is 2-3pm ok? PH is not available at 11-12. @Zheng Xiaodong"
 
