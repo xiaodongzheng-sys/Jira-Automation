@@ -2631,6 +2631,185 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual([item["person"] for item in candidates or []], ["Ker Yin"])
         self.assertIn("ETP linkage", candidates[0]["text"])
 
+    def test_team_member_reminder_candidates_ignore_clarification_that_already_answers(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== [IV x FE x AF] SG Non Singpass Foreigner Onboarding (group-100) ===",
+                "[2026-08-03 10:00:00] Alice Tan [thread reply under: Resources Planning]: @Rene Chong do you mean how many applications we are expecting? if yes, can estimate ~600/month for 2026",
+            ]
+        )
+
+        self.assertEqual(_build_team_member_reminder_candidates(history), [])
+
+    def test_team_member_reminder_candidates_ignore_request_to_wait_a_few_minutes(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== PH AAF Small Group (group-100) ===",
+                "[2026-08-03 15:00:00] Alice Tan: @Ker Yin, pls give us a few minutes",
+            ]
+        )
+
+        self.assertEqual(_build_team_member_reminder_candidates(history), [])
+
+    def test_team_member_reminder_candidates_ignore_answer_saying_no_action_needed(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== PH AAF Small Group (group-100) ===",
+                "[2026-08-04 10:00:00] Alice Tan [thread reply under: Loan Channeling Scenario Migration]: @Ker Yin I think no issues, since these scenarios are currently for report only and no AF rule configuration needed",
+            ]
+        )
+
+        self.assertEqual(_build_team_member_reminder_candidates(history), [])
+
+    def test_team_member_reminder_candidates_ignore_completed_check_with_conclusion(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== SG Card PM x AF (group-100) ===",
+                "[2026-08-07 11:08:39] Boheng Lin [thread reply under: ATM Withdrawal Limit]: just checked w cards biz, since ATM limit is separate, we can use a different L1 and follow the DCard authentication @Ker Yin",
+            ]
+        )
+
+        self.assertEqual(_build_team_member_reminder_candidates(history), [])
+
+    def test_team_member_reminder_candidates_ignore_checking_with_owner_progress(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== ID AF & PM, Reg AF (group-100) ===",
+                "[2026-08-07 16:00:00] Alice [thread reply under: v3.52 PRD sign off]: checking with Keryin for this",
+            ]
+        )
+
+        self.assertEqual(_build_team_member_reminder_candidates(history), [])
+
+    def test_clean_daily_brief_evidence_dedupes_sources_and_strips_gmail_links(self):
+        items = [
+            {
+                "source_type": "seatalk",
+                "evidence": "Mari Stock Trading Project Group / thread: MTA closure; Mari Stock Trading Project Group; Mari Stock Trading Project Group / thread: MTA closure",
+            },
+            {
+                "source_type": "gmail",
+                "evidence": "Gmail: Huixian Nah — CRMS Data Retention — https://mail.google.com/mail/u/0/#all/abc",
+            },
+        ]
+
+        seatalk_daily_email._clean_daily_brief_evidence(items)
+
+        self.assertEqual(items[0]["evidence"], "Mari Stock Trading Project Group / thread: MTA closure")
+        self.assertEqual(items[1]["evidence"], "Gmail: Huixian Nah — CRMS Data Retention")
+
+    def test_clean_daily_brief_evidence_drops_calendar_invite_fragments(self):
+        items = [
+            {
+                "source_type": "seatalk",
+                "evidence": "Mari Stock Trading Project Group / thread: MTA closure; [PM x Dev] Mari Stock Trading / thread: SG MTA alignment Thursday, 6 August 6:30pm Time zone: Asia/Shanghai Google Meet joining info Video call link: https://meet.google.com/x",
+            }
+        ]
+
+        seatalk_daily_email._clean_daily_brief_evidence(items)
+
+        self.assertEqual(items[0]["evidence"], "Mari Stock Trading Project Group / thread: MTA closure")
+
+    def test_clean_daily_brief_evidence_drops_dated_meeting_thread_title(self):
+        items = [
+            {
+                "source_type": "seatalk",
+                "evidence": "[PM x Dev] Mari Stock Trading / thread: BC x Trading alignment Thursday, 30 July 5:00 – 6:00pm; Mari Stock Trading Project Group / thread: MTA closure",
+            }
+        ]
+
+        seatalk_daily_email._clean_daily_brief_evidence(items)
+
+        self.assertEqual(items[0]["evidence"], "Mari Stock Trading Project Group / thread: MTA closure")
+
+    def test_same_thread_team_followup_is_covered_by_xiaodong_action_across_domains(self):
+        reminder = {
+            "domain": "General",
+            "person": "Jireh",
+            "reminder": "Confirm with development whether scheduled transfer scenarios can be supported at launch.",
+            "evidence": "大佬来抓贼 / thread: Scheduled Payments",
+        }
+        todo = {
+            "domain": "Anti-fraud",
+            "task": "Obtain the decision on whether scheduled-transfer controls may land after feature launch.",
+            "evidence": "大佬来抓贼 / thread: Scheduled Payments",
+        }
+
+        self.assertTrue(seatalk_daily_email._brief_items_are_same_followup_event(reminder, todo))
+
+    def test_similar_sdk_updates_from_different_groups_are_not_merged(self):
+        translation = {
+            "domain": "Anti-fraud",
+            "summary": "State: The native SDK translation-key configuration remains open. Impact: implementation is blocked. Next: align the keys and validate the SDK build.",
+            "evidence": "PH AAF Issue Troubleshooting Group / thread: [Copywriting Update in SDK]",
+        }
+        anti_malware = {
+            "domain": "Anti-fraud",
+            "summary": "State: Android SDK 6.2.1 fixes ROOT detection for v3.07 anti-malware testing. Impact: release validation is pending. Next: update the ticket and test the SDK build.",
+            "evidence": "ID/SG Anti-Malware Features / thread: SG emoji fix",
+        }
+
+        self.assertFalse(seatalk_daily_email._brief_items_refer_to_same_topic(translation, anti_malware))
+
+    def test_identical_generic_summaries_from_different_groups_are_not_merged(self):
+        ph_sdk = {
+            "domain": "Anti-fraud",
+            "summary": "State: Copywriting remains unresolved. Impact: approval blocks implementation. Next: obtain the business decision.",
+            "evidence": "PH AAF Issue Troubleshooting Group / thread: Copywriting Update in SDK",
+        }
+        mari_stock = {
+            "domain": "Anti-fraud",
+            "summary": "State: Copywriting remains unresolved. Impact: approval blocks implementation. Next: obtain the business decision.",
+            "evidence": "[PM x Dev] Mari Stock Trading / thread: Onboarding Account Creation States",
+        }
+
+        self.assertFalse(seatalk_daily_email._brief_items_refer_to_same_topic(ph_sdk, mari_stock))
+
+    def test_same_thread_ignores_optional_issue_id_in_source_group(self):
+        update = {
+            "domain": "Anti-fraud",
+            "summary": "State: Hold & Release supports the MAS commitment. Impact: delivery is at risk. Next: finish the PRD.",
+            "evidence": "[Dev x PM] SG Hold & Release (issueID - 187187) / thread: [PM PRD readiness]",
+        }
+        todo = {
+            "domain": "Ops Risk",
+            "task": "Complete the SG Hold & Release PRD and secure capacity.",
+            "evidence": "[Dev x PM] SG Hold & Release / thread: [PM PRD readiness]",
+        }
+
+        self.assertTrue(seatalk_daily_email._brief_update_is_covered_by_todo(update, todo))
+
+    def test_visibility_repair_does_not_readd_fallback_covered_by_todo(self):
+        fallback = {
+            "domain": "Anti-fraud",
+            "summary": "State: Hold & Release supports the MAS commitment. Impact: regulatory delivery is at risk. Next: finish the PRD.",
+            "evidence": "[Dev x PM] SG Hold & Release (issueID - 187187) / thread: [PM PRD readiness]",
+            "fallback_source": "deterministic_high_signal",
+        }
+        todo = {
+            "domain": "Ops Risk",
+            "task": "Complete the SG Hold & Release PRD and secure capacity.",
+            "evidence": "[Dev x PM] SG Hold & Release / thread: [PM PRD readiness]",
+        }
+        project_updates: list[dict] = []
+
+        seatalk_daily_email._ensure_high_signal_fallbacks_visible(
+            high_signal_fallbacks=[fallback],
+            project_updates=project_updates,
+            other_updates=[],
+            direct_action_todos=[todo],
+            watch_delegate_todos=[],
+            reminders=[],
+        )
+
+        self.assertEqual(project_updates, [])
+        self.assertIn("regulatory delivery is at risk", todo["why"])
+
     def test_team_member_reminder_candidates_do_not_match_ambiguous_short_names(self):
         history = "\n".join(
             [
@@ -2743,6 +2922,76 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(todos[0]["action_type"], "direct_action")
         self.assertIn("A/B testing", todos[0]["task"])
 
+    def test_multi_mention_rollout_decision_stays_xiaodong_direct_action(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== [ID] AF 需求排期沟通群 (group-3463210) ===",
+                "[2026-08-03 15:23:45] Huang Haitao [thread reply under: ID v3.49 所有场景迁移到ALC v12]: "
+                "有件事情没有考虑到，88有大促，所以这种大的改动要挪到大促之后，大促之前我们先都用白名单验证。"
+                "大促后再正式放量，ok吗？@Rene Chong｜紫芯 @Zheng Xiaodong",
+            ]
+        )
+        all_candidates = seatalk_daily_email._build_team_member_reminder_candidates(history) or []
+        xiaodong_candidates = [
+            {**candidate, "ownership_reason": "direct_request"}
+            for candidate in all_candidates
+            if candidate["person"] == "Zheng Xiaodong"
+        ]
+        refs = seatalk_daily_email._build_daily_brief_evidence_refs(
+            history,
+            team_member_reminder_candidates=all_candidates,
+            xiaodong_followup_candidates=xiaodong_candidates,
+        )
+        delegated_item = {
+            "action_type": "watch_delegate",
+            "task": "Ensure Rene confirms the v3.49 rollout plan.",
+            "evidence": "[ID] AF 需求排期沟通群 / thread: ID v3.49 所有场景迁移到ALC v12",
+            "evidence_ref_id": refs[0]["id"],
+        }
+
+        todos = seatalk_daily_email._build_xiaodong_followup_items(
+            xiaodong_candidates,
+            evidence_refs=refs,
+            existing_items=[delegated_item],
+        )
+
+        self.assertEqual(len(todos), 1)
+        self.assertEqual(todos[0]["action_type"], "direct_action")
+        self.assertEqual(todos[0]["priority"], "high")
+        self.assertIn("whitelist-only before the 8.8 promotion", todos[0]["task"])
+        reminder = {
+            "person": "Rene Chong",
+            "reminder": "Confirm the v3.49 rollout plan.",
+            "evidence": todos[0]["evidence"],
+            "evidence_ref_id": todos[0]["evidence_ref_id"],
+        }
+        self.assertTrue(seatalk_daily_email._brief_items_refer_to_same_topic(reminder, todos[0]))
+        kept = seatalk_daily_email._filter_resolved_or_meeting_logistics_followups(
+            todos,
+            resolved_candidates=[
+                {
+                    "person": "Rene Chong",
+                    "text": all_candidates[0]["text"],
+                    "group": all_candidates[0]["group"],
+                    "thread": all_candidates[0]["thread"],
+                }
+            ],
+        )
+        self.assertEqual(kept, todos)
+
+    def test_for_visibility_outcome_is_not_a_xiaodong_request(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== MariBank PH ALCv12 Model Validation (group-4479470) ===",
+                "[2026-08-03 14:17:14] Gabriel [thread reply under: hi @Zheng Xiaodong, for visibility]: "
+                "noted, then IV will not deploy the passports OCR/ICQC model for SG Bank.",
+            ]
+        )
+
+        self.assertEqual(seatalk_daily_email._build_team_member_reminder_candidates(history), [])
+
     def test_xiaodong_commitment_closes_after_thread_answer_or_fixed_confirmation(self):
         answered_history = "\n".join(
             [
@@ -2775,6 +3024,34 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         )
 
         self.assertEqual(len(seatalk_daily_email._build_xiaodong_followup_candidates(history)), 1)
+
+    def test_xiaodong_commitment_uses_adjacent_context_to_match_existing_todo(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== Ker Yin 珂瑩 (buddy-786789) ===",
+                "[2026-08-05 16:42:29] Ker Yin: The v3.26 ticket was amended for v3.28; is this the right release mapping?",
+                "[2026-08-05 16:43:00] Zheng Xiaodong: I see. Let me check with dev. The process looks weird.",
+            ]
+        )
+        candidates = seatalk_daily_email._build_xiaodong_followup_candidates(history)
+        refs = seatalk_daily_email._build_daily_brief_evidence_refs(history, xiaodong_followup_candidates=candidates)
+        existing = {
+            "action_type": "direct_action",
+            "task": "Resolve the AF ivLog ticketing ambiguity with development and confirm when market and productization tickets are required.",
+            "evidence": "Ker Yin 珂瑩",
+        }
+
+        self.assertIn("v3.26 ticket", candidates[0]["context"])
+        self.assertEqual(
+            seatalk_daily_email._build_xiaodong_followup_items(candidates, evidence_refs=refs, existing_items=[existing]),
+            [],
+        )
+        existing["evidence"] = "Private SeaTalk chat"
+        self.assertEqual(
+            seatalk_daily_email._build_xiaodong_followup_items(candidates, evidence_refs=refs, existing_items=[existing]),
+            [],
+        )
 
     def test_private_chat_never_creates_team_member_reminder(self):
         history = "\n".join(
@@ -2830,6 +3107,23 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(todo["why"], "version sequencing affects release coverage")
         self.assertIn("Why it matters: version sequencing affects release coverage.", rendered)
         self.assertNotIn("Context:", rendered)
+
+    def test_high_signal_merge_preserves_explicit_mas_commitment(self):
+        todo = {
+            "task": "Complete the SG Hold & Release PRD and lock the delivery version.",
+            "evidence": "[Dev x PM] SG Hold & Release / thread: PM PRD readiness",
+        }
+        update = {
+            "summary": (
+                "State: Hold & Release supports the MAS commitment. "
+                "Impact: unresolved PRD decisions put the regulatory control at risk. Next: finish the PRD."
+            ),
+            "evidence": todo["evidence"],
+        }
+
+        seatalk_daily_email._merge_high_signal_update_into_todo(todo, update)
+
+        self.assertTrue(todo["why"].startswith("MAS commitment:"))
 
     def test_project_update_summary_is_synthesized_not_a_chat_quote(self):
         item = {
@@ -2894,6 +3188,71 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertIn("regulatory risk", summary)
         self.assertTrue(summary.startswith("State:"))
 
+    def test_project_update_summary_preserves_hold_release_mas_commitment(self):
+        summary = seatalk_daily_email._synthesize_project_update_summary(
+            {
+                "title": "[PM PRD readiness] high-signal update",
+                "summary": "FYI for Hold & Release: this supports the MAS commitment to benchmark other banks, save SFV cost, and prevent financial loss from human error.",
+                "evidence": "[Dev x PM] SG Hold & Release / thread: [PM PRD readiness]",
+                "fallback_source": "deterministic_high_signal",
+            }
+        )
+
+        self.assertIn("MAS commitment", summary)
+        self.assertIn("operational-risk control", summary)
+        self.assertIn("Next:", summary)
+
+    def test_high_signal_update_same_evidence_merges_into_todo_across_domains(self):
+        update = {
+            "domain": "Anti-fraud",
+            "summary": "State: Hold & Release supports the MAS commitment. Impact: regulatory risk. Next: finish the PRD.",
+            "evidence": "[Dev x PM] SG Hold & Release / thread: [PM PRD readiness]",
+        }
+        todo = {
+            "domain": "Ops Risk",
+            "task": "Complete and circulate the SG Hold & Release PRD.",
+            "evidence": "[Dev x PM] SG Hold & Release / thread: [PM PRD readiness]",
+        }
+
+        self.assertTrue(seatalk_daily_email._brief_update_is_covered_by_todo(update, todo))
+
+    def test_private_chat_different_topics_do_not_merge_by_contact_alone(self):
+        atm_update = {
+            "domain": "Anti-fraud",
+            "title": "ATM timeline",
+            "summary": "State: ATM toggle tests in v3.07 and withdrawal in v3.08. Impact: release sequencing changed. Next: confirm dates.",
+            "evidence": "Ker Yin 珂瑩",
+            "fallback_source": "deterministic_high_signal",
+        }
+        qris_todo = {
+            "domain": "Anti-fraud",
+            "task": "Resolve what issue SGDB-81072 has and whether it delayed the QRIS upstream timeline.",
+            "evidence": "Ker Yin 珂瑩",
+        }
+
+        self.assertFalse(seatalk_daily_email._brief_update_is_covered_by_todo(atm_update, qris_todo))
+        self.assertFalse(seatalk_daily_email._brief_items_refer_to_same_topic(atm_update, qris_todo))
+
+    def test_atm_timeline_does_not_merge_into_generic_sgdb_81072_todo(self):
+        atm_update = {
+            "domain": "Anti-fraud",
+            "title": "Private SeaTalk chat high-signal update",
+            "summary": (
+                "State: ATM toggle testing is delayed to v3.07 and withdrawal testing is in v3.08. "
+                "Impact: upstream timeline sequencing affects release coverage. Next: confirm the dates."
+            ),
+            "evidence": "Ker Yin 珂瑩",
+            "fallback_source": "deterministic_high_signal",
+        }
+        qris_todo = {
+            "domain": "Anti-fraud",
+            "task": "Check what issue SGDB-81072 has and whether it delayed the upstream timeline.",
+            "evidence": "Ker Yin 珂瑩",
+        }
+
+        self.assertFalse(seatalk_daily_email._brief_update_is_covered_by_todo(atm_update, qris_todo))
+        self.assertFalse(seatalk_daily_email._brief_items_refer_to_same_topic(atm_update, qris_todo))
+
     def test_project_update_summary_does_not_map_unrelated_mta_to_mari_stock(self):
         summary = seatalk_daily_email._synthesize_project_update_summary(
             {
@@ -2925,6 +3284,33 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertNotIn("face-page", translation)
         self.assertIn("SDK copywriting", copywriting)
         self.assertNotIn("Onboarding", copywriting)
+
+    def test_project_update_summary_drops_generic_gmail_product_greeting(self):
+        summary = seatalk_daily_email._synthesize_project_update_summary(
+            {
+                "title": "[Product Update] SG Mari Stock Trading (Project ID: 216820)",
+                "summary": "[Product Update] SG Mari Stock Trading: Hi all, Thank you for your continued support for the Mari Stock Trading project.",
+                "evidence": "Gmail: SG Mari Stock Trading / Ziyue Jin",
+                "fallback_source": "deterministic_gmail_high_signal",
+            }
+        )
+
+        self.assertEqual(summary, "")
+
+    def test_project_update_summary_synthesizes_retail_credit_weekly_report(self):
+        summary = seatalk_daily_email._synthesize_project_update_summary(
+            {
+                "title": "Weekly Report - 27/7/2026 - 31/7/2026",
+                "summary": "Retail PRD: Retail Credit Review Timing Update and Engine Output Validation (V3.07). Deployment confirmed in V3.07_0827 before August's monthly credit review.",
+                "evidence": "Gmail: Weekly Report / Ming Ming Yeo",
+                "fallback_source": "deterministic_gmail_high_signal",
+            }
+        )
+
+        self.assertTrue(summary.startswith("State:"))
+        self.assertIn("Impact:", summary)
+        self.assertIn("Next:", summary)
+        self.assertIn("v3.07_0827", summary)
 
     def test_other_update_preparation_drops_chat_quotes_and_context_appendages(self):
         items = seatalk_daily_email._prepare_other_update_items(
@@ -2978,6 +3364,17 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             seatalk_daily_email._filter_resolved_or_meeting_logistics_followups(items, resolved_candidates=[]),
             [],
         )
+
+    def test_meeting_shift_request_is_not_a_team_follow_up(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== GRC evaluation (group-101) ===",
+                "[2026-08-05 11:00:00] Alice: ID has full-day training. Can we shift the meeting to Friday instead? @Sabrina Chan",
+            ]
+        )
+
+        self.assertEqual(_build_team_member_reminder_candidates(history), [])
 
     def test_resolved_followup_filter_drops_model_todo_after_team_member_answer(self):
         history = "\n".join(
@@ -4977,6 +5374,35 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             ],
         )
         self.assertIn("Rene Chong", candidate_refs[0]["mentioned_people"])
+
+        translated_direct = [
+            {
+                "task": "Decide whether v3.49 remains whitelist-only before the promotion.",
+                "domain": "Anti-fraud",
+                "source_type": "seatalk",
+                "evidence_ref_id": "st-ref-001",
+                "followup_source": "deterministic_xiaodong_direct_request",
+            }
+        ]
+        seatalk_daily_email._apply_daily_brief_evidence_refs(
+            project_updates=[],
+            other_updates=[],
+            my_todos=translated_direct,
+            reminders=[],
+            evidence_refs=[
+                {
+                    "id": "st-ref-001",
+                    "source_type": "seatalk",
+                    "evidence": "[ID] AF 需求排期沟通群 / thread: ID v3.49 所有场景迁移到ALC v12",
+                    "group": "[ID] AF 需求排期沟通群",
+                    "thread": "ID v3.49 所有场景迁移到ALC v12",
+                    "snippet": "大促之前先用白名单验证，大促后再正式放量。",
+                    "mentioned_people": ["Zheng Xiaodong", "Rene Chong"],
+                }
+            ],
+        )
+        self.assertEqual(len(translated_direct), 1)
+        self.assertIn("v3.49", translated_direct[0]["task"])
 
         mismatch_reminders = [{"person": "Rene Chong", "reminder": "Credit DWH loan", "source_type": "seatalk", "evidence_ref_id": "st-ref-001"}]
         metrics = seatalk_daily_email._apply_daily_brief_evidence_refs(
