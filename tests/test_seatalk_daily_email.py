@@ -165,6 +165,7 @@ class SeaTalkDailyEmailCodexRoutingTests(unittest.TestCase):
             service = build_seatalk_service(Settings.from_env(), data_root=Path(temp_dir))
 
         self.assertEqual(service.codex_model, "gpt-5.6-luna")
+        self.assertEqual(service.insights_codex_route, "deep")
 
     def test_build_seatalk_service_defaults_to_codex_provider(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -243,6 +244,24 @@ class SeaTalkInsightsProviderRoutingTests(unittest.TestCase):
 
         self.assertEqual(parsed, "CODEX")
         ClaudeProvider.assert_not_called()
+
+    def test_daily_brief_deep_route_uses_high_reasoning(self):
+        service = SeaTalkDashboardService(
+            owner_email="owner@example.com",
+            codex_workspace_root="/tmp",
+            insights_codex_route="deep",
+        )
+        codex_result = LLMGenerateResult(payload={"text": "CODEX"}, usage={}, model="gpt-5.5", attempts=1)
+        with patch.object(seatalk_dashboard, "CodexCliBridgeSourceCodeQALLMProvider") as CodexProvider, patch.object(
+            service, "_parse_insights_response", side_effect=lambda text: text
+        ):
+            CodexProvider.return_value.generate.return_value = codex_result
+            CodexProvider.return_value.extract_text.return_value = "CODEX"
+            service._run_codex_insights_prompt(prompt="hi", system_prompt="sys")
+
+        payload = CodexProvider.return_value.generate.call_args.kwargs["payload"]
+        self.assertEqual(payload["_codex_reasoning_effort"], "high")
+        self.assertEqual(payload["_llm_ledger_route"], "deep")
         CodexProvider.return_value.generate.assert_called_once()
 
 
@@ -1691,10 +1710,16 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             now=datetime(2026, 5, 21, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
         )
 
-        self.assertEqual([item["person"] for item in payload["team_member_reminders"]], ["Zheng Xiaodong"])
-        self.assertEqual(payload["team_member_reminders"][0]["evidence"], "AF launch follow-up")
+        self.assertEqual(payload["team_member_reminders"], [])
+        self.assertEqual(len(payload["direct_action_todos"]), 1)
+        self.assertEqual(payload["direct_action_todos"][0]["domain"], "Anti-fraud")
+        self.assertEqual(
+            payload["direct_action_todos"][0]["task"],
+            "Confirm whether the PN false-alarm CS reply wording is okay.",
+        )
+        self.assertEqual(payload["direct_action_todos"][0]["evidence"], "AF launch follow-up")
         metrics = payload["quality_metadata"]["evidence_quality_metrics"]
-        self.assertEqual(metrics["followup_diagnostics"]["candidate_examples"][0]["person"], "Zheng Xiaodong")
+        self.assertEqual(metrics["followup_diagnostics"]["candidate_examples"], [])
 
     def test_build_daily_briefing_drops_backfilled_followup_with_wrong_topic_source(self):
         class NoReminderService(FakeSeaTalkService):
@@ -2718,6 +2743,39 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(todos[0]["action_type"], "direct_action")
         self.assertIn("A/B testing", todos[0]["task"])
 
+    def test_xiaodong_commitment_closes_after_thread_answer_or_fixed_confirmation(self):
+        answered_history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== AF launch follow-up (group-101) ===",
+                "[2026-08-07 14:00:00] Zheng Xiaodong [thread reply under: Launch issue]: I will check and get back.",
+                "[2026-08-07 14:10:00] Ker Yin [thread reply under: Launch issue]: The reason is an upstream configuration mismatch.",
+            ]
+        )
+        fixed_history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== AF launch follow-up (group-101) ===",
+                "[2026-08-07 14:00:00] Zheng Xiaodong [thread reply under: Launch issue]: I will check and get back.",
+                "[2026-08-07 14:10:00] Alice [thread reply under: Launch issue]: The issue is fixed and tested as expected.",
+            ]
+        )
+
+        self.assertEqual(seatalk_daily_email._build_xiaodong_followup_candidates(answered_history), [])
+        self.assertEqual(seatalk_daily_email._build_xiaodong_followup_candidates(fixed_history), [])
+
+    def test_xiaodong_commitment_remains_open_after_later_clarification_question(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== AF launch follow-up (group-101) ===",
+                "[2026-08-07 14:00:00] Zheng Xiaodong [thread reply under: Launch issue]: I will check and get back.",
+                "[2026-08-07 14:10:00] Alice [thread reply under: Launch issue]: Could you also confirm the rollout date?",
+            ]
+        )
+
+        self.assertEqual(len(seatalk_daily_email._build_xiaodong_followup_candidates(history)), 1)
+
     def test_private_chat_never_creates_team_member_reminder(self):
         history = "\n".join(
             [
@@ -2746,6 +2804,32 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         }
 
         self.assertTrue(seatalk_daily_email._brief_items_refer_to_same_topic(reminder, todo))
+
+    def test_high_signal_merge_keeps_todo_action_concise_and_adds_why(self):
+        todo = {
+            "task": "Confirm the upstream ATM test dates.",
+            "priority": "high",
+            "due": "TBD",
+            "evidence": "ATM rollout",
+        }
+        update = {
+            "summary": (
+                "State: ATM testing is split across v3.07 and v3.08. "
+                "Impact: version sequencing affects release coverage. "
+                "Next: confirm the upstream dates."
+            ),
+            "status": "blocked",
+            "evidence": "ATM rollout / thread: timeline",
+            "source_type": "seatalk",
+        }
+
+        seatalk_daily_email._merge_high_signal_update_into_todo(todo, update)
+        rendered = seatalk_daily_email._render_todo_text(todo)
+
+        self.assertEqual(todo["task"], "Confirm the upstream ATM test dates.")
+        self.assertEqual(todo["why"], "version sequencing affects release coverage")
+        self.assertIn("Why it matters: version sequencing affects release coverage.", rendered)
+        self.assertNotIn("Context:", rendered)
 
     def test_project_update_summary_is_synthesized_not_a_chat_quote(self):
         item = {
@@ -2809,6 +2893,55 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertIn("MAS", summary)
         self.assertIn("regulatory risk", summary)
         self.assertTrue(summary.startswith("State:"))
+
+    def test_project_update_summary_does_not_map_unrelated_mta_to_mari_stock(self):
+        summary = seatalk_daily_email._synthesize_project_update_summary(
+            {
+                "title": "Account maintenance high-signal update",
+                "summary": "Hi @Owner, MTA validation remains under discussion and no delivery outcome was stated.",
+                "evidence": "Account maintenance thread",
+            }
+        )
+
+        self.assertEqual(summary, "")
+
+    def test_project_update_summary_keeps_translation_and_copywriting_scope_grounded(self):
+        translation = seatalk_daily_email._synthesize_project_update_summary(
+            {
+                "title": "[Copywriting Update in SDK] high-signal update",
+                "summary": "The native translation key still needs to align with iOS configuration.",
+                "evidence": "PH AAF Issue Troubleshooting Group",
+            }
+        )
+        copywriting = seatalk_daily_email._synthesize_project_update_summary(
+            {
+                "title": "[Copywriting Update in SDK] high-signal update",
+                "summary": "Biz still needs to decide the SDK copywriting.",
+                "evidence": "PH AAF Issue Troubleshooting Group",
+            }
+        )
+
+        self.assertIn("native translation-key", translation)
+        self.assertNotIn("face-page", translation)
+        self.assertIn("SDK copywriting", copywriting)
+        self.assertNotIn("Onboarding", copywriting)
+
+    def test_other_update_preparation_drops_chat_quotes_and_context_appendages(self):
+        items = seatalk_daily_email._prepare_other_update_items(
+            [
+                {
+                    "summary": "A policy dependency may delay launch. Context: @Alice please check the raw thread.",
+                    "signal_type": "policy_process",
+                },
+                {
+                    "summary": "Hi @Alice @Bob can you check whether this is expected?",
+                    "signal_type": "useful_awareness",
+                },
+            ]
+        )
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["summary"], "A policy dependency may delay launch.")
 
     def test_meeting_time_slot_availability_question_is_not_a_follow_up(self):
         text = "Is 2-3pm ok? PH is not available at 11-12. @Zheng Xiaodong"

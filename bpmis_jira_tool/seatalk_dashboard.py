@@ -14,7 +14,12 @@ from threading import Lock
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from bpmis_jira_tool.codex_model_router import CODEX_ROUTE_CHEAP, resolve_codex_model, resolve_codex_reasoning_effort
+from bpmis_jira_tool.codex_model_router import (
+    CODEX_ROUTE_CHEAP,
+    normalize_codex_route,
+    resolve_codex_model,
+    resolve_codex_reasoning_effort,
+)
 from bpmis_jira_tool.errors import ConfigError, ToolError
 from bpmis_jira_tool.source_code_qa import (
     ClaudeCliBridgeSourceCodeQALLMProvider,
@@ -90,6 +95,7 @@ class SeaTalkDashboardService:
         codex_concurrency: int = 1,
         codex_binary: str | None = None,
         insights_llm_provider: str | None = None,
+        insights_codex_route: str | None = None,
         claude_model: str | None = None,
         claude_binary: str | None = None,
         name_overrides_path: str | Path | None = None,
@@ -111,6 +117,7 @@ class SeaTalkDashboardService:
         self.insights_llm_provider = (
             str(insights_llm_provider or "").strip().lower() or LLM_PROVIDER_CODEX_CLI_BRIDGE
         )
+        self.insights_codex_route = normalize_codex_route(insights_codex_route or CODEX_ROUTE_CHEAP)
         self.claude_model = str(claude_model or "").strip() or None
         self.claude_binary = str(claude_binary or "").strip() or None
         self.name_overrides_path = Path(name_overrides_path).expanduser() if name_overrides_path else None
@@ -209,9 +216,9 @@ class SeaTalkDashboardService:
         prompt_payload = {
             "codex_prompt_mode": SEATALK_INSIGHTS_PROMPT_MODE,
             "systemInstruction": {"parts": [{"text": self._insights_system_prompt()}]},
-            "_codex_reasoning_effort": resolve_codex_reasoning_effort(CODEX_ROUTE_CHEAP),
+            "_codex_reasoning_effort": resolve_codex_reasoning_effort(self.insights_codex_route),
             "_llm_ledger_flow": "seatalk",
-            "_llm_ledger_route": CODEX_ROUTE_CHEAP,
+            "_llm_ledger_route": self.insights_codex_route,
             "contents": [
                 {
                     "parts": [
@@ -452,9 +459,9 @@ class SeaTalkDashboardService:
             "codex_prompt_mode": SEATALK_INSIGHTS_PROMPT_MODE,
             "systemInstruction": {"parts": [{"text": effective_system_prompt}]},
             "contents": [{"parts": [{"text": prompt}]}],
-            "_codex_reasoning_effort": resolve_codex_reasoning_effort(CODEX_ROUTE_CHEAP),
+            "_codex_reasoning_effort": resolve_codex_reasoning_effort(self.insights_codex_route),
             "_llm_ledger_flow": "seatalk",
-            "_llm_ledger_route": CODEX_ROUTE_CHEAP,
+            "_llm_ledger_route": self.insights_codex_route,
             "_llm_prompt_budget_policy": "quality_preserving_soft_budget",
             "_llm_prompt_budget_threshold": SEATALK_QUALITY_PROMPT_WARNING_TOKENS,
             "_llm_quality_preserving_over_budget": estimated_prompt_tokens >= SEATALK_QUALITY_PROMPT_WARNING_TOKENS,
