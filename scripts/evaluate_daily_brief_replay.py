@@ -28,14 +28,15 @@ from bpmis_jira_tool.report_intelligence import (
 )
 from bpmis_jira_tool.seatalk_daily_email import (
     DAILY_EMAIL_WEEKDAY_RUNS,
-    _build_daily_brief_evidence_refs,
     _build_high_signal_review_hints,
+    _build_gmail_xiaodong_action_items,
     _build_resolved_team_member_reminder_candidates,
     _build_team_member_reminder_candidates,
     _filter_daily_brief_meeting_logistics,
     _filter_gmail_calendar_history,
     _filter_team_member_coverage_items,
     _brief_items_refer_to_same_topic,
+    _split_evidence_ref_ids,
     build_daily_briefing,
     build_seatalk_service,
     data_root_from_settings,
@@ -69,6 +70,18 @@ CALENDAR_LEAK_CUES = (
     "google calendar",
     "event reminder",
 )
+LOW_VALUE_REMINDER_LEAK_CUES = (
+    "please change password",
+    "password expiry",
+    "password expiration",
+    "password will expire",
+    "password has expired",
+)
+GENERIC_EXECUTIVE_FILLER_CUES = (
+    "confirm owners and delivery dates",
+    "confirm the detailed delivery date and owner",
+    "confirm the outstanding deliverables and owners",
+)
 RESOLVED_FOLLOWUP_CUES = (
     "already fixed",
     "already resolved",
@@ -92,6 +105,8 @@ KNOWN_SIGNAL_EXPECTATIONS = (
     ("PH recurring incident", ("querytransferrecipient", "swp-31174", "recurring")),
     ("Ker Yin edit access", ("edit access", "rows 548", "548-549")),
     ("PH translation request", ("translation", "configure", "copywriting")),
+    ("PH SMS vendor cost", ("usd400k", "sender id", "infobip")),
+    ("Xiaodong Gmail direct request", ("maribank", "rca", "root-cause")),
 )
 
 
@@ -133,6 +148,20 @@ def _item_text(item: dict[str, Any], *, include_evidence: bool = True) -> str:
     return " ".join(str(item.get(field) or "") for field in fields).casefold()
 
 
+def _normalized_evidence_label(value: Any) -> str:
+    text = re.sub(r"https?://\S+", " ", str(value or ""), flags=re.IGNORECASE)
+    text = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", text.casefold())
+    return " ".join(text.split())
+
+
+def _evidence_labels_match(displayed: Any, referenced: Any) -> bool:
+    displayed_text = _normalized_evidence_label(displayed)
+    referenced_text = _normalized_evidence_label(referenced)
+    if not displayed_text or not referenced_text:
+        return False
+    return displayed_text == referenced_text or displayed_text in referenced_text or referenced_text in displayed_text
+
+
 def _quality_gates(
     *,
     briefing: dict[str, Any],
@@ -142,6 +171,7 @@ def _quality_gates(
     filtered_gmail: str,
     candidates: list[dict[str, str]] | None,
     resolved_candidates: list[dict[str, str]],
+    evidence_refs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     items = _iter_brief_items(briefing)
     findings: list[str] = []
@@ -155,7 +185,18 @@ def _quality_gates(
     invalid_domain: list[str] = []
     invalid_status: list[str] = []
     calendar_leaks: list[str] = []
+    low_value_reminder_leaks: list[str] = []
     resolved_leaks: list[str] = []
+    source_coherence_leaks: list[str] = []
+    generic_filler_items: list[str] = []
+    third_person_xiaodong_actions: list[str] = []
+    unstructured_project_updates: list[str] = []
+    evidence_ref_mismatches: list[dict[str, Any]] = []
+    refs_by_id = {
+        str(ref.get("id") or "").strip(): ref
+        for ref in (evidence_refs or [])
+        if str(ref.get("id") or "").strip()
+    }
     for section, item in items:
         evidence_text = str(item.get("evidence") or "")
         if RAW_SOURCE_ID_RE.search(evidence_text):
@@ -166,6 +207,54 @@ def _quality_gates(
             invalid_status.append(section)
         if section != "Project Updates" and any(cue in _item_text(item) for cue in CALENDAR_LEAK_CUES):
             calendar_leaks.append(section)
+        if any(cue in _item_text(item) for cue in LOW_VALUE_REMINDER_LEAK_CUES):
+            low_value_reminder_leaks.append(section)
+        item_text = _item_text(item)
+        if "ph gpay team and cif" in item_text:
+            source_coherence_leaks.append(section)
+        if (
+            item.get("domain") == "Credit Risk"
+            and "kyc" in evidence_text.casefold()
+            and "credit risk" not in evidence_text.casefold()
+            and "crms" not in evidence_text.casefold()
+        ):
+            source_coherence_leaks.append(section)
+        if any(cue in item_text for cue in GENERIC_EXECUTIVE_FILLER_CUES):
+            generic_filler_items.append(section)
+        if section == "Xiaodong Action Required" and re.search(
+            r"\bxiaodong(?:'s|’s|\s+(?:should|must|needs?\s+to))\b",
+            _item_text(item, include_evidence=False),
+            flags=re.IGNORECASE,
+        ):
+            third_person_xiaodong_actions.append(section)
+        if section == "Project Updates" and not all(
+            label in str(item.get("summary") or "").casefold()
+            for label in ("state:", "impact:", "next:")
+        ):
+            unstructured_project_updates.append(str(item.get("title") or item.get("summary") or "")[:160])
+        if evidence_refs is not None:
+            ref_ids = _split_evidence_ref_ids(item.get("evidence_ref_id"))
+            unknown_ids = [ref_id for ref_id in ref_ids if ref_id not in refs_by_id]
+            displayed_parts = [part.strip() for part in evidence_text.split(";") if part.strip()]
+            referenced_labels = [
+                str(refs_by_id[ref_id].get("evidence") or "").strip()
+                for ref_id in ref_ids
+                if ref_id in refs_by_id
+            ]
+            unmatched_parts = [
+                part
+                for part in displayed_parts
+                if not any(_evidence_labels_match(part, label) for label in referenced_labels)
+            ]
+            if not ref_ids or unknown_ids or not displayed_parts or unmatched_parts:
+                evidence_ref_mismatches.append(
+                    {
+                        "section": section,
+                        "evidence_ref_id": str(item.get("evidence_ref_id") or ""),
+                        "unknown_ids": unknown_ids,
+                        "unmatched_evidence": unmatched_parts,
+                    }
+                )
         if section in {"Xiaodong Action Required", "Watch / Delegate", "Suggested Team Follow-up"}:
             action_text = _item_text(item, include_evidence=False)
             unresolved_context = any(
@@ -189,18 +278,28 @@ def _quality_gates(
         findings.append("invalid_status")
     if calendar_leaks:
         findings.append("calendar_or_meeting_leak")
+    if low_value_reminder_leaks:
+        findings.append("low_value_reminder_leak")
     if resolved_leaks:
         findings.append("resolved_followup_leak")
+    if source_coherence_leaks:
+        findings.append("source_coherence_or_domain_leak")
+    if generic_filler_items:
+        findings.append("generic_executive_filler")
+    if evidence_ref_mismatches:
+        findings.append("evidence_ref_mismatch")
+    if third_person_xiaodong_actions:
+        findings.append("third_person_xiaodong_action")
+    if unstructured_project_updates:
+        findings.append("unstructured_project_update")
 
     duplicates: list[dict[str, str]] = []
     for index, (left_section, left_item) in enumerate(items):
         for right_section, right_item in items[index + 1 :]:
-            if left_section == right_section:
-                continue
             if _brief_items_refer_to_same_topic(left_item, right_item):
                 duplicates.append({"left": left_section, "right": right_section})
     if duplicates:
-        findings.append("cross_section_duplicate")
+        findings.append("duplicate_topic")
 
     source_lines = f"{raw_seatalk}\n{raw_gmail}".casefold().splitlines()
     source_joined = "\n".join(source_lines)
@@ -236,7 +335,8 @@ def _quality_gates(
         elif name == "Mari Stock / fallback":
             source_hit = [cue for cue in cues if cue.casefold() in source_joined] if any(
                 "mari stock" in line
-                or ("fallback" in line and any(term in line for term in ("mas", "fraud", "anti-fraud")))
+                and any(marker in line for marker in ("fallback", "fall back"))
+                and any(term in line for term in ("mas", "fraud", "anti-fraud", " af "))
                 for line in source_lines
             ) else []
         elif name == "MAS/compliance":
@@ -278,10 +378,22 @@ def _quality_gates(
                 and any(term in line for term in ("ker yin", "548", "row ", "rows "))
                 for line in source_lines
             ) else []
+        elif name == "PH SMS vendor cost":
+            source_hit = [cue for cue in cues if cue.casefold() in source_joined] if (
+                re.search(r"usd\s*400k|usd400k", source_joined, flags=re.IGNORECASE)
+                and "sender id" in source_joined
+                and "infobip" in source_joined
+            ) else []
+        elif name == "Xiaodong Gmail direct request":
+            source_hit = list(cues) if _build_gmail_xiaodong_action_items(
+                evidence_refs or [], existing_items=[]
+            ) else []
         if not source_hit:
             continue
         if name == "MAS/compliance":
             output_hit = ["mas"] if re.search(r"(?<![A-Za-z0-9_])mas(?![A-Za-z0-9_])", output_joined, flags=re.IGNORECASE) else []
+        elif name == "Xiaodong Gmail direct request":
+            output_hit = [cue for cue in ("maribank", "rca", "root-cause") if cue in output_joined]
         else:
             output_hit = [cue for cue in source_hit if cue.casefold() in output_joined]
         known_signal_checks.append({"name": name, "source_cues": source_hit, "output_cues": output_hit, "covered": bool(output_hit)})
@@ -306,7 +418,15 @@ def _quality_gates(
         "findings": findings,
         "sections_present": sorted(sections_present),
         "calendar_leak_count": len(calendar_leaks),
+        "low_value_reminder_leak_count": len(low_value_reminder_leaks),
         "resolved_followup_leak_count": len(resolved_leaks),
+        "source_coherence_leak_count": len(source_coherence_leaks),
+        "generic_filler_count": len(generic_filler_items),
+        "evidence_ref_mismatch_count": len(evidence_ref_mismatches),
+        "evidence_ref_mismatches": evidence_ref_mismatches,
+        "third_person_xiaodong_action_count": len(third_person_xiaodong_actions),
+        "unstructured_project_update_count": len(unstructured_project_updates),
+        "unstructured_project_updates": unstructured_project_updates,
         "duplicate_count": len(duplicates),
         "duplicates": duplicates,
         "known_signal_checks": known_signal_checks,
@@ -344,7 +464,15 @@ def _isolated_seatalk_service(settings: Settings, temp_root: Path):
     return service
 
 
-def run_replay(*, start: date, end: date, output_dir: Path, max_windows: int = 0, data_root: Path | None = None) -> dict[str, Any]:
+def run_replay(
+    *,
+    start: date,
+    end: date,
+    output_dir: Path,
+    max_windows: int = 0,
+    data_root: Path | None = None,
+    slot: str = "all",
+) -> dict[str, Any]:
     settings = Settings.from_env()
     if data_root is not None:
         settings = replace(settings, team_portal_data_dir=data_root)
@@ -359,7 +487,8 @@ def run_replay(*, start: date, end: date, output_dir: Path, max_windows: int = 0
         report_intelligence_config=report_config,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
-    windows = [(day, slot) for day in _date_range(start, end) for slot in ("morning", "midday")]
+    slots = ("morning", "midday") if slot == "all" else (slot,)
+    windows = [(day, window_slot) for day in _date_range(start, end) for window_slot in slots]
     if max_windows > 0:
         windows = windows[:max_windows]
     summary: dict[str, Any] = {
@@ -392,11 +521,6 @@ def run_replay(*, start: date, end: date, output_dir: Path, max_windows: int = 0
                 filtered_gmail, suppressed_calendar_count = _filter_gmail_calendar_history(raw_gmail)
                 candidates = _build_team_member_reminder_candidates(_filter_daily_brief_meeting_logistics(raw_seatalk))
                 resolved_candidates = _build_resolved_team_member_reminder_candidates(_filter_daily_brief_meeting_logistics(raw_seatalk))
-                evidence_refs = _build_daily_brief_evidence_refs(
-                    _filter_daily_brief_meeting_logistics(raw_seatalk),
-                    gmail_history_text=filtered_gmail,
-                    team_member_reminder_candidates=candidates,
-                )
                 briefing = build_daily_briefing(
                     service,
                     now=window.end,
@@ -405,7 +529,9 @@ def run_replay(*, start: date, end: date, output_dir: Path, max_windows: int = 0
                     window_end=window.end,
                     report_intelligence_config=report_config,
                     key_project_candidates=key_projects,
+                    include_debug_evidence_refs=True,
                 )
+                evidence_refs = briefing.pop("_debug_evidence_refs", [])
                 subject, text_body, html_body = render_email(briefing=briefing, now=window.end, window_label=window.label)
                 quality = _quality_gates(
                     briefing=briefing,
@@ -415,6 +541,7 @@ def run_replay(*, start: date, end: date, output_dir: Path, max_windows: int = 0
                     filtered_gmail=filtered_gmail,
                     candidates=candidates,
                     resolved_candidates=resolved_candidates,
+                    evidence_refs=evidence_refs,
                 )
                 record.update(
                     {
@@ -460,6 +587,7 @@ def main() -> int:
     parser.add_argument("--end", type=_parse_date)
     parser.add_argument("--output", type=Path, default=Path("/tmp/daily-brief-replay"))
     parser.add_argument("--max-windows", type=int, default=0)
+    parser.add_argument("--slot", choices=("all", "morning", "midday"), default="all")
     parser.add_argument("--data-root", type=Path, help="Read-only Live data root containing the Google credentials and SeaTalk mappings.")
     args = parser.parse_args()
     current_date = datetime.now(SEATALK_INSIGHTS_TIMEZONE).date()
@@ -472,7 +600,14 @@ def main() -> int:
         phases = [(args.start, args.end, "custom")]
     for phase_start, phase_end, phase_name in phases:
         phase_output = args.output / phase_name
-        summary = run_replay(start=phase_start, end=phase_end, output_dir=phase_output, max_windows=args.max_windows, data_root=args.data_root)
+        summary = run_replay(
+            start=phase_start,
+            end=phase_end,
+            output_dir=phase_output,
+            max_windows=args.max_windows,
+            data_root=args.data_root,
+            slot=args.slot,
+        )
         print(json.dumps({"phase": phase_name, "output": str(phase_output), "window_count": summary["window_count"], "passed": summary["passed_count"], "failed": summary["failed_count"], "errors": summary["error_count"]}, ensure_ascii=False))
     return 0
 

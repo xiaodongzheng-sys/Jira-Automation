@@ -357,6 +357,10 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(payload["other_updates"], [])
         self.assertEqual(payload["team_member_reminders"], [])
         self.assertEqual(payload["period_hours"], 24)
+        self.assertNotIn("_debug_evidence_refs", payload)
+
+        debug_payload = build_daily_briefing(service, now=now, include_debug_evidence_refs=True)
+        self.assertEqual(debug_payload["_debug_evidence_refs"], [])
 
     def test_build_daily_briefing_includes_gmail_threads_even_without_seatalk_messages(self):
         service = FakeSeaTalkService("SeaTalk Chat History Export\nWindow: since 2026-04-26T19:00:00+08:00\n")
@@ -374,9 +378,24 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(payload["my_todos"][0]["task"], "Review rollout note")
+        # The fake model cites SeaTalk even though this window contains only
+        # Gmail, so its unsupported action must be discarded.
+        self.assertEqual(payload["my_todos"], [])
         self.assertIn("=== Gmail thread history ===", service.last_prompt)
         self.assertIn("Subject: CR rollout", service.last_prompt)
+
+    def test_direct_gmail_action_requires_evidence_ref(self):
+        self.assertTrue(
+            seatalk_daily_email._requires_daily_brief_evidence_ref(
+                {
+                    "action_type": "direct_action",
+                    "source_type": "gmail",
+                    "task": "Review the incident RCA.",
+                },
+                section="my_todos",
+                available_ref_source_types={"gmail", "seatalk"},
+            )
+        )
 
     def test_build_daily_briefing_filters_reminders_and_other_updates(self):
         class NoisyBriefingService(FakeSeaTalkService):
@@ -1579,7 +1598,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             [
                 "SeaTalk Chat History Export",
                 "=== PH AF UAT物料沟通 (group-4074790) ===",
-                "[2026-05-21 10:00:00] Grace: Please confirm wording for the customer PN false-alarm complaint before CS reply.",
+                "[2026-05-21 10:00:00] Grace: @Zheng Xiaodong please confirm wording for the customer PN false-alarm complaint before CS reply.",
             ]
         )
 
@@ -1653,7 +1672,10 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(payload["other_updates"], [])
         self.assertEqual(len(payload["watch_delegate_todos"]), 1)
         metrics = payload["quality_metadata"]["evidence_quality_metrics"]
-        self.assertEqual(metrics["suppressed_cross_section_duplicate_count"], 1)
+        self.assertGreaterEqual(
+            metrics["suppressed_update_duplicate_count"] + metrics["suppressed_cross_section_duplicate_count"],
+            2,
+        )
 
     def test_build_daily_briefing_backfills_valid_team_member_followup_and_records_diagnostics(self):
         class NoReminderService(FakeSeaTalkService):
@@ -1982,7 +2004,6 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
 
         self.assertEqual([item["task"] for item in my_todos], [
             "Ensure Ker Yin confirms whether PH Money Lock and Kill Switch public live can proceed.",
-            "Finish direct PM task.",
         ])
         self.assertEqual(my_todos[0]["evidence"], "PH AAF Small Group")
         self.assertEqual([item["person"] for item in reminders], ["Ker Yin"])
@@ -2152,6 +2173,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                             "priority": "high",
                             "due": "TBD",
                             "evidence": "Rene Chong direct chat",
+                            "evidence_ref_id": "st-ref-001",
                             "source_type": "seatalk",
                         },
                         {
@@ -2174,7 +2196,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                     "=== GRC evaluation group ===",
                     "[2026-04-29 18:30:00] Sabrina Chan: PH GRC audit-history access is still pending confirmation and tomorrow clarify whether generate report needs separate audit log.",
                     "=== Rene Chong direct chat ===",
-                    "[2026-04-29 18:35:00] Rene Chong: Please review the SeaBank Direct Debit PRD and answer the two open questions.",
+                    "[2026-04-29 18:35:00] Rene Chong: @Zheng Xiaodong please review the SeaBank Direct Debit PRD and answer the two open questions.",
                     "=== Vendor onboarding group ===",
                     "[2026-04-29 18:40:00] Bob: Ensure PH follows up tomorrow on vendor onboarding owner alignment.",
                 ]
@@ -2456,6 +2478,36 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertNotIn("Updated invitation", filtered)
         self.assertNotIn("calendar-notification", filtered)
 
+    def test_gmail_password_expiry_reminder_is_suppressed(self):
+        history = "\n".join(
+            [
+                "Gmail thread history export",
+                "=" * 80,
+                "Thread 1",
+                "Subject: Please Change Password - SeaBank Admin Portal",
+                "Message 1",
+                "From: uat1_admin_portal@seabank.com.ph",
+                "Use: in-window evidence",
+                "Body:",
+                "Your password expires on 10 Aug 2026.",
+            ]
+        )
+
+        filtered, count = seatalk_daily_email._filter_gmail_low_value_reminder_history(history)
+        items = seatalk_daily_email._filter_gmail_calendar_items(
+            [
+                {
+                    "task": "Change the SeaBank Admin Portal password on 10 Aug 2026.",
+                    "evidence": "Gmail: Please Change Password - SeaBank Admin Portal",
+                    "source_type": "gmail",
+                }
+            ]
+        )
+
+        self.assertEqual(count, 1)
+        self.assertNotIn("Please Change Password", filtered)
+        self.assertEqual(items, [])
+
     def test_team_member_coverage_notice_is_not_a_follow_up(self):
         history = "\n".join(
             [
@@ -2681,6 +2733,18 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                 "SeaTalk Chat History Export",
                 "=== ID AF & PM, Reg AF (group-100) ===",
                 "[2026-08-07 16:00:00] Alice [thread reply under: v3.52 PRD sign off]: checking with Keryin for this",
+            ]
+        )
+
+        self.assertEqual(_build_team_member_reminder_candidates(history), [])
+
+    def test_team_member_reminder_candidates_drop_after_xiaodong_short_decision(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== ID AF & PM, Reg AF (group-3758590) ===",
+                "[2026-08-07 16:12:57] Gary Rustandi: @Rene Chong｜紫芯 Need to deactivate AF rules collect data just like last month?",
+                "[2026-08-07 17:16:59] Zheng Xiaodong (UID 14420) [thread reply under: @Rene Chong｜紫芯 Need to deactivate AF rules collect data just like last month?]: If dev never informed, then we can assume no need",
             ]
         )
 
@@ -2922,6 +2986,19 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(todos[0]["action_type"], "direct_action")
         self.assertIn("A/B testing", todos[0]["task"])
 
+    def test_xiaodong_ab_testing_commitment_closes_after_his_final_answer(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== ID AF & PM, Reg AF (group-3758590) ===",
+                "[2026-08-07 17:34:24] Zheng Xiaodong [thread reply under: [need advice] Rule A/B testing]: I see. Will check and get back",
+                "[2026-08-07 17:34:42] Wendy [thread reply under: [need advice] Rule A/B testing]: okay thanks a lot XD!",
+                "[2026-08-07 22:04:37] Zheng Xiaodong [thread reply under: [need advice] Rule A/B testing]: It is expected that if A/B testing starts on Mon, Sat and Sun this rule will be inactive.",
+            ]
+        )
+
+        self.assertEqual(seatalk_daily_email._build_xiaodong_followup_candidates(history), [])
+
     def test_multi_mention_rollout_decision_stays_xiaodong_direct_action(self):
         history = "\n".join(
             [
@@ -3043,14 +3120,15 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         }
 
         self.assertIn("v3.26 ticket", candidates[0]["context"])
-        self.assertEqual(
-            seatalk_daily_email._build_xiaodong_followup_items(candidates, evidence_refs=refs, existing_items=[existing]),
-            [],
+        items = seatalk_daily_email._build_xiaodong_followup_items(
+            candidates, evidence_refs=refs, existing_items=[existing]
         )
+        self.assertEqual(len(items), 1)
+        self.assertIn("v3.26/v3.28", items[0]["task"])
         existing["evidence"] = "Private SeaTalk chat"
         self.assertEqual(
-            seatalk_daily_email._build_xiaodong_followup_items(candidates, evidence_refs=refs, existing_items=[existing]),
-            [],
+            len(seatalk_daily_email._build_xiaodong_followup_items(candidates, evidence_refs=refs, existing_items=[existing])),
+            1,
         )
 
     def test_private_chat_never_creates_team_member_reminder(self):
@@ -3138,6 +3216,155 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertIn("Impact:", summary)
         self.assertIn("Next:", summary)
         self.assertNotIn("Context:", summary)
+
+    def test_project_update_summary_keeps_kyc_backlog_coherent(self):
+        item = {
+            "domain": "Credit Risk",
+            "title": "ID KYC backlog high-signal update",
+            "summary": (
+                "Foreigner onboarding v3.52.2_0917; KYC name similarity v3.52_0910; "
+                "RFI expiry v3.54_1015; Remove Free Text; Forgot Phone Number Phase 2 is #8; "
+                "LexisNexis screening is #9; New Channeling Loan Partner in DCB follows biz timeline."
+            ),
+            "evidence": "ID PM x KYC PM / thread: LexisNexis Screening",
+            "fallback_source": "deterministic_high_signal",
+        }
+
+        summary = seatalk_daily_email._synthesize_project_update_summary(item)
+
+        self.assertIn("ID KYC backlog", summary)
+        self.assertIn("LexisNexis moved to ninth priority", summary)
+        self.assertNotIn("Credit Risk scope", summary)
+
+    def test_project_update_evidence_corrects_kyc_domain_to_general(self):
+        refs = [
+            {
+                "id": "st-ref-001",
+                "source_type": "seatalk",
+                "group": "ID PM x KYC PM",
+                "thread": "LexisNexis Screening in KYC onboarding",
+                "snippet": "Remove Free Text; LexisNexis Screening; new DCB channeling loan partner follows biz timeline",
+                "evidence": "ID PM x KYC PM / thread: LexisNexis Screening in KYC onboarding",
+            }
+        ]
+        updates = [
+            {
+                "domain": "Credit Risk",
+                "title": "ID KYC backlog",
+                "summary": "LexisNexis and DCB channeling loan backlog priorities changed.",
+                "source_type": "seatalk",
+                "evidence_ref_id": "st-ref-001",
+            }
+        ]
+
+        seatalk_daily_email._apply_daily_brief_evidence_refs(
+            project_updates=updates,
+            other_updates=[],
+            my_todos=[],
+            reminders=[],
+            evidence_refs=refs,
+        )
+
+        self.assertEqual(updates[0]["domain"], "General")
+
+        visibility_backfill = [
+            {
+                "domain": "Credit Risk",
+                "title": "ID KYC backlog high-signal update",
+                "evidence": "ID PM x KYC PM / thread: LexisNexis Screening in KYC onboarding",
+            }
+        ]
+        seatalk_daily_email._correct_known_update_domains(visibility_backfill)
+        self.assertEqual(visibility_backfill[0]["domain"], "General")
+
+    def test_seatalk_direct_action_requires_xiaodong_ownership_in_same_ref(self):
+        refs = [
+            {
+                "id": "st-ref-001",
+                "source_type": "seatalk",
+                "group": "PH GPay UAT Support",
+                "thread": "supporting doc: agent screenshot",
+                "sender": "Fred Ruan",
+                "snippet": "If screenshots must be stored in CIF, PM needs a PRD review and the timeline may miss foreigner onboarding.",
+                "evidence": "PH GPay UAT Support / thread: supporting doc: agent screenshot",
+            }
+        ]
+        todos = [
+            {
+                "domain": "General",
+                "task": "Ensure the PH GPay team and CIF decide whether screenshots must be stored in CIF.",
+                "priority": "high",
+                "due": "TBD",
+                "action_type": "direct_action",
+                "source_type": "seatalk",
+                "evidence_ref_id": "st-ref-001",
+            }
+        ]
+
+        seatalk_daily_email._apply_daily_brief_evidence_refs(
+            project_updates=[],
+            other_updates=[],
+            my_todos=todos,
+            reminders=[],
+            evidence_refs=refs,
+        )
+
+        self.assertEqual(todos, [])
+
+    def test_seatalk_evidence_rejects_date_imported_from_another_source(self):
+        refs = [
+            {
+                "source_type": "seatalk",
+                "group": "PH GPay UAT Support",
+                "thread": "supporting doc: agent screenshot",
+                "snippet": "CIF storage needs a PRD review and may miss the foreigner onboarding timeline.",
+                "evidence": "PH GPay UAT Support / thread: supporting doc: agent screenshot",
+            }
+        ]
+        item = {
+            "task": "Prepare the CIF screenshot PRD before the 29 Oct foreigner-onboarding go-live.",
+            "due": "Before 29 Oct 2026",
+        }
+
+        self.assertFalse(seatalk_daily_email._evidence_refs_match_project_item(item, refs))
+
+    def test_identical_mari_stock_summaries_are_deduped_across_groups(self):
+        summary = (
+            "State: Mari Stock Trading is still closing Payment BC and account integration decisions. "
+            "Impact: dependencies affect readiness. Next: close the API decisions."
+        )
+        updates = [
+            {"summary": summary, "evidence": "[PM x Dev] Mari Stock Trading / thread: Stock Asset API"},
+            {"summary": summary, "evidence": "Mari Stock Trading Project Group / thread: MTA notifications"},
+        ]
+
+        removed = seatalk_daily_email._suppress_cross_section_duplicate_topics(
+            project_updates=updates,
+            other_updates=[],
+            direct_action_todos=[],
+            watch_delegate_todos=[],
+            reminders=[],
+        )
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(len(updates), 1)
+
+    def test_ordinary_mari_stock_chat_is_not_protected_high_signal(self):
+        record = {
+            "group": "Mari Stock Trading Project Group",
+            "thread": "MSA/MCA top up notifications",
+            "sender": "Invest PM",
+            "text": "Here are the notification templates already in production.",
+        }
+        fallback_record = {
+            "group": "Mari Stock Trading Project Group",
+            "thread": "Anti Fraud fall back logic",
+            "sender": "AF PM",
+            "text": "AF fallback may create MAS incident reporting risk.",
+        }
+
+        self.assertFalse(seatalk_daily_email._is_protected_daily_brief_record(record))
+        self.assertTrue(seatalk_daily_email._is_protected_daily_brief_record(fallback_record))
 
     def test_project_update_summary_preserves_atm_version_timeline(self):
         item = {
@@ -3312,6 +3539,115 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertIn("Next:", summary)
         self.assertIn("v3.07_0827", summary)
 
+    def test_project_update_summary_keeps_hold_release_scope_without_inventing_bccr(self):
+        summary = seatalk_daily_email._synthesize_project_update_summary(
+            {
+                "title": "Hold & Release decision",
+                "summary": "Proceed with development while waiting for MAS approval; do not launch without approval.",
+                "evidence": "Grace Zheng",
+            }
+        )
+
+        self.assertIn("Hold & Release development", summary)
+        self.assertIn("launch remains gated", summary)
+        self.assertNotIn("BCCR", summary)
+
+    def test_generic_mas_summary_does_not_invent_bccr(self):
+        summary = seatalk_daily_email._synthesize_project_update_summary(
+            {
+                "title": "Scheduled transfer MAS approval",
+                "summary": "Reg Compliance must write formally to MAS before public launch.",
+                "evidence": "SG Payment Design Review",
+                "fallback_source": "deterministic_high_signal",
+            }
+        )
+
+        self.assertTrue(summary.startswith("State:"))
+        self.assertNotIn("BCCR", summary)
+
+    def test_project_update_summary_structures_mari_stock_milestone(self):
+        summary = seatalk_daily_email._synthesize_project_update_summary(
+            {
+                "title": "[Product Update] SG Mari Stock Trading (Project ID: 216820)",
+                "summary": "Project 216820 is on track, with APP UI/UX complete, PRD reviews nearing finalisation, tech design in progress, Tiger setup confirmed, and market-data vendor integration pending.",
+                "evidence": "Gmail: SG Mari Stock Trading / Ziyue Jin",
+            }
+        )
+
+        self.assertTrue(summary.startswith("State:"))
+        self.assertIn("Impact:", summary)
+        self.assertIn("Next:", summary)
+
+    def test_other_update_promotes_material_vendor_cost_to_dependency(self):
+        items = seatalk_daily_email._prepare_other_update_items(
+            [
+                {
+                    "title": "PH SMS vendor proposal",
+                    "summary": "State: International sender ID routing may cost USD400k per month. Impact: exposure is unresolved. Next: Infobip must confirm telco scope.",
+                    "signal_type": "useful_awareness",
+                    "evidence": "PHDB SMS International Rates",
+                }
+            ]
+        )
+
+        self.assertEqual(items[0]["signal_type"], "cross_team_dependency")
+
+    def test_normalize_direct_action_removes_third_person_xiaodong_possessive(self):
+        items = seatalk_daily_email._normalize_todo_items(
+            [
+                {
+                    "task": "Provide Xiaodong’s root-cause input for the incident RCA.",
+                    "action_type": "direct_action",
+                }
+            ]
+        )
+
+        self.assertEqual(items[0]["task"], "Provide root-cause input for the incident RCA.")
+
+    def test_gmail_fallback_classifies_retail_credit_review_as_credit_risk(self):
+        fallbacks = seatalk_daily_email._build_gmail_high_signal_fallback_items(
+            "",
+            evidence_refs=[
+                {
+                    "id": "gm-ref-001",
+                    "source_type": "gmail",
+                    "subject": "Weekly Report - Retail Credit Review V3.07",
+                    "snippet": "Deployment timeline confirmed for V3.07_0827 before the monthly review.",
+                    "evidence": "Gmail: Weekly Report / Ming Ming Yeo",
+                }
+            ],
+            existing_items=[],
+        )
+
+        self.assertEqual(fallbacks[0]["domain"], "Credit Risk")
+
+    def test_same_topic_merge_keeps_all_evidence_ref_ids(self):
+        items = [
+            {
+                "domain": "General",
+                "title": "Shared API dependency",
+                "summary": "The shared API dependency remains blocked.",
+                "evidence": "Group A / thread: API dependency",
+                "evidence_ref_id": "st-ref-001",
+                "source_type": "seatalk",
+            },
+            {
+                "domain": "General",
+                "title": "Shared API dependency",
+                "summary": "The shared API dependency remains blocked.",
+                "evidence": "Group A / thread: API contract",
+                "evidence_ref_id": "st-ref-002",
+                "source_type": "seatalk",
+            },
+        ]
+
+        merged = seatalk_daily_email._dedupe_same_topic_items(items)
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["evidence_ref_id"], "st-ref-001, st-ref-002")
+        self.assertIn("Group A", merged[0]["evidence"])
+        self.assertIn("thread: API contract", merged[0]["evidence"])
+
     def test_other_update_preparation_drops_chat_quotes_and_context_appendages(self):
         items = seatalk_daily_email._prepare_other_update_items(
             [
@@ -3462,6 +3798,165 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
 
         candidates = _build_team_member_reminder_candidates(history)
         self.assertEqual([item["person"] for item in candidates or []], ["Rene Chong"])
+
+    def test_team_member_reminder_candidates_drop_after_named_co_recipient_delegates(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== [ID Auth] FV Error Monitoring Alert_error (group-3409846) ===",
+                "[2026-08-01 16:53:08] Camelia: Hi @Rene Chong｜紫芯 @Huang Liekai (黄烈凯) | Bank can please help to check this alert.",
+                "[2026-08-01 17:03:56] Huang Liekai (黄烈凯): @Xu Zuhua (徐祖华) pls help to check",
+                "[2026-08-01 17:07:02] Xu Zuhua (徐祖华): enen",
+            ]
+        )
+
+        self.assertEqual(_build_team_member_reminder_candidates(history), [])
+
+    def test_team_member_reply_closes_only_rene_in_shared_request(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== [ID] AF 需求排期沟通群 (group-3463210) ===",
+                "[2026-08-03 15:23:45] Huang Haitao [thread reply under: ID v3.49 所有场景迁移到ALC v12]: 大促前先用白名单验证，大促后正式放量，ok吗？@Rene Chong @Zheng Xiaodong",
+                "[2026-08-03 15:26:45] Rene Chong [thread reply under: ID v3.49 所有场景迁移到ALC v12]: 这个我问问业务吧，延期的话大约几号上？",
+            ]
+        )
+
+        candidates = _build_team_member_reminder_candidates(history)
+
+        self.assertEqual([item["person"] for item in candidates or []], ["Zheng Xiaodong"])
+
+    def test_scheduled_transfer_mas_items_share_one_topic_family(self):
+        todo = {
+            "task": "Ensure the scheduled-transfer controls receive the MAS drainage-rule decision before launch.",
+            "evidence": "SG Payment Design Review",
+        }
+        update = {
+            "summary": "State: MAS approval for scheduled payments remains open. Impact: launch is gated. Next: obtain the drainage-rule decision.",
+            "evidence": "SG Payment Design Review / thread: MAS approval",
+        }
+
+        self.assertEqual(seatalk_daily_email._protected_daily_brief_topic_family(todo), "scheduled_transfer_mas")
+        self.assertEqual(seatalk_daily_email._protected_daily_brief_topic_family(update), "scheduled_transfer_mas")
+
+    def test_xiaodong_we_can_confirm_is_a_followup_commitment(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== Jireh (buddy-633302) ===",
+                "[2026-08-03 12:55:34] Zheng Xiaodong: I think we can confirm with Bob if we just proceed with dev first while waiting for MAS approval",
+            ]
+        )
+
+        candidates = seatalk_daily_email._build_xiaodong_followup_candidates(history)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["ownership_reason"], "commitment")
+
+    def test_xiaodong_commitment_is_not_satisfied_by_model_watch_item(self):
+        candidate = {
+            "sender": "Zheng Xiaodong",
+            "group": "Jireh (buddy-633302)",
+            "thread": "",
+            "timestamp": "2026-08-03 12:55:34",
+            "text": "I think we can confirm with Bob if we proceed with Hold & Release dev while waiting for MAS approval",
+            "context": "FYI",
+            "ownership_reason": "commitment",
+        }
+        refs = [
+            {
+                "id": "st-ref-001",
+                "source_type": "seatalk",
+                "group": candidate["group"],
+                "thread": "",
+                "timestamp": candidate["timestamp"],
+                "snippet": candidate["text"],
+                "evidence": "Jireh",
+            }
+        ]
+        watch = {
+            "task": "Monitor the Hold & Release decision with Bob.",
+            "action_type": "watch_delegate",
+            "evidence": "Grace Zheng",
+        }
+
+        items = seatalk_daily_email._build_xiaodong_followup_items(
+            [candidate], evidence_refs=refs, existing_items=[watch]
+        )
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["action_type"], "direct_action")
+        self.assertEqual(items[0]["domain"], "Anti-fraud")
+
+    def test_exact_xiaodong_ref_survives_bilingual_fuzzy_validation(self):
+        items = [
+            {
+                "task": "Decide whether ID v3.49 ALC v12 remains whitelist-only before the 8.8 promotion.",
+                "evidence": "[ID] AF 需求排期沟通群 / thread: ID v3.49 所有场景迁移到ALC v12",
+                "evidence_ref_id": "st-ref-001",
+                "source_type": "seatalk",
+                "followup_source": "deterministic_xiaodong_direct_request",
+            }
+        ]
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== [ID] AF 需求排期沟通群 (group-3463210) ===",
+                "[2026-08-03 15:23:45] Huang Haitao [thread reply under: ID v3.49 所有场景迁移到ALC v12]: 大促之前先用白名单验证，大促后正式放量，ok吗？@Zheng Xiaodong",
+            ]
+        )
+
+        seatalk_daily_email._validate_and_repair_seatalk_evidence(
+            items, history_text=history, quality_metrics={}, name_mappings={}
+        )
+
+        self.assertEqual(len(items), 1)
+
+    def test_gmail_google_docs_mention_backfills_xiaodong_rca_action(self):
+        refs = [
+            {
+                "id": "gm-ref-001",
+                "source_type": "gmail",
+                "subject": "PH Bank - MariBank RCA - @xiaodong.zheng@npt.sg may I ask for input",
+                "sender": '"Deah Ambrocio (Google Docs)" <comments-noreply@docs.google.com>',
+                "to": "xiaodong.zheng@npt.sg",
+                "snippet": "You were mentioned in the MariBank App Downtime RCA.",
+                "evidence": "Gmail: MariBank RCA / Deah Ambrocio",
+            }
+        ]
+
+        items = seatalk_daily_email._build_gmail_xiaodong_action_items(refs, existing_items=[])
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["action_type"], "direct_action")
+        self.assertEqual(items[0]["evidence_ref_id"], "gm-ref-001")
+
+    def test_completed_rca_email_without_direct_request_is_not_backfilled(self):
+        refs = [
+            {
+                "id": "gm-ref-001",
+                "source_type": "gmail",
+                "subject": "Re: MariBank App Downtime - Root Cause Analysis Documentation",
+                "sender": "Deah Ambrocio <deah.ambrocio@maribank.com.ph>",
+                "to": "xiaodong.zheng@npt.sg",
+                "snippet": "Provided my comments in the RCA documentation. Thanks!",
+                "evidence": "Gmail: MariBank RCA / Deah Ambrocio",
+            }
+        ]
+
+        self.assertEqual(
+            seatalk_daily_email._build_gmail_xiaodong_action_items(refs, existing_items=[]),
+            [],
+        )
+
+    def test_deterministic_followup_backfill_is_not_a_raw_chat_quote(self):
+        reminder = seatalk_daily_email._candidate_followup_reminder_text(
+            {
+                "text": "Hi @Rene Chong @Huang Liekai can please help to check this alert, ops reported more failures?"
+            }
+        )
+
+        self.assertEqual(reminder, "Check this alert, ops reported more failures.")
 
     def test_team_member_reminder_candidates_drop_after_requester_confirms_fixed(self):
         history = "\n".join(
