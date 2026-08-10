@@ -25,7 +25,7 @@ from bpmis_jira_tool.business_insights_sheet_refresh import (
     refresh_anti_fraud_reports_from_google_sheet,
 )
 from bpmis_jira_tool.public_artifacts_gcs import (
-    hydrate_business_insights_metadata,
+    gcs_read_bytes,
     public_gcs_read_bucket,
 )
 from scripts.generate_business_insights_live_reports import DEFAULT_PORTAL_DATA_DIR, _publish_to_public_gcs
@@ -62,6 +62,38 @@ def _truthy(value: str) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _hydrate_shared_metadata_or_fail(portal_data_dir: Path) -> None:
+    """Never publish a partial refresh from a stale local reports.json copy."""
+    bucket_name = public_gcs_read_bucket()
+    if not bucket_name:
+        return
+
+    metadata_bytes = gcs_read_bytes(bucket_name, "business_insights/reports.json")
+    if not metadata_bytes:
+        raise SystemExit(
+            f"Could not read the shared Business Insights metadata from gs://{bucket_name}/business_insights/reports.json; "
+            "refresh aborted before publishing to protect the other market reports."
+        )
+    try:
+        metadata = json.loads(metadata_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise SystemExit(
+            f"Shared Business Insights metadata is invalid in gs://{bucket_name}/business_insights/reports.json; "
+            "refresh aborted before publishing."
+        ) from error
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("artifacts"), dict):
+        raise SystemExit(
+            f"Shared Business Insights metadata is missing its artifacts map in gs://{bucket_name}/business_insights/reports.json; "
+            "refresh aborted before publishing."
+        )
+
+    metadata_path = portal_data_dir / "business_insights" / "reports.json"
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = metadata_path.with_name(f".{metadata_path.name}.{os.getpid()}.gcs.tmp")
+    temp_path.write_bytes(metadata_bytes)
+    os.replace(temp_path, metadata_path)
+
+
 def load_google_sheets_credentials(args: argparse.Namespace):
     oauth_credentials_json = os.getenv("BUSINESS_INSIGHTS_GOOGLE_OAUTH_CREDENTIALS_JSON", "").strip()
     if oauth_credentials_json:
@@ -94,14 +126,10 @@ def load_google_sheets_credentials(args: argparse.Namespace):
 def main() -> int:
     args = parse_args()
     portal_data_dir = Path(args.portal_data_dir).expanduser().resolve()
-    # Cloud Run Jobs use an ephemeral directory. Keep metadata for reports
-    # refreshed by another source (for example, the ID Sheet) when publishing
-    # the PH-only refresh back to the shared bucket.
-    if public_gcs_read_bucket():
-        hydrate_business_insights_metadata(
-            portal_data_dir / "business_insights",
-            max_age_seconds=0,
-        )
+    # Cloud Run Jobs use an ephemeral directory. Hydrate the shared index before
+    # a partial refresh, and fail closed if it cannot be read so a stale local
+    # reports.json can never overwrite another market's latest artifacts.
+    _hydrate_shared_metadata_or_fail(portal_data_dir)
     credentials = load_google_sheets_credentials(args)
     service = build_sheets_service(credentials)
     configured_report_ids = [
