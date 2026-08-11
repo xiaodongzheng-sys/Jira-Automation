@@ -21,34 +21,42 @@
   <main class="issue-management-page" data-issue-management data-issue-mode="overview" data-create-url="{{ url_for(issue_create_endpoint) }}" data-overview-url="{{ url_for(issue_overview_endpoint) }}" data-view-url="{{ url_for(issue_view_endpoint, issue_id='__ISSUE_ID__') }}" data-action-plan-view-url="{{ url_for(issue_action_plan_view_endpoint, issue_id='__ISSUE_ID__', ap_id='__AP_ID__') }}">
     <section class="issue-panel issue-search-panel" aria-label="Issue filters">
       <div class="issue-search-grid">
-        <label class="issue-field">
+        <div class="issue-field">
           <span>Issue ID</span>
           <input type="search" placeholder="Search Issue ID" data-search-id>
-        </label>
-        <label class="issue-field">
+        </div>
+        <div class="issue-field">
           <span>Issue Type</span>
-          <select data-search-type>
-            <option value="">All issue types</option>
-            <option value="Self-Assessment">Self-Assessment</option>
-            <option value="Risk &amp; Control Self-Assessment">Risk &amp; Control Self-Assessment (RCSA)</option>
-            <option value="Outsourcing">Outsourcing</option>
-            <option value="External Audit">External Audit</option>
-            <option value="Internal Audit">Internal Audit</option>
-            <option value="Compliance Assurance">Compliance Assurance</option>
-          </select>
-        </label>
-        <label class="issue-field">
+          <div class="issue-multi-select" data-search-multi="type" data-placeholder="All issue types">
+            <button class="issue-multi-select-trigger issue-filter-empty" type="button" data-search-multi-trigger aria-haspopup="listbox" aria-expanded="false"><span data-search-multi-label>All issue types</span><span class="issue-multi-select-arrow" aria-hidden="true">▾</span></button>
+            <div class="issue-multi-select-menu" data-search-multi-menu role="listbox" aria-multiselectable="true" hidden>
+              <label class="issue-multi-select-option"><input type="checkbox" data-search-multi-option value="Self-Assessment"><span>Self-Assessment</span></label>
+              <label class="issue-multi-select-option"><input type="checkbox" data-search-multi-option value="Risk &amp; Control Self-Assessment"><span>Risk &amp; Control Self-Assessment (RCSA)</span></label>
+              <label class="issue-multi-select-option"><input type="checkbox" data-search-multi-option value="Outsourcing"><span>Outsourcing</span></label>
+              <label class="issue-multi-select-option"><input type="checkbox" data-search-multi-option value="External Audit"><span>External Audit</span></label>
+              <label class="issue-multi-select-option"><input type="checkbox" data-search-multi-option value="Internal Audit"><span>Internal Audit</span></label>
+              <label class="issue-multi-select-option"><input type="checkbox" data-search-multi-option value="Compliance Assurance"><span>Compliance Assurance</span></label>
+            </div>
+          </div>
+        </div>
+        <div class="issue-field">
           <span>Issue Creator</span>
-          <select data-search-creator><option value="">All functional units</option></select>
-        </label>
-        <label class="issue-field">
+          <div class="issue-multi-select" data-search-multi="creator" data-placeholder="All functional units">
+            <button class="issue-multi-select-trigger issue-filter-empty" type="button" data-search-multi-trigger aria-haspopup="listbox" aria-expanded="false"><span data-search-multi-label>All functional units</span><span class="issue-multi-select-arrow" aria-hidden="true">▾</span></button>
+            <div class="issue-multi-select-menu" data-search-multi-menu role="listbox" aria-multiselectable="true" hidden></div>
+          </div>
+        </div>
+        <div class="issue-field">
           <span>Impacted Unit</span>
-          <select data-search-unit><option value="">All functional units</option></select>
-        </label>
-        <label class="issue-field">
+          <div class="issue-multi-select" data-search-multi="unit" data-placeholder="All functional units">
+            <button class="issue-multi-select-trigger issue-filter-empty" type="button" data-search-multi-trigger aria-haspopup="listbox" aria-expanded="false"><span data-search-multi-label>All functional units</span><span class="issue-multi-select-arrow" aria-hidden="true">▾</span></button>
+            <div class="issue-multi-select-menu" data-search-multi-menu role="listbox" aria-multiselectable="true" hidden></div>
+          </div>
+        </div>
+        <div class="issue-field">
           <span>Issue Title</span>
           <input type="search" placeholder="Search Issue Title" data-search-title>
-        </label>
+        </div>
         <div class="issue-field issue-date-range-field">
           <span>Date of Issue</span>
           <div class="issue-date-range">
@@ -57,30 +65,34 @@
             <input type="date" aria-label="Date of Issue to" data-search-issue-date-to>
           </div>
         </div>
-        <label class="issue-field">
+        <div class="issue-field">
           <span>Potential Impact</span>
-          <select data-search-impact>
-            <option value="">All potential impacts</option>
-            <option value="High">High</option>
-            <option value="Medium-High">Medium-High</option>
-            <option value="Medium-Low">Medium-Low</option>
-            <option value="Low">Low</option>
-          </select>
-        </label>
-        <label class="issue-field">
+          <div class="issue-multi-select" data-search-multi="impact" data-placeholder="All potential impacts">
+            <button class="issue-multi-select-trigger issue-filter-empty" type="button" data-search-multi-trigger aria-haspopup="listbox" aria-expanded="false"><span data-search-multi-label>All potential impacts</span><span class="issue-multi-select-arrow" aria-hidden="true">▾</span></button>
+            <div class="issue-multi-select-menu" data-search-multi-menu role="listbox" aria-multiselectable="true" hidden>
+              <label class="issue-multi-select-option"><input type="checkbox" data-search-multi-option value="High"><span>High</span></label>
+              <label class="issue-multi-select-option"><input type="checkbox" data-search-multi-option value="Medium-High"><span>Medium-High</span></label>
+              <label class="issue-multi-select-option"><input type="checkbox" data-search-multi-option value="Medium-Low"><span>Medium-Low</span></label>
+              <label class="issue-multi-select-option"><input type="checkbox" data-search-multi-option value="Low"><span>Low</span></label>
+            </div>
+          </div>
+        </div>
+        <div class="issue-field">
           <span>Issue Status</span>
-          <select data-search-status>
-            <option value="">All statuses</option>
-            <option value="Draft">Draft</option>
-            <option value="Pending Approval">Pending Approval</option>
-            <option value="Open">Open</option>
-            <option value="Reopen (Open) - Pending Approval">Reopen (Open) - Pending Approval</option>
-            <option value="Reopen (Draft) - Pending Approval">Reopen (Draft) - Pending Approval</option>
-            <option value="Closed">Closed</option>
-            <option value="Withdraw - Pending Approval">Withdraw - Pending Approval</option>
-            <option value="Withdrawn">Withdrawn</option>
-          </select>
-        </label>
+          <div class="issue-multi-select" data-search-multi="status" data-placeholder="All statuses">
+            <button class="issue-multi-select-trigger issue-filter-empty" type="button" data-search-multi-trigger aria-haspopup="listbox" aria-expanded="false"><span data-search-multi-label>All statuses</span><span class="issue-multi-select-arrow" aria-hidden="true">▾</span></button>
+            <div class="issue-multi-select-menu" data-search-multi-menu role="listbox" aria-multiselectable="true" hidden>
+              <label class="issue-multi-select-option"><input type="checkbox" data-search-multi-option value="Draft"><span>Draft</span></label>
+              <label class="issue-multi-select-option"><input type="checkbox" data-search-multi-option value="Pending Approval"><span>Pending Approval</span></label>
+              <label class="issue-multi-select-option"><input type="checkbox" data-search-multi-option value="Open"><span>Open</span></label>
+              <label class="issue-multi-select-option"><input type="checkbox" data-search-multi-option value="Reopen (Open) - Pending Approval"><span>Reopen (Open) - Pending Approval</span></label>
+              <label class="issue-multi-select-option"><input type="checkbox" data-search-multi-option value="Reopen (Draft) - Pending Approval"><span>Reopen (Draft) - Pending Approval</span></label>
+              <label class="issue-multi-select-option"><input type="checkbox" data-search-multi-option value="Closed"><span>Closed</span></label>
+              <label class="issue-multi-select-option"><input type="checkbox" data-search-multi-option value="Withdraw - Pending Approval"><span>Withdraw - Pending Approval</span></label>
+              <label class="issue-multi-select-option"><input type="checkbox" data-search-multi-option value="Withdrawn"><span>Withdrawn</span></label>
+            </div>
+          </div>
+        </div>
       </div>
       <div class="issue-search-grid issue-search-advanced" id="issue-date-filters" data-date-filters hidden>
         <div class="issue-field issue-date-range-field">

@@ -204,17 +204,77 @@
     window.location.assign(root.dataset.overviewUrl || '/issue-management');
   };
 
-  const uniqueValues = (key) => [...new Set(issues.map((issue) => issue[key]).filter(Boolean))].sort((a, b) => a.localeCompare(b));
-  const searchFilterSelector = '[data-search-id], [data-search-title], [data-search-creator], [data-search-unit], [data-search-type], [data-search-status], [data-search-impact], [data-search-issue-date-from], [data-search-issue-date-to], [data-search-tcd-from], [data-search-tcd-to], [data-search-rtcd-from], [data-search-rtcd-to]';
+  const multiSelectNode = (key) => root.querySelector(`[data-search-multi="${key}"]`);
+  const multiSelectValues = (key) => {
+    const node = multiSelectNode(key);
+    return node ? [...node.querySelectorAll('[data-search-multi-option]:checked')].map((option) => option.value) : [];
+  };
+  const closeMultiSelectMenus = (except = null) => {
+    $$('[data-search-multi]').forEach((node) => {
+      if (node === except) return;
+      const trigger = node.querySelector('[data-search-multi-trigger]');
+      const menu = node.querySelector('[data-search-multi-menu]');
+      if (menu) menu.hidden = true;
+      if (trigger) trigger.setAttribute('aria-expanded', 'false');
+    });
+  };
+  const renderMultiSelect = (node) => {
+    if (!node) return;
+    const selected = [...node.querySelectorAll('[data-search-multi-option]:checked')].map((option) => ({
+      value: option.value,
+      label: option.closest('.issue-multi-select-option')?.querySelector('span')?.textContent.trim() || option.value,
+    }));
+    const trigger = node.querySelector('[data-search-multi-trigger]');
+    const label = node.querySelector('[data-search-multi-label]');
+    const placeholder = node.dataset.placeholder || 'Select';
+    if (label) {
+      label.innerHTML = selected.length
+        ? `${selected.slice(0, 2).map((item) => `<span class="issue-multi-select-tag">${escapeHtml(item.label)}</span>`).join('')}${selected.length > 2 ? `<span class="issue-multi-select-tag">+${selected.length - 2}</span>` : ''}`
+        : escapeHtml(placeholder);
+    }
+    if (trigger) {
+      trigger.classList.toggle('issue-filter-empty', !selected.length);
+      trigger.title = selected.length ? selected.map((item) => item.label).join(', ') : placeholder;
+      trigger.setAttribute('aria-label', `${placeholder}: ${selected.length ? selected.map((item) => item.label).join(', ') : 'none selected'}`);
+    }
+  };
+  const setMultiSelectOptions = (key, options) => {
+    const node = multiSelectNode(key);
+    const menu = node?.querySelector('[data-search-multi-menu]');
+    if (!node || !menu) return;
+    const selected = new Set(multiSelectValues(key));
+    menu.innerHTML = options.map(({ value, label }) => `<label class="issue-multi-select-option"><input type="checkbox" data-search-multi-option value="${escapeHtml(value)}"${selected.has(value) ? ' checked' : ''}><span>${escapeHtml(label)}</span></label>`).join('');
+    menu.querySelectorAll('[data-search-multi-option]').forEach((option) => option.addEventListener('change', () => { renderMultiSelect(node); syncSearchFilterTone(); }));
+    renderMultiSelect(node);
+  };
+  const initializeMultiSelectFilters = () => {
+    $$('[data-search-multi]').forEach((node) => {
+      const trigger = node.querySelector('[data-search-multi-trigger]');
+      if (trigger) trigger.addEventListener('click', (event) => {
+        event.preventDefault();
+        const menu = node.querySelector('[data-search-multi-menu]');
+        const expanded = menu ? menu.hidden : true;
+        closeMultiSelectMenus(node);
+        if (menu) menu.hidden = !expanded;
+        trigger.setAttribute('aria-expanded', String(expanded));
+      });
+      node.querySelectorAll('[data-search-multi-option]').forEach((option) => option.addEventListener('change', () => { renderMultiSelect(node); syncSearchFilterTone(); }));
+      renderMultiSelect(node);
+    });
+    root.addEventListener('click', (event) => { if (!event.target.closest('[data-search-multi]')) closeMultiSelectMenus(); });
+  };
+  const searchFilterSelector = '[data-search-id], [data-search-title], [data-search-issue-date-from], [data-search-issue-date-to], [data-search-tcd-from], [data-search-tcd-to], [data-search-rtcd-from], [data-search-rtcd-to]';
   const syncSearchFilterTone = () => {
     $$(searchFilterSelector).forEach((node) => node.classList.toggle('issue-filter-empty', !node.value));
+    $$('[data-search-multi]').forEach((node) => {
+      const trigger = node.querySelector('[data-search-multi-trigger]');
+      if (trigger) trigger.classList.toggle('issue-filter-empty', !node.querySelector('[data-search-multi-option]:checked'));
+    });
   };
   const populateFilters = () => {
-    [['[data-search-creator]', 'creator', 'All functional units'], ['[data-search-unit]', 'impacted_unit', 'All functional units']].forEach(([selector, key, label]) => {
-      const select = $(selector); const current = select.value;
-      select.innerHTML = `<option value="">${label}</option>${uniqueValues(key).map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join('')}`;
-      select.value = current;
-    });
+    setMultiSelectOptions('creator', allFunctionalUnits.map((value) => ({ value, label: value })));
+    setMultiSelectOptions('unit', allFunctionalUnits.map((value) => ({ value, label: value })));
+    $$('[data-search-multi]').forEach(renderMultiSelect);
     syncSearchFilterTone();
   };
   const sortDateValue = (left, right) => {
@@ -261,11 +321,11 @@
   const filteredIssues = () => {
     const issueId = ($('[data-search-id]').value || '').trim().toLowerCase();
     const issueTitle = ($('[data-search-title]').value || '').trim().toLowerCase();
-    const creator = $('[data-search-creator]').value;
-    const unit = $('[data-search-unit]').value;
-    const type = $('[data-search-type]').value;
-    const status = $('[data-search-status]').value;
-    const impact = $('[data-search-impact]').value;
+    const creator = multiSelectValues('creator');
+    const unit = multiSelectValues('unit');
+    const type = multiSelectValues('type');
+    const status = multiSelectValues('status');
+    const impact = multiSelectValues('impact');
     const issueDateFrom = $('[data-search-issue-date-from]').value;
     const issueDateTo = $('[data-search-issue-date-to]').value;
     const tcdFrom = $('[data-search-tcd-from]').value;
@@ -276,7 +336,8 @@
     return issues.filter((issue) => {
       const issueIdMatch = !issueId || String(issue.issue_id || '').toLowerCase().includes(issueId);
       const issueTitleMatch = !issueTitle || String(issue.title || '').toLowerCase().includes(issueTitle);
-      return issueIdMatch && issueTitleMatch && (!creator || issue.creator === creator) && (!unit || issue.impacted_unit === unit) && (!type || issue.type === type) && (!status || issue.status === status) && (!impact || issue.impact === impact) && inRange(issue.date_of_issue, issueDateFrom, issueDateTo) && inRange(issueTcd(issue), tcdFrom, tcdTo) && inRange(issue.revised_tcd || '', rtcdFrom, rtcdTo);
+      const matchesAny = (selected, value) => !selected.length || selected.includes(value);
+      return issueIdMatch && issueTitleMatch && matchesAny(creator, issue.creator) && matchesAny(unit, issue.impacted_unit) && matchesAny(type, issue.type) && matchesAny(status, issue.status) && matchesAny(impact, issue.impact) && inRange(issue.date_of_issue, issueDateFrom, issueDateTo) && inRange(issueTcd(issue), tcdFrom, tcdTo) && inRange(issue.revised_tcd || '', rtcdFrom, rtcdTo);
     }).sort((a, b) => {
       const comparison = compareIssuesForOverview(a, b);
       return sortOrder === 'ascend' ? comparison : -comparison;
@@ -818,10 +879,11 @@
     $('[data-save-issue]').addEventListener('click', () => persistForm(false));
     $('[data-issue-form]').addEventListener('submit', (event) => { event.preventDefault(); persistForm(true); });
     [formFieldMap.creator, formFieldMap.type].forEach((selector) => $(selector).addEventListener('change', syncTypeDrivenFields));
+    initializeMultiSelectFilters();
     $('[data-run-search]').addEventListener('click', () => { currentPage = 1; renderRows(); });
     $$('[data-issue-sort]').forEach((button) => button.addEventListener('click', () => toggleOverviewSort(button.dataset.issueSort)));
     $('[data-toggle-date-filters]').addEventListener('click', () => { const filters = $('[data-date-filters]'); const expanded = filters.hidden; filters.hidden = !expanded; $('[data-toggle-date-filters]').setAttribute('aria-expanded', String(expanded)); $('[data-toggle-date-filters]').setAttribute('aria-label', expanded ? 'Collapse Target Completion Date / Revised Target Completion Date filters' : 'Expand Target Completion Date / Revised Target Completion Date filters'); $('[data-toggle-date-filters] span').textContent = expanded ? '▴' : '▾'; });
-    $('[data-clear-search]').addEventListener('click', () => { $$(searchFilterSelector).forEach((node) => { node.value = ''; }); syncSearchFilterTone(); currentPage = 1; renderRows(); });
+    $('[data-clear-search]').addEventListener('click', () => { $$(searchFilterSelector).forEach((node) => { node.value = ''; }); $$('[data-search-multi-option]').forEach((node) => { node.checked = false; }); $$('[data-search-multi]').forEach(renderMultiSelect); closeMultiSelectMenus(); syncSearchFilterTone(); currentPage = 1; renderRows(); });
     $('[data-prev-page]').addEventListener('click', () => { if (currentPage > 1) { currentPage -= 1; renderRows(); } });
     $('[data-next-page]').addEventListener('click', () => { const totalPages = Math.max(1, Math.ceil(filteredIssues().length / pageSize)); if (currentPage < totalPages) { currentPage += 1; renderRows(); } });
     $('[data-page-size]').addEventListener('change', (event) => { pageSize = Number(event.target.value) || 10; currentPage = 1; renderRows(); });
