@@ -1,9 +1,11 @@
 <form data-issue-form novalidate>
+  <div class="issue-identity-fields">
+    <label class="issue-field"><span>Issue Creator *</span><select required data-form-creator><option value="">Select Functional Unit</option><option>Credit Risk</option><option>Fraud Risk</option><option>Operations</option><option>Marketing</option><option>Internal Audit</option><option>Compliance &amp; AML/CTF Assurance</option></select></label>
+    <label class="issue-field"><span>Issue Type *</span><select required data-form-type><option value="">Select Issue Type</option><option>Self-Assessment</option><option>Outsourcing</option><option>External Audit</option><option>Internal Audit</option><option>Compliance Assurance</option></select></label>
+  </div>
   <div class="issue-form-section">
     <div class="issue-form-section-heading issue-form-section-heading-simple"><h3>Issue Details</h3></div>
     <div class="issue-form-grid">
-      <label class="issue-field"><span>Issue Creator *</span><select required data-form-creator><option value="">Select Functional Unit</option><option>Credit Risk</option><option>Fraud Risk</option><option>Operations</option><option>Marketing</option><option>Internal Audit</option><option>Compliance &amp; AML/CTF Assurance</option></select></label>
-      <label class="issue-field"><span>Issue Type *</span><select required data-form-type><option value="">Select Issue Type</option><option>Self-Assessment</option><option>Outsourcing</option><option>External Audit</option><option>Internal Audit</option><option>Compliance Assurance</option></select></label>
       <label class="issue-field"><span class="issue-field-label">Issue ID{% if create_mode %}<button class="issue-tooltip" type="button" aria-label="Issue ID information" data-tooltip="The Issue ID will be generated automatically once the Issue is saved or submitted.">?</button>{% endif %}</span><input type="text" readonly value="Generated after Save or Submit" data-form-issue-id></label>
       <label class="issue-field"><span>Issue Status</span><input type="text" readonly value="Draft" data-form-status></label>
       <label class="issue-field"><span>Impacted Unit *</span><select required data-form-unit><option value="">Select Functional Unit</option><option>Credit Risk</option><option>Fraud Risk</option><option>Operations</option><option>Marketing</option><option>Internal Audit</option><option>Compliance &amp; AML/CTF Assurance</option></select></label>

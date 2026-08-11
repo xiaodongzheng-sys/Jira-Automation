@@ -511,6 +511,13 @@
   gap: 16px;
 }
 
+.issue-identity-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
 .issue-ap-table th {
   font-size: 13px;
 }
@@ -800,6 +807,7 @@
   }
 
   .issue-search-grid,
+  .issue-identity-fields,
   .issue-form-grid,
   .issue-ap-form-grid {
     grid-template-columns: 1fr;
