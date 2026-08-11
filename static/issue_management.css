@@ -1084,3 +1084,24 @@
 .issue-ap-table th:nth-child(7), .issue-ap-table td:nth-child(7) { width: 140px; }
 .issue-ap-table th:nth-child(8), .issue-ap-table td:nth-child(8) { width: 100px; }
 .issue-ap-table th:nth-child(9), .issue-ap-table td:nth-child(9) { width: 100px; }
+
+/* Keep the first five Issue Overview columns visible during horizontal scroll.
+ * These offsets match the fixed widths above (No., Issue ID, Issue Type,
+ * Issue Creator and Impacted Unit) so the frozen cells never overlap. */
+.issue-table th:nth-child(-n + 5),
+.issue-table td:nth-child(-n + 5) {
+  position: sticky;
+  background: #fff;
+  background-clip: padding-box;
+}
+
+.issue-table th:nth-child(-n + 5) { top: 0; }
+
+.issue-table th:nth-child(1), .issue-table td:nth-child(1) { left: 0; }
+.issue-table th:nth-child(2), .issue-table td:nth-child(2) { left: 60px; }
+.issue-table th:nth-child(3), .issue-table td:nth-child(3) { left: 230px; }
+.issue-table th:nth-child(4), .issue-table td:nth-child(4) { left: 385px; }
+.issue-table th:nth-child(5), .issue-table td:nth-child(5) { left: 565px; box-shadow: 3px 0 6px -5px rgba(0, 0, 0, .35); }
+.issue-table th:nth-child(-n + 5) { z-index: 5; background: #fafafa; }
+.issue-table td:nth-child(-n + 5) { z-index: 3; }
+.issue-table tbody tr:hover td:nth-child(-n + 5) { background: #fafafa; }

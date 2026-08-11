@@ -394,6 +394,18 @@
     unit.disabled = Boolean(fixedImpactedUnit) || !editableContext || Boolean(issue && issue.status !== 'Draft');
     syncActionPlanOwnerOptions();
   };
+  const syncIssueIdentityFieldLocks = () => {
+    if (!isCreatePage && !isEditPage) return;
+    const creator = $(formFieldMap.creator);
+    const type = $(formFieldMap.type);
+    const issueId = getField('issueId');
+    const hasCreatedIssueId = Boolean(issueId && issueId !== 'Generated after Save or Submit');
+    // The creator is fixed by the picker step.  Issue Type remains selectable
+    // until the first Save/Submit creates the Issue ID, then both identity
+    // fields are immutable on this create/edit surface.
+    if (creator) creator.disabled = true;
+    if (type) type.disabled = hasCreatedIssueId;
+  };
 
   const renderDocumentList = (selector, docs, removeAttribute, editable) => {
     const node = $(selector);
@@ -584,8 +596,7 @@
     syncIssueWithdrawalFields(null);
     setField('date', today); setField('tcd', ''); setField('rtcd', ''); setField('rtcdCount', '0'); setField('overdue', '-');
     syncIssueTargetDateFields();
-    $(formFieldMap.creator).disabled = true;
-    renderIssueDocuments(true); renderActionPlans(true); syncTypeDrivenFields(); setFormError('');
+    renderIssueDocuments(true); renderActionPlans(true); syncTypeDrivenFields(); syncIssueIdentityFieldLocks(); setFormError('');
   };
   const initializeEditPage = () => {
     const issue = issues.find((candidate) => candidate.issue_id === root.dataset.editIssueId);
@@ -607,6 +618,7 @@
     [formFieldMap.creator, formFieldMap.type].forEach((selector) => { $(selector).disabled = true; });
     [formFieldMap.unit, formFieldMap.impact, formFieldMap.title, formFieldMap.description, formFieldMap.parties, formFieldMap.documents].forEach((selector) => { $(selector).disabled = false; });
     syncTypeDrivenFields();
+    syncIssueIdentityFieldLocks();
     renderIssueDocuments(true); renderActionPlans(true); setFormError('');
   };
   const setViewEditing = (enabled) => {
@@ -720,6 +732,7 @@
       if (submit) { window.location.assign(root.dataset.overviewUrl || '/issue-management'); return true; }
       const issueIdField = $('[data-form-issue-id]');
       if (issueIdField) issueIdField.value = issue.issue_id;
+      syncIssueIdentityFieldLocks();
       renderActionPlans(true);
       showToast(`${issue.issue_id} saved as Draft.`);
       return true;
