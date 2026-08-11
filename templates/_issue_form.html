@@ -13,13 +13,13 @@
       <label class="issue-field"><span>Date of Issue</span><input type="date" readonly data-form-date></label>
       <label class="issue-field issue-field-full"><span>Issue Title *</span><input type="text" maxlength="200" placeholder="Enter a concise Issue title" required data-form-title></label>
       <label class="issue-field issue-field-full"><span>Description of Issue *</span><textarea rows="4" maxlength="10000" placeholder="Describe the issue and its impact" required data-form-description></textarea></label>
-      <label class="issue-field issue-field-full"><span>Parties Involved *</span><textarea rows="4" maxlength="500" required data-form-parties></textarea></label>
+      <label class="issue-field issue-field-full"><span class="issue-field-label">Parties Involved *<button class="issue-tooltip" type="button" aria-label="Parties Involved information" data-tooltip="Please specify the internal Functional Unit involved (e.g., Anti-Fraud, Settlement) or any external parties (e.g., Vendor Name)">?</button></span><textarea rows="4" maxlength="500" required data-form-parties></textarea></label>
       <label class="issue-field"><span>Target Completion Date</span><input type="date" readonly data-form-tcd></label>
-      <label class="issue-field"><span>Revised Target Completion Date</span><input type="date" readonly data-form-rtcd></label>
-      <label class="issue-field"><span>Number of RTCD</span><input type="text" readonly data-form-rtcd-count></label>
+      <label class="issue-field" data-issue-target-date-field><span>Revised Target Completion Date</span><input type="date" readonly data-form-rtcd></label>
+      <label class="issue-field" data-issue-target-date-field><span>Number of RTCD</span><input type="text" readonly data-form-rtcd-count></label>
       <label class="issue-field" data-issue-withdraw-field hidden><span>Withdraw Date</span><input type="date" readonly data-form-withdraw-date></label>
       <label class="issue-field issue-field-full" data-issue-withdraw-field hidden><span>Withdraw Justification</span><textarea rows="3" readonly data-form-withdraw-justification></textarea></label>
-      <label class="issue-field"><span>Overdue</span><input type="text" readonly data-form-overdue></label>
+      <label class="issue-field" data-issue-target-date-field><span>Overdue</span><input type="text" readonly data-form-overdue></label>
       <label class="issue-field issue-field-full issue-document-field issue-document-main-field"><span>Documents</span><div class="issue-document-drop issue-document-main-drop"><span>PDF, DOCX, TXT, CSV, XLSX, JPG, PPT or ZIP · max 20 MB each · up to 100 files</span><input type="file" multiple accept=".pdf,.docx,.txt,.csv,.xlsx,.jpg,.jpeg,.ppt,.pptx,.zip" data-form-documents></div><div class="issue-document-list" data-document-list></div><p class="issue-form-error" data-documents-error role="alert" hidden></p></label>
     </div>
   </div>

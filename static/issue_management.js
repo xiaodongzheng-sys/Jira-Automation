@@ -385,6 +385,11 @@
   const getField = (key) => { const node = $(formFieldMap[key]); return node ? node.value.trim() : ''; };
   const setApField = (key, value) => { const node = $(apFieldMap[key]); if (node) node.value = value || ''; };
   const getApField = (key) => { const node = $(apFieldMap[key]); return node ? node.value.trim() : ''; };
+  const issueHidesRevisedTargetFields = (status) => status === 'Draft' || String(status || '').includes('Pending Approval');
+  const syncIssueTargetDateVisibility = (status) => {
+    const hidden = issueHidesRevisedTargetFields(status || getField('status') || 'Draft');
+    $$('[data-issue-target-date-field]').forEach((node) => { node.hidden = hidden; });
+  };
   const syncIssueTargetDateFields = (issue = null, actionPlans = null) => {
     const current = issue || (editingId ? issues.find((candidate) => candidate.issue_id === editingId) : null);
     const source = current
@@ -393,6 +398,7 @@
     const tcd = issueTcd(source);
     setField('tcd', tcd);
     setField('overdue', tcd ? (isOverdue(source) ? 'Yes' : 'No') : '-');
+    syncIssueTargetDateVisibility(source.status);
   };
   const syncIssueWithdrawalFields = (issue) => {
     const visible = issue?.status === 'Withdrawn';
@@ -637,6 +643,7 @@
     $('[data-modal-title]').textContent = `${issue.issue_id} ${editable ? 'Edit' : 'Details'}`;
     $('[data-modal-subtitle]').textContent = editable ? 'Update Draft fields, then save or submit for approval.' : 'This Issue is read-only after submission.';
     setField('issueId', issue.issue_id); setField('status', issue.status || 'Draft'); setField('creator', issue.creator); setField('type', issue.type); setField('unit', issue.impacted_unit); setField('impact', issue.impact); setField('date', issue.date_of_issue || today); setField('tcd', issueTcd(issue)); setField('rtcd', issue.revised_tcd); setField('rtcdCount', issue.rtcd_count || (issue.revised_tcd ? 1 : 0)); setField('overdue', issueTcd(issue) ? (isOverdue(issue) ? 'Yes' : 'No') : '-'); setField('title', issue.title); setField('description', issue.description); setField('parties', issue.parties);
+    syncIssueTargetDateVisibility(issue.status || 'Draft');
     syncIssueWithdrawalFields(issue);
     syncTypeDrivenFields();
     [formFieldMap.creator, formFieldMap.type].forEach((selector) => { $(selector).disabled = true; });
@@ -673,6 +680,7 @@
     draftActionPlans = clone(issue.action_plans || []);
     selectedDocuments = clone(issue.documents || []);
     setField('issueId', issue.issue_id); setField('status', issue.status || 'Draft'); setField('creator', issue.creator); setField('type', issue.type); setField('unit', issue.impacted_unit); setField('impact', issue.impact); setField('date', issue.date_of_issue || today); setField('tcd', issueTcd(issue)); setField('rtcd', issue.revised_tcd); setField('rtcdCount', issue.rtcd_count || (issue.revised_tcd ? 1 : 0)); setField('overdue', issueTcd(issue) ? (isOverdue(issue) ? 'Yes' : 'No') : '-'); setField('title', issue.title); setField('description', issue.description); setField('parties', issue.parties);
+    syncIssueTargetDateVisibility(issue.status || 'Draft');
     syncIssueWithdrawalFields(issue);
     const subtitle = $('[data-edit-subtitle]');
     if (subtitle) subtitle.textContent = `${issue.issue_id} · ${issue.creator || '-'} · ${issue.type || 'Issue'}`;
@@ -720,6 +728,7 @@
     draftActionPlans = clone(issue.action_plans || []);
     selectedDocuments = clone(issue.documents || []);
     setField('issueId', issue.issue_id); setField('status', issue.status || 'Draft'); setField('creator', issue.creator); setField('type', issue.type); setField('unit', issue.impacted_unit); setField('impact', issue.impact); setField('date', issue.date_of_issue || today); setField('tcd', issueTcd(issue)); setField('rtcd', issue.revised_tcd); setField('rtcdCount', issue.rtcd_count || (issue.revised_tcd ? 1 : 0)); setField('overdue', issueTcd(issue) ? (isOverdue(issue) ? 'Yes' : 'No') : '-'); setField('title', issue.title); setField('description', issue.description); setField('parties', issue.parties);
+    syncIssueTargetDateVisibility(issue.status || 'Draft');
     syncIssueWithdrawalFields(issue);
     $('[data-view-subtitle]').textContent = `${issue.issue_id} · ${issue.creator || '-'} · ${issue.type || 'Issue'}`;
     const viewHeading = $('[data-view-heading]');
