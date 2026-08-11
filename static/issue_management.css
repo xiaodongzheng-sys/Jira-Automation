@@ -1221,3 +1221,12 @@
   padding: 0;
   accent-color: #2773dd;
 }
+
+/* Filter values are controls, not field labels: keep their copy regular. */
+.issue-multi-select-trigger,
+.issue-multi-select-trigger [data-search-multi-label],
+.issue-multi-select-trigger .issue-multi-select-arrow,
+.issue-multi-select-option span,
+.issue-multi-select-tag {
+  font-weight: 400;
+}
