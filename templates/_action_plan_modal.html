@@ -1,0 +1,32 @@
+<div class="issue-modal-backdrop issue-ap-modal-backdrop" data-ap-modal hidden>
+  <section class="issue-modal issue-ap-modal" role="dialog" aria-modal="true" aria-labelledby="ap-modal-title">
+    <div class="issue-modal-header">
+      <div>
+        <p class="issue-section-kicker" data-ap-modal-kicker hidden>Action Plan Details</p>
+        <h2 id="ap-modal-title" data-ap-modal-title>Add Action Plan</h2>
+        <p class="issue-modal-subtitle" data-ap-modal-subtitle hidden>Capture the remediation action, owner and target completion date.</p>
+      </div>
+      <button class="issue-icon-button" type="button" aria-label="Close" data-close-ap-modal>×</button>
+    </div>
+    <div class="issue-modal-body">
+      <form data-ap-form novalidate>
+        <div class="issue-ap-form-grid">
+          <label class="issue-field"><span>Action Plan Owner *</span><select required data-ap-form-owner><option value="">Select Owner FU</option><option>Credit Risk</option><option>Fraud Risk</option><option>Operations</option><option>Marketing</option><option>Internal Audit</option><option>Compliance &amp; AML/CTF Assurance</option></select></label>
+          <label class="issue-field"><span>Action Plan ID</span><input type="text" readonly value="Generated after Save" data-ap-form-id></label>
+          <label class="issue-field"><span>Action Plan Status</span><input type="text" readonly value="Draft" data-ap-form-status></label>
+          <label class="issue-field issue-field-full"><span>Action Plan Title *</span><input type="text" maxlength="200" placeholder="Enter the action to be completed" required data-ap-form-title></label>
+          <label class="issue-field issue-field-full"><span>Description of Action *</span><textarea rows="4" maxlength="10000" placeholder="Describe the remediation action and expected outcome" required data-ap-form-description></textarea></label>
+          <label class="issue-field"><span>Target Completion Date *</span><input type="date" required data-ap-form-tcd></label>
+          <label class="issue-field"><span>Revised Target Completion Date</span><input type="date" readonly data-ap-form-rtcd></label>
+          <label class="issue-field"><span>Overdue</span><input type="text" readonly data-ap-form-overdue></label>
+          <label class="issue-field"><span>Number of RTCD</span><input type="text" readonly value="0" data-ap-form-rtcd-count></label>
+          <label class="issue-field" data-ap-withdraw-field hidden><span>Withdraw Date</span><input type="date" readonly data-ap-form-withdraw-date></label>
+          <label class="issue-field issue-field-full" data-ap-withdraw-field hidden><span>Withdraw Justification</span><textarea rows="3" readonly data-ap-form-withdraw-justification></textarea></label>
+          <label class="issue-field issue-field-full issue-document-field issue-ap-document-field"><span>Supporting Document</span><div class="issue-document-drop issue-ap-document-drop"><span>Evidence is mandatory when completing an Action Plan.</span><input type="file" multiple accept=".pdf,.docx,.txt,.csv,.xlsx,.jpg,.jpeg,.ppt,.pptx,.zip" data-ap-form-documents></div><div class="issue-document-list" data-ap-document-list></div><p class="issue-form-error" data-ap-documents-error role="alert" hidden></p></label>
+        </div>
+        <p class="issue-form-error" data-ap-form-error role="alert" hidden></p>
+        <div class="issue-modal-footer"><div class="issue-modal-actions"><button class="button button-secondary" type="button" data-close-ap-modal>Cancel</button><button class="button button-primary" type="submit" data-save-ap>Save</button></div></div>
+      </form>
+    </div>
+  </section>
+</div>

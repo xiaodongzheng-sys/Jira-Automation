@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+
+{% block page_shell_class %} issue-page-shell{% endblock %}
+
+{% block extra_head %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='issue_management.css', v=asset_revision|default('static')) }}">
+{% endblock %}
+
+{% block body %}
+  {% if demo_mode|default(false) %}
+    {% set issue_overview_endpoint = 'issue_management_demo_page' %}
+    {% set issue_create_endpoint = 'issue_management_demo_create_page' %}
+    {% set issue_view_endpoint = 'issue_management_demo_view_page' %}
+    {% set issue_action_plan_view_endpoint = 'issue_management_demo_action_plan_view_page' %}
+  {% else %}
+    {% set issue_overview_endpoint = 'issue_management_page' %}
+    {% set issue_create_endpoint = 'issue_management_create_page' %}
+    {% set issue_view_endpoint = 'issue_management_view_page' %}
+    {% set issue_action_plan_view_endpoint = 'issue_management_action_plan_view_page' %}
+  {% endif %}
+  <main class="issue-management-page" data-issue-management data-issue-mode="overview" data-create-url="{{ url_for(issue_create_endpoint) }}" data-overview-url="{{ url_for(issue_overview_endpoint) }}" data-view-url="{{ url_for(issue_view_endpoint, issue_id='__ISSUE_ID__') }}" data-action-plan-view-url="{{ url_for(issue_action_plan_view_endpoint, issue_id='__ISSUE_ID__', ap_id='__AP_ID__') }}">
+    <section class="issue-panel issue-search-panel" aria-label="Issue filters">
+      <div class="issue-search-grid">
+        <label class="issue-field">
+          <span>Issue ID</span>
+          <input type="search" placeholder="Search Issue ID" data-search-id>
+        </label>
+        <label class="issue-field">
+          <span>Issue Type</span>
+          <select data-search-type>
+            <option value="">All types</option>
+            <option value="Self-Assessment">Self-Assessment</option>
+            <option value="Risk &amp; Control Self-Assessment">Risk &amp; Control Self-Assessment (RCSA)</option>
+            <option value="Outsourcing">Outsourcing</option>
+            <option value="External Audit">External Audit</option>
+            <option value="Internal Audit">Internal Audit</option>
+            <option value="Compliance Assurance">Compliance Assurance</option>
+          </select>
+        </label>
+        <label class="issue-field">
+          <span>Issue Creator</span>
+          <select data-search-creator><option value="">All creators</option></select>
+        </label>
+        <label class="issue-field">
+          <span>Impacted Unit</span>
+          <select data-search-unit><option value="">All units</option></select>
+        </label>
+        <label class="issue-field">
+          <span>Issue Title</span>
+          <input type="search" placeholder="Search Issue Title" data-search-title>
+        </label>
+        <div class="issue-field issue-date-range-field">
+          <span>Date of Issue</span>
+          <div class="issue-date-range">
+            <input type="date" aria-label="Date of Issue from" data-search-issue-date-from>
+            <span class="issue-date-range-arrow" aria-hidden="true">→</span>
+            <input type="date" aria-label="Date of Issue to" data-search-issue-date-to>
+          </div>
+        </div>
+        <label class="issue-field">
+          <span>Potential Impact</span>
+          <select data-search-impact>
+            <option value="">All impacts</option>
+            <option value="High">High</option>
+            <option value="Medium-High">Medium-High</option>
+            <option value="Medium-Low">Medium-Low</option>
+            <option value="Low">Low</option>
+          </select>
+        </label>
+        <label class="issue-field">
+          <span>Issue Status</span>
+          <select data-search-status>
+            <option value="">All statuses</option>
+            <option value="Draft">Draft</option>
+            <option value="Pending Approval">Pending Approval</option>
+            <option value="Open">Open</option>
+            <option value="Reopen (Open) - Pending Approval">Reopen (Open) - Pending Approval</option>
+            <option value="Reopen (Draft) - Pending Approval">Reopen (Draft) - Pending Approval</option>
+            <option value="Closed">Closed</option>
+            <option value="Withdraw - Pending Approval">Withdraw - Pending Approval</option>
+            <option value="Withdrawn">Withdrawn</option>
+          </select>
+        </label>
+      </div>
+      <div class="issue-search-grid issue-search-advanced" id="issue-date-filters" data-date-filters hidden>
+        <div class="issue-field issue-date-range-field">
+          <span>Target Completion Date</span>
+          <div class="issue-date-range">
+            <input type="date" aria-label="Target Completion Date from" data-search-tcd-from>
+            <span class="issue-date-range-arrow" aria-hidden="true">→</span>
+            <input type="date" aria-label="Target Completion Date to" data-search-tcd-to>
+          </div>
+        </div>
+        <div class="issue-field issue-date-range-field">
+          <span>Revised Target Completion Date</span>
+          <div class="issue-date-range">
+            <input type="date" aria-label="Revised Target Completion Date from" data-search-rtcd-from>
+            <span class="issue-date-range-arrow" aria-hidden="true">→</span>
+            <input type="date" aria-label="Revised Target Completion Date to" data-search-rtcd-to>
+          </div>
+        </div>
+      </div>
+      <button class="issue-filter-toggle" type="button" data-toggle-date-filters aria-label="Expand Target Completion Date / Revised Target Completion Date filters" aria-expanded="false" aria-controls="issue-date-filters"><span aria-hidden="true">▾</span></button>
+      <div class="issue-search-footer">
+        <div class="issue-search-actions">
+          <button class="button button-secondary" type="button" data-clear-search>Clear</button>
+          <button class="button button-primary" type="button" data-run-search>Search</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="issue-panel issue-list-panel" aria-labelledby="issue-list-title">
+      <div class="issue-panel-heading issue-list-heading">
+        <div>
+          <h2 id="issue-list-title">Issue Management List</h2>
+        </div>
+        <div class="issue-list-heading-actions"><button class="button button-primary" type="button" data-create-issue>+ Create New Issue</button></div>
+      </div>
+      <div class="issue-table-wrap">
+        <table class="issue-table">
+          <thead>
+            <tr>
+              <th scope="col">No.</th>
+              <th scope="col">Issue ID</th>
+              <th scope="col">Issue Type</th>
+              <th scope="col">Issue Creator</th>
+              <th scope="col">Impacted Unit</th>
+              <th scope="col">Issue Title</th>
+              <th scope="col"><button class="issue-sort-button" type="button" data-issue-sort="date_of_issue" aria-label="Sort by Date of Issue"><span>Date of Issue</span><span class="issue-sort-indicator" aria-hidden="true"></span></button></th>
+              <th scope="col">Potential Impact</th>
+              <th scope="col">Issue Status</th>
+              <th scope="col"><button class="issue-sort-button" type="button" data-issue-sort="tcd" aria-label="Sort by Target Completion Date"><span>Target Completion Date</span><span class="issue-sort-indicator" aria-hidden="true"></span></button></th>
+              <th scope="col"><button class="issue-sort-button" type="button" data-issue-sort="revised_tcd" aria-label="Sort by Revised Target Completion Date"><span>Revised Target Completion Date</span><span class="issue-sort-indicator" aria-hidden="true"></span></button></th>
+              <th scope="col">Overdue</th>
+            </tr>
+          </thead>
+          <tbody data-issue-rows></tbody>
+        </table>
+      </div>
+      <div class="issue-empty-state" data-issue-empty hidden>
+        <div class="issue-empty-icon">⌕</div>
+        <h3>No Issues found</h3>
+        <p>Try clearing a filter or create a new Issue for the demo.</p>
+      </div>
+      <div class="issue-pagination" aria-label="Issue list pagination">
+        <span data-total-items>Total 0 items</span>
+        <button class="issue-page-button" type="button" data-prev-page aria-label="Previous page">‹</button>
+        <span class="issue-page-number" data-page-number>1</span>
+        <button class="issue-page-button" type="button" data-next-page aria-label="Next page">›</button>
+        <select class="issue-page-size" data-page-size aria-label="Items per page">
+          <option value="10" selected>10 / page</option>
+          <option value="20">20 / page</option>
+          <option value="50">50 / page</option>
+        </select>
+      </div>
+    </section>
+
+    <div class="issue-modal-backdrop issue-picker-backdrop" data-create-picker hidden>
+      <section class="issue-modal issue-picker-modal" role="dialog" aria-modal="true" aria-labelledby="create-picker-title">
+        <div class="issue-modal-header">
+          <div>
+            <h2 id="create-picker-title">Create New Issue &amp; Action Plan</h2>
+          </div>
+          <button class="issue-icon-button" type="button" aria-label="Close" data-cancel-create>×</button>
+        </div>
+        <div class="issue-picker-body">
+          <label class="issue-field"><span>Issue Creator *</span><select data-create-creator><option value="">Select Functional Unit</option><option>Credit Risk</option><option>Fraud Risk</option><option>Operations</option><option>Marketing</option><option>Internal Audit</option><option>Compliance &amp; AML/CTF Assurance</option></select></label>
+          <p class="issue-form-error" data-create-picker-error role="alert" hidden>Issue Creator is required.</p>
+        </div>
+        <div class="issue-picker-footer"><button class="button button-secondary" type="button" data-cancel-create>Cancel</button><button class="button button-primary" type="button" data-confirm-create>Confirm</button></div>
+      </section>
+    </div>
+
+    <div class="issue-modal-backdrop" data-issue-modal hidden>
+      <section class="issue-modal" role="dialog" aria-modal="true" aria-labelledby="issue-modal-title">
+        <div class="issue-modal-header">
+          <div>
+            <p class="issue-section-kicker" data-modal-kicker>Create New Issue &amp; Action Plan</p>
+            <h2 id="issue-modal-title" data-modal-title>Create New Issue</h2>
+            <p class="issue-modal-subtitle" data-modal-subtitle>Start with the Issue basic information and add the first Action Plan.</p>
+          </div>
+          <button class="issue-icon-button" type="button" aria-label="Close" data-close-modal>×</button>
+        </div>
+        <div class="issue-modal-body">
+          {% include "_issue_form.html" %}
+        </div>
+      </section>
+    </div>
+    {% include "_action_plan_modal.html" %}
+    {% include "_issue_confirmation_modals.html" %}
+    <div class="issue-validation-toast" data-validation-toast role="alert" aria-live="assertive" hidden><span class="issue-validation-toast-icon" aria-hidden="true">×</span><span data-validation-toast-message></span></div>
+    <div class="issue-toast" data-issue-toast role="status" aria-live="polite" hidden></div>
+  </main>
+{% endblock %}
+
+{% block extra_scripts %}
+  <script src="{{ url_for('static', filename='issue_management.js', v=asset_revision|default('static')) }}"></script>
+{% endblock %}

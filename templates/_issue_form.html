@@ -1,0 +1,50 @@
+<form data-issue-form novalidate>
+  <div class="issue-form-section">
+    <div class="issue-form-section-heading issue-form-section-heading-simple"><h3>Issue Details</h3></div>
+    <div class="issue-form-grid">
+      <label class="issue-field"><span>Issue Creator *</span><select required data-form-creator><option value="">Select Functional Unit</option><option>Credit Risk</option><option>Fraud Risk</option><option>Operations</option><option>Marketing</option><option>Internal Audit</option><option>Compliance &amp; AML/CTF Assurance</option></select></label>
+      <label class="issue-field"><span>Issue Type *</span><select required data-form-type><option value="">Select Issue Type</option><option>Self-Assessment</option><option>Outsourcing</option><option>External Audit</option><option>Internal Audit</option><option>Compliance Assurance</option></select></label>
+      <label class="issue-field"><span class="issue-field-label">Issue ID{% if create_mode %}<button class="issue-tooltip" type="button" aria-label="Issue ID information" data-tooltip="The Issue ID will be generated automatically once the Issue is saved or submitted.">?</button>{% endif %}</span><input type="text" readonly value="Generated after Save or Submit" data-form-issue-id></label>
+      <label class="issue-field"><span>Issue Status</span><input type="text" readonly value="Draft" data-form-status></label>
+      <label class="issue-field"><span>Impacted Unit *</span><select required data-form-unit><option value="">Select Functional Unit</option><option>Credit Risk</option><option>Fraud Risk</option><option>Operations</option><option>Marketing</option><option>Internal Audit</option><option>Compliance &amp; AML/CTF Assurance</option></select></label>
+      <label class="issue-field"><span class="issue-field-label">Potential Impact *<button class="issue-tooltip" type="button" aria-label="Potential Impact information" data-tooltip="User Guide URL: Sample">?</button></span><select required data-form-impact><option value="">Select impact</option><option>High</option><option>Medium-High</option><option>Medium-Low</option><option>Low</option></select></label>
+      <label class="issue-field"><span>Date of Issue</span><input type="date" readonly data-form-date></label>
+      <label class="issue-field issue-field-full"><span>Issue Title *</span><input type="text" maxlength="200" placeholder="Enter a concise Issue title" required data-form-title></label>
+      <label class="issue-field issue-field-full"><span>Description of Issue *</span><textarea rows="4" maxlength="10000" placeholder="Describe the issue and its impact" required data-form-description></textarea></label>
+      <label class="issue-field issue-field-full"><span>Parties Involved *</span><textarea rows="4" maxlength="500" required data-form-parties></textarea></label>
+      <label class="issue-field"><span>Target Completion Date</span><input type="date" readonly data-form-tcd></label>
+      <label class="issue-field"><span>Revised Target Completion Date</span><input type="date" readonly data-form-rtcd></label>
+      <label class="issue-field"><span>Number of RTCD</span><input type="text" readonly data-form-rtcd-count></label>
+      <label class="issue-field" data-issue-withdraw-field hidden><span>Withdraw Date</span><input type="date" readonly data-form-withdraw-date></label>
+      <label class="issue-field issue-field-full" data-issue-withdraw-field hidden><span>Withdraw Justification</span><textarea rows="3" readonly data-form-withdraw-justification></textarea></label>
+      <label class="issue-field"><span>Overdue</span><input type="text" readonly data-form-overdue></label>
+      <label class="issue-field issue-field-full issue-document-field issue-document-main-field"><span>Documents</span><div class="issue-document-drop issue-document-main-drop"><span>PDF, DOCX, TXT, CSV, XLSX, JPG, PPT or ZIP · max 20 MB each · up to 100 files</span><input type="file" multiple accept=".pdf,.docx,.txt,.csv,.xlsx,.jpg,.jpeg,.ppt,.pptx,.zip" data-form-documents></div><div class="issue-document-list" data-document-list></div><p class="issue-form-error" data-documents-error role="alert" hidden></p></label>
+    </div>
+  </div>
+
+  <div class="issue-form-section issue-ap-section">
+    <div class="issue-form-section-heading issue-form-section-heading-simple"><h3>Action Plan Details</h3></div>
+    <div class="issue-ap-table-wrap">
+      <table class="issue-ap-table">
+        <thead><tr><th>No.</th><th>Action Plan ID / Title</th><th>Action Plan Owner</th><th>Target Completion Date</th><th>Revised Target Completion Date</th><th>No. of RTCD</th><th>Status</th><th>Overdue</th><th>Action</th></tr></thead>
+        <tbody data-ap-rows></tbody>
+      </table>
+      <div class="issue-ap-empty" data-ap-empty>No Action Plans added.</div>
+    </div>
+    <button class="button button-secondary issue-add-ap-button" type="button" data-add-ap{% if view_mode %} hidden{% endif %}>+ Add New Action Plan</button>
+  </div>
+  <p class="issue-form-error" data-form-error role="alert" hidden></p>
+  <div class="issue-modal-footer">
+    <div class="issue-modal-actions">
+      {% if create_mode or edit_mode %}
+        <button class="button button-secondary" type="button" data-form-back>Back</button>
+      {% elif view_mode %}
+        <button class="button button-secondary" type="button" data-form-back>Back</button>
+      {% else %}
+        <button class="button button-quiet" type="button" data-close-modal>Cancel</button>
+      {% endif %}
+      <button class="button button-primary" type="button" data-save-issue{% if view_mode %} hidden{% endif %}>Save</button>
+      <button class="button button-primary" type="submit" data-submit-issue{% if view_mode %} hidden{% endif %}>Submit</button>
+    </div>
+  </div>
+</form>

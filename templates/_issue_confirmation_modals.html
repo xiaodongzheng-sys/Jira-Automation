@@ -1,0 +1,58 @@
+<div class="issue-modal-backdrop issue-confirm-backdrop" data-submit-confirm hidden>
+  <section class="issue-modal issue-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="submit-confirm-title">
+    <div class="issue-modal-header">
+      <div>
+        <p class="issue-section-kicker">Submit Issue &amp; Action Plan</p>
+        <h2 id="submit-confirm-title">Submit a new Issue and Action Plan(s)?</h2>
+      </div>
+      <button class="issue-icon-button" type="button" aria-label="Close" data-close-submit-confirm>×</button>
+    </div>
+    <div class="issue-modal-body issue-confirm-body">
+      <p>Please make sure all information is correct before submitting for approval. Once submitted, this Issue and its Action Plan(s) will be sent for approval.</p>
+    </div>
+    <div class="issue-modal-footer"><div class="issue-modal-actions"><button class="button button-quiet" type="button" data-close-submit-confirm>Cancel</button><button class="button button-primary" type="button" data-confirm-submit>Confirm</button></div></div>
+  </section>
+</div>
+
+<div class="issue-modal-backdrop issue-confirm-backdrop" data-cancel-confirm hidden>
+  <section class="issue-modal issue-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="cancel-confirm-title">
+    <div class="issue-modal-header">
+      <div>
+        <h2 id="cancel-confirm-title">Are you sure to cancel?</h2>
+      </div>
+      <button class="issue-icon-button" type="button" aria-label="Close" data-close-cancel-confirm>×</button>
+    </div>
+    <div class="issue-modal-body issue-confirm-body"><p>Your changes will not be saved. Click “Cancel” to continue make a changes.</p></div>
+    <div class="issue-modal-footer"><div class="issue-modal-actions"><button class="button button-quiet" type="button" data-close-cancel-confirm>Cancel</button><button class="button button-primary" type="button" data-confirm-cancel>Yes</button></div></div>
+  </section>
+</div>
+
+<div class="issue-modal-backdrop issue-withdraw-backdrop" data-withdraw-justification hidden>
+  <section class="issue-modal issue-withdraw-modal" role="dialog" aria-modal="true" aria-labelledby="withdraw-justification-title">
+    <div class="issue-modal-header">
+      <div>
+        <h2 id="withdraw-justification-title" data-withdraw-justification-title>Withdraw Issue</h2>
+      </div>
+      <button class="issue-icon-button" type="button" aria-label="Close" data-close-withdraw-justification>×</button>
+    </div>
+    <div class="issue-modal-body issue-withdraw-body">
+      <label class="issue-field issue-field-full"><span><em aria-hidden="true">*</em> Withdrawal Justification</span><textarea rows="4" maxlength="1000" data-withdraw-justification-input></textarea></label>
+      <p class="issue-form-error" data-withdraw-justification-error role="alert" hidden>Withdrawal Justification is required.</p>
+    </div>
+    <div class="issue-modal-footer"><div class="issue-modal-actions"><button class="button button-primary" type="button" data-confirm-withdraw-justification>Confirm</button></div></div>
+  </section>
+</div>
+
+<div class="issue-modal-backdrop issue-confirm-backdrop" data-withdraw-confirmation hidden>
+  <section class="issue-modal issue-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="withdraw-confirmation-title">
+    <div class="issue-modal-header">
+      <div>
+        <p class="issue-section-kicker">Confirm Withdrawal</p>
+        <h2 id="withdraw-confirmation-title" data-withdraw-confirmation-title>Confirm Withdrawal</h2>
+      </div>
+      <button class="issue-icon-button" type="button" aria-label="Close" data-close-withdraw-confirmation>×</button>
+    </div>
+    <div class="issue-modal-body issue-confirm-body"><p data-withdraw-confirmation-message>Confirm to Withdraw Issue? Once Issue is withdrawn, it is irreversible.</p></div>
+    <div class="issue-modal-footer"><div class="issue-modal-actions"><button class="button button-quiet" type="button" data-close-withdraw-confirmation>Cancel</button><button class="button button-primary" type="button" data-confirm-withdraw>Confirm</button></div></div>
+  </section>
+</div>

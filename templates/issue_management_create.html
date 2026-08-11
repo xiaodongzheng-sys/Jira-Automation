@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block page_shell_class %} issue-page-shell{% endblock %}
+
+{% block extra_head %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='issue_management.css', v=asset_revision|default('static')) }}">
+{% endblock %}
+
+{% block body %}
+  {% set issue_overview_endpoint = 'issue_management_demo_page' if demo_mode|default(false) else 'issue_management_page' %}
+  <main class="issue-management-page issue-create-page" data-issue-management data-issue-mode="create" data-overview-url="{{ url_for(issue_overview_endpoint) }}" data-initial-creator="{{ initial_creator|e }}">
+    <header class="issue-page-header issue-create-page-header">
+      <div>
+        <h1>Create New Issue &amp; Action Plan</h1>
+        <p class="issue-page-intro">Select an Issue Type, enter details and add at least one action plan</p>
+      </div>
+    </header>
+
+    <section class="issue-create-card" aria-label="Create issue and action plan form">
+      {% set create_mode = true %}
+      {% include "_issue_form.html" %}
+    </section>
+    {% include "_action_plan_modal.html" %}
+    {% include "_issue_confirmation_modals.html" %}
+    <div class="issue-validation-toast" data-validation-toast role="alert" aria-live="assertive" hidden><span class="issue-validation-toast-icon" aria-hidden="true">×</span><span data-validation-toast-message></span></div>
+    <div class="issue-toast" data-issue-toast role="status" aria-live="polite" hidden></div>
+  </main>
+{% endblock %}
+
+{% block extra_scripts %}
+  <script src="{{ url_for('static', filename='issue_management.js', v=asset_revision|default('static')) }}"></script>
+{% endblock %}

@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block page_shell_class %} issue-page-shell{% endblock %}
+
+{% block extra_head %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='issue_management.css', v=asset_revision|default('static')) }}">
+{% endblock %}
+
+{% block body %}
+  {% if demo_mode|default(false) %}
+    {% set issue_overview_endpoint = 'issue_management_demo_page' %}
+    {% set issue_view_endpoint = 'issue_management_demo_view_page' %}
+  {% else %}
+    {% set issue_overview_endpoint = 'issue_management_page' %}
+    {% set issue_view_endpoint = 'issue_management_view_page' %}
+  {% endif %}
+  <main class="issue-management-page issue-view-page" data-issue-management data-issue-mode="action-plan-view" data-view-issue-id="{{ issue_id|e }}" data-view-ap-id="{{ ap_id|e }}" data-overview-url="{{ url_for(issue_overview_endpoint) }}" data-issue-view-url="{{ url_for(issue_view_endpoint, issue_id='__ISSUE_ID__') }}">
+    <header class="issue-page-header issue-view-page-header">
+      <div>
+        <p class="issue-eyebrow">GRC / Phase 4 Demo</p>
+        <h1>View Action Plan</h1>
+        <p class="issue-page-intro" data-ap-view-subtitle>Review the Action Plan details.</p>
+      </div>
+      <div class="issue-view-actions">
+        <button class="button button-danger-outline" type="button" data-ap-view-withdraw hidden>Withdraw Action Plan</button>
+      </div>
+    </header>
+
+    <section class="issue-create-card issue-view-card" aria-labelledby="ap-view-heading">
+      <div class="issue-create-card-heading">
+        <div>
+          <p class="issue-section-kicker">Action Plan Workspace</p>
+          <h2 id="ap-view-heading" data-ap-view-heading>Action Plan Details</h2>
+        </div>
+        <span class="issue-create-step" data-ap-view-status>Loading</span>
+      </div>
+      <div class="issue-form-section">
+        <div class="issue-form-grid">
+          <label class="issue-field"><span>Action Plan Owner</span><input type="text" readonly data-ap-view-owner></label>
+          <label class="issue-field"><span>Action Plan ID</span><input type="text" readonly data-ap-view-id></label>
+          <label class="issue-field"><span>Action Plan Status</span><input type="text" readonly data-ap-view-status-field></label>
+          <label class="issue-field"><span>Target Completion Date</span><input type="text" readonly data-ap-view-tcd></label>
+          <label class="issue-field"><span>Revised Target Completion Date</span><input type="text" readonly data-ap-view-rtcd></label>
+          <label class="issue-field"><span>Number of RTCD</span><input type="text" readonly data-ap-view-rtcd-count></label>
+          <label class="issue-field" data-ap-view-withdraw-field hidden><span>Withdraw Date</span><input type="text" readonly data-ap-view-withdraw-date></label>
+          <label class="issue-field issue-field-full" data-ap-view-withdraw-field hidden><span>Withdraw Justification</span><textarea rows="3" readonly data-ap-view-withdraw-justification></textarea></label>
+          <label class="issue-field"><span>Overdue</span><input type="text" readonly data-ap-view-overdue></label>
+          <label class="issue-field issue-field-full"><span>Action Plan Title</span><input type="text" readonly data-ap-view-title></label>
+          <label class="issue-field issue-field-full"><span>Description of Action</span><textarea rows="5" readonly data-ap-view-description></textarea></label>
+          <label class="issue-field issue-field-full issue-document-field"><span>Supporting Documents</span><div class="issue-document-list" data-ap-view-document-list></div></label>
+        </div>
+      </div>
+      <div class="issue-modal-footer issue-action-plan-view-footer">
+        <div class="issue-modal-actions"><button class="button button-quiet" type="button" data-ap-view-back>Back to Issue</button></div>
+      </div>
+    </section>
+    {% include "_issue_confirmation_modals.html" %}
+    <div class="issue-toast" data-issue-toast role="status" aria-live="polite" hidden></div>
+  </main>
+{% endblock %}
+
+{% block extra_scripts %}
+  <script src="{{ url_for('static', filename='issue_management.js', v=asset_revision|default('static')) }}"></script>
+{% endblock %}

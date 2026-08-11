@@ -290,6 +290,7 @@ from bpmis_jira_tool.web_bpmis_routes import build_bpmis_handlers, register_bpmi
 from bpmis_jira_tool.web_team_dashboard_seatalk_routes import build_team_dashboard_seatalk_handlers, register_team_dashboard_seatalk_routes
 from bpmis_jira_tool.web_meeting_recorder_routes import build_meeting_recorder_handlers, register_meeting_recorder_routes
 from bpmis_jira_tool.web_prd_self_assessment_routes import build_prd_self_assessment_handlers, register_prd_self_assessment_routes
+from bpmis_jira_tool.web_issue_management_routes import build_issue_management_handlers, register_issue_management_routes
 from bpmis_jira_tool.web_productization_routes import build_productization_handlers, register_productization_routes
 from bpmis_jira_tool.web_source_code_qa_routes import register_source_code_qa_routes
 from bpmis_jira_tool.web_team_dashboard_routes import build_team_dashboard_handlers, register_team_dashboard_routes
@@ -764,6 +765,13 @@ def create_app() -> Flask:
         show_admin_tool_entries = _is_portal_admin()
         site_tabs.append(
             {
+                "label": "Issue Management",
+                "href": url_for("issue_management_page"),
+                "active": request.path.startswith("/issue-management"),
+            }
+        )
+        site_tabs.append(
+            {
                 "label": "Version Plan",
                 "href": VERSION_PLAN_NAV_URL,
                 "active": request.path.startswith("/version-plan"),
@@ -914,6 +922,14 @@ def create_app() -> Flask:
             "cloud_static",
             "access_denied",
             "prd_briefing.image_proxy",
+            # The Issue Management business demo is deliberately public. It is
+            # a browser-only surface and does not read or mutate portal stores;
+            # the regular /issue-management routes remain login-gated.
+            "issue_management_demo_page",
+            "issue_management_demo_create_page",
+            "issue_management_demo_edit_page",
+            "issue_management_demo_view_page",
+            "issue_management_demo_action_plan_view_page",
             # Source Code repo downloads are now login-gated (no password).
             "source_code_qa_repo_download_api",
         }:
@@ -1298,6 +1314,15 @@ def create_app() -> Flask:
                 _build_local_agent_client=_build_local_agent_client,
                 _get_prd_latest_result=_get_prd_latest_result,
                 web_globals=globals(),
+            )
+        ),
+    )
+    register_issue_management_routes(
+        app,
+        build_issue_management_handlers(
+            SimpleNamespace(
+                settings=settings,
+                _get_user_identity=_get_user_identity,
             )
         ),
     )
