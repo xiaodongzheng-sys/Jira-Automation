@@ -210,7 +210,7 @@
     $$(searchFilterSelector).forEach((node) => node.classList.toggle('issue-filter-empty', !node.value));
   };
   const populateFilters = () => {
-    [['[data-search-creator]', 'creator', 'All creators'], ['[data-search-unit]', 'impacted_unit', 'All units']].forEach(([selector, key, label]) => {
+    [['[data-search-creator]', 'creator', 'All functional units'], ['[data-search-unit]', 'impacted_unit', 'All functional units']].forEach(([selector, key, label]) => {
       const select = $(selector); const current = select.value;
       select.innerHTML = `<option value="">${label}</option>${uniqueValues(key).map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join('')}`;
       select.value = current;
