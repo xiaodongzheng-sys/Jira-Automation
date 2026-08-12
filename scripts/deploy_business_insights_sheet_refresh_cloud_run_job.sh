@@ -38,6 +38,7 @@ SHEET_URL="${BUSINESS_INSIGHTS_GOOGLE_SHEET_URL:-$(read_env_value BUSINESS_INSIG
 SHEET_URL="${SHEET_URL:-https://docs.google.com/spreadsheets/d/1F5MSUwnxg8AbGr3rQN1l8nXYkxrBU680FJYhTGzL9qo/edit?gid=2125394335#gid=2125394335}"
 PORTAL_DATA_DIR="${BUSINESS_INSIGHTS_REFRESH_PORTAL_DATA_DIR:-/tmp/team-portal-runtime}"
 PUBLIC_GCS_BUCKET="${TEAM_PORTAL_PUBLIC_GCS_PUBLISH_BUCKET:-${CLOUD_RUN_PUBLIC_GCS_BUCKET:-$(read_env_value CLOUD_RUN_PUBLIC_GCS_BUCKET)}}"
+REFRESH_ENTRYPOINT="${BUSINESS_INSIGHTS_REFRESH_ENTRYPOINT:-scripts/refresh_business_insights_from_google_sheet.py}"
 # The scheduled-output Sheet and report ids are configurable so the same
 # deployment entrypoint can provision the PH, SG, or ID refresh Job safely.
 REFRESH_REPORT_IDS="${BUSINESS_INSIGHTS_REFRESH_REPORT_IDS:-anti-fraud-ph-scenarios-actions-auth-steps anti-fraud-ph-rules-features anti-fraud-ph-rule-effectiveness anti-fraud-ph-fraud-loss-cases anti-fraud-ph-facial-verification anti-fraud-ph-device-identity-risk anti-fraud-ph-card-3ds anti-fraud-ph-blacklist-whitelist-greylist}"
@@ -145,6 +146,7 @@ unset IFS
 echo "Business Insights refresh Job: $JOB_NAME"
 echo "Cloud Run region: $REGION"
 echo "Cloud Run image: $IMAGE_URI"
+echo "Refresh entrypoint: $REFRESH_ENTRYPOINT"
 echo "Job service account: $JOB_SERVICE_ACCOUNT"
 echo "Scheduler: $SCHEDULER_NAME ($SCHEDULE, $TIME_ZONE)"
 if [[ -n "$PUBLIC_GCS_BUCKET" ]]; then
@@ -165,7 +167,7 @@ run_cmd "$GCLOUD_BIN" run jobs deploy "$JOB_NAME" \
   --image "$IMAGE_URI" \
   --service-account "$JOB_SERVICE_ACCOUNT" \
   --command python \
-  --args scripts/refresh_business_insights_from_google_sheet.py \
+  --args "$REFRESH_ENTRYPOINT" \
   --tasks 1 \
   --max-retries "${BUSINESS_INSIGHTS_REFRESH_MAX_RETRIES:-1}" \
   --task-timeout "${BUSINESS_INSIGHTS_REFRESH_TASK_TIMEOUT:-1800s}" \
