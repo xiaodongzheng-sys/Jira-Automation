@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ from scripts.run_business_insights_all_sheet_refresh import (
     REFRESH_SCRIPT,
     SG_REPORT_IDS,
     SG_SHEET_URL,
+    main,
     market_configs,
     refresh_command,
 )
@@ -45,6 +47,16 @@ class BusinessInsightsAllRefreshTests(unittest.TestCase):
         self.assertEqual(command[:4], [os.fspath(__import__("sys").executable), os.fspath(REFRESH_SCRIPT), "--sheet-url", "sheet-url"])
         self.assertEqual(command.count("--report-id"), len(PH_REPORT_IDS))
         self.assertEqual(command[-1], PH_REPORT_IDS[-1])
+
+    @patch("scripts.run_business_insights_all_sheet_refresh.subprocess.run")
+    def test_one_market_failure_does_not_block_later_markets(self, run: object) -> None:
+        run.side_effect = [
+            subprocess.CompletedProcess([], 1),
+            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 0),
+        ]
+        self.assertEqual(main(), 1)
+        self.assertEqual(run.call_count, 3)
 
 
 if __name__ == "__main__":

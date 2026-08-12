@@ -67,6 +67,7 @@ def refresh_command(sheet_url: str, report_ids: tuple[str, ...]) -> list[str]:
 
 def main() -> int:
     environment = os.environ.copy()
+    failures: list[tuple[str, int]] = []
     for market, sheet_url, report_ids in market_configs():
         print(f"business-insights-{market.lower()}: starting refresh", flush=True)
         completed = subprocess.run(
@@ -78,11 +79,16 @@ def main() -> int:
         if completed.returncode != 0:
             print(
                 f"business-insights-{market.lower()}: failed with exit code {completed.returncode}; "
-                "later markets were not run",
+                "continuing with the remaining markets",
                 flush=True,
             )
-            return completed.returncode
+            failures.append((market, completed.returncode))
+            continue
         print(f"business-insights-{market.lower()}: completed", flush=True)
+    if failures:
+        failed_markets = ", ".join(f"{market} (exit {code})" for market, code in failures)
+        print(f"business-insights-all: failed markets: {failed_markets}", flush=True)
+        return 1
     print("business-insights-all: completed PH, SG, and ID refreshes", flush=True)
     return 0
 
