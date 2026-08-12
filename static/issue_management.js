@@ -224,12 +224,15 @@
       value: option.value,
       label: option.closest('.issue-multi-select-option')?.querySelector('span')?.textContent.trim() || option.value,
     }));
+    node.querySelectorAll('[data-search-multi-option]').forEach((option) => {
+      option.closest('.issue-multi-select-option')?.classList.toggle('issue-multi-select-option-selected', option.checked);
+    });
     const trigger = node.querySelector('[data-search-multi-trigger]');
     const label = node.querySelector('[data-search-multi-label]');
     const placeholder = node.dataset.placeholder || 'Select';
     if (label) {
       label.innerHTML = selected.length
-        ? `${selected.slice(0, 2).map((item) => `<span class="issue-multi-select-tag">${escapeHtml(item.label)}</span>`).join('')}${selected.length > 2 ? `<span class="issue-multi-select-tag">+${selected.length - 2}</span>` : ''}`
+        ? `${selected.slice(0, 3).map((item) => `<span class="issue-multi-select-tag"><span class="issue-multi-select-tag-text">${escapeHtml(item.label)}</span><span class="issue-multi-select-tag-remove" role="button" tabindex="0" aria-label="Remove ${escapeHtml(item.label)}" data-search-multi-remove="${escapeHtml(item.value)}">×</span></span>`).join('')}${selected.length > 3 ? `<span class="issue-multi-select-tag issue-multi-select-tag-count">+${selected.length - 3}</span>` : ''}`
         : escapeHtml(placeholder);
     }
     if (trigger) {
@@ -252,6 +255,17 @@
       const trigger = node.querySelector('[data-search-multi-trigger]');
       if (trigger) trigger.addEventListener('click', (event) => {
         event.preventDefault();
+        const remove = event.target.closest('[data-search-multi-remove]');
+        if (remove) {
+          event.stopPropagation();
+          const option = [...node.querySelectorAll('[data-search-multi-option]')].find((candidate) => candidate.value === remove.dataset.searchMultiRemove);
+          if (option) {
+            option.checked = false;
+            renderMultiSelect(node);
+            syncSearchFilterTone();
+          }
+          return;
+        }
         const menu = node.querySelector('[data-search-multi-menu]');
         const expanded = menu ? menu.hidden : true;
         closeMultiSelectMenus(node);
