@@ -180,6 +180,7 @@
   let versionPlanState = null;
   let versionPlanPollTimer = null;
   let versionPlanDragRow = null;
+  let versionPlanRowMutationInFlight = false;
   let versionPlanPmFilterValue = 'All PMs';
   const pmFilterState = {};
   const expandedPanels = {};
@@ -570,10 +571,30 @@
   };
 
   const versionPlanSyncPausedMessage = 'Syncing Jira. Row changes are paused until sync finishes.';
+  const versionPlanRowMutationMessage = 'Saving Version Plan changes. Please wait until the current change finishes.';
 
   const isVersionPlanSyncRunning = () => {
     const syncState = versionPlanState?.sync_state || {};
     return Boolean(versionPlanState?.sync_queued) || String(syncState.state || '').trim() === 'running';
+  };
+
+  const isVersionPlanRowMutationRunning = () => versionPlanRowMutationInFlight;
+
+  const isVersionPlanRowChangesPaused = () => (
+    isVersionPlanSyncRunning() || isVersionPlanRowMutationRunning()
+  );
+
+  const beginVersionPlanRowMutation = () => {
+    if (isVersionPlanSyncRunning()) {
+      setVersionPlanStatus(versionPlanSyncPausedMessage, 'neutral');
+      return false;
+    }
+    if (isVersionPlanRowMutationRunning()) {
+      setVersionPlanStatus(versionPlanRowMutationMessage, 'neutral');
+      return false;
+    }
+    versionPlanRowMutationInFlight = true;
+    return true;
   };
 
   const versionPlanSyncText = (syncState = {}) => {
@@ -688,7 +709,7 @@
         <div class="team-dashboard-version-plan-feature">${renderLink(row.jira_link, `[${jiraId}]`)}<span class="team-dashboard-version-plan-market">[${escapeHtml(market)}]</span><span>${escapeHtml(summary)}</span></div>
       `;
     }
-    if (readOnly || isVersionPlanSyncRunning()) return escapeHtml(row.feature || '-');
+    if (readOnly || isVersionPlanRowChangesPaused()) return escapeHtml(row.feature || '-');
     return `
       <textarea
         rows="1"
@@ -699,7 +720,7 @@
   };
 
   const versionPlanManualField = (row, field, readOnly) => {
-    if (!readOnly && isVersionPlanSyncRunning()) {
+    if (!readOnly && isVersionPlanRowChangesPaused()) {
       if (field === 'pm') return escapeHtml(versionPlanPmDisplay(row.pm || []));
       return escapeHtml(row[field] || '-');
     }
@@ -728,7 +749,7 @@
   const renderVersionPlanRows = (rows, { scope, versionId = '', readOnly = false, title = 'Rows', headerFeature = 'Feature' } = {}) => {
     const rowItems = Array.isArray(rows) ? rows : [];
     const empty = '';
-    const rowChangesPaused = isVersionPlanSyncRunning();
+    const rowChangesPaused = isVersionPlanRowChangesPaused();
     const body = rowItems.map((row) => {
       const manual = row.row_type === 'manual' && !readOnly;
       const manualActionsEnabled = manual && !rowChangesPaused;
@@ -868,7 +889,7 @@
     canSyncVersionPlan = root.dataset.canSyncVersionPlan === 'true' && payload?.can_sync !== false;
     if (!versionPlanSyncButton) return;
     versionPlanSyncButton.hidden = !canSyncVersionPlan;
-    versionPlanSyncButton.disabled = !canSyncVersionPlan || isVersionPlanSyncRunning();
+    versionPlanSyncButton.disabled = !canSyncVersionPlan || isVersionPlanRowChangesPaused();
   };
 
   const loadVersionPlan = async ({ force = false } = {}) => {
@@ -925,6 +946,10 @@
       setVersionPlanStatus('Sync Jira is admin-only.', 'neutral');
       return;
     }
+    if (isVersionPlanRowMutationRunning()) {
+      setVersionPlanStatus(versionPlanRowMutationMessage, 'neutral');
+      return;
+    }
     versionPlanSyncButton.disabled = true;
     setVersionPlanStatus('Starting Jira sync...', 'neutral');
     try {
@@ -939,7 +964,7 @@
     } catch (error) {
       setVersionPlanStatus(error.message || 'Could not start Version Plan sync.', 'error');
     } finally {
-      versionPlanSyncButton.disabled = !canSyncVersionPlan || isVersionPlanSyncRunning();
+      versionPlanSyncButton.disabled = !canSyncVersionPlan || isVersionPlanRowChangesPaused();
     }
   };
 
@@ -957,7 +982,7 @@
       versionPlanState.sync_state = payload.sync_state || {};
     }
     if (versionPlanSyncButton) {
-      versionPlanSyncButton.disabled = !canSyncVersionPlan || isVersionPlanSyncRunning();
+      versionPlanSyncButton.disabled = !canSyncVersionPlan || isVersionPlanRowChangesPaused();
     }
   };
 
@@ -973,12 +998,15 @@
     return payload;
   };
 
-  const saveVersionPlanCell = async (input, retryOnConflict = true) => {
+  const saveVersionPlanCell = async (input, retryOnConflict = true, { mutationStarted = false } = {}) => {
     const row = input.closest('[data-version-plan-row-id]');
     if (!row) return;
     const field = input.dataset.versionPlanCell || '';
-    if (isVersionPlanSyncRunning()) {
-      setVersionPlanStatus(versionPlanSyncPausedMessage, 'neutral');
+    if (!mutationStarted && isVersionPlanRowChangesPaused()) {
+      setVersionPlanStatus(
+        isVersionPlanSyncRunning() ? versionPlanSyncPausedMessage : versionPlanRowMutationMessage,
+        'neutral',
+      );
       return;
     }
     const value = input.multiple ? Array.from(input.selectedOptions).map((option) => option.value) : input.value;
@@ -1015,7 +1043,7 @@
     } catch (error) {
       if (retryOnConflict && error?.payload?.error_category === 'version_plan_conflict') {
         await refreshVersionPlanRevision();
-        return saveVersionPlanCell(input, false);
+        return saveVersionPlanCell(input, false, { mutationStarted: true });
       }
       if (error?.payload?.error_category === 'version_plan_sync_running') {
         setVersionPlanStatus(error.message || versionPlanSyncPausedMessage, 'neutral');
@@ -1030,31 +1058,47 @@
     payload,
     fallbackMessage = 'Could not update Version Plan rows.',
     retryOnConflict = true,
-    { renderOnSuccess = true } = {},
+    { renderOnSuccess = true, mutationStarted = false } = {},
   ) => {
-    const response = await fetch(root.dataset.versionPlanRowsUrl || '/api/team-dashboard/version-plan/af/rows', {
-      method: 'POST',
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify({ ...versionPlanRevisionPayload(), ...payload }),
-    });
-    let result;
-    try {
-      result = await readJson(response, fallbackMessage);
-    } catch (error) {
-      if (retryOnConflict && error?.payload?.error_category === 'version_plan_conflict') {
-        await refreshVersionPlanRevision();
-        return updateVersionPlanRows(payload, fallbackMessage, false, { renderOnSuccess: true });
-      }
-      if (error?.payload?.error_category === 'version_plan_sync_running') {
-        setVersionPlanStatus(error.message || versionPlanSyncPausedMessage, 'neutral');
-        await refreshVersionPlanRevision();
-      }
-      throw error;
+    if (!mutationStarted && isVersionPlanRowMutationRunning()) {
+      setVersionPlanStatus(versionPlanRowMutationMessage, 'neutral');
+      return false;
     }
-    if (renderOnSuccess) renderVersionPlan(result);
-    else commitVersionPlanMetadata(result);
-    setVersionPlanStatus('Saved.', 'success');
+    versionPlanRowMutationInFlight = true;
+    let result;
+    let saved = false;
+    const send = async (allowConflictRetry) => {
+      const response = await fetch(root.dataset.versionPlanRowsUrl || '/api/team-dashboard/version-plan/af/rows', {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ ...versionPlanRevisionPayload(), ...payload }),
+      });
+      try {
+        return await readJson(response, fallbackMessage);
+      } catch (error) {
+        if (allowConflictRetry && error?.payload?.error_category === 'version_plan_conflict') {
+          await refreshVersionPlanRevision();
+          return send(false);
+        }
+        if (error?.payload?.error_category === 'version_plan_sync_running') {
+          setVersionPlanStatus(error.message || versionPlanSyncPausedMessage, 'neutral');
+          await refreshVersionPlanRevision();
+        }
+        throw error;
+      }
+    };
+    try {
+      result = await send(retryOnConflict);
+      if (renderOnSuccess) renderVersionPlan(result);
+      else commitVersionPlanMetadata(result);
+      saved = true;
+      return true;
+    } finally {
+      versionPlanRowMutationInFlight = false;
+      if (versionPlanState) renderVersionPlan(versionPlanState);
+      if (saved) setVersionPlanStatus('Saved.', 'success');
+    }
   };
 
   const cloneVersionPlanState = () => {
@@ -1212,6 +1256,7 @@
     if (!versionPlanSameManualBlock(dropRow)) return;
     const sheet = dropRow.closest('[data-version-plan-sheet]');
     if (!sheet) return;
+    if (!beginVersionPlanRowMutation()) return;
     const before = versionPlanDragRow.compareDocumentPosition(dropRow) & Node.DOCUMENT_POSITION_FOLLOWING;
     sheet.insertBefore(versionPlanDragRow, before ? dropRow.nextSibling : dropRow);
     const rowIds = Array.from(sheet.querySelectorAll('[data-version-plan-manual-row="true"]'))
@@ -1225,8 +1270,16 @@
       row_ids: rowIds,
     };
     const previousState = applyOptimisticVersionPlanRows(change);
+    if (!previousState) {
+      versionPlanRowMutationInFlight = false;
+      if (versionPlanState) renderVersionPlan(versionPlanState);
+      return;
+    }
     try {
-      await updateVersionPlanRows(change, 'Could not reorder Version Plan rows.', true, { renderOnSuccess: false });
+      await updateVersionPlanRows(change, 'Could not reorder Version Plan rows.', true, {
+        renderOnSuccess: true,
+        mutationStarted: true,
+      });
     } catch (error) {
       rollbackVersionPlanRows(previousState);
       throw error;
@@ -1240,6 +1293,7 @@
     const sourceVersionId = versionPlanDragRow.dataset.versionId || '';
     const targetVersionId = targetSheet.dataset.versionId || '';
     if (!versionPlanSheetAcceptsDrop(targetSheet)) return;
+    if (!beginVersionPlanRowMutation()) return;
     const targetBeforeRowId = dropRow && dropRow.dataset.versionPlanPriority === versionPlanDragRow.dataset.versionPlanPriority
       ? (insertBefore ? dropRow.dataset.versionPlanRowId || '' : dropRow.nextElementSibling?.dataset.versionPlanRowId || '')
       : '';
@@ -1253,8 +1307,16 @@
       target_before_row_id: targetBeforeRowId,
     };
     const previousState = applyOptimisticVersionPlanRows(change);
+    if (!previousState) {
+      versionPlanRowMutationInFlight = false;
+      if (versionPlanState) renderVersionPlan(versionPlanState);
+      return;
+    }
     try {
-      await updateVersionPlanRows(change, 'Could not move Version Plan row.', true, { renderOnSuccess: false });
+      await updateVersionPlanRows(change, 'Could not move Version Plan row.', true, {
+        renderOnSuccess: true,
+        mutationStarted: true,
+      });
     } catch (error) {
       rollbackVersionPlanRows(previousState);
       throw error;
@@ -3207,7 +3269,13 @@
   });
   versionPlanContent?.addEventListener('change', (event) => {
     const input = event.target.closest('[data-version-plan-cell]');
-    if (input) saveVersionPlanCell(input);
+    if (input) {
+      if (!beginVersionPlanRowMutation()) return;
+      saveVersionPlanCell(input, true, { mutationStarted: true }).finally(() => {
+        versionPlanRowMutationInFlight = false;
+        if (versionPlanState) renderVersionPlan(versionPlanState);
+      });
+    }
   });
   versionPlanContent?.addEventListener('click', async (event) => {
     const toggle = event.target.closest('[data-version-plan-bundle-toggle]');
@@ -3230,8 +3298,11 @@
     }
     const button = event.target.closest('[data-version-plan-row-action]');
     if (!button) return;
-    if (isVersionPlanSyncRunning()) {
-      setVersionPlanStatus(versionPlanSyncPausedMessage, 'neutral');
+    if (isVersionPlanRowChangesPaused()) {
+      setVersionPlanStatus(
+        isVersionPlanSyncRunning() ? versionPlanSyncPausedMessage : versionPlanRowMutationMessage,
+        'neutral',
+      );
       return;
     }
     const action = button.dataset.versionPlanRowAction || '';
@@ -3240,6 +3311,7 @@
     const row = button.closest('[data-version-plan-row-id]');
     try {
       if (action === 'add') {
+        if (!beginVersionPlanRowMutation()) return;
         const change = {
           action: 'add',
           scope,
@@ -3247,8 +3319,16 @@
           row_id: `manual-client-${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`,
         };
         const previousState = applyOptimisticVersionPlanRows(change);
+        if (!previousState) {
+          versionPlanRowMutationInFlight = false;
+          if (versionPlanState) renderVersionPlan(versionPlanState);
+          return;
+        }
         try {
-          await updateVersionPlanRows(change, 'Could not add Version Plan row.', true, { renderOnSuccess: false });
+          await updateVersionPlanRows(change, 'Could not add Version Plan row.', true, {
+            renderOnSuccess: true,
+            mutationStarted: true,
+          });
         } catch (error) {
           rollbackVersionPlanRows(previousState);
           throw error;
@@ -3256,6 +3336,7 @@
         return;
       }
       if (action === 'delete' && row) {
+        if (!beginVersionPlanRowMutation()) return;
         const change = {
           action: 'delete',
           scope,
@@ -3263,8 +3344,16 @@
           row_id: row.dataset.versionPlanRowId || '',
         };
         const previousState = applyOptimisticVersionPlanRows(change);
+        if (!previousState) {
+          versionPlanRowMutationInFlight = false;
+          if (versionPlanState) renderVersionPlan(versionPlanState);
+          return;
+        }
         try {
-          await updateVersionPlanRows(change, 'Could not delete Version Plan row.', true, { renderOnSuccess: false });
+          await updateVersionPlanRows(change, 'Could not delete Version Plan row.', true, {
+            renderOnSuccess: true,
+            mutationStarted: true,
+          });
         } catch (error) {
           rollbackVersionPlanRows(previousState);
           throw error;
@@ -3277,9 +3366,12 @@
   });
   versionPlanContent?.addEventListener('dragstart', (event) => {
     if (!event.target.closest('.team-dashboard-version-plan-drag')) return;
-    if (isVersionPlanSyncRunning()) {
+    if (isVersionPlanRowChangesPaused()) {
       event.preventDefault();
-      setVersionPlanStatus(versionPlanSyncPausedMessage, 'neutral');
+      setVersionPlanStatus(
+        isVersionPlanSyncRunning() ? versionPlanSyncPausedMessage : versionPlanRowMutationMessage,
+        'neutral',
+      );
       return;
     }
     const row = event.target.closest('[data-version-plan-manual-row="true"]');
@@ -3295,7 +3387,7 @@
     versionPlanDragRow = null;
   });
   versionPlanContent?.addEventListener('dragover', (event) => {
-    if (isVersionPlanSyncRunning()) return;
+    if (isVersionPlanRowChangesPaused()) return;
     const row = event.target.closest('[data-version-plan-manual-row="true"]');
     const sheet = versionPlanClosestSheet(event.target);
     if (!versionPlanDragRow || !sheet) return;
@@ -3315,10 +3407,13 @@
     event.dataTransfer.dropEffect = 'move';
   });
   versionPlanContent?.addEventListener('drop', async (event) => {
-    if (isVersionPlanSyncRunning()) {
+    if (isVersionPlanRowChangesPaused()) {
       event.preventDefault();
       clearVersionPlanDropIndicators();
-      setVersionPlanStatus(versionPlanSyncPausedMessage, 'neutral');
+      setVersionPlanStatus(
+        isVersionPlanSyncRunning() ? versionPlanSyncPausedMessage : versionPlanRowMutationMessage,
+        'neutral',
+      );
       return;
     }
     const row = event.target.closest('[data-version-plan-manual-row="true"]');
