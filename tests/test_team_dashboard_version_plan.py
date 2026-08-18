@@ -1239,6 +1239,22 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
 
     def test_parser_market_and_date_helper_edges(self) -> None:
         self.assertEqual(vplan._bundle_payload({"prd_deadline_date": "2026-05-10"}, today=date(2026, 5, 16))["synced_rows"], [])
+        self.assertFalse(
+            vplan._version_plan_should_sync_jira(
+                {"prd_deadline_date": "2026-05-10"},
+                date(2026, 5, 6),
+            )
+        )
+        self.assertTrue(
+            vplan._version_plan_should_sync_jira(
+                {"prd_deadline_date": "2026-05-10"},
+                date(2026, 5, 7),
+            )
+        )
+        self.assertEqual(
+            vplan._version_plan_jira_sync_date({"prd_final_date": "2026-05-08"}),
+            date(2026, 5, 7),
+        )
         self.assertEqual(vplan._latest_mapped_release_date({"bad": {}, "good": {"release_date": "2026-05-26"}}), "2026-05-26")
         self.assertEqual(
             vplan._mapped_dbp_versions(

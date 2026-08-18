@@ -47,6 +47,7 @@ VERSION_PLAN_SYNC_OPERATION = "af_version_plan"
 VERSION_PLAN_AUDIT_LIMIT = 500
 VERSION_PLAN_EXCLUDE_SUFFIXES = ("_adhoc",)
 VERSION_PLAN_MARKET_VERSION_MIN_DAYS_AFTER_AF = 5
+VERSION_PLAN_JIRA_SYNC_DAYS_BEFORE_PRD_FINAL = 1
 
 
 class VersionPlanSyncUpstreamError(RuntimeError):
@@ -609,8 +610,18 @@ def _archived_bundle_payload(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _version_plan_should_sync_jira(version: dict[str, Any], today: date) -> bool:
-    prd_final_date = _parse_date(_offset_date_text(_prd_schedule_base_date(version), -2))
-    return bool(prd_final_date and prd_final_date < today)
+    sync_date = _version_plan_jira_sync_date(version)
+    return bool(sync_date and today >= sync_date)
+
+
+def _version_plan_jira_sync_date(version: dict[str, Any]) -> date | None:
+    prd_final_date = _parse_date(
+        str(version.get("prd_final_date") or "").strip()
+        or _offset_date_text(_prd_schedule_base_date(version), -2)
+    )
+    if not prd_final_date:
+        return None
+    return prd_final_date - timedelta(days=VERSION_PLAN_JIRA_SYNC_DAYS_BEFORE_PRD_FINAL)
 
 
 def _is_excluded_version_name(version_name: str) -> bool:
@@ -624,7 +635,8 @@ def _bundle_should_show_synced_rows(bundle: dict[str, Any], *, today: date) -> b
         return True
     prd_final_date = _parse_date(str(bundle.get("prd_final_date") or ""))
     if prd_final_date:
-        return prd_final_date < today
+        sync_date = prd_final_date - timedelta(days=VERSION_PLAN_JIRA_SYNC_DAYS_BEFORE_PRD_FINAL)
+        return today >= sync_date
     if not str(bundle.get("prd_deadline_date") or "").strip():
         return True
     return _version_plan_should_sync_jira(bundle, today)
