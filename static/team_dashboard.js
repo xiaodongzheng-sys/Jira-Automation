@@ -181,6 +181,7 @@
   let versionPlanPollTimer = null;
   let versionPlanDragRow = null;
   let versionPlanRowMutationInFlight = false;
+  let versionPlanCellMutationQueue = Promise.resolve();
   let versionPlanPmFilterValue = 'All PMs';
   const pmFilterState = {};
   const expandedPanels = {};
@@ -597,6 +598,24 @@
     return true;
   };
 
+  const finishVersionPlanRowMutation = () => {
+    versionPlanRowMutationInFlight = false;
+  };
+
+  // A cell can emit change while the previous field is still saving (for example,
+  // selecting Priority immediately after Feature blurs). Wait for that save to
+  // settle so the next request uses the latest document revision.
+  const waitForVersionPlanRowMutation = () => new Promise((resolve) => {
+    const check = () => {
+      if (!versionPlanRowMutationInFlight) {
+        resolve();
+        return;
+      }
+      window.setTimeout(check, 0);
+    };
+    check();
+  });
+
   const versionPlanSyncText = (syncState = {}) => {
     const state = String(syncState.state || '').trim();
     if (state === 'running') return versionPlanSyncPausedMessage;
@@ -998,10 +1017,22 @@
     return payload;
   };
 
+  const versionPlanCellEditFromInput = (input) => {
+    const row = input?.closest?.('[data-version-plan-row-id]');
+    if (!row) return null;
+    return {
+      scope: row.dataset.versionPlanScope || '',
+      versionId: row.dataset.versionId || '',
+      rowId: row.dataset.versionPlanRowId || '',
+      field: input.dataset.versionPlanCell || '',
+      value: input.multiple ? Array.from(input.selectedOptions).map((option) => option.value) : input.value,
+    };
+  };
+
   const saveVersionPlanCell = async (input, retryOnConflict = true, { mutationStarted = false } = {}) => {
-    const row = input.closest('[data-version-plan-row-id]');
-    if (!row) return;
-    const field = input.dataset.versionPlanCell || '';
+    const edit = input?.nodeType === 1 ? versionPlanCellEditFromInput(input) : input;
+    if (!edit?.rowId) return;
+    const field = edit.field || '';
     if (!mutationStarted && isVersionPlanRowChangesPaused()) {
       setVersionPlanStatus(
         isVersionPlanSyncRunning() ? versionPlanSyncPausedMessage : versionPlanRowMutationMessage,
@@ -1009,7 +1040,7 @@
       );
       return;
     }
-    const value = input.multiple ? Array.from(input.selectedOptions).map((option) => option.value) : input.value;
+    const value = edit.value;
     try {
       const response = await fetch(root.dataset.versionPlanCellUrl || '/api/team-dashboard/version-plan/af/cell', {
         method: 'POST',
@@ -1017,9 +1048,9 @@
         credentials: 'same-origin',
         body: JSON.stringify({
           ...versionPlanRevisionPayload(),
-          scope: row.dataset.versionPlanScope || '',
-          version_id: row.dataset.versionId || '',
-          row_id: row.dataset.versionPlanRowId || '',
+          scope: edit.scope,
+          version_id: edit.versionId,
+          row_id: edit.rowId,
           field,
           value,
         }),
@@ -1031,11 +1062,11 @@
         commitVersionPlanMetadata(payload);
         const rows = versionPlanRowsForCellPayload(
           versionPlanState,
-          row.dataset.versionPlanScope || '',
-          row.dataset.versionId || '',
+          edit.scope,
+          edit.versionId,
         );
         const cachedRow = Array.isArray(rows)
-          ? rows.find((item) => String(item?.row_id || '') === String(row.dataset.versionPlanRowId || ''))
+          ? rows.find((item) => String(item?.row_id || '') === String(edit.rowId))
           : null;
         if (cachedRow) cachedRow[field] = value;
       }
@@ -1043,7 +1074,7 @@
     } catch (error) {
       if (retryOnConflict && error?.payload?.error_category === 'version_plan_conflict') {
         await refreshVersionPlanRevision();
-        return saveVersionPlanCell(input, false, { mutationStarted: true });
+        return saveVersionPlanCell(edit, false, { mutationStarted: true });
       }
       if (error?.payload?.error_category === 'version_plan_sync_running') {
         setVersionPlanStatus(error.message || versionPlanSyncPausedMessage, 'neutral');
@@ -1095,7 +1126,7 @@
       saved = true;
       return true;
     } finally {
-      versionPlanRowMutationInFlight = false;
+      finishVersionPlanRowMutation();
       if (versionPlanState) renderVersionPlan(versionPlanState);
       if (saved) setVersionPlanStatus('Saved.', 'success');
     }
@@ -1271,7 +1302,7 @@
     };
     const previousState = applyOptimisticVersionPlanRows(change);
     if (!previousState) {
-      versionPlanRowMutationInFlight = false;
+      finishVersionPlanRowMutation();
       if (versionPlanState) renderVersionPlan(versionPlanState);
       return;
     }
@@ -1308,7 +1339,7 @@
     };
     const previousState = applyOptimisticVersionPlanRows(change);
     if (!previousState) {
-      versionPlanRowMutationInFlight = false;
+      finishVersionPlanRowMutation();
       if (versionPlanState) renderVersionPlan(versionPlanState);
       return;
     }
@@ -3270,11 +3301,24 @@
   versionPlanContent?.addEventListener('change', (event) => {
     const input = event.target.closest('[data-version-plan-cell]');
     if (input) {
-      if (!beginVersionPlanRowMutation()) return;
-      saveVersionPlanCell(input, true, { mutationStarted: true }).finally(() => {
-        versionPlanRowMutationInFlight = false;
-        if (versionPlanState) renderVersionPlan(versionPlanState);
-      });
+      const edit = versionPlanCellEditFromInput(input);
+      if (!edit) return;
+      // Keep edits in event order. The input itself may be replaced by a render
+      // while an earlier cell save is in flight, so queue the immutable payload.
+      versionPlanCellMutationQueue = versionPlanCellMutationQueue
+        .catch(() => {})
+        .then(async () => {
+          await waitForVersionPlanRowMutation();
+          if (!beginVersionPlanRowMutation()) return;
+          try {
+            await saveVersionPlanCell(edit, true, { mutationStarted: true });
+          } catch (error) {
+            setVersionPlanStatus(error.message || 'Could not save Version Plan cell.', 'error');
+          } finally {
+            finishVersionPlanRowMutation();
+            if (versionPlanState) renderVersionPlan(versionPlanState);
+          }
+        });
     }
   });
   versionPlanContent?.addEventListener('click', async (event) => {
@@ -3320,7 +3364,7 @@
         };
         const previousState = applyOptimisticVersionPlanRows(change);
         if (!previousState) {
-          versionPlanRowMutationInFlight = false;
+          finishVersionPlanRowMutation();
           if (versionPlanState) renderVersionPlan(versionPlanState);
           return;
         }
@@ -3345,7 +3389,7 @@
         };
         const previousState = applyOptimisticVersionPlanRows(change);
         if (!previousState) {
-          versionPlanRowMutationInFlight = false;
+          finishVersionPlanRowMutation();
           if (versionPlanState) renderVersionPlan(versionPlanState);
           return;
         }
