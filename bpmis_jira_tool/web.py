@@ -765,13 +765,6 @@ def create_app() -> Flask:
         show_admin_tool_entries = _is_portal_admin()
         site_tabs.append(
             {
-                "label": "Issue Management",
-                "href": url_for("issue_management_page"),
-                "active": request.path.startswith("/issue-management"),
-            }
-        )
-        site_tabs.append(
-            {
                 "label": "Version Plan",
                 "href": VERSION_PLAN_NAV_URL,
                 "active": request.path.startswith("/version-plan"),
