@@ -51,6 +51,8 @@ from bpmis_jira_tool.trello_daily_summary import (
 
 DEFAULT_RECIPIENT = "xiaodong.zheng@npt.sg"
 DEFAULT_HOURS = 24
+DAILY_BRIEF_CODEX_MODEL = "gpt-5.6-luna"
+DAILY_BRIEF_CODEX_REASONING_EFFORT = "xhigh"
 MORNING_SLOT = "morning"
 MIDDAY_SLOT = "midday"
 LEGACY_SLOT = "daily"
@@ -534,12 +536,16 @@ def build_seatalk_service(settings: Settings, *, data_root: Path) -> SeaTalkDash
         codex_model=resolve_codex_model(
             CODEX_ROUTE_DEEP,
             legacy_env_names=("SEATALK_CODEX_MODEL",),
-            explicit_model=os.getenv("SEATALK_CODEX_MODEL"),
+            explicit_model=os.getenv("SEATALK_CODEX_MODEL") or DAILY_BRIEF_CODEX_MODEL,
         ),
         codex_timeout_seconds=settings.daily_brief_codex_timeout_seconds,
         codex_concurrency=settings.source_code_qa_codex_concurrency,
         insights_llm_provider=str(os.getenv("DAILY_BRIEF_INSIGHTS_LLM_PROVIDER") or "").strip(),
         insights_codex_route=CODEX_ROUTE_DEEP,
+        insights_codex_reasoning_effort=(
+            str(os.getenv("DAILY_BRIEF_CODEX_REASONING_EFFORT") or "").strip()
+            or DAILY_BRIEF_CODEX_REASONING_EFFORT
+        ),
         claude_model=str(os.getenv("DAILY_BRIEF_CLAUDE_MODEL") or "").strip(),
         claude_binary=str(os.getenv("DAILY_BRIEF_CLAUDE_BINARY") or "").strip(),
         name_overrides_path=seatalk_name_overrides_path(data_root=data_root),

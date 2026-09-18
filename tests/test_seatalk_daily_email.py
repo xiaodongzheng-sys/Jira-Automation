@@ -168,6 +168,7 @@ class SeaTalkDailyEmailCodexRoutingTests(unittest.TestCase):
 
         self.assertEqual(service.codex_model, "gpt-5.6-luna")
         self.assertEqual(service.insights_codex_route, "deep")
+        self.assertEqual(service.insights_codex_reasoning_effort, "xhigh")
         self.assertEqual(service.codex_timeout_seconds, 900)
 
     def test_build_seatalk_service_defaults_to_codex_provider(self):
@@ -179,6 +180,8 @@ class SeaTalkDailyEmailCodexRoutingTests(unittest.TestCase):
             service = build_seatalk_service(Settings.from_env(), data_root=Path(temp_dir))
 
         self.assertEqual(service.insights_llm_provider, LLM_PROVIDER_CODEX_CLI_BRIDGE)
+        self.assertEqual(service.codex_model, "gpt-5.6-luna")
+        self.assertEqual(service.insights_codex_reasoning_effort, "xhigh")
         self.assertIsNone(service.claude_model)
 
     def test_build_seatalk_service_uses_claude_when_env_set(self):

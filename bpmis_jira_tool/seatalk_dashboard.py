@@ -96,6 +96,7 @@ class SeaTalkDashboardService:
         codex_binary: str | None = None,
         insights_llm_provider: str | None = None,
         insights_codex_route: str | None = None,
+        insights_codex_reasoning_effort: str | None = None,
         claude_model: str | None = None,
         claude_binary: str | None = None,
         name_overrides_path: str | Path | None = None,
@@ -118,6 +119,10 @@ class SeaTalkDashboardService:
             str(insights_llm_provider or "").strip().lower() or LLM_PROVIDER_CODEX_CLI_BRIDGE
         )
         self.insights_codex_route = normalize_codex_route(insights_codex_route or CODEX_ROUTE_CHEAP)
+        self.insights_codex_reasoning_effort = resolve_codex_reasoning_effort(
+            self.insights_codex_route,
+            explicit_effort=insights_codex_reasoning_effort,
+        )
         self.claude_model = str(claude_model or "").strip() or None
         self.claude_binary = str(claude_binary or "").strip() or None
         self.name_overrides_path = Path(name_overrides_path).expanduser() if name_overrides_path else None
@@ -216,7 +221,7 @@ class SeaTalkDashboardService:
         prompt_payload = {
             "codex_prompt_mode": SEATALK_INSIGHTS_PROMPT_MODE,
             "systemInstruction": {"parts": [{"text": self._insights_system_prompt()}]},
-            "_codex_reasoning_effort": resolve_codex_reasoning_effort(self.insights_codex_route),
+            "_codex_reasoning_effort": self.insights_codex_reasoning_effort,
             "_llm_ledger_flow": "seatalk",
             "_llm_ledger_route": self.insights_codex_route,
             "contents": [
@@ -459,7 +464,7 @@ class SeaTalkDashboardService:
             "codex_prompt_mode": SEATALK_INSIGHTS_PROMPT_MODE,
             "systemInstruction": {"parts": [{"text": effective_system_prompt}]},
             "contents": [{"parts": [{"text": prompt}]}],
-            "_codex_reasoning_effort": resolve_codex_reasoning_effort(self.insights_codex_route),
+            "_codex_reasoning_effort": self.insights_codex_reasoning_effort,
             "_llm_ledger_flow": "seatalk",
             "_llm_ledger_route": self.insights_codex_route,
             "_llm_prompt_budget_policy": "quality_preserving_soft_budget",
