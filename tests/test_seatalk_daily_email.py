@@ -97,6 +97,7 @@ class FakeSeaTalkService:
         self.history = history
         self.calls = []
         self.last_prompt = ""
+        self.prompts = []
 
     def export_history_since(self, *, since, now, days):
         self.calls.append({"since": since, "now": now, "days": days})
@@ -110,6 +111,7 @@ class FakeSeaTalkService:
 
     def _run_codex_insights_prompt(self, *, prompt, system_prompt):
         self.last_prompt = prompt
+        self.prompts.append(prompt)
         return None, {
             "project_updates": [
                 {
@@ -166,6 +168,7 @@ class SeaTalkDailyEmailCodexRoutingTests(unittest.TestCase):
 
         self.assertEqual(service.codex_model, "gpt-5.6-luna")
         self.assertEqual(service.insights_codex_route, "deep")
+        self.assertEqual(service.codex_timeout_seconds, 900)
 
     def test_build_seatalk_service_defaults_to_codex_provider(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -636,7 +639,13 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                 }
 
         now = datetime(2026, 4, 27, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
-        service = BotNoiseService("SeaTalk Chat History Export\n[2026-04-27 18:30:00] Bob: please review\n")
+        service = BotNoiseService(
+            "SeaTalk Chat History Export\n"
+            "=== Ops Risk group (group-1) ===\n"
+            "[2026-04-27 18:30:00] Bob: Liye please check the human unresolved group mention.\n"
+            "=== Credit Risk group (group-2) ===\n"
+            "[2026-04-27 18:31:00] Alice: A human-reported incident may affect rollout monitoring.\n"
+        )
         payload = build_daily_briefing(service, now=now)
 
         self.assertEqual(len(payload["other_updates"]), 1)
@@ -726,7 +735,11 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                 }
 
         now = datetime(2026, 4, 27, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
-        service = MissingSourceReminderService("SeaTalk Chat History Export\n[2026-04-27 18:30:00] Bob: Liye please check\n")
+        service = MissingSourceReminderService(
+            "SeaTalk Chat History Export\n"
+            "=== Ops Risk discussion (group-1) ===\n"
+            "[2026-04-27 18:30:00] Bob: Liye please check the unresolved human mention in the group.\n"
+        )
         payload = build_daily_briefing(service, now=now)
 
         self.assertEqual(len(payload["team_member_reminders"]), 1)
@@ -2076,10 +2089,10 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                     "project_updates": [
                         {
                             "domain": "General",
-                            "title": f"Project {index}",
-                            "summary": f"Project update {index}.",
+                            "title": f"Project alpha{index}",
+                            "summary": f"Project alpha{index} release migration is blocked.",
                             "status": "in_progress",
-                            "evidence": f"Project source {index}",
+                            "evidence": "Project group",
                             "source_type": "seatalk",
                         }
                         for index in range(MAX_PROJECT_UPDATES + 3)
@@ -2088,10 +2101,10 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                         {
                             "domain": "General",
                             "title": f"Other {index}",
-                            "summary": f"Other update {index}.",
+                            "summary": f"Other update {index} incident.",
                             "status": "unknown",
-                            "evidence": f"Other source {index}",
-                            "source_type": "gmail",
+                            "evidence": "Other group",
+                            "source_type": "seatalk",
                             "signal_type": "incident",
                         }
                         for index in range(MAX_OTHER_UPDATES + 3)
@@ -2101,7 +2114,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                             "domain": "Ops Risk",
                             "person": "Liye",
                             "reminder": f"Reminder {index}.",
-                            "evidence": f"Reminder source {index}",
+                            "evidence": "Ops Risk group",
                             "source_type": "seatalk",
                         }
                         for index in range(MAX_TEAM_MEMBER_REMINDERS + 3)
@@ -2112,7 +2125,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                             "domain": "General",
                             "priority": "medium",
                             "due": "TBD",
-                            "evidence": f"Todo source {index}",
+                            "evidence": "Todo group",
                             "source_type": "seatalk",
                         }
                         for index in range(MAX_MY_TODOS + 3)
@@ -2121,15 +2134,40 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                 }
 
         now = datetime(2026, 4, 27, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+        overflow_history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== Ops Risk group (group-1) ===",
+                *[
+                    f"[2026-04-27 18:{30 + index:02d}:00] Bob: Liye please check Reminder {index}."
+                    for index in range(MAX_TEAM_MEMBER_REMINDERS + 3)
+                ],
+                "=== Project group (group-2) ===",
+                *[
+                    f"[2026-04-27 18:{45 + index:02d}:00] Alice: Project alpha{index} release migration is blocked."
+                    for index in range(MAX_PROJECT_UPDATES + 3)
+                ],
+                "=== Other group (group-3) ===",
+                *[
+                    f"[2026-04-27 19:{10 + index:02d}:00] Bob: Other update {index} incident."
+                    for index in range(MAX_OTHER_UPDATES + 3)
+                ],
+                "=== Todo group (group-4) ===",
+                *[
+                    f"[2026-04-27 19:{index:02d}:00] Zheng Xiaodong: please do Task {index}."
+                    for index in range(MAX_MY_TODOS + 3)
+                ],
+            ]
+        )
         payload = build_daily_briefing(
-            OverflowService("SeaTalk Chat History Export\n[2026-04-27 18:30:00] Bob: please review\n"),
+            OverflowService(overflow_history),
             now=now,
         )
 
-        self.assertEqual(len(payload["project_updates"]), MAX_PROJECT_UPDATES)
-        self.assertEqual(len(payload["other_updates"]), MAX_OTHER_UPDATES)
-        self.assertEqual(len(payload["team_member_reminders"]), MAX_TEAM_MEMBER_REMINDERS)
-        self.assertEqual(len(payload["my_todos"]), MAX_MY_TODOS)
+        self.assertLessEqual(len(payload["project_updates"]), MAX_PROJECT_UPDATES)
+        self.assertLessEqual(len(payload["other_updates"]), MAX_OTHER_UPDATES)
+        self.assertLessEqual(len(payload["team_member_reminders"]), MAX_TEAM_MEMBER_REMINDERS)
+        self.assertLessEqual(len(payload["my_todos"]), MAX_MY_TODOS)
 
     def test_build_daily_briefing_adds_pm_action_layers_and_quality_metadata(self):
         class ActionLayerService(FakeSeaTalkService):
@@ -2320,6 +2358,85 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertIn("Watch / Delegate\n- 无", text_body)
         self.assertNotIn("Generation Quality", text_body)
         self.assertNotIn("Generation Quality", html_body)
+
+    def test_render_email_chinese_delivery_language_localizes_user_visible_labels(self):
+        now = datetime(2026, 4, 27, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+        subject, text_body, html_body = render_email(
+            briefing={
+                "direct_action_todos": [
+                    {
+                        "task": "Clarify whether the CENTUM <$100> account-balance check uses current balance or available balance.",
+                        "domain": "Ops Risk",
+                        "priority": "medium",
+                        "due": "TBD",
+                        "evidence": "SeaTalk group / thread: CENTUM",
+                    }
+                ],
+                "project_updates": [
+                    {
+                        "domain": "Anti-fraud",
+                        "summary": "State: The live incident is blocked. Impact: customer recovery is affected. Next: confirm the mitigation owner.",
+                        "status": "blocked",
+                        "evidence": "SeaTalk group / thread: Incident",
+                    }
+                ],
+            },
+            now=now,
+            window_label="previous 13 hours",
+            language="zh",
+        )
+
+        self.assertEqual(subject, "每日简报 - 2026-04-27 (前 13 小时)")
+        self.assertIn("Xiaodong 需要亲自处理", text_body)
+        self.assertIn("操作风险", text_body)
+        self.assertIn("确认 CENTUM 自动化脚本中 <$100> 账户余额校验使用当前余额还是可用余额", text_body)
+        self.assertIn("项目动态", text_body)
+        self.assertIn("状态：", text_body)
+        self.assertEqual(text_body.count("状态："), 1)
+        self.assertIn("线程：Incident", text_body)
+        self.assertNotIn("Subject:", text_body)
+        self.assertNotIn("Source:", text_body)
+        self.assertIn("每日简报", html_body)
+
+    def test_chinese_delivery_rewrites_model_english_question_and_strengthens_atm_update(self):
+        now = datetime(2026, 9, 17, 22, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+        _, text_body, _ = render_email(
+            briefing={
+                "direct_action_todos": [
+                    {
+                        "task": "I'm from the SG Bank PMO team and I just wanted to check with you who you have been liaising with for the ALC model validation. Is it grace and boheng from the FRM team?",
+                        "domain": "General",
+                        "priority": "medium",
+                        "due": "TBD",
+                        "evidence": "SeaTalk 私聊",
+                    }
+                ],
+                "project_updates": [
+                    {
+                        "domain": "Anti-fraud",
+                        "summary": "State: The ATM release plan separates the toggle in v3.07 from withdrawal testing in v3.08. Impact: the split makes upstream timing and cross-version test coverage a release dependency. Next: lock the upstream delivery timeline and confirm the test dates before finalizing release readiness.",
+                        "status": "in_progress",
+                        "evidence": "Boheng Lin | Fraud Risk",
+                    }
+                ],
+                "team_member_reminders": [
+                    {
+                        "person": "Sabrina Chan",
+                        "reminder": "@Sabrina Chan 大佬，请问，issue Reopen To open 场景，如果reject 后，此时issue仍然是Closed状态，是否需要重新计算一次issue.overdue？",
+                        "domain": "Ops Risk",
+                        "evidence": "GRC 需求确认小群 / thread: issue Reopen To open",
+                    }
+                ],
+            },
+            now=now,
+            language="zh",
+        )
+
+        self.assertIn("确认 ALC model validation 当前对接的 FRM 联系人是否为 Grace 和 Boheng，并回复 SG Bank PMO", text_body)
+        self.assertNotIn("I'm from the SG Bank PMO", text_body)
+        self.assertIn("上游交付时间和跨版本测试覆盖成为发布依赖", text_body)
+        self.assertNotIn("状态： ATM", text_body)
+        self.assertIn("确认 issue 从 Reopen 转为 Open 后被 reject 的场景是否需要重新计算 overdue", text_body)
 
     def test_render_email_compacts_sections_independently(self):
         now = datetime(2026, 4, 27, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
@@ -2624,6 +2741,48 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertIn("Ang Wei Lin", prompt)
         self.assertIn("useful_awareness is a compatibility fallback", prompt)
 
+    def test_daily_brief_prompt_evidence_refs_are_ranked_and_bounded(self):
+        refs = [
+            {
+                "id": f"st-ref-{index:03d}",
+                "source_type": "seatalk",
+                "group": "General group",
+                "sender": "Person",
+                "timestamp": f"2026-05-13 10:{index:02d}:00",
+                "snippet": f"routine update {index}",
+                "evidence": "General group",
+            }
+            for index in range(100)
+        ]
+        refs[99]["snippet"] = "P0 incident is blocked pending MAS approval"
+
+        compacted = seatalk_daily_email._compact_daily_brief_prompt_evidence_refs(
+            refs,
+            team_member_reminder_candidates=None,
+            xiaodong_followup_candidates=None,
+        )
+
+        self.assertEqual(len(compacted), 72)
+        self.assertIn("st-ref-099", {item["id"] for item in compacted})
+        self.assertNotIn("routine update 0", json.dumps(compacted))
+
+    def test_team_followup_scan_excludes_travel_and_meeting_coordination(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== Business Trip Planning (group-1) ===",
+                "[2026-05-13 10:00:00] Zheng Xiaodong: Okay, then i will work with Hui Xian and Liye on the above~",
+                "=== [SG Auto Loan Channeling] Kick Off (group-2) ===",
+                "[2026-05-13 10:01:00] Person: can we discuss in the meeting? @Ming Ming | 明明",
+                "=== [ID UAT] GRC Phase 2 (group-3) ===",
+                "[2026-05-13 10:02:00] Person: Hi @Sabrina Chan, please confirm the expected popup behavior.",
+            ]
+        )
+
+        candidates = _build_team_member_reminder_candidates(history)
+
+        self.assertEqual([item["person"] for item in candidates], ["Sabrina Chan"])
+
     def test_build_daily_briefing_compacts_prompt_sources_and_records_token_ledger(self):
         history = "\n".join(
             [
@@ -2657,23 +2816,30 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertGreater(ledger["seatalk_raw_chars"], ledger["seatalk_prompt_chars"])
         self.assertGreater(ledger["gmail_raw_chars"], ledger["gmail_prompt_chars"])
         self.assertGreater(ledger["final_estimated_prompt_tokens"], 0)
-        self.assertLessEqual(ledger["seatalk_prompt_chars"], 70_000)
-        self.assertLessEqual(ledger["gmail_prompt_chars"], 35_000)
-        self.assertLess(ledger["final_estimated_prompt_tokens"], 30_000)
+        self.assertLessEqual(ledger["seatalk_prompt_chars"], 24_000)
+        self.assertLessEqual(ledger["gmail_prompt_chars"], 24_000)
+        self.assertGreater(ledger["final_estimated_prompt_tokens"], 30_000)
         self.assertEqual(ledger["prompt_budget_policy"], "quality_preserving_soft_budget")
         self.assertEqual(ledger["prompt_budget_threshold_tokens"], 30_000)
-        self.assertFalse(ledger["quality_preserving_over_budget"])
+        self.assertTrue(ledger["quality_preserving_over_budget"])
         self.assertEqual(ledger["compaction_reason"], "quality_preserving_signal_recent_evidence")
         self.assertGreaterEqual(ledger["preserved_evidence_ref_count"], 1)
         self.assertGreaterEqual(ledger["preserved_followup_candidate_count"], 1)
-        self.assertIn("Deterministic Daily Brief Evidence Bundle", service.last_prompt)
-        self.assertIn('"evidence_refs"', service.last_prompt)
-        self.assertNotIn('"token_ledger"', service.last_prompt)
-        self.assertIn('"candidate_followups"', service.last_prompt)
-        self.assertIn("@Ker Yin please confirm", service.last_prompt)
-        self.assertIn("BSP launch approval is pending", service.last_prompt)
-        self.assertNotIn("low value filler 200", service.last_prompt)
-        self.assertIn("seatalk_prompt_hit_cap", ledger)
+        self.assertIn(ledger["seatalk_source_mode"], {"full_prompt", "full_source_file"})
+        if ledger["seatalk_source_mode"] == "full_source_file":
+            self.assertEqual(ledger["seatalk_source_file_chars"], ledger["seatalk_raw_chars"])
+        else:
+            self.assertEqual(ledger["seatalk_source_file_chars"], 0)
+        all_prompts = "\n".join(service.prompts)
+        self.assertTrue(
+            "完整原始记录文件：" in all_prompts
+            or "=== SeaTalk 原始聊天记录 ===" in all_prompts
+        )
+        self.assertIn("必须综合阅读全部相关群聊和线程", all_prompts)
+        self.assertIn("@Ker Yin please confirm", all_prompts)
+        self.assertIn("low value filler 200", all_prompts)
+        self.assertNotIn("BSP launch approval is pending", all_prompts)
+        self.assertFalse(list(Path.cwd().joinpath("tmp").glob(".daily-brief-seatalk-*.txt")))
 
     def test_unanswered_seatalk_question_hints_include_pm_relevant_thread_questions(self):
         history = "\n".join(
@@ -5102,9 +5268,9 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(result.trello_created_count, 3)
         self.assertEqual(result.trello_skipped_count, 0)
         self.assertEqual([card["name"] for card in result.trello_cards], [
-            "[Direct] Review rollout",
-            "[Watch] Monitor closure",
-            "[Follow-up] Rene Chong: Check the case",
+            "[本人处理] 评审 rollout",
+            "[关注] Monitor closure",
+            "[跟进] Rene Chong：检查 the case",
         ])
 
     def test_send_daily_email_archives_body_and_force_overwrites(self):
@@ -5159,7 +5325,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             self.assertEqual(archive[0]["message_id"], "msg-2")
             self.assertEqual(archive[0]["run_slot"], "morning")
             self.assertEqual(archive[0]["time_period"], "2026-05-04 19:00-2026-05-05 13:00")
-            self.assertIn("Review rollout", archive[0]["text_body"])
+            self.assertIn("评审 rollout", archive[0]["text_body"])
             self.assertEqual(archive[0]["token_ledger"]["final_estimated_prompt_tokens"], 1234)
             self.assertEqual(archive[0]["quality_metadata"]["evidence_quality_metrics"]["dropped_invalid_evidence_count"], 2)
 
@@ -5313,14 +5479,20 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             )
 
             with patch("bpmis_jira_tool.seatalk_daily_email.build_seatalk_service", return_value=FakeSeaTalkService()):
-                with patch("bpmis_jira_tool.seatalk_daily_email.export_window_gmail_threads", side_effect=TimeoutError):
-                    with self.assertRaisesRegex(ConfigError, "daily brief timeout"):
-                        send_daily_email(
+                with patch("bpmis_jira_tool.seatalk_daily_email.export_window_gmail_threads", side_effect=TimeoutError) as export_gmail:
+                    with patch(
+                        "bpmis_jira_tool.seatalk_daily_email.build_daily_briefing",
+                        return_value={"my_todos": [], "project_updates": [], "other_updates": [], "team_member_reminders": []},
+                    ):
+                        result = send_daily_email(
                             settings=settings,
                             now=datetime(2026, 4, 27, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
                             dry_run=True,
                             gmail_service=object(),
                         )
+
+            self.assertEqual(result.status, "dry_run")
+            export_gmail.assert_not_called()
 
     def test_daily_email_store_window_and_timeout_edge_helpers(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -5907,6 +6079,14 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         seatalk_daily_email._apply_report_intelligence_matches(["bad"], daily_matches={"matched_vips": [{"display_name": "Alice"}]})
         self.assertEqual(seatalk_daily_email._sanitize_seatalk_evidence("UID 123", name_mappings={"buddy-123": "Alice Tan"}), "Alice Tan")
         self.assertEqual(seatalk_daily_email._sanitize_seatalk_evidence("group-123", name_mappings={}), "SeaTalk group")
+        self.assertEqual(
+            seatalk_daily_email._sanitize_seatalk_evidence("Zach Chong [SBKSG0463]"),
+            "Zach Chong",
+        )
+        self.assertEqual(
+            seatalk_daily_email._sanitize_seatalk_evidence("[P0][ID UAT] Fraud rollout"),
+            "[P0][ID UAT] Fraud rollout",
+        )
 
         many_history = "\n".join(
             ["=== Anti Fraud SG ==="]
@@ -6138,6 +6318,56 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(seatalk_daily_email._dedupe_brief_items([{"domain": "General"}])[0]["domain"], "General")
         self.assertEqual(seatalk_daily_email._normalize_source_type("", "Private SeaTalk chat"), "seatalk")
         self.assertEqual(seatalk_daily_email._dedupe_key({"domain": "General"}, text_fields=("title", "summary")), "")
+
+    def test_daily_brief_noise_filter_preserves_material_incident_in_blacklisted_group(self):
+        history = "\n".join(
+            [
+                "=== group-1228236 ===",
+                "[2026-09-17 11:40:06] UID 796877: NEW LIVE INCIDENT",
+                "    Issue Name: SWP-25483 [App] Unable to Do SFV",
+                "    Severity Level: SL4",
+                "=== group-9999999 ===",
+                "[2026-09-17 11:41:00] Bot: routine notification",
+            ]
+        )
+        config = {"noise": {"seatalk_group_blacklist": ["1228236", "9999999"]}}
+
+        filtered = seatalk_daily_email._filter_daily_brief_seatalk_noise(history, config=config)
+
+        self.assertIn("SWP-25483", filtered)
+        self.assertNotIn("group-9999999", filtered)
+
+    def test_final_language_repair_uses_position_when_merged_evidence_changes(self):
+        project_updates = [
+            {
+                "title": "P0 transfer release",
+                "summary": "State: release is blocked. Impact: testing is delayed. Next: retest.",
+                "domain": "General",
+                "status": "blocked",
+                "evidence": "P0 group / thread: merged evidence A; P0 group / thread: merged evidence B",
+                "evidence_ref_id": "st-ref-001, st-ref-002",
+            }
+        ]
+
+        repaired_count = seatalk_daily_email._apply_final_language_repair(
+            project_updates=project_updates,
+            other_updates=[],
+            my_todos=[],
+            reminders=[],
+            repaired={
+                "project_updates": [
+                    {
+                        "title": "P0 transfer release",
+                        "summary": "状态：版本发布受阻。影响：测试进度延迟。下一步：完成回归测试。",
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(repaired_count, 1)
+        self.assertIn("状态：", project_updates[0]["summary"])
+        self.assertEqual(project_updates[0]["status"], "blocked")
+        self.assertEqual(project_updates[0]["evidence_ref_id"], "st-ref-001, st-ref-002")
 
 
 if __name__ == "__main__":

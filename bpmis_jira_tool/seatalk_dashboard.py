@@ -1026,13 +1026,35 @@ class SeaTalkDashboardService:
             raise ToolError("Codex returned an invalid SeaTalk insights JSON response.") from error
         if not isinstance(payload, dict):
             raise ToolError("Codex returned an invalid SeaTalk insights payload.")
-        return {
+        parsed = {
             "project_updates": cls._normalize_project_updates(payload.get("project_updates")),
             "my_todos": cls._normalize_todos(payload.get("my_todos")),
             "other_updates": cls._normalize_project_updates(payload.get("other_updates")),
             "team_member_reminders": cls._normalize_team_member_reminders(payload.get("team_member_reminders")),
             "team_todos": [],
         }
+        # The Daily Brief language-repair pass may ask Codex to translate only
+        # residual items by stable section/index. Preserve that narrow response
+        # shape instead of silently reducing it to empty standard sections.
+        residual_items: list[dict[str, Any]] = []
+        for row in payload.get("items") if isinstance(payload.get("items"), list) else []:
+            if not isinstance(row, dict):
+                continue
+            fields = row.get("fields") if isinstance(row.get("fields"), dict) else {}
+            residual_items.append(
+                {
+                    "section": cls._clean_text(row.get("section"), ""),
+                    "index": row.get("index"),
+                    "fields": {
+                        str(field): cls._clean_text(value, "")
+                        for field, value in fields.items()
+                        if str(field) in {"title", "summary", "task", "reminder", "priority_reason"}
+                    },
+                }
+            )
+        if residual_items:
+            parsed["items"] = residual_items
+        return parsed
 
     @staticmethod
     def _extract_json_text(text: str) -> str:

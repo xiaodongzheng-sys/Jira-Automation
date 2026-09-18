@@ -173,3 +173,23 @@ def test_quality_gate_rejects_project_update_without_state_impact_next() -> None
     )
 
     assert "unstructured_project_update" in quality["findings"]
+
+
+def test_quality_gate_rejects_english_project_prose_inside_chinese_report() -> None:
+    briefing = {
+        "project_updates": [
+            {
+                "domain": "General",
+                "summary": (
+                    "状态： Seller Cash Loan Direct Debit UAT is blocked by a Shopee-side issue. "
+                    "影响： the AF release cannot be signed off. 下一步： obtain the Shopee fix and retest."
+                ),
+                "status": "blocked",
+                "evidence": "SeaTalk group",
+            }
+        ]
+    }
+
+    quality = _quality(briefing)
+
+    assert "english_content_leak" in quality["findings"]

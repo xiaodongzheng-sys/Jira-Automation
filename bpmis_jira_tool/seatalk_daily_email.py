@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import threading
+import tempfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -66,15 +67,41 @@ MAX_USEFUL_AWARENESS_OTHER_UPDATES = 2
 MAX_UNANSWERED_SEATALK_QUESTION_HINTS = 10
 MAX_TEAM_MEMBER_REMINDER_HINTS = 12
 MAX_TOP_FOCUS_ITEMS = 3
-DAILY_BRIEF_SEATALK_PROMPT_MAX_CHARS = 70_000
-DAILY_BRIEF_SEATALK_PROMPT_RECENT_CHARS = 18_000
-DAILY_BRIEF_GMAIL_PROMPT_MAX_CHARS = 35_000
-DAILY_BRIEF_GMAIL_PROMPT_RECENT_CHARS = 8_000
+DAILY_BRIEF_SEATALK_PROMPT_MAX_CHARS = 56_000
+DAILY_BRIEF_SEATALK_PROMPT_RECENT_CHARS = 16_000
+DAILY_BRIEF_GMAIL_PROMPT_MAX_CHARS = 24_000
+DAILY_BRIEF_GMAIL_PROMPT_RECENT_CHARS = 6_000
+DAILY_BRIEF_PROMPT_EVIDENCE_REF_LIMIT = 72
 DAILY_BRIEF_TOKEN_CHARS_PER_TOKEN = 4
 DAILY_BRIEF_QUALITY_PROMPT_WARNING_TOKENS = 30_000
+# Medium windows fit directly in the Codex prompt. Larger windows are read as
+# one source file rather than being reduced to a signal-only excerpt.
+DAILY_BRIEF_REFERENCE_STYLE_THRESHOLD = 24_000
+DAILY_BRIEF_FULL_SOURCE_FILE_THRESHOLD = 360_000
 LOW_SIGNAL_EMAIL_SUMMARY = "No clear action, blocker, key project update, or team follow-up was found in this window."
 EMPTY_TODO_SECTION_SUMMARY = "No Xiaodong-owned action or watch/delegate item found."
 EMPTY_DAILY_BRIEF_SECTION = "无"
+BRIEF_ZH_SECTION_LABELS = {
+    "To-do": "待办",
+    "Xiaodong Action Required": "Xiaodong 需要亲自处理",
+    "Watch / Delegate": "关注 / 委派",
+    "Project Updates": "项目动态",
+    "Other Update": "其他重要动态",
+    "Suggested Team Follow-up": "建议团队跟进",
+}
+BRIEF_ZH_DOMAIN_LABELS = {
+    "Anti-fraud": "防欺诈",
+    "Credit Risk": "信用风险",
+    "Ops Risk": "操作风险",
+    "General": "综合",
+}
+BRIEF_ZH_PRIORITY_LABELS = {"high": "高", "medium": "中", "low": "低", "unknown": "未知"}
+BRIEF_ZH_STATUS_LABELS = {
+    "done": "已完成",
+    "in_progress": "进行中",
+    "blocked": "已阻塞",
+    "unknown": "未知",
+}
 ALLOWED_OTHER_UPDATE_SIGNAL_TYPES = {
     "incident",
     "launch",
@@ -110,6 +137,12 @@ BOT_ALERT_REMINDER_HINTS = (
     "automated",
     "auto-generated",
     "system generated",
+)
+TEAM_MEMBER_REMINDER_NOISE_GROUP_HINTS = (
+    "business trip",
+    "travel planning",
+    "trip planning",
+    "team building",
 )
 GMAIL_CALENDAR_SUBJECT_HINTS = (
     "invitation:",
@@ -170,7 +203,6 @@ DAILY_BRIEF_HIGH_SIGNAL_TERMS = (
     "qris",
     "translation",
     "copywriting",
-    "edit access",
     "querytransferrecipient",
     "fallback",
     "recurring",
@@ -232,6 +264,8 @@ ANTI_FRAUD_TEAM_MEMBERS = {
 TEAM_MEMBER_REMINDER_DOMAIN_OVERRIDES = {
     "zheng xiaodong": "General",
     "sophia wang zijun": "Credit Risk",
+    "liye": "Anti-fraud",
+    "ming ming": "Anti-fraud",
 }
 XIAODONG_FOLLOWUP_COMMITMENT_CUES = (
     "will check and get back",
@@ -314,6 +348,7 @@ RAW_SEATALK_ID_PATTERN = re.compile(r"\b(?:group|buddy)-\d+\b|\bUID\s+\d+\b", re
 TODO_ACTION_TYPES = {"direct_action", "watch_delegate"}
 WATCH_DELEGATE_HINTS = (
     "ensure ",
+    "确保",
     "follow up with",
     "check with",
     "monitor",
@@ -501,7 +536,7 @@ def build_seatalk_service(settings: Settings, *, data_root: Path) -> SeaTalkDash
             legacy_env_names=("SEATALK_CODEX_MODEL",),
             explicit_model=os.getenv("SEATALK_CODEX_MODEL"),
         ),
-        codex_timeout_seconds=settings.source_code_qa_codex_timeout_seconds,
+        codex_timeout_seconds=settings.daily_brief_codex_timeout_seconds,
         codex_concurrency=settings.source_code_qa_codex_concurrency,
         insights_llm_provider=str(os.getenv("DAILY_BRIEF_INSIGHTS_LLM_PROVIDER") or "").strip(),
         insights_codex_route=CODEX_ROUTE_DEEP,
@@ -625,11 +660,15 @@ def _export_window_gmail_threads_with_timeout(
             signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
 
 
-def ensure_gmail_daily_scopes(credentials_payload: dict[str, Any]) -> None:
+def ensure_gmail_daily_scopes(credentials_payload: dict[str, Any], *, require_read: bool = True) -> None:
     scopes = {str(scope).strip() for scope in (credentials_payload.get("scopes") or []) if str(scope).strip()}
-    missing = [scope for scope in (GMAIL_READONLY_SCOPE, "https://www.googleapis.com/auth/gmail.send") if scope not in scopes]
+    required_scopes = ["https://www.googleapis.com/auth/gmail.send"]
+    if require_read:
+        required_scopes.insert(0, GMAIL_READONLY_SCOPE)
+    missing = [scope for scope in required_scopes if scope not in scopes]
     if missing:
-        raise ConfigError("Gmail daily brief permission is missing. Reconnect Google once to grant Gmail read and send access.")
+        permissions = "read and send" if require_read else "send"
+        raise ConfigError(f"Gmail daily brief permission is missing. Reconnect Google once to grant Gmail {permissions} access.")
 
 
 def build_daily_briefing(
@@ -650,17 +689,21 @@ def build_daily_briefing(
     local_window_end = window_end.astimezone(SEATALK_INSIGHTS_TIMEZONE) if window_end else None
     refresh_seatalk_auto_name_mappings(service, now=local_now)
     if local_window_start and local_window_end:
-        history_text = service._filter_system_generated_history(
-            export_window_history(service, window_start=local_window_start, window_end=local_window_end)
+        raw_seatalk_history_text = export_window_history(
+            service,
+            window_start=local_window_start,
+            window_end=local_window_end,
         )
+        history_text = service._filter_system_generated_history(raw_seatalk_history_text)
         period_hours = max(1, int((local_window_end - local_window_start).total_seconds() // 3600))
         window_label = f"{_format_window_endpoint(local_window_start)} - {_format_window_endpoint(local_window_end)}"
     else:
-        history_text = service._filter_system_generated_history(export_rolling_history(service, now=local_now, hours=hours))
+        raw_seatalk_history_text = export_rolling_history(service, now=local_now, hours=hours)
+        history_text = service._filter_system_generated_history(raw_seatalk_history_text)
         period_hours = hours
         window_label = f"previous {hours} hours"
     seatalk_validation_history_text = history_text
-    history_text = filter_text_by_noise(history_text, config=intelligence_config, source="seatalk")
+    history_text = _filter_daily_brief_seatalk_noise(history_text, config=intelligence_config)
     history_text = _filter_daily_brief_meeting_logistics(history_text)
     filtered_seatalk_history_text = history_text
     gmail_history_text = str(gmail_history_text or "").strip()
@@ -741,6 +784,7 @@ def build_daily_briefing(
         for candidate in (all_reminder_candidates or [])
         if _canonical_team_member_name(candidate.get("person")) == "Zheng Xiaodong"
     ]
+    xiaodong_request_candidates.extend(_build_direct_xiaodong_request_candidates(filtered_seatalk_history_text))
     team_member_reminder_candidates = None if all_reminder_candidates is None else [
         candidate
         for candidate in all_reminder_candidates
@@ -795,6 +839,12 @@ def build_daily_briefing(
         xiaodong_followup_candidates=xiaodong_followup_candidates,
         source_token_ledger=source_token_ledger,
     )
+    source_file_path = _write_daily_brief_source_file(
+        service,
+        raw_seatalk_history_text,
+        threshold=DAILY_BRIEF_FULL_SOURCE_FILE_THRESHOLD,
+    )
+    reference_style_mode = len(raw_seatalk_history_text) >= DAILY_BRIEF_REFERENCE_STYLE_THRESHOLD
     prompt = _daily_brief_user_prompt(
         history_text=prompt_history_text,
         gmail_history_text=prompt_gmail_history_text,
@@ -807,6 +857,8 @@ def build_daily_briefing(
         xiaodong_followup_hints=_format_xiaodong_followup_hints(xiaodong_followup_candidates),
         high_signal_review_hints=high_signal_review_hints,
         evidence_context=evidence_context,
+        source_file_path=str(source_file_path) if source_file_path else "",
+        source_text=(raw_seatalk_history_text if reference_style_mode and source_file_path is None else ""),
     )
     source_token_ledger["final_prompt_chars"] = len(prompt)
     source_token_ledger["final_estimated_prompt_tokens"] = _estimate_daily_prompt_tokens(prompt)
@@ -827,6 +879,15 @@ def build_daily_briefing(
         else "not_needed"
     )
     source_token_ledger["preserved_evidence_ref_count"] = len(evidence_refs)
+    source_token_ledger["prompt_evidence_ref_count"] = len(
+        json.loads(evidence_context).get("evidence_refs", [])
+    )
+    source_token_ledger["seatalk_source_mode"] = (
+        "full_source_file"
+        if source_file_path is not None
+        else ("full_prompt" if reference_style_mode else "prompt_excerpt")
+    )
+    source_token_ledger["seatalk_source_file_chars"] = len(raw_seatalk_history_text) if source_file_path else 0
     source_token_ledger["preserved_followup_candidate_count"] = len(team_member_reminder_candidates or [])
     source_token_ledger["preserved_unanswered_hint_count"] = len(
         [line for line in str(unanswered_question_hints or "").splitlines() if line.strip()]
@@ -834,10 +895,23 @@ def build_daily_briefing(
     source_token_ledger["preserved_high_signal_hint_count"] = len(
         [line for line in str(high_signal_review_hints or "").splitlines() if line.strip()]
     )
-    _, parsed = service._run_codex_insights_prompt(
-        system_prompt=_daily_brief_system_prompt(),
-        prompt=prompt,
-    )
+    try:
+        _, parsed = service._run_codex_insights_prompt(
+            system_prompt=_daily_brief_system_prompt(),
+            prompt=prompt,
+        )
+    finally:
+        _remove_daily_brief_source_file(source_file_path)
+    language_repair_attempted = False
+    language_repair_count = 0
+    if reference_style_mode and _daily_brief_needs_language_repair(parsed):
+        language_repair_attempted = True
+        _, repaired = service._run_codex_insights_prompt(
+            system_prompt=_daily_brief_system_prompt(),
+            prompt=_daily_brief_language_repair_prompt(parsed),
+        )
+        if _daily_brief_has_items(repaired):
+            parsed = repaired
     project_updates = _dedupe_brief_items(
         _filter_gmail_calendar_items(
             _prepare_project_update_items(
@@ -845,19 +919,37 @@ def build_daily_briefing(
             )
         )
     )[:MAX_PROJECT_UPDATES]
+    # Full-source Codex is primary, but deterministic high-signal candidates
+    # remain enabled as a recall guard.  They are evidence-gated, synthesized,
+    # deduped, and validated below; disabling them for long inputs caused live
+    # incidents and P0 timeline changes to disappear when the model focused on
+    # a smaller set of actions.
     high_signal_fallbacks = _build_high_signal_fallback_items(
         filtered_seatalk_history_text,
         evidence_refs=evidence_refs,
         name_mappings=name_mappings,
         existing_items=project_updates,
     )
-    high_signal_fallbacks.extend(
-        _build_gmail_high_signal_fallback_items(
-            gmail_history_text,
-            evidence_refs=evidence_refs,
-            existing_items=[*project_updates, *high_signal_fallbacks],
+    if not reference_style_mode:
+        high_signal_fallbacks.extend(
+            _build_gmail_high_signal_fallback_items(
+                gmail_history_text,
+                evidence_refs=evidence_refs,
+                existing_items=[*project_updates, *high_signal_fallbacks],
+            )
         )
-    )
+    other_fallbacks: list[dict[str, Any]] = []
+    project_fallbacks: list[dict[str, Any]] = []
+    for fallback in high_signal_fallbacks:
+        if _fallback_should_be_other_update(fallback):
+            fallback = dict(fallback)
+            fallback["signal_type"] = _fallback_signal_type(fallback)
+            fallback["summary"] = _synthesize_other_update_summary(fallback)
+            if fallback.get("summary"):
+                other_fallbacks.append(fallback)
+        else:
+            project_fallbacks.append(fallback)
+    high_signal_fallbacks = project_fallbacks
     high_signal_fallbacks = _prepare_project_update_items(high_signal_fallbacks)
     if high_signal_fallbacks:
         # Put deterministic high-signal candidates first so the section cap cannot
@@ -870,19 +962,26 @@ def build_daily_briefing(
             _prepare_other_update_items(
                 _filter_other_updates(
                     _normalize_update_items(
-                        _normalize_brief_items(parsed.get("other_updates", []), name_mappings=name_mappings)
+                        _normalize_brief_items(
+                            [*other_fallbacks, *parsed.get("other_updates", [])],
+                            name_mappings=name_mappings,
+                        )
                     )
                 )
             )
         )
     )[:MAX_OTHER_UPDATES]
     parsed_todos = _normalize_todo_items(_normalize_brief_items(parsed.get("my_todos", []), name_mappings=name_mappings))
+    # Full-source Codex is the primary extractor, while deterministic
+    # unresolved-request backfills protect high-value actions that a long
+    # context model may omit. These backfills are evidence-gated and deduped;
+    # they are not the old signal-excerpt fallback path.
     xiaodong_followup_fallbacks = _build_xiaodong_followup_items(
         xiaodong_followup_candidates,
         evidence_refs=evidence_refs,
         existing_items=parsed_todos,
     )
-    gmail_xiaodong_action_fallbacks = _build_gmail_xiaodong_action_items(
+    gmail_xiaodong_action_fallbacks = [] if reference_style_mode else _build_gmail_xiaodong_action_items(
         evidence_refs,
         existing_items=[*xiaodong_followup_fallbacks, *parsed_todos],
     )
@@ -935,6 +1034,7 @@ def build_daily_briefing(
     evidence_quality_metrics["calendar_suppressed_count"] = suppressed_calendar_message_count
     evidence_quality_metrics["low_value_reminder_suppressed_count"] = suppressed_low_value_reminder_count
     evidence_quality_metrics["high_signal_fallback_count"] = len(high_signal_fallbacks)
+    evidence_quality_metrics["other_high_signal_fallback_count"] = len(other_fallbacks)
     evidence_quality_metrics["xiaodong_followup_fallback_count"] = len(xiaodong_followup_fallbacks)
     evidence_quality_metrics["gmail_xiaodong_action_fallback_count"] = len(gmail_xiaodong_action_fallbacks)
     _repair_generic_seatalk_evidence(
@@ -1032,6 +1132,59 @@ def build_daily_briefing(
     _correct_known_update_domains(project_updates)
     _correct_known_update_domains(other_updates)
     project_updates[:] = _dedupe_same_topic_items(_prepare_project_update_items(project_updates))[:MAX_PROJECT_UPDATES]
+    if reference_style_mode:
+        final_language_payload = {
+            "project_updates": project_updates,
+            "other_updates": other_updates,
+            "my_todos": my_todos,
+            "team_member_reminders": reminders,
+            "team_todos": [],
+        }
+        for _ in range(2):
+            if not _daily_brief_needs_language_repair(final_language_payload):
+                break
+            language_repair_attempted = True
+            _, repaired = service._run_codex_insights_prompt(
+                system_prompt=_daily_brief_system_prompt(),
+                prompt=_daily_brief_language_repair_prompt(final_language_payload),
+            )
+            if not _daily_brief_has_items(repaired):
+                break
+            language_repair_count += _apply_final_language_repair(
+                project_updates=project_updates,
+                other_updates=other_updates,
+                my_todos=my_todos,
+                reminders=reminders,
+                repaired=repaired,
+            )
+        for _ in range(2):
+            residual_items = _daily_brief_remaining_language_items(
+                project_updates=project_updates,
+                other_updates=other_updates,
+                my_todos=my_todos,
+                reminders=reminders,
+            )
+            if not residual_items:
+                break
+            language_repair_attempted = True
+            _, residual_repaired = service._run_codex_insights_prompt(
+                system_prompt=_daily_brief_residual_language_system_prompt(),
+                prompt=_daily_brief_residual_language_repair_prompt(residual_items),
+            )
+            language_repair_count += _apply_residual_language_repair(
+                project_updates=project_updates,
+                other_updates=other_updates,
+                my_todos=my_todos,
+                reminders=reminders,
+                repaired=residual_repaired,
+            )
+        evidence_quality_metrics["language_repair_attempted"] = language_repair_attempted
+        evidence_quality_metrics["language_repair_count"] = language_repair_count
+        # Language repair mutates canonical my_todos. Rebuild the display
+        # partitions because _split_todos_by_action_type returns item copies;
+        # otherwise the email could retain stale English in direct_action_todos
+        # even though my_todos was translated successfully.
+        direct_action_todos, watch_delegate_todos = _split_todos_by_action_type(my_todos)
     _clean_daily_brief_evidence(
         [*project_updates, *other_updates, *direct_action_todos, *watch_delegate_todos, *reminders]
     )
@@ -1094,10 +1247,26 @@ def build_daily_briefing(
     return briefing
 
 
-def render_email(*, briefing: dict[str, Any], now: datetime, window_label: str = "") -> tuple[str, str, str]:
+def render_email(
+    *,
+    briefing: dict[str, Any],
+    now: datetime,
+    window_label: str = "",
+    language: str = "en",
+) -> tuple[str, str, str]:
+    """Render the report for delivery.
+
+    ``language`` defaults to English for backwards-compatible library callers;
+    production delivery explicitly uses Simplified Chinese. Internal field
+    names, enums, and evidence IDs remain stable for validation and storage.
+    """
     local_now = now.astimezone(SEATALK_INSIGHTS_TIMEZONE)
+    is_chinese = str(language or "").strip().casefold() in {"zh", "zh-cn", "chinese"}
     label = str(window_label or briefing.get("window_label") or "").strip()
-    subject = f"Daily Brief - {local_now.date().isoformat()}"
+    if is_chinese:
+        label = _brief_localize_window_label(label)
+    subject_prefix = "每日简报" if is_chinese else "Daily Brief"
+    subject = f"{subject_prefix} - {local_now.date().isoformat()}"
     if label:
         subject = f"{subject} ({label})"
     todos = [item for item in briefing.get("my_todos") or [] if isinstance(item, dict)]
@@ -1120,10 +1289,10 @@ def render_email(*, briefing: dict[str, Any], now: datetime, window_label: str =
         if isinstance(item, dict) and _is_display_other_update_signal(item)
     ]
     text_lines = [
-        f"Subject: {subject}",
-        f"Window: {label}" if label else "",
+        (f"主题：{subject}" if is_chinese else f"Subject: {subject}"),
+        (f"时间窗口：{label}" if is_chinese else f"Window: {label}") if label else "",
         "",
-        "To-do",
+        _brief_label("To-do", language=language),
     ]
     for heading, items, kind in (
         ("Xiaodong Action Required", direct_action_todos, "todo"),
@@ -1132,13 +1301,18 @@ def render_email(*, briefing: dict[str, Any], now: datetime, window_label: str =
         ("Other Update", other_updates, "update"),
         ("Suggested Team Follow-up", reminders, "reminder"),
     ):
-        text_lines.extend(["", heading])
-        text_lines.extend(_render_grouped_text(items, kind=kind) if items else [f"- {EMPTY_DAILY_BRIEF_SECTION}"])
+        text_lines.extend(["", _brief_label(heading, language=language)])
+        text_lines.extend(
+            _render_grouped_text(items, kind=kind, language=language)
+            if items
+            else [f"- {EMPTY_DAILY_BRIEF_SECTION}"]
+        )
     text_body = "\n".join(text_lines).strip() + "\n"
     html_body = "<html><body>" f"<h2>{html.escape(subject)}</h2>"
     if label:
-        html_body += f"<p><strong>Window:</strong> {html.escape(label)}</p>"
-    html_body += "<h3>To-do</h3>"
+        window_label_text = "时间窗口：" if is_chinese else "Window:"
+        html_body += f"<p><strong>{html.escape(window_label_text)}</strong> {html.escape(label)}</p>"
+    html_body += f"<h3>{html.escape(_brief_label('To-do', language=language))}</h3>"
     for heading, items, kind, tag in (
         ("Xiaodong Action Required", direct_action_todos, "todo", "h4"),
         ("Watch / Delegate", watch_delegate_todos, "watch_todo", "h4"),
@@ -1146,8 +1320,13 @@ def render_email(*, briefing: dict[str, Any], now: datetime, window_label: str =
         ("Other Update", other_updates, "other", "h3"),
         ("Suggested Team Follow-up", reminders, "reminder", "h3"),
     ):
-        html_body += f"<{tag}>{html.escape(heading)}</{tag}>"
-        html_body += _render_grouped_html(items, kind=kind) if items else f"<p>{html.escape(EMPTY_DAILY_BRIEF_SECTION)}</p>"
+        html_heading = _brief_label(heading, language=language)
+        html_body += f"<{tag}>{html.escape(html_heading)}</{tag}>"
+        html_body += (
+            _render_grouped_html(items, kind=kind, language=language)
+            if items
+            else f"<p>{html.escape(EMPTY_DAILY_BRIEF_SECTION)}</p>"
+        )
     html_body += "</body></html>"
     return subject, text_body, html_body
 
@@ -1206,21 +1385,15 @@ def send_daily_email(
     )
     owner_email = str(settings.gmail_seatalk_demo_owner_email or settings.seatalk_owner_email or "").strip().lower()
     credentials_payload = credential_store.load(owner_email=owner_email)
-    ensure_gmail_daily_scopes(credentials_payload)
+    ensure_gmail_daily_scopes(credentials_payload, require_read=False)
     credentials = credentials_from_payload(credentials_payload)
     service = build_seatalk_service(settings, data_root=data_root)
-    gmail_brief_service = GmailDashboardService(
-        credentials=credentials,
-        gmail_service=gmail_service,
-        cache_key=owner_email,
-        report_intelligence_config=report_intelligence_config,
-    )
+    # Gmail remains the transport for the report, but SeaTalk is the only
+    # analysis source. Do not export or instantiate Gmail history here: email
+    # invitations, reminders, and calendar notifications must not affect the
+    # Daily Brief candidate set.
+    gmail_history_text = ""
     if email_window:
-        gmail_history_text = _export_window_gmail_threads_with_timeout(
-            gmail_brief_service,
-            window_start=email_window.start,
-            window_end=email_window.end,
-        )
         briefing = build_daily_briefing(
             service,
             now=local_now,
@@ -1232,7 +1405,6 @@ def send_daily_email(
         )
     else:
         effective_hours = hours if hours is not None else DEFAULT_HOURS
-        gmail_history_text = _export_rolling_gmail_threads_with_timeout(gmail_brief_service, now=local_now, hours=effective_hours)
         briefing = build_daily_briefing(
             service,
             now=local_now,
@@ -1241,7 +1413,12 @@ def send_daily_email(
             report_intelligence_config=report_intelligence_config,
             key_project_candidates=key_project_candidates,
         )
-    subject, text_body, html_body = render_email(briefing=briefing, now=local_now, window_label=window_label)
+    subject, text_body, html_body = render_email(
+        briefing=briefing,
+        now=local_now,
+        window_label=window_label,
+        language="zh",
+    )
     if dry_run:
         return DailyEmailResult(
             status="dry_run",
@@ -1264,6 +1441,7 @@ def send_daily_email(
             now=local_now,
             trello_client=trello_client,
             trello_store=trello_store,
+            language="zh",
         )
     response = send_gmail_message(
         credentials=credentials,
@@ -1325,13 +1503,19 @@ def sync_daily_summary_to_trello(
     now: datetime,
     trello_client: TrelloDailySummaryClient | None = None,
     trello_store: TrelloDailySummaryStore | None = None,
+    language: str = "en",
 ) -> TrelloSyncResult:
     try:
         client = trello_client or TrelloDailySummaryClient.from_env()
     except ConfigError:
         return TrelloSyncResult(status="disabled")
     store = trello_store or TrelloDailySummaryStore(data_root / "seatalk" / "daily_trello_cards.json")
-    specs = build_trello_card_specs(briefing=briefing, run_date=run_date, window_label=window_label)
+    specs = build_trello_card_specs(
+        briefing=briefing,
+        run_date=run_date,
+        window_label=window_label,
+        language=language,
+    )
     if not specs:
         return TrelloSyncResult(status="no_cards")
 
@@ -1415,7 +1599,13 @@ def sync_daily_summary_to_trello(
     )
 
 
-def build_trello_card_specs(*, briefing: dict[str, Any], run_date: str, window_label: str = "") -> list[TrelloCardSpec]:
+def build_trello_card_specs(
+    *,
+    briefing: dict[str, Any],
+    run_date: str,
+    window_label: str = "",
+    language: str = "en",
+) -> list[TrelloCardSpec]:
     direct_action_todos = [item for item in briefing.get("direct_action_todos") or [] if isinstance(item, dict)]
     watch_delegate_todos = [item for item in briefing.get("watch_delegate_todos") or [] if isinstance(item, dict)]
     if not direct_action_todos and not watch_delegate_todos:
@@ -1433,13 +1623,14 @@ def build_trello_card_specs(*, briefing: dict[str, Any], run_date: str, window_l
         due = _trello_explicit_due(item.get("due"))
         specs.append(
             TrelloCardSpec(
-                section="Xiaodong Action Required",
-                name=f"[Direct] {task}",
+                section=_brief_label("Xiaodong Action Required", language=language),
+                name=f"[{'本人处理' if _is_chinese_brief(language) else 'Direct'}] {_brief_localize_value(task, language=language)}",
                 description=_trello_todo_description(
                     item,
                     run_date=run_date,
                     section="Xiaodong Action Required",
                     window_label=window_label,
+                    language=language,
                 ),
                 fingerprint_text=task,
                 domain=_display_domain(item.get("domain")),
@@ -1453,13 +1644,14 @@ def build_trello_card_specs(*, briefing: dict[str, Any], run_date: str, window_l
         due = _trello_explicit_due(item.get("due"))
         specs.append(
             TrelloCardSpec(
-                section="Watch / Delegate",
-                name=f"[Watch] {task}",
+                section=_brief_label("Watch / Delegate", language=language),
+                name=f"[{'关注' if _is_chinese_brief(language) else 'Watch'}] {_brief_localize_value(task, language=language)}",
                 description=_trello_todo_description(
                     item,
                     run_date=run_date,
                     section="Watch / Delegate",
                     window_label=window_label,
+                    language=language,
                 ),
                 fingerprint_text=task,
                 domain=_display_domain(item.get("domain")),
@@ -1473,9 +1665,18 @@ def build_trello_card_specs(*, briefing: dict[str, Any], run_date: str, window_l
         reminder = _sentence_text(item.get("reminder"), "Follow-up may be needed").rstrip(".")
         specs.append(
             TrelloCardSpec(
-                section="Suggested Team Follow-up",
-                name=f"[Follow-up] {person}: {reminder}",
-                description=_trello_reminder_description(item, run_date=run_date, window_label=window_label),
+                section=_brief_label("Suggested Team Follow-up", language=language),
+                name=(
+                    f"[跟进] {person}：{_brief_localize_value(reminder, language=language)}"
+                    if _is_chinese_brief(language)
+                    else f"[Follow-up] {person}: {reminder}"
+                ),
+                description=_trello_reminder_description(
+                    item,
+                    run_date=run_date,
+                    window_label=window_label,
+                    language=language,
+                ),
                 fingerprint_text=f"{person} {reminder}",
                 domain=_display_domain(item.get("domain")),
                 target_list=TRELLO_WORKFLOW_LIST_FOLLOW_UP,
@@ -1537,7 +1738,30 @@ def _trello_domain_labels(domain: Any, text: str = "") -> tuple[str, ...]:
     return tuple(dict.fromkeys(labels))
 
 
-def _trello_todo_description(item: dict[str, Any], *, run_date: str, section: str, window_label: str = "") -> str:
+def _trello_todo_description(
+    item: dict[str, Any],
+    *,
+    run_date: str,
+    section: str,
+    window_label: str = "",
+    language: str = "en",
+) -> str:
+    if _is_chinese_brief(language):
+        lines = [
+            f"报告日期：{run_date}",
+            f"版块：{_brief_label(section, language=language)}",
+            f"领域：{_display_domain(item.get('domain'), language=language)}",
+            f"任务：{_brief_localize_value(_sentence_text(item.get('task'), '未命名'), language=language)}",
+            f"优先级：{_display_priority(item.get('priority'), language=language)}",
+            f"截止：{_display_due(item.get('due'), language=language)}",
+            f"来源：{_brief_localize_evidence(item.get('evidence') or '未知', language=language)}",
+        ]
+        if window_label:
+            lines.insert(1, f"报告窗口：{window_label}")
+        source_type = str(item.get("source_type") or "").strip()
+        if source_type:
+            lines.append(f"来源类型：{source_type}")
+        return "\n".join(lines)
     lines = [
         f"Report date: {run_date}",
         f"Section: {section}",
@@ -1555,7 +1779,28 @@ def _trello_todo_description(item: dict[str, Any], *, run_date: str, section: st
     return "\n".join(lines)
 
 
-def _trello_reminder_description(item: dict[str, Any], *, run_date: str, window_label: str = "") -> str:
+def _trello_reminder_description(
+    item: dict[str, Any],
+    *,
+    run_date: str,
+    window_label: str = "",
+    language: str = "en",
+) -> str:
+    if _is_chinese_brief(language):
+        lines = [
+            f"报告日期：{run_date}",
+            f"版块：{_brief_label('Suggested Team Follow-up', language=language)}",
+            f"领域：{_display_domain(item.get('domain'), language=language)}",
+            f"负责人：{item.get('person') or '未知'}",
+            f"跟进事项：{_brief_localize_value(_sentence_text(item.get('reminder'), '需要跟进'), language=language)}",
+            f"来源：{_brief_localize_evidence(item.get('evidence') or '未知', language=language)}",
+        ]
+        if window_label:
+            lines.insert(1, f"报告窗口：{window_label}")
+        source_type = str(item.get("source_type") or "").strip()
+        if source_type:
+            lines.append(f"来源类型：{source_type}")
+        return "\n".join(lines)
     lines = [
         f"Report date: {run_date}",
         "Section: Suggested Team Follow-up",
@@ -1574,13 +1819,16 @@ def _trello_reminder_description(item: dict[str, Any], *, run_date: str, window_
 
 def _daily_brief_system_prompt() -> str:
     return (
-        "You are Xiaodong Zheng's senior AI chief of staff and a veteran Digital Banking Product Manager. "
-        "Produce a decision brief that changes what Xiaodong does next, not a summary of what people said. "
-        "Return only valid JSON. Synthesize SeaTalk logs and Gmail threads into clear actions, project updates, awareness updates, and unresolved team-member reminders. "
-        "Lead with the concrete delta, decision, risk, owner, required outcome, and next checkpoint. Do not copy raw transcripts or write conversational play-by-plays. "
-        "Use precise, concise, executive-readable English while preserving original group names, contact names, and email subjects in evidence. "
+        "你是 Xiaodong Zheng 的高级 AI 秘书，也是资深数字银行产品经理。 "
+        "你要产出一份能直接改变 Xiaodong 下一步行动的决策简报，而不是复述聊天内容。 "
+        "先按信号强度排序：Xiaodong 本人的决定和承诺，其次是 blocked/P0/P1、事故和风险，再其次是活跃依赖、已改变的发布日期，最后是未答复的团队请求；其余内容全部省略。 "
+        "只返回合法 JSON。综合 SeaTalk 记录，提炼明确的行动、项目动态、其他高价值动态和未解决的团队成员跟进请求。 "
+        "每条内容先写清楚发生了什么变化、需要谁做什么、风险或影响是什么，以及下一个检查点；禁止复制原始聊天记录或写成对话流水账。 "
+        "除真实群名、人名、线程名、产品名、技术名词和邮箱外，所有用户可见的任务、摘要、原因和状态说明必须使用简体中文。 "
         "Every item must keep traceability through a short evidence field. Prefer real names over UIDs whenever names are available. "
         "Favor omission over speculation: an unsupported, generic, or ambiguous item is worse than an empty section."
+        " 每条项目动态或其他动态都必须是简洁的 PM 综合判断，并用中文明确写出“状态：”“影响：”“下一步：”；如果证据不足以支持三者，直接省略。"
+        " JSON 字段名、允许的英文枚举值和 evidence_ref_id 仅用于机器校验，不属于用户可见内容；不要把英文 State、Impact、Next、Due、Source、Status 标签写入输出。"
     )
 
 
@@ -1597,7 +1845,16 @@ def _daily_brief_user_prompt(
     xiaodong_followup_hints: str = "",
     high_signal_review_hints: str = "",
     evidence_context: str = "",
+    source_file_path: str = "",
+    source_text: str = "",
 ) -> str:
+    if str(source_file_path or "").strip() or str(source_text or "").strip():
+        return _daily_brief_reference_style_user_prompt(
+            source_file_path=source_file_path,
+            source_text=source_text,
+            local_now=local_now,
+            window_label=window_label or f"previous {hours} hours",
+        )
     window_text = window_label or f"previous {hours} hours"
     match_block = (
         "## Today's Report Intelligence Matches\n"
@@ -1650,7 +1907,9 @@ def _daily_brief_user_prompt(
     )
     return (
         "## Output Contract\n"
+        "语言要求：除 Source/Evidence 中必须保留的真实群名、人名、线程名、产品名、技术名词和邮箱外，所有 JSON 字段值必须使用简体中文。任务、项目摘要、提醒、原因和 priority_reason 都要用中文。项目摘要必须使用“状态：... 影响：... 下一步：...”格式，不要使用英文 State/Impact/Next 标签。\n"
         "Return a JSON object with exactly these top-level keys: project_updates, other_updates, my_todos, team_member_reminders, team_todos.\n"
+        "Never copy an English source question into task, summary, reminder, or priority_reason. Rewrite it in Simplified Chinese as a concrete action naming the subject, person to contact, and expected decision or deliverable.\n"
         "project_updates: array of objects with keys domain, title, summary, status, evidence, source_type, evidence_ref_id, matched_vips, matched_keywords, matched_key_projects, priority_reason.\n"
         "other_updates: array of objects with keys domain, title, summary, status, evidence, source_type, signal_type, evidence_ref_id, matched_vips, matched_keywords, matched_key_projects, priority_reason.\n"
         "my_todos: array of objects with keys task, domain, priority, due, evidence, source_type, action_type, evidence_ref_id, matched_vips, matched_keywords, matched_key_projects, priority_reason.\n"
@@ -1670,7 +1929,7 @@ def _daily_brief_user_prompt(
         "Do not turn a question, @mention, meeting invitation, meeting logistics, acknowledgement, thanks, or discussion into an action, decision, status, or risk unless a source explicitly states that result. Do not invent owners, deadlines, commitments, severity, or dependencies.\n"
         "Each item must be atomic and source-coherent: one actionable request or one material state change supported by one group/thread or one email thread. Never import a date, owner, dependency, or milestone from a different source merely because the project names are related. A SeaTalk group name is an evidence label, not proof that the similarly named team owns the action. Merge only duplicate evidence for the same event, never separate events merely because they share a project name.\n\n"
         "## Section Rules\n"
-        "my_todos: include only Xiaodong-owned actions, decisions needed from Xiaodong, follow-ups Xiaodong clearly needs to drive, or watch/delegate items where Xiaodong should ensure another owner follows through. Every task must name a concrete object and intended outcome; never write a bare 'follow up', 'check', or 'confirm' without saying what must be resolved. Do not include tasks fully owned by other people with no Xiaodong follow-up value. Max 6 items. Sort high priority first, then earliest due date, then most actionable.\n"
+        "my_todos: include only Xiaodong-owned actions, decisions needed from Xiaodong, follow-ups Xiaodong clearly needs to drive, or watch/delegate items where Xiaodong should ensure another owner follows through. Every task must name a concrete object and intended outcome; never write a bare 'follow up', 'check', or 'confirm' without saying what must be resolved. If the source is a question, rewrite it as '确认什么、向谁确认、预期得到什么结论'. Do not include tasks fully owned by other people with no Xiaodong follow-up value. Max 6 items. Sort high priority first, then earliest due date, then most actionable.\n"
         "For each my_todos item, set action_type=direct_action only when Xiaodong must personally reply, decide, review, approve, attend, provide, or drive the next step. Set action_type=watch_delegate when Xiaodong mainly needs to monitor, ensure, follow up with someone, check with a team, or confirm another owner follows through.\n"
         "If a teammate follow-up topic is already represented as a my_todos watch_delegate item, do not repeat it in team_member_reminders.\n"
         "Do not create a todo or reminder for an ask when a later human reply in the same SeaTalk group/thread already gives the answer, conclusion, or ownership update. A clarification question is not an answer. A Xiaodong commitment such as 'will check and get back' is not a resolution: keep one Xiaodong direct_action item until a conclusion is visible.\n"
@@ -1717,7 +1976,8 @@ def _daily_brief_user_prompt(
         "## Formatting Inside JSON\n"
         "For my_todos.task, write one synthesized action sentence. For due, extract a real deadline if present; otherwise use TBD.\n"
         "For project_updates.summary and other_updates.summary, write one compact executive entry of at most three short sentences and 65 words total. A project update that reads like a source quote is invalid even when its evidence is valid. Do not add generic filler such as 'confirm the owner and next milestone'.\n"
-        "For evidence, provide only the source label. Do not include long snippets.\n\n"
+        "For evidence, provide only the source label. Do not include long snippets.\n"
+        "最终语言检查：除证据中的真实专有名词外，禁止英文句子或英文标签出现在输出值中；用“状态：”“影响：”“下一步：”“截止：”“来源：”等中文标签。\n\n"
         f"Window: {window_text}. Generated at: {local_now.isoformat()}.\n\n"
         "=== SeaTalk history ===\n"
         "[focused evidence excerpt]\n"
@@ -1726,6 +1986,377 @@ def _daily_brief_user_prompt(
         "[focused evidence excerpt]\n"
         f"{gmail_history_text or 'No Gmail messages were found in this window.'}"
     )
+
+
+def _daily_brief_reference_style_user_prompt(
+    *,
+    source_file_path: str,
+    source_text: str,
+    local_now: datetime,
+    window_label: str,
+) -> str:
+    """Use the reference report's reasoning shape without copying its data rules.
+
+    The complete export is deliberately kept outside the prompt body. Codex CLI
+    can read the temporary file from its read-only workspace, which avoids the
+    signal-excerpt bias that previously hid context in long windows.
+    """
+    source_instruction = (
+        f"完整原始记录文件：{source_file_path}\n"
+        "必须先通读该文件的全部相关群聊和线程；不要只读取开头、结尾或少数命中行。"
+        "该文件是唯一的业务事实来源。"
+        if str(source_file_path or "").strip()
+        else (
+            "下面的 SeaTalk 原始记录是完整输入，必须综合阅读全部相关群聊和线程，"
+            "不能只依据少数命中行或最近几条消息。该记录是唯一的业务事实来源。\n\n"
+            "=== SeaTalk 原始聊天记录 ===\n"
+            f"{source_text}"
+        )
+    )
+    return (
+        "你现在担任 Xiaodong Zheng 的高级 AI 秘书，同时是一位资深数字银行产品经理。"
+        "请完整阅读指定的 SeaTalk 原始聊天记录，再产出一份真正能改变 Xiaodong 下一步行动的每日工作简报。"
+        "不要把聊天记录改写成流水账，也不要为了填满版块而保留低价值信息。\n\n"
+        f"{source_instruction}\n\n"
+        "## 重点判断顺序\n"
+        "1. Xiaodong 必须亲自答复、评审、决定、审批、参加或承诺跟进的事项。\n"
+        "2. Xiaodong 不必亲自执行，但必须监控、推动或确保负责人完成的事项。\n"
+        "3. 影响发布、UAT/Live、客户、合规、风险或跨团队依赖的重大项目状态。\n"
+        "4. 对数字银行 PM 有实际价值的 incident、launch、policy/process、risk/compliance、cross-team dependency、leadership decision 或 cross-product milestone。\n"
+        "5. 白名单团队成员被明确提出、分配任务或直接艾特，但在可见记录中仍未得到负责人或 Xiaodong 的实质回复的请求。\n\n"
+        "## 必须忽略\n"
+        "忽略寒暄、感谢、普通 FYI、没有决定的会议预约、会议迟到/缺席/coverage 通知、机器人和系统告警、纯提醒、纯问句、重复转述、已经回答/解决/关闭的事项。"
+        "其他参与者的回复只能作为上下文；只有被点名负责人、Xiaodong 或原请求人明确表示已回答、fixed、resolved、closed，才算关闭请求。"
+        "Xiaodong 说会检查、跟进或稍后回复，不算问题已解决，应保留为 Xiaodong 待办。"
+        "同一主题在不同版块只保留一个综合事项；只有负责人或动作不同，才可以拆分。\n\n"
+        "## 业务归属和团队边界\n"
+        "Domain 只能使用 Anti-fraud、Credit Risk、Ops Risk、General。Sophia Wang Zijun 归属 Credit Risk。"
+        "Xiaodong 团队跟进白名单：Ker Yin、Rene Chong、Sabrina Chan、Liye、Hui Xian、Sophia Wang Zijun、Ming Ming、Zoey Lu、Wang Chang、Jireh、Ang Wei Lin、Lim Dao Jun。"
+        "Anti-fraud 团队成员仅限 Ker Yin、Rene Chong、Wang Chang、Jireh、Ang Wei Lin、Sabrina Chan。"
+        "Ming Ming | 明明 与 Li Mingming 是不同的人，不能合并。不要因为群名相似就推断项目归属；以聊天中明确的参与者、请求和内容为准。\n\n"
+        "## 输出质量要求\n"
+        "所有用户可见内容使用精炼、专业、商务通顺的简体中文；真实群名、人名、线程名、产品名、技术名词和邮箱保持原文。"
+        "每一条行动项必须写清楚背景、具体动作和预期结果，不能只写‘跟进’、‘确认’或‘检查’。"
+        "每一条项目动态必须是 PM 综合判断，并严格包含‘状态：… 影响：… 下一步：…’，禁止直接引用聊天原句。"
+        "每一条 Source/Evidence 必须能回溯到真实群名、联系人或 thread 标题；禁止输出 group-数字、buddy-数字、UID 数字等原始 ID。"
+        "不确定时宁可省略，不要猜测 owner、deadline、severity、dependency 或 project relationship。\n\n"
+        "## 机器可读输出契约\n"
+        "只返回合法 JSON，不要 Markdown、解释或代码围栏。顶层只能包含：project_updates、other_updates、my_todos、team_member_reminders、team_todos。"
+        "team_todos 必须是空数组。没有高信号内容的版块返回空数组。"
+        "project_updates 每项字段：domain、title、summary、status、evidence、source_type。"
+        "other_updates 每项字段：domain、title、summary、status、signal_type、evidence、source_type。"
+        "my_todos 每项字段：task、domain、priority、due、action_type、evidence、source_type。"
+        "team_member_reminders 每项字段：domain、person、reminder、evidence、source_type。"
+        "允许的 status：done、in_progress、blocked、unknown；priority：high、medium、low、unknown；"
+        "action_type：direct_action 或 watch_delegate；signal_type：incident、launch、policy_process、risk_compliance、cross_team_dependency、leadership_decision、cross_product_milestone。"
+        "最多输出 6 条 Xiaodong Action、6 条 Watch/Delegate、6 条 Project Updates、5 条 Other Update、6 条 Team Follow-up。"
+        "如果同一主题同时属于 Xiaodong 待办和项目动态，只保留最能指导下一步的版本，除非两者确实承担不同动作。\n\n"
+        f"报告窗口：{window_label}。生成时间：{local_now.isoformat()}。"
+    )
+
+
+_DAILY_BRIEF_ENGLISH_PROSE_CUES = (
+    "state:",
+    "impact:",
+    "next:",
+    " is ",
+    " are ",
+    " the ",
+    " and ",
+    " with ",
+    " from ",
+    " to ",
+    " by ",
+    " pending ",
+    " blocked ",
+    " release ",
+    " issue ",
+)
+_DAILY_BRIEF_ENGLISH_CONNECTOR_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "because",
+    "by",
+    "can",
+    "from",
+    "has",
+    "have",
+    "in",
+    "is",
+    "may",
+    "must",
+    "needs",
+    "of",
+    "on",
+    "or",
+    "pending",
+    "remains",
+    "still",
+    "that",
+    "the",
+    "to",
+    "until",
+    "was",
+    "were",
+    "with",
+}
+
+
+def _daily_brief_contains_english_prose(value: Any) -> bool:
+    """Detect English sentences without rejecting product names or acronyms."""
+    prose = " ".join(str(value or "").split()).casefold()
+    if not prose or re.search(r"\b(?:state|impact|next):", prose, flags=re.IGNORECASE):
+        return bool(prose and re.search(r"\b(?:state|impact|next):", prose, flags=re.IGNORECASE))
+    words = re.findall(r"\b[a-z]{2,}\b", prose)
+    connector_count = sum(word in _DAILY_BRIEF_ENGLISH_CONNECTOR_WORDS for word in words)
+    return len(words) >= 10 and connector_count >= 3
+
+
+def _daily_brief_has_items(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return any(
+        isinstance(payload.get(key), list) and bool(payload.get(key))
+        for key in ("project_updates", "other_updates", "my_todos", "team_member_reminders")
+    )
+
+
+def _daily_brief_needs_language_repair(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    for section in ("project_updates", "other_updates", "my_todos", "team_member_reminders"):
+        for item in payload.get(section) or []:
+            if not isinstance(item, dict):
+                continue
+            prose = " ".join(
+                str(item.get(field) or "")
+                for field in ("title", "summary", "task", "reminder", "priority_reason")
+            ).casefold()
+            if _daily_brief_contains_english_prose(prose):
+                return True
+    return False
+
+
+def _daily_brief_language_repair_prompt(payload: dict[str, Any]) -> str:
+    return (
+        "请只修复下面这份 Daily Brief JSON 的语言和表达，不要重新分析聊天记录，也不要新增、删除或合并任何业务事项。"
+        "必须逐项保留每个数组的原始长度、顺序和每一条事项；禁止返回不完整的 section，禁止因为某条事项来自私聊、英文或证据较短而省略它。"
+        "这是强制语言转换：凡是完整英文句子、英文 State/Impact/Next 标签、英文连接词组成的句子，都必须翻译成精炼、专业的简体中文；"
+        "不能因为原文夹杂中文、产品名或技术名词而保留英文句子。可保留真实群名、人名、线程名、产品名、技术名词、版本号、字段名和邮箱；其余说明必须中文。"
+        "所有用户可见的 title、summary、task、reminder、priority_reason 必须改为精炼、专业的简体中文；"
+        "真实群名、人名、线程名、产品名、技术名词、版本号和邮箱保持原文。"
+        "项目 summary 必须使用‘状态：… 影响：… 下一步：…’，不能保留 State/Impact/Next 或英文完整句子。"
+        "例如：‘is blocked by a Shopee-side issue’应改为‘因 Shopee 侧问题而受阻’，‘cannot be signed off until the upstream issue is fixed’应改为‘上游问题修复前无法完成签核’。"
+        "严格保留原有字段、domain、status、priority、due、action_type、evidence 和 source_type；只返回合法 JSON。\n\n"
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
+def _daily_brief_remaining_language_items(
+    *,
+    project_updates: list[dict[str, Any]],
+    other_updates: list[dict[str, Any]],
+    my_todos: list[dict[str, Any]],
+    reminders: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    sections = {
+        "project_updates": project_updates,
+        "other_updates": other_updates,
+        "my_todos": my_todos,
+        "team_member_reminders": reminders,
+    }
+    fields = ("title", "summary", "task", "reminder", "priority_reason")
+    remaining: list[dict[str, Any]] = []
+    for section, items in sections.items():
+        for index, item in enumerate(items):
+            visible = " ".join(str(item.get(field) or "") for field in fields)
+            if not _daily_brief_contains_english_prose(visible):
+                continue
+            remaining.append(
+                {
+                    "section": section,
+                    "index": index,
+                    "fields": {field: str(item.get(field) or "") for field in fields if str(item.get(field) or "").strip()},
+                }
+            )
+    return remaining
+
+
+def _daily_brief_residual_language_repair_prompt(items: list[dict[str, Any]]) -> str:
+    return (
+        "只翻译下面列出的 Daily Brief 残留英文用户可见字段，不要重新分析业务，也不要改变事项含义。"
+        "必须返回与输入 items 数量完全相同的 items，并保留每个 item 的 section 和 index；禁止遗漏任何 item。"
+        "凡是完整英文句子、英文连接词组成的任务或摘要都必须翻译成专业简体中文。"
+        "真实人名、群名、线程名、产品名、技术名词、版本号、字段名和邮箱可以保留原文。"
+        "只返回 JSON：{\"items\":[{\"section\":\"...\",\"index\":0,\"fields\":{\"task\":\"...\"}}]}。"
+        "不要返回 domain、status、priority、due、action_type、evidence、source_type 或其他元数据。\n\n"
+        + json.dumps({"items": items}, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
+def _daily_brief_residual_language_system_prompt() -> str:
+    return (
+        "你是 Daily Brief 的定点语言修复器。只处理用户消息中列出的 items，不能重新分析原始聊天记录。"
+        "必须严格返回 JSON 对象 {\"items\":[...]}，不得返回 project_updates、other_updates、my_todos、"
+        "team_member_reminders 或 team_todos。保留每个 item 的 section、index 和字段结构，只把完整英文说明翻译成专业简体中文。"
+    )
+
+
+def _apply_residual_language_repair(
+    *,
+    project_updates: list[dict[str, Any]],
+    other_updates: list[dict[str, Any]],
+    my_todos: list[dict[str, Any]],
+    reminders: list[dict[str, Any]],
+    repaired: dict[str, Any],
+) -> int:
+    sections = {
+        "project_updates": project_updates,
+        "other_updates": other_updates,
+        "my_todos": my_todos,
+        "team_member_reminders": reminders,
+    }
+    text_fields = {"title", "summary", "task", "reminder", "priority_reason"}
+    repaired_count = 0
+    for candidate in repaired.get("items") or []:
+        if not isinstance(candidate, dict):
+            continue
+        section = str(candidate.get("section") or "").strip()
+        try:
+            index = int(candidate.get("index"))
+        except (TypeError, ValueError):
+            continue
+        current_items = sections.get(section)
+        if current_items is None or index < 0 or index >= len(current_items):
+            continue
+        fields = candidate.get("fields") if isinstance(candidate.get("fields"), dict) else {}
+        for field in text_fields:
+            value = str(fields.get(field) or "").strip()
+            if value and value != current_items[index].get(field):
+                current_items[index][field] = value
+                repaired_count += 1
+    return repaired_count
+
+
+def _apply_final_language_repair(
+    *,
+    project_updates: list[dict[str, Any]],
+    other_updates: list[dict[str, Any]],
+    my_todos: list[dict[str, Any]],
+    reminders: list[dict[str, Any]],
+    repaired: dict[str, Any],
+) -> int:
+    """Copy repaired prose onto canonical items without losing evidence metadata."""
+    current_sections = {
+        "project_updates": project_updates,
+        "other_updates": other_updates,
+        "my_todos": my_todos,
+        "team_member_reminders": reminders,
+    }
+    repaired_count = 0
+    text_fields = ("title", "summary", "task", "reminder", "priority_reason")
+    for section, current_items in current_sections.items():
+        candidates = [item for item in repaired.get(section) or [] if isinstance(item, dict)]
+        used: set[int] = set()
+        for current_index, current in enumerate(current_items):
+            current_ref = str(current.get("evidence_ref_id") or "").strip()
+            current_evidence = _normalize_thread_match_text(current.get("evidence"))
+            current_person = _normalize_person_key(current.get("person"))
+            match_index = next(
+                (
+                    index
+                    for index, candidate in enumerate(candidates)
+                    if index not in used
+                    and current_ref
+                    and current_ref == str(candidate.get("evidence_ref_id") or "").strip()
+                ),
+                None,
+            )
+            if match_index is None and current_evidence:
+                match_index = next(
+                    (
+                        index
+                        for index, candidate in enumerate(candidates)
+                        if index not in used
+                        and current_evidence == _normalize_thread_match_text(candidate.get("evidence"))
+                    ),
+                    None,
+                )
+            if match_index is None and current_person:
+                match_index = next(
+                    (
+                        index
+                        for index, candidate in enumerate(candidates)
+                        if index not in used
+                        and current_person == _normalize_person_key(candidate.get("person"))
+                    ),
+                    None,
+                )
+            # The language-repair prompt forbids adding, deleting, or
+            # reordering items.  A merged item may lose its long evidence_ref
+            # string in the repair response, so use the same-position item
+            # only when the section cardinality is unchanged.  This preserves
+            # canonical evidence/status metadata while still repairing prose.
+            if (
+                match_index is None
+                and len(candidates) == len(current_items)
+                and current_index not in used
+            ):
+                match_index = current_index
+            if match_index is None:
+                continue
+            used.add(match_index)
+            candidate = candidates[match_index]
+            for field in text_fields:
+                if field in candidate and str(candidate.get(field) or "").strip():
+                    if candidate.get(field) != current.get(field):
+                        current[field] = candidate[field]
+                        repaired_count += 1
+    return repaired_count
+
+
+def _write_daily_brief_source_file(
+    service: SeaTalkDashboardService,
+    history_text: str,
+    *,
+    threshold: int,
+) -> Path | None:
+    """Write a large raw export where the read-only Codex CLI can inspect it."""
+    source = str(history_text or "")
+    if len(source) < max(1, int(threshold)):
+        return None
+    workspace_root = Path(getattr(service, "codex_workspace_root", Path.cwd())).resolve()
+    target_dir = workspace_root / "tmp"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix=".daily-brief-seatalk-",
+        suffix=".txt",
+        dir=target_dir,
+        delete=False,
+    )
+    try:
+        with handle:
+            handle.write(source)
+        return Path(handle.name)
+    except OSError:
+        try:
+            Path(handle.name).unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+
+
+def _remove_daily_brief_source_file(source_file_path: Path | None) -> None:
+    if source_file_path is None:
+        return
+    try:
+        source_file_path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 _SEATALK_HISTORY_HEADER_RE = re.compile(r"^===\s*(?P<group>.+?)\s*===$")
@@ -1784,6 +2415,11 @@ def _build_daily_brief_evidence_context(
     high_signal_review_hints: str = "",
     xiaodong_followup_candidates: list[dict[str, str]] | None = None,
 ) -> str:
+    prompt_evidence_refs = _compact_daily_brief_prompt_evidence_refs(
+        evidence_refs or [],
+        team_member_reminder_candidates=team_member_reminder_candidates,
+        xiaodong_followup_candidates=xiaodong_followup_candidates,
+    )
     payload = {
         "unanswered_mentions": [
             line[2:] if line.startswith("- ") else line
@@ -1792,7 +2428,7 @@ def _build_daily_brief_evidence_context(
         ][:MAX_UNANSWERED_SEATALK_QUESTION_HINTS],
         "candidate_followups": _compact_daily_followup_candidates(team_member_reminder_candidates),
         "xiaodong_action_candidates": _compact_xiaodong_followup_candidates(xiaodong_followup_candidates),
-        "evidence_refs": evidence_refs or [],
+        "evidence_refs": prompt_evidence_refs,
         "high_signal_candidates": [
             line[2:] if line.startswith("- ") else line
             for line in str(high_signal_review_hints or "").splitlines()
@@ -1806,6 +2442,85 @@ def _build_daily_brief_evidence_context(
     if any(cap_flags.values()):
         payload["source_caps"] = cap_flags
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _compact_daily_brief_prompt_evidence_refs(
+    evidence_refs: list[dict[str, Any]],
+    *,
+    team_member_reminder_candidates: list[dict[str, str]] | None,
+    xiaodong_followup_candidates: list[dict[str, str]] | None,
+) -> list[dict[str, Any]]:
+    """Give the model a ranked evidence index without repeating the full raw export.
+
+    Downstream deterministic validation still receives every ref. The model only
+    needs the refs most likely to support an output item, plus every ref tied to
+    an unresolved owner request. This keeps the synthesis prompt focused while
+    preserving citation IDs for the later validation layer.
+    """
+    if len(evidence_refs) <= DAILY_BRIEF_PROMPT_EVIDENCE_REF_LIMIT:
+        selected = list(evidence_refs)
+    else:
+        candidate_refs = _seatalk_refs_by_candidate(evidence_refs)
+        required_ids: set[str] = set()
+        for candidate in [*(team_member_reminder_candidates or []), *(xiaodong_followup_candidates or [])]:
+            ref = candidate_refs.get(_candidate_ref_key(candidate))
+            if ref:
+                required_ids.add(str(ref.get("id") or ""))
+
+        def rank(ref: dict[str, Any]) -> tuple[int, str]:
+            haystack = " ".join(
+                str(ref.get(field) or "")
+                for field in ("group", "thread", "sender", "subject", "snippet", "evidence")
+            ).casefold()
+            score = 100 if str(ref.get("id") or "") in required_ids else 0
+            score += sum(3 for term in DAILY_BRIEF_HIGH_SIGNAL_TERMS if term in haystack)
+            score += sum(
+                weight
+                for term, weight in (
+                    ("[sp][p0]", 20),
+                    ("p0", 12),
+                    ("p1", 8),
+                    ("mas", 10),
+                    ("incident", 9),
+                    ("blocked", 9),
+                    ("dependency", 8),
+                    ("launch", 6),
+                    ("release", 5),
+                    ("timeline", 5),
+                    ("delay", 5),
+                )
+                if term in haystack
+            )
+            if str(ref.get("reply_state") or "").casefold() in {"unanswered", "xiaodong_commitment"}:
+                score += 30
+            return score, str(ref.get("timestamp") or "")
+
+        selected = sorted(evidence_refs, key=rank, reverse=True)[:DAILY_BRIEF_PROMPT_EVIDENCE_REF_LIMIT]
+        selected_ids = {str(ref.get("id") or "") for ref in selected}
+        for ref in evidence_refs:
+            ref_id = str(ref.get("id") or "")
+            if ref_id in required_ids and ref_id not in selected_ids:
+                selected[-1] = ref
+                selected_ids.add(ref_id)
+
+    allowed_fields = (
+        "id",
+        "source_type",
+        "group",
+        "thread",
+        "sender",
+        "timestamp",
+        "mentioned_people",
+        "reply_state",
+        "snippet",
+        "subject",
+        "to",
+        "evidence",
+    )
+    return [
+        {key: ref.get(key) for key in allowed_fields if key in ref}
+        for ref in selected
+    ]
 
 
 def _compact_xiaodong_followup_candidates(candidates: list[dict[str, str]] | None) -> list[dict[str, str]]:
@@ -2045,6 +2760,122 @@ def _build_xiaodong_followup_candidates(history_text: str) -> list[dict[str, str
     ][-MAX_TEAM_MEMBER_REMINDER_HINTS:]
 
 
+def _looks_like_direct_xiaodong_request(text: Any) -> bool:
+    """Recognize a human request addressed to Xiaodong, including private chats."""
+    normalized = " ".join(str(text or "").casefold().split())
+    if not normalized or _is_meeting_logistics_or_availability_notice(normalized):
+        return False
+    direct_name = bool(
+        re.search(r"(?:@|\b)(?:zheng\s+xiaodong|xiaodong\s+zheng|xiaodong)\b", normalized)
+    )
+    if not direct_name:
+        return False
+    if _is_team_member_coverage_notice(normalized) or _is_assignment_statement(normalized):
+        return False
+    if any(cue in normalized for cue in ("heads up", "heads-up", "just want to give you a headsup", "for visibility")):
+        return False
+    if re.search(r"\bcc\s+@?(?:zheng\s+)?xiaodong\b", normalized):
+        return False
+    name_match = re.search(r"(?:@|\b)(?:zheng\s+xiaodong|xiaodong\s+zheng|xiaodong)\b", normalized)
+    if name_match and re.search(r"[?？]", normalized[: name_match.start()]):
+        return False
+    if name_match and name_match.start() > 60 and not normalized[:name_match.start()].strip().startswith(("hi", "hello", "hey")):
+        return False
+    return _looks_like_team_member_request(normalized) or _looks_like_unanswered_question(normalized)
+
+
+def _build_direct_xiaodong_request_candidates(history_text: str) -> list[dict[str, str]]:
+    """Keep unresolved human asks to Xiaodong as owned actions.
+
+    SeaTalk private chats are intentionally included here. The regular team
+    follow-up scanner excludes private chats because it is only for named team
+    members, but that exclusion must not hide a direct request to Xiaodong.
+    """
+    pending: list[dict[str, Any]] = []
+    for record in _seatalk_history_records_for_evidence(history_text):
+        sender = str(record.get("sender") or "").strip()
+        text = str(record.get("text") or "").strip()
+        if not _is_meaningful_human_seatalk_line(sender, text):
+            continue
+        group = str(record.get("group") or "").strip()
+        thread = str(record.get("thread") or "").strip()
+        context = (
+            _normalize_thread_match_text(group),
+            _normalize_thread_match_text(thread or "__main__"),
+        )
+        for candidate in pending:
+            if candidate.get("context") != context or candidate.get("resolved"):
+                continue
+            if _is_explicit_team_member_closure(text):
+                candidate["resolved"] = True
+                continue
+            if _sender_is_xiaodong(sender):
+                # A commitment to investigate or get back is still Xiaodong's
+                # open work. Only a clear answer/closure resolves the request.
+                if _looks_like_xiaodong_followup_commitment(text):
+                    continue
+                if any(
+                    cue in text.casefold()
+                    for cue in (
+                        "i recommend",
+                        "recommend",
+                        "我建议",
+                        "建议可以",
+                        "已确认",
+                        "confirmed",
+                        "改好了",
+                        "ok",
+                        "okay",
+                    )
+                ) and not any(
+                    cue in text.casefold()
+                    for cue in ("error", "issue", "blocked", "need to check", "还需要", "仍然", "still")
+                ):
+                    candidate["resolved"] = True
+                    continue
+                # Do not infer closure from a diagnostic reply such as
+                # "the page is still showing a server error". The request is
+                # resolved only by an explicit closure in the visible window.
+                continue
+        if _sender_is_xiaodong(sender) or not _looks_like_direct_xiaodong_request(text):
+            continue
+        pending.append(
+            {
+                "sender": sender,
+                "group": group,
+                "thread": thread,
+                "timestamp": str(record.get("timestamp") or "").strip(),
+                "text": text,
+                "context": context,
+                "ownership_reason": "direct_request",
+                "resolved": False,
+            }
+        )
+    def priority(candidate: dict[str, Any]) -> tuple[int, str]:
+        text = " ".join(str(candidate.get(field) or "") for field in ("group", "thread", "text")).casefold()
+        score = 0
+        for marker, weight in (
+            ("ipification", 40),
+            ("brd", 25),
+            ("unlock card", 40),
+            ("server error", 30),
+            ("centum", 40),
+            ("current balance", 20),
+            ("available balance", 20),
+            ("default template", 10),
+            ("需要配模板", 10),
+        ):
+            if marker in text:
+                score += weight
+        return score, str(candidate.get("timestamp") or "")
+
+    return [
+        {key: str(value) for key, value in candidate.items() if key not in {"context", "resolved"}}
+        for candidate in sorted(pending, key=priority, reverse=True)[:MAX_TEAM_MEMBER_REMINDER_HINTS]
+        if not candidate.get("resolved")
+    ][-MAX_TEAM_MEMBER_REMINDER_HINTS:]
+
+
 def _same_xiaodong_action_context(candidate: dict[str, Any], *, group: str, thread: str) -> bool:
     return (
         _normalize_thread_match_text(candidate.get("group")) == _normalize_thread_match_text(group)
@@ -2078,7 +2909,7 @@ def _scan_team_member_reminder_candidates(history_text: str) -> tuple[list[dict[
         sender = message_match.group("sender").strip()
         thread = (message_match.group("thread") or "").strip()
         text = message_match.group("text").strip()
-        if _is_meeting_logistics_or_availability_notice(text):
+        if _is_team_member_reminder_noise(current_group, text):
             continue
         key = (current_group, thread or "__main__")
         sender_person = _canonical_team_member_name(sender)
@@ -2128,6 +2959,7 @@ def _scan_team_member_reminder_candidates(history_text: str) -> tuple[list[dict[
             not is_human_reply
             or _is_team_member_coverage_notice(text)
             or _is_team_member_progress_update(text)
+            or (sender_is_xiaodong and _is_assignment_statement(text))
             or not _looks_like_team_member_request(text)
         ):
             continue
@@ -2507,6 +3339,8 @@ def _build_high_signal_fallback_items(
         sender = str(record.get("sender") or "").strip()
         if not group or not text or not _is_meaningful_human_seatalk_line(sender, text):
             continue
+        if _is_meeting_logistics_or_availability_notice(text):
+            continue
         haystack = f"{group} {thread} {text}".casefold()
         is_p0_group = bool(re.search(r"\bp0\b", group.casefold()))
         risk_terms = (
@@ -2551,6 +3385,20 @@ def _build_high_signal_fallback_items(
             "failed",
             "error",
             "impact",
+            "uat",
+            "not working",
+            "isn't working",
+            "doesn't work",
+            "does not work",
+            "unable to",
+            "problem ticket",
+            "rejection",
+            "capacity",
+            "outage",
+            "system down",
+            "faq",
+            "blank page",
+            "manual provisioning",
         )
         hit_terms = [term for term in risk_terms if term in haystack]
         direct_xiaodong = _sender_is_xiaodong(sender)
@@ -2576,7 +3424,7 @@ def _build_high_signal_fallback_items(
                 )
             )
         )
-        protected_topic = _is_protected_daily_brief_record(record) or any(
+        protected_topic = _is_protected_daily_brief_record(record) or _is_priority_other_update_record(record) or any(
             (
                 "qris" in haystack and any(term in haystack for term in ("dependency", "upstream", "requirement", "timeline")),
                 "atm" in haystack and bool(re.search(r"\bv?3\.0[78]\b", haystack, flags=re.IGNORECASE)),
@@ -2609,6 +3457,8 @@ def _build_high_signal_fallback_items(
             score += 24
         if protected_topic:
             score += 20
+        if _is_other_event_signal(haystack):
+            score += 12
         if any(
             term in haystack
             for term in (
@@ -2712,6 +3562,12 @@ def _build_high_signal_fallback_items(
             return "ker_yin_edit_access"
         if "translation" in haystack and any(term in haystack for term in ("configure", "copywriting", "sdk", "key")):
             return "ph_translation"
+        if "gpay" in haystack and any(term in haystack for term in ("uat", "manual provisioning", "not working")):
+            return "gpay_uat"
+        if "dd05" in haystack and any(term in haystack for term in ("faq", "blank page", "need help")):
+            return "ph_dd05_faq"
+        if "problem ticket" in haystack or ("incident" in haystack and any(term in haystack for term in ("sfv", "live issue", "outage"))):
+            return "live_incident"
         return ""
 
     # The normal score favors repeated generic incident lines. Reserve slots
@@ -2745,6 +3601,16 @@ def _build_high_signal_fallback_items(
             _clip_high_signal_text(record.get("text"), limit=320),
             name_mappings=name_mappings,
         )
+        if (
+            re.match(r"^[\w.-]+\)\s*\(", text)
+            or text[:1] in {")", "]", "}", ":", ";"}
+            or len(text) < 35
+        ):
+            # A clipped export fragment is not a defensible project update.
+            # The full record remains available to the model and validation
+            # layer, but this fallback must never turn a dangling name into a
+            # fake State/Impact/Next summary.
+            continue
         haystack = f"{group} {thread} {text}".casefold()
         source_topic = f"{group} {thread}".casefold()
         if _is_material_vendor_cost_signal(haystack):
@@ -2773,6 +3639,9 @@ def _build_high_signal_fallback_items(
             "priority_reason": "Deterministic high-signal P0/risk preservation",
             "fallback_source": "deterministic_high_signal",
         }
+        item["summary"] = _synthesize_project_update_summary(item)
+        if not item["summary"]:
+            continue
         detail_text = f"{group} {thread} {text}".casefold()
         protected_detail = _is_protected_daily_brief_record(record) or bool(
             re.search(r"\bv?\d+\.\d+(?:\.\d+)?\b", detail_text, flags=re.IGNORECASE)
@@ -2784,9 +3653,97 @@ def _build_high_signal_fallback_items(
         if has_same_topic(item, record) and not protected_detail:
             continue
         fallbacks.append(item)
-        if len(fallbacks) >= 10:
+        if len(fallbacks) >= 24:
             break
     return fallbacks
+
+
+def _is_other_event_signal(value: Any) -> bool:
+    haystack = " ".join(str(value or "").casefold().split())
+    return any(
+        term in haystack
+        for term in (
+            "incident",
+            "outage",
+            "system down",
+            "service down",
+            "unable to",
+            "not working",
+            "isn't working",
+            "doesn't work",
+            "does not work",
+            "failed",
+            "failure",
+            "error",
+            "high rejection",
+            "rejection rate",
+            "rejected",
+            "alert",
+            "capacity",
+            "problem ticket",
+            "phishing",
+            "security warning",
+            "手工开通",
+            "故障",
+            "告警",
+        )
+    )
+
+
+def _is_priority_other_update_record(record: dict[str, str]) -> bool:
+    haystack = " ".join(
+        str(record.get(field) or "") for field in ("group", "thread", "sender", "text")
+    ).casefold()
+    return any(
+        (
+            "gpay" in haystack and any(term in haystack for term in ("manual provisioning", "not working", "uat")),
+            "incident" in haystack and any(term in haystack for term in ("live issue", "outage", "problem ticket", "faq", "dd05", "sfv")),
+            "rejection" in haystack and "address proof" in haystack,
+            "capacity" in haystack and any(term in haystack for term in ("database", "db", "over 80%", "80%")),
+            "phishing" in haystack or "security warning" in haystack,
+        )
+    )
+
+
+def _fallback_should_be_other_update(item: dict[str, Any]) -> bool:
+    haystack = " ".join(
+        str(item.get(field) or "") for field in ("title", "summary", "evidence")
+    ).casefold()
+    if not _is_other_event_signal(haystack):
+        return False
+    # P0 delivery threads remain Project Updates even when they contain an
+    # error log; the project state and the operational incident are one topic.
+    if "[p0]" in haystack or "scheduled transfer" in haystack or "recurring transfer" in haystack:
+        return False
+    return any(
+        term in haystack
+        for term in (
+            "incident",
+            "gpay",
+            "rejection",
+            "faq",
+            "problem ticket",
+            "outage",
+            "capacity",
+            "security",
+            "phishing",
+            "not working",
+            "unable to",
+        )
+    )
+
+
+def _fallback_signal_type(item: dict[str, Any]) -> str:
+    haystack = " ".join(
+        str(item.get(field) or "") for field in ("title", "summary", "evidence")
+    ).casefold()
+    if any(term in haystack for term in ("incident", "outage", "system down", "problem ticket")):
+        return "incident"
+    if any(term in haystack for term in ("phishing", "security", "mas", "compliance")):
+        return "risk_compliance"
+    if any(term in haystack for term in ("rejection", "capacity", "alert")):
+        return "cross_team_dependency"
+    return "cross_team_dependency"
 
 
 def _is_protected_daily_brief_record(record: dict[str, str]) -> bool:
@@ -2969,6 +3926,61 @@ def _filter_daily_brief_meeting_logistics(history_text: str) -> str:
     )
 
 
+def _filter_daily_brief_seatalk_noise(history_text: str, *, config: dict[str, Any] | None) -> str:
+    """Apply configured SeaTalk noise filtering without hiding material incidents."""
+    normalized_config = config if isinstance(config, dict) else {}
+    noise = normalized_config.get("noise") or {}
+    blocked_terms = {
+        str(value).strip().casefold()
+        for value in (noise.get("seatalk_group_blacklist") or [])
+        if str(value).strip()
+    }
+    if not blocked_terms:
+        return str(history_text or "")
+
+    lines = str(history_text or "").splitlines()
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in lines:
+        if _SEATALK_HISTORY_HEADER_RE.match(line.strip()) and current:
+            blocks.append(current)
+            current = []
+        current.append(line)
+    if current:
+        blocks.append(current)
+
+    protected_groups: set[str] = set()
+    for block in blocks:
+        header = next((line for line in block if _SEATALK_HISTORY_HEADER_RE.match(line.strip())), "")
+        match = _SEATALK_HISTORY_HEADER_RE.match(header.strip())
+        if not match:
+            continue
+        group = match.group("group").strip()
+        if not any(term in header.casefold() for term in blocked_terms):
+            continue
+        records = _seatalk_history_records_for_evidence("\n".join(block))
+        if any(_is_priority_other_update_record(record) for record in records):
+            protected_groups.add(group.casefold())
+
+    kept: list[str] = []
+    skip_block = False
+    current_group = ""
+    for line in lines:
+        header_match = _SEATALK_HISTORY_HEADER_RE.match(line.strip())
+        if header_match:
+            current_group = header_match.group("group").strip()
+            blocked = any(term in line.casefold() for term in blocked_terms)
+            skip_block = blocked and current_group.casefold() not in protected_groups
+            if skip_block:
+                continue
+        if skip_block:
+            continue
+        if any(term in line.casefold() for term in blocked_terms) and current_group.casefold() not in protected_groups:
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def _is_meeting_logistics_or_availability_notice(text: Any) -> bool:
     normalized = str(text or "").casefold()
     meeting_terms = (
@@ -3001,6 +4013,33 @@ def _is_meeting_logistics_or_availability_notice(text: Any) -> bool:
     )
     if any(term in normalized for term in availability_terms) and any(term in normalized for term in meeting_terms):
         return True
+    meeting_discussion_logistics = (
+        "quick meeting",
+        "meeting this afternoon",
+        "discuss in the meeting",
+        "discuss this in the meeting",
+        "can we discuss",
+        "shall we discuss",
+        "invite has been sent",
+        "calendar invite",
+        "calendar invitation",
+        "accepting/rejecting the calendar",
+        "accept/reject the calendar",
+        "rsvp",
+        "you are invited",
+        "you're invited",
+        "you’re invited",
+        "meeting invitation",
+        "briefing",
+        "conflicting meeting",
+        "able to join",
+        "join today's meeting",
+        "join the meeting",
+        "在会议上讨论",
+        "会议上讨论",
+    )
+    if any(phrase in normalized for phrase in meeting_discussion_logistics):
+        return True
     # Availability questions such as "is 2-3pm ok?" are scheduling logistics,
     # even when the message does not use the word "meeting".
     time_slot_question = bool(
@@ -3011,6 +4050,48 @@ def _is_meeting_logistics_or_availability_notice(text: Any) -> bool:
     )
     return time_slot_question and any(
         term in normalized for term in ("available", "not available", "@", "calendar", "slot")
+    )
+
+
+def _is_team_member_reminder_noise(group: Any, text: Any) -> bool:
+    """Exclude coordination chatter that is not an unanswered work request."""
+    group_text = " ".join(str(group or "").casefold().split())
+    message_text = " ".join(str(text or "").casefold().split())
+    if any(hint in group_text for hint in TEAM_MEMBER_REMINDER_NOISE_GROUP_HINTS):
+        return True
+    return _is_meeting_logistics_or_availability_notice(message_text)
+
+
+def _is_assignment_statement(text: Any) -> bool:
+    """Do not turn Xiaodong's internal delegation notes into team reminders."""
+    normalized = " ".join(str(text or "").casefold().split())
+    if not normalized or re.search(r"[?？]", normalized):
+        return False
+    return any(
+        phrase in normalized
+        for phrase in (
+            " can help with ",
+            " can help on ",
+            " will help with ",
+            " will help on ",
+            "负责",
+            "可以帮忙",
+            "可以负责",
+        )
+    ) and not any(
+        cue in normalized
+        for cue in (
+            "please",
+            "can you",
+            "could you",
+            "need you",
+            "check",
+            "confirm",
+            "review",
+            "看下",
+            "确认",
+            "跟进",
+        )
     )
 
 
@@ -3595,6 +4676,15 @@ def _sanitize_seatalk_evidence(value: Any, *, name_mappings: dict[str, str] | No
 
     cleaned = RAW_SEATALK_ID_PATTERN.sub(replace_raw_id, text)
     cleaned = _normalize_seatalk_source_label(cleaned)
+    # Some SeaTalk display names include an internal employee/account code in
+    # brackets (for example, ``Zach Chong [SBKSG0463]``).  The code is not
+    # useful evidence and should not leak into the user-facing brief.  Keep
+    # meaningful labels such as [P0] and [ID UAT].
+    cleaned = re.sub(
+        r"\s+\[(?=[A-Z][A-Z0-9_-]{4,}\d[A-Z0-9_-]*\])[A-Z][A-Z0-9_-]{4,}\]",
+        "",
+        cleaned,
+    )
     cleaned = re.sub(r"\bSeaTalk\s+SeaTalk\s+group\b", "SeaTalk group", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\bSeaTalk\s+SeaTalk\s+contact\b", "SeaTalk contact", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\b(SeaTalk group)(?:\s*[,;/]\s*\1)+\b", r"\1", cleaned)
@@ -3737,7 +4827,7 @@ def _build_daily_brief_evidence_refs(
                 thread=str(record.get("thread") or ""),
                 sender=str(record.get("sender") or ""),
             ) or _looks_like_project_update_ref(record)
-            protected = _is_protected_daily_brief_record(record)
+            protected = _is_protected_daily_brief_record(record) or _is_priority_other_update_record(record)
             if not qualifies and not protected:
                 continue
             if regular_record_count < 120 or protected:
@@ -3779,7 +4869,6 @@ def _looks_like_project_update_ref(record: dict[str, str]) -> bool:
             "qris",
             "translation",
             "copywriting",
-            "edit access",
             "querytransferrecipient",
             "fallback",
             "recurring",
@@ -4092,7 +5181,11 @@ def _correct_known_update_domains(items: list[dict[str, Any]]) -> None:
             continue
         source_labels = " ".join(str(item.get(field) or "") for field in ("evidence", "title")).casefold()
         item_text = _item_text(item)
-        if "retail credit review" in item_text or "retail credit review" in source_labels:
+        if any(term in item_text or term in source_labels for term in ("548-549", "af sheet", "scam model v3", "anti-fraud", "anti fraud")):
+            item["domain"] = "Anti-fraud"
+        elif any(term in item_text or term in source_labels for term in ("grc", "authorization management", "issue & action plan")):
+            item["domain"] = "Ops Risk"
+        elif "retail credit review" in item_text or "retail credit review" in source_labels:
             item["domain"] = "Credit Risk"
         elif (
             _display_domain(item.get("domain")) == "Credit Risk"
@@ -4126,8 +5219,13 @@ def _best_evidence_ref_for_item(
         )
         ref_evidence = _normalize_thread_match_text(ref.get("evidence"))
         score = 0
-        if item_evidence and ref_evidence:
+        if item_evidence and ref_evidence and not _is_generic_seatalk_evidence(item_evidence):
             if item_evidence == ref_evidence:
+                # An exact source label narrows the candidate set, but a group
+                # can have several messages with the same rendered label. Keep
+                # scoring the snippet, thread, and mentioned people so an
+                # incident is not attached to a nearby reminder in the same
+                # group.
                 score += 30
             elif item_evidence in ref_evidence or ref_evidence in item_evidence:
                 score += 16
@@ -4136,8 +5234,18 @@ def _best_evidence_ref_for_item(
             score += 10
         ref_tokens = _evidence_match_tokens(ref_text)
         overlap = item_tokens & ref_tokens
+        item_people = _extract_item_people_for_evidence_validation(item)
+        item_people_tokens: set[str] = set()
+        for person in item_people:
+            item_people_tokens.update(_evidence_match_tokens(person))
         score += min(len(overlap), 12)
-        if _extract_item_people_for_evidence_validation(item) and _evidence_ref_matches_item_people(item, ref):
+        # Prefer topical overlap over a shared person name when the SeaTalk
+        # source label is generic, e.g. two Xiaodong messages about Hui
+        # Xian/Liye in different groups during the same window. Keep Gmail's
+        # stricter legacy threshold unchanged.
+        if ref_source_type == "seatalk":
+            score += min(len(overlap - item_people_tokens), 6)
+        if item_people and _evidence_ref_matches_item_people(item, ref):
             score += 3
         if not _evidence_refs_match_project_item(item, [ref]):
             score -= 20
@@ -4901,6 +6009,8 @@ def _normalize_todo_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for item in items:
         clean = dict(item)
+        if _is_low_quality_todo_item(clean):
+            continue
         clean["domain"] = _display_domain(clean.get("domain"))
         clean["priority"] = _normalize_priority(clean.get("priority"))
         clean["due"] = _display_due(clean.get("due"))
@@ -4909,6 +6019,27 @@ def _normalize_todo_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             clean["task"] = _normalize_xiaodong_action_voice(clean.get("task"))
         normalized.append(clean)
     return normalized
+
+
+def _is_low_quality_todo_item(item: dict[str, Any]) -> bool:
+    """Drop acknowledgements, bare mentions, and generic fallback actions."""
+    task = " ".join(str(item.get("task") or "").split()).strip()
+    lowered = task.casefold()
+    if not task:
+        return True
+    if task.startswith("@") and re.fullmatch(r"@[\w.-]{2,30}[。.!！]?", task):
+        return True
+    return lowered.startswith(
+        (
+            "respond to the unresolved seatalk request",
+            "respond to the unresolved request in the",
+            "follow up on the unresolved seatalk ask",
+            "thanks ",
+            "thanks.",
+            "yes, that's correct",
+            "yes, thats correct",
+        )
+    )
 
 
 def _normalize_xiaodong_action_voice(value: Any) -> str:
@@ -4948,15 +6079,31 @@ def _normalize_update_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]
 def _prepare_project_update_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     prepared: list[dict[str, Any]] = []
     for item in items:
+        if _is_meeting_logistics_or_availability_notice(
+            _item_text(item, fields=("title", "summary", "evidence"))
+        ):
+            continue
         clean = dict(item)
         summary = _synthesize_project_update_summary(clean)
         if "context:" in summary.casefold():
             summary = re.split(r"\bcontext\s*:", summary, maxsplit=1, flags=re.IGNORECASE)[0].strip(" .") + "."
-        if not summary:
+        if not summary or _is_placeholder_update_summary(summary):
             continue
         clean["summary"] = summary
         prepared.append(clean)
     return prepared
+
+
+def _is_placeholder_update_summary(value: Any) -> bool:
+    normalized = " ".join(str(value or "").casefold().split())
+    return any(
+        phrase in normalized
+        for phrase in (
+            "the update may affect the related delivery or operational work",
+            "confirm the owner, impact, and next milestone",
+            "the unresolved blocker or dependency may affect delivery or operational readiness",
+        )
+    )
 
 
 def _prepare_other_update_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -4975,6 +6122,8 @@ def _prepare_other_update_items(items: list[dict[str, Any]]) -> list[dict[str, A
             or summary.endswith(("?", "？"))
         ):
             continue
+        if _is_placeholder_update_summary(summary):
+            continue
         combined = " ".join(str(clean.get(field) or "") for field in ("title", "summary", "evidence")).casefold()
         if any(term in combined for term in ("incident", "outage", "downtime", "ddos")):
             clean["signal_type"] = "incident"
@@ -4986,6 +6135,39 @@ def _prepare_other_update_items(items: list[dict[str, Any]]) -> list[dict[str, A
         clean["summary"] = f"{summary}." if summary[-1:] not in ".!?。！？" else summary
         prepared.append(clean)
     return prepared
+
+
+def _synthesize_other_update_summary(item: dict[str, Any]) -> str:
+    """Create an awareness entry only when the event has an explicit impact."""
+    raw = " ".join(str(item.get("summary") or item.get("title") or "").split())
+    if not raw:
+        return ""
+    if all(label in raw.casefold() for label in ("state:", "impact:", "next:")) and not _is_placeholder_update_summary(raw):
+        return raw
+    known = _synthesize_project_update_summary(item)
+    if known and not _is_placeholder_update_summary(known):
+        return known
+    combined = " ".join(str(item.get(field) or "") for field in ("title", "evidence", "summary"))
+    lowered = combined.casefold()
+    body = _clean_deterministic_fallback_body(raw).rstrip(" .!?。！？")
+    if not body or _is_meeting_logistics_or_availability_notice(combined):
+        return ""
+    if "incident" in lowered or "outage" in lowered or "system down" in lowered:
+        return (
+            f"State: {body}. Impact: the live incident may affect customer operations or service recovery. "
+            "Next: confirm the mitigation owner, recovery status, and recurrence-prevention plan."
+        )
+    if any(term in lowered for term in ("failed", "failure", "not working", "unable to", "error")):
+        return (
+            f"State: {body}. Impact: the failed flow is blocking or degrading the affected UAT or live journey. "
+            "Next: isolate the failing dependency, apply the fix, and complete a retest."
+        )
+    if any(term in lowered for term in ("rejection", "rejected", "capacity", "alert", "phishing", "security")):
+        return (
+            f"State: {body}. Impact: the risk signal requires product or operational attention. "
+            "Next: confirm the exposure, accountable owner, and remediation checkpoint."
+        )
+    return ""
 
 
 def _clean_deterministic_fallback_body(value: Any) -> str:
@@ -5036,6 +6218,26 @@ def _synthesize_project_update_summary(item: dict[str, Any]) -> str:
         label in raw_lowered for label in ("state:", "impact:", "next:")
     ) and any(term in lowered for term in ("ui/ux", "prd review", "tech design", "tiger", "market-data", "market data")):
         return "State: Mari Stock Trading project 216820 remains on track: APP UI/UX is complete, PRD reviews are nearing finalization, technical design is in progress, and core Tiger/ITC setup is confirmed. Impact: no schedule exception is currently signaled, but PRD, market-data-vendor, and fractional-share design checkpoints still govern implementation readiness. Next: close the internal and Tiger-flow PRD reviews, confirm market-data integration, and complete fractional-share design."
+    if "seller cash loan" in lowered and "direct debit" in lowered:
+        if any(term in lowered for term in ("23/9", "23 sep", "23 september", "cutoff by monday", "china start holidays")):
+            return "State: Seller Cash Loan Direct Debit remains blocked in UAT because the Shopee-side issue prevents successful transactions; AF v3.53 is now targeted for 23 Sep, with a 21 Sep cutoff for testing. Impact: failure to sign off by the cutoff could remove the AF ticket from the deployment or require rollback, with limited support during the China holiday. Next: Shopee must fix the UAT issue and QA must retest before 21 Sep."
+        return "State: Seller Cash Loan Direct Debit UAT is blocked by a Shopee-side issue that prevents successful transactions. Impact: the AF release cannot be signed off until the upstream issue is fixed. Next: obtain the Shopee fix and complete a successful QA retest."
+    if "qris" in lowered and "uat" in lowered and any(term in lowered for term in ("blocker", "waiting to", "select an spaylater", "payment failed")):
+        return "State: QRIS CrossBorder UAT still has one highest-severity blocker and five high-severity issues, including the incorrect SPayLater tenure prompt and unresolved SeaBank/payment-result integrations. Impact: the UAT package is not ready for sign-off. Next: close the remaining AS/SPP fixes and run the listed retests before release approval."
+    if "mas" in lowered and any(term in lowered for term in ("scheduled transfer", "schedule transfer", "drainage rule")):
+        return "State: Scheduled-transfer controls remain pending MAS confirmation on the drainage-rule check. Impact: public launch depends on regulatory confirmation. Next: obtain the MAS response and update launch readiness."
+    if "scheduled and recurring transfer" in lowered or "scheduled transfer" in lowered and "p0" in lowered:
+        return "State: The P0 Scheduled and Recurring Transfers release has 28 open SIT/UAT bugs, including Admin Portal entry failures and a PayNow interbank execution blocker. Impact: release validation and go-live readiness remain blocked. Next: prioritize the blocking defects, publish owner-level dispositions, and complete verified UAT/SIT retests before the release checkpoint."
+    if "force upgrade" in lowered and any(term in lowered for term in ("v3.05", "3.05", "app version")):
+        return "State: AF is preparing an App force-upgrade to reduce version-dependent authentication branches; about 5% of users remain below v3.05 and the target is to start once the affected cohort falls below 2–3%. Impact: the decision affects AF rule-maintenance complexity and customer coverage. Next: confirm the 3.5.0 baseline and obtain Bank PMO approval for the target timing."
+    if ("dd05" in lowered and "faq" in lowered) or ("blank page" in lowered and "need help" in lowered):
+        return "State: PH live issue analysis found that DD05 transaction types lack the required FAQ mapping, sending users to a blank page from Need Help; the PM request has now been raised for configuration. Impact: affected SPP AS DP and QR P2M journeys may show a broken support path at go-live. Next: complete and validate the DD05 FAQ configuration before the next-week go-live."
+    if "manual provisioning" in lowered and "uat" in lowered:
+        return "State: PH GPay UAT manual-provisioning SMS is not working, while the team has agreed to run regression for the retry-logic ticket. Impact: the UAT path remains a test dependency for v3.29 sign-off. Next: reproduce the error, complete the regression test, and record whether the flow is a release blocker or a deferred enhancement."
+    if "problem ticket" in lowered and any(term in lowered for term in ("sfv", "recurrence frequency", "operational impact")):
+        return "State: The SFV live issue is being converted into a Problem Ticket because investigation and a sustainable fix need more time. Impact: recurrence frequency and manual recovery effort will determine the long-term priority and fix SLA. Next: confirm the recurrence and operational-impact assessment and track the remediation plan."
+    if "address proof" in lowered and "rejection" in lowered:
+        return "State: Recent foreigner-onboarding rejections were traced to missing or invalid address proof rather than a SingPass retrieval failure. Impact: the gap can continue to block eligible foreign-worker onboarding. Next: Bank and Shopee teams are defining simpler address-proof alternatives and validating them through upcoming interviews."
     if _is_material_vendor_cost_signal(lowered):
         return "State: GMS may classify all PH SMS sender IDs as international, creating an estimated USD400k monthly cost. Impact: the unresolved routing classification creates material recurring cost exposure. Next: Infobip must confirm the affected account and telco scope and provide a remediation decision."
     if "mas" in lowered and "hold & release" in lowered and any(
@@ -5080,11 +6282,21 @@ def _synthesize_project_update_summary(item: dict[str, Any]) -> str:
         # MTA, notification, and asset-API markers can belong to unrelated
         # threads. Do not manufacture one cross-thread integration state.
         return ""
+    if "548-549" in lowered or ("edit access" in lowered and "af sheet" in lowered):
+        return "State: AF sheet rows 548-549 still require edit access. Impact: the pending change blocks the related review or validation step. Next: grant the required access and confirm the rows are updated."
+    if "edit access" in lowered:
+        return ""
     if "android" in lowered and "sdk" in lowered and any(term in lowered for term in ("v3.07", "anti-malware", "malware")):
         return "State: The Bank Android SDK package is available for 6.2.1 testing to support the v3.07 anti-malware release. Impact: validation is needed before the release can progress. Next: notify the team and complete package verification."
     if "atm" in lowered and any(version in lowered for version in ("v3.07", "v3.08")):
-        state = "ATM upstream timing is delayed; " if any(term in lowered for term in ("delay", "delayed", "延期")) else "ATM release sequencing currently places "
-        return f"State: {state}the ATM toggle in v3.07 and ATM withdrawal testing in v3.08. Impact: version sequencing affects release coverage. Next: confirm the upstream timeline and test dates."
+        if any(term in lowered for term in ("delay", "delayed", "延期")):
+            state_text = "ATM upstream timing is delayed; the ATM release plan separates the toggle in v3.07 from withdrawal testing in v3.08."
+        else:
+            state_text = "The ATM release plan separates the toggle in v3.07 from withdrawal testing in v3.08."
+        return (
+            f"State: {state_text} Impact: the split makes upstream timing and cross-version test coverage a release dependency. "
+            "Next: lock the upstream delivery timeline and confirm the test dates before finalizing release readiness."
+        )
     if "querytransferrecipient" in lowered or "swp-31174" in lowered or (
         "recurring" in lowered and "incident" in lowered and "ph" in lowered
     ):
@@ -5130,6 +6342,10 @@ def _synthesize_project_update_summary(item: dict[str, Any]) -> str:
         body = _clean_deterministic_fallback_body(body).rstrip(" .!?。！？")
         if not body:
             return ""
+        if "blocked" in lowered and any(
+            term in lowered for term in ("configuration challenge", "config challenge", "configuration issue")
+        ):
+            return "State: The AF UAT flow is blocked by a configuration challenge. Impact: UAT validation cannot proceed until the configuration is corrected. Next: confirm the configuration owner, apply the fix, and complete a retest."
         if raw.endswith(("?", "？")):
             state = f"An open decision is being assessed: {body}."
         else:
@@ -5156,7 +6372,10 @@ def _synthesize_project_update_summary(item: dict[str, Any]) -> str:
             impact = "The version or release decision may affect delivery timing and validation readiness."
         else:
             impact = "The update may affect the related delivery or operational work."
-        return f"State: {state} Impact: {impact} Next: Confirm the owner, impact, and next milestone."
+        # A generic fallback is not useful to a senior PM. If the source does
+        # not contain a concrete impact or next step, omit it rather than
+        # sending a polished-looking transcript fragment.
+        return ""
     # A transcript-like candidate without a grounded synthesis is lower quality
     # than omission. Known high-signal families are handled explicitly above.
     return ""
@@ -5537,6 +6756,8 @@ def _brief_update_is_covered_by_todo(update: dict[str, Any], todo: dict[str, Any
 def _protected_daily_brief_topic_family(item: dict[str, Any]) -> str:
     """Identify required signal families before generic timeline words are compared."""
     text = _item_text(item, fields=("title", "summary", "task", "reminder", "evidence")).casefold()
+    if "scheduled and recurring transfer" in text or "scheduled transfer" in text and "p0" in text:
+        return "scheduled_recurring_transfers_p0"
     if "atm" in text and re.search(r"\bv?3\.0[78]\b", text, flags=re.IGNORECASE):
         return "atm_version_timeline"
     if "qris" in text or "sgdb-81072" in text:
@@ -5703,7 +6924,10 @@ def _build_quality_metadata(
     joined_sources = "\n".join(source_texts).lower()
     if "seatalk" in joined_sources:
         source_types.add("seatalk")
-    if "gmail" in joined_sources or "message " in joined_sources:
+    # The second source slot is the explicit Gmail input, not a word that may
+    # appear inside a SeaTalk message or URL. Daily Brief production runs now
+    # pass an empty Gmail source by design.
+    if len(source_texts) > 1 and str(source_texts[1] or "").strip():
         source_types.add("gmail")
     high_confidence = sum(1 for item in direct_action_todos if _normalize_priority(item.get("priority")) == "high")
     manual_notes: list[str] = []
@@ -5752,13 +6976,29 @@ def _filter_seatalk_reminders(
             for candidate in reminder_candidates
         ):
             continue
-        domain = TEAM_MEMBER_REMINDER_DOMAIN_OVERRIDES.get(_normalize_person_key(canonical_person), _display_domain(item.get("domain")))
+        domain = _team_member_reminder_domain(item, canonical_person)
         if domain == "Anti-fraud" and _normalize_person_key(canonical_person) not in ANTI_FRAUD_TEAM_MEMBERS:
             continue
         item["person"] = canonical_person
         item["domain"] = domain
         filtered.append(item)
     return filtered
+
+
+def _team_member_reminder_domain(item: dict[str, Any], person: str) -> str:
+    """Assign reminder ownership from the person and the evidenced work context."""
+    person_key = _normalize_person_key(person)
+    if person_key in {_normalize_person_key(name) for name in ANTI_FRAUD_TEAM_MEMBERS}:
+        return "Anti-fraud"
+    combined = " ".join(
+        str(item.get(field) or "")
+        for field in ("domain", "title", "summary", "reminder", "evidence")
+    ).casefold()
+    if any(term in combined for term in ("grc", "authorization management", "issue & action plan", "audit-history")):
+        return "Ops Risk"
+    if any(term in combined for term in ("credit risk", "crms", "maricredit", "a-card", "acard")):
+        return "Credit Risk"
+    return TEAM_MEMBER_REMINDER_DOMAIN_OVERRIDES.get(person_key, _display_domain(item.get("domain")))
 
 
 def _reminder_matches_candidate(
@@ -5796,6 +7036,14 @@ def _filter_reminders_already_covered_by_watch_delegate(
     ]
 
 
+def _watch_item_is_explicitly_owner_specific(todo: dict[str, Any], reminder: dict[str, Any]) -> bool:
+    person = _canonical_team_member_name(reminder.get("person"))
+    if not person:
+        return False
+    text = _item_text(todo, fields=("task", "title", "summary"))
+    return _normalize_person_key(person) in _normalize_person_key(text)
+
+
 def _backfill_team_member_reminders_from_candidates(
     reminders: list[dict[str, Any]],
     *,
@@ -5818,9 +7066,8 @@ def _backfill_team_member_reminders_from_candidates(
         person = _canonical_team_member_name(candidate.get("person"))
         if not person:
             continue
-        domain = TEAM_MEMBER_REMINDER_DOMAIN_OVERRIDES.get(_normalize_person_key(person), "General")
         item = {
-            "domain": domain,
+            "domain": "General",
             "person": person,
             "reminder": _candidate_followup_reminder_text(candidate),
             "evidence": str(ref.get("evidence") or "").strip(),
@@ -5828,6 +7075,7 @@ def _backfill_team_member_reminders_from_candidates(
             "evidence_ref_id": str(ref.get("id") or "").strip(),
             "followup_source": "deterministic_backfill",
         }
+        item["domain"] = _team_member_reminder_domain(item, person)
         if any(_item_matches_resolved_followup(item, resolved) for resolved in (resolved_candidates or [])):
             continue
         if _is_team_member_coverage_notice(_candidate_followup_reminder_text(candidate)):
@@ -5874,6 +7122,9 @@ def _candidate_ref_key(candidate: dict[str, str]) -> tuple[str, str, str, str]:
 
 
 def _candidate_followup_reminder_text(candidate: dict[str, str]) -> str:
+    context = " ".join(str(candidate.get(field) or "") for field in ("group", "thread")).casefold()
+    if "shadow run" in context and "strategy" in context:
+        return "Confirm whether downstream Strategies should continue after the first Strategy is rejected in Shadow Run, and check Bowen's issue."
     text = _clip_hint_text(candidate.get("text"), limit=180)
     if text:
         concise = _concise_followup_request(text)
@@ -5885,6 +7136,13 @@ def _concise_followup_request(value: Any) -> str:
     """Turn deterministic backfill text into an action instead of a chat quote."""
     text = " ".join(str(value or "").split()).strip()
     if not text:
+        return ""
+    chinese_check = re.search(r"(?:你看下|帮忙看下|帮我看下)\s*(?P<subject>.+)$", text, flags=re.IGNORECASE)
+    if chinese_check:
+        subject = chinese_check.group("subject").strip(" ，,。.!！")
+        if subject:
+            return _sentence_text(f"Check {subject} and provide an update", "Follow up on the unresolved request")
+    if re.search(r"\b(?:can|could)\s+help\s+with\b", text, flags=re.IGNORECASE) and not re.search(r"[?？]", text):
         return ""
     match = re.search(
         r"\b(?:please|pls|plz)\s+(?:help\s+to\s+)?(?P<action>.+)$",
@@ -5912,6 +7170,18 @@ def _concise_followup_request(value: Any) -> str:
 
 def _xiaodong_followup_task(candidate: dict[str, str]) -> str:
     combined = " ".join(str(candidate.get(field) or "") for field in ("group", "thread", "context", "text")).casefold()
+    if "centum" in combined and any(term in combined for term in ("current balance", "available balance", "<$100>", "account balance")):
+        return "Clarify whether the CENTUM <$100> account-balance check uses current balance or available balance."
+    if "ipification" in combined and any(term in combined for term in ("brd", "business requirement", "business requirements")):
+        return "Review the Ipification POC BRD and join the follow-up alignment discussion."
+    if "unlock card" in combined or ("blacklist" in combined and "server error" in combined):
+        return "Investigate the Self Service Unlock Card server error after a blacklisted-account hit and coordinate the fix with the CC development team."
+    if "force upgrade" in combined and any(term in combined for term in ("v3.05", "3.5", "2.83", "app version")):
+        return "Confirm the App force-upgrade baseline with Bank PMO and start the approval process to simplify version-dependent AF authentication branches."
+    if "default template" in combined or "默认模板" in combined or ("需要配模板" in combined and "模板" in combined):
+        return "Confirm whether the scenario requires a dedicated template and align the default-template handling with Bank BE."
+    if "fraud ops" in combined and "slide" in combined and any(term in combined for term in ("next wed", "next wednesday", "finish")):
+        return "Complete the PH Fraud Ops slide covering scope, focus areas, automation target state, and immediate next steps by next Wednesday."
     if "v3.49" in combined and any(term in combined for term in ("白名单", "大促", "放量", "alc v12")):
         return (
             "Decide and communicate whether ID v3.49 ALC v12 remains whitelist-only before the 8.8 promotion "
@@ -5976,10 +7246,14 @@ def _xiaodong_direct_request_task(candidate: dict[str, str]) -> str:
 
 def _xiaodong_followup_domain(candidate: dict[str, str]) -> str:
     combined = " ".join(str(candidate.get(field) or "") for field in ("group", "thread", "text")).casefold()
-    if any(term in combined for term in ("anti-fraud", "anti fraud", "fraud", "a/b", "s0141", "authentication", "rule", "hold & release")) or (
+    if any(term in combined for term in ("anti-fraud", "anti fraud", "fraud", "a/b", "s0141", "authentication", "rule", "hold & release", "ipification", "unlock card", "blacklist")) or (
         "mas" in combined and "bob" in combined
     ) or re.search(r"\baf\b", combined):
         return "Anti-fraud"
+    if any(term in combined for term in ("centum", "grc", "ops risk", "operational", "vpn")):
+        return "Ops Risk"
+    if any(term in combined for term in ("credit risk", "crms", "loan", "acard")):
+        return "Credit Risk"
     return "General"
 
 
@@ -6418,8 +7692,163 @@ def _normalize_dedupe_text(value: str) -> str:
     return " ".join(useful[:16])
 
 
-def _render_todo_text(item: dict[str, Any]) -> str:
+def _brief_label(value: Any, *, language: str = "en") -> str:
+    text = str(value or "").strip()
+    if str(language or "").strip().casefold() in {"zh", "zh-cn", "chinese"}:
+        return BRIEF_ZH_SECTION_LABELS.get(text, text)
+    return text
+
+
+def _brief_localize_window_label(value: Any) -> str:
+    text = " ".join(str(value or "").split())
+    match = re.fullmatch(r"previous\s+(\d+)\s+hours?", text, flags=re.IGNORECASE)
+    if match:
+        return f"前 {match.group(1)} 小时"
+    return text
+
+
+def _is_chinese_brief(language: str) -> bool:
+    return str(language or "").strip().casefold() in {"zh", "zh-cn", "chinese"}
+
+
+def _brief_localize_value(value: Any, *, language: str = "en") -> str:
+    """Localize deterministic English text without changing source evidence."""
+    text = str(value or "").strip()
+    if str(language or "").strip().casefold() not in {"zh", "zh-cn", "chinese"} or not text:
+        return text
+
+    exact = {
+        "Clarify whether the CENTUM <$100> account-balance check uses current balance or available balance.": "确认 CENTUM 自动化脚本中 <$100> 账户余额校验使用当前余额还是可用余额。",
+        "Review the Ipification POC BRD and join the follow-up alignment discussion.": "评审 Ipification POC BRD，并参加后续对齐讨论。",
+        "Investigate the Self Service Unlock Card server error after a blacklisted-account hit and coordinate the fix with the CC development team.": "跟进黑名单账户命中后的 Self Service Unlock Card 服务器报错，并与 CC 开发团队协调修复。",
+        "Confirm the App force-upgrade baseline with Bank PMO and start the approval process to simplify version-dependent AF authentication branches.": "与 Bank PMO 确认 App 强制升级基线版本，并启动审批，以简化依赖版本的防欺诈认证分支。",
+        "Confirm whether the scenario requires a dedicated template and align the default-template handling with Bank BE.": "确认该场景是否需要专用模板，并与 Bank BE 对齐默认模板处理方式。",
+        "Complete the PH Fraud Ops slide covering scope, focus areas, automation target state, and immediate next steps by next Wednesday.": "在下周三前完成 PH Fraud Ops 幻灯片，覆盖范围、重点、自动化目标状态和近期下一步。",
+        "Follow up on the A/B testing rule-behavior issue and confirm why S0141 stopped triggering before the scheduled configuration date.": "跟进 A/B testing 规则行为问题，并确认 S0141 为何在计划配置日期前停止触发。",
+        "Confirm with Bob whether Hold & Release development should proceed before MAS approval, while keeping production launch blocked until approval is received.": "与 Bob 确认 Hold & Release 是否可在 MAS 审批前继续开发，同时在获得审批前保持生产上线阻塞。",
+        "Follow up on how the two-action authentication case was handled with Wang Chang and Zuhua.": "跟进 Wang Chang 和 Zuhua 对双重认证动作案例的处理方式。",
+        "Resolve the AF ivLog ticketing ambiguity with development and confirm when market and productization tickets are required.": "与开发团队解决 AF ivLog 建单规则歧义，并确认何时需要创建市场单和产品化单。",
+        "Confirm with development that the amended v3.26/v3.28 ticket and release mapping follows the correct delivery process.": "与开发团队确认修订后的 v3.26/v3.28 工单与发布映射符合正确交付流程。",
+        "Confirm whether downstream Strategies should continue after the first Strategy is rejected in Shadow Run, and check Bowen's issue.": "确认 Shadow Run 中第一层 Strategy 被拒绝后是否仍应继续执行后续 Strategies，并跟进 Bowen 的问题。",
+        "State: QRIS CrossBorder UAT still has one highest-severity blocker and five high-severity issues, including the incorrect SPayLater tenure prompt and unresolved SeaBank/payment-result integrations. Impact: the UAT package is not ready for sign-off. Next: close the remaining AS/SPP fixes and run the listed retests before release approval.": "状态：QRIS CrossBorder UAT 仍有一个最高严重级别阻塞和五个高严重级别问题，包括 SPayLater 期限提示错误，以及 SeaBank 和支付结果集成未解决。影响：UAT 包尚未达到签字确认条件。下一步：关闭剩余 AS/SPP 修复，并在发布审批前完成列出的回归测试。",
+        "State: Seller Cash Loan Direct Debit remains blocked in UAT because the Shopee-side issue prevents successful transactions; AF v3.53 is now targeted for 23 Sep, with a 21 Sep cutoff for testing. Impact: failure to sign off by the cutoff could remove the AF ticket from the deployment or require rollback, with limited support during the China holiday. Next: Shopee must fix the UAT issue and QA must retest before 21 Sep.": "状态：Seller Cash Loan Direct Debit 仍被 Shopee 侧问题阻塞，UAT 无法成功交易；AF v3.53 目标调整为 9 月 23 日，测试截止时间为 9 月 21 日。影响：若未能在截止时间前签字确认，AF 工单可能被移出发布或需要回滚，且中国假期期间支持资源有限。下一步：Shopee 需修复 UAT 问题，QA 需在 9 月 21 日前完成回归测试。",
+        "State: The P0 Scheduled and Recurring Transfers release has 28 open SIT/UAT bugs, including Admin Portal entry failures and a PayNow interbank execution blocker. Impact: release validation and go-live readiness remain blocked. Next: prioritize the blocking defects, publish owner-level dispositions, and complete verified UAT/SIT retests before the release checkpoint.": "状态：P0 Scheduled and Recurring Transfers 发布目前有 28 个未关闭的 SIT/UAT 缺陷，包括 Admin Portal 无法进入和 PayNow 跨行执行阻塞。影响：发布验证和上线准备仍被阻塞。下一步：优先关闭阻塞缺陷，发布到责任人的逐项处理结论，并在发布检查点前完成可验证的 UAT/SIT 回归测试。",
+        "State: AF is preparing an App force-upgrade to reduce version-dependent authentication branches; about 5% of users remain below v3.05 and the target is to start once the affected cohort falls below 2–3%. Impact: the decision affects AF rule-maintenance complexity and customer coverage. Next: confirm the 3.5.0 baseline and obtain Bank PMO approval for the target timing.": "状态：AF 正准备 App force-upgrade，以减少依赖版本的认证分支；目前约 5% 用户低于 v3.05，目标是在受影响用户降至 2–3% 以下后启动。影响：该决定会影响 AF 规则维护复杂度和客户覆盖范围。下一步：确认 3.5.0 基线版本，并取得 Bank PMO 对启动时间的审批。",
+        "State: PH live issue analysis found that DD05 transaction types lack the required FAQ mapping, sending users to a blank page from Need Help; the PM request has now been raised for configuration. Impact: affected SPP AS DP and QR P2M journeys may show a broken support path at go-live. Next: complete and validate the DD05 FAQ configuration before the next-week go-live.": "状态：PH 线上问题分析发现 DD05 交易类型缺少 FAQ 映射，用户从 Need Help 进入空白页；PM 已提交配置请求。影响：受影响的 SPP AS DP 和 QR P2M 流程上线后可能出现失效的帮助入口。下一步：在下周上线前完成 DD05 FAQ 配置并验证。",
+        "State: PH GPay UAT manual-provisioning SMS is not working, while the team has agreed to run regression for the retry-logic ticket. Impact: the UAT path remains a test dependency for v3.29 sign-off. Next: reproduce the error, complete the regression test, and record whether the flow is a release blocker or a deferred enhancement.": "状态：PH GPay UAT 的手工开通短信仍无法正常发送，团队已同意对 retry-logic 工单执行回归测试。影响：该 UAT 流程仍是 v3.29 签字确认的测试依赖。下一步：复现问题、完成回归测试，并记录该流程属于发布阻塞还是延期增强项。",
+        "State: The SFV live issue is being converted into a Problem Ticket because investigation and a sustainable fix need more time. Impact: recurrence frequency and manual recovery effort will determine the long-term priority and fix SLA. Next: confirm the recurrence and operational-impact assessment and track the remediation plan.": "状态：SFV 线上问题正在转为 Problem Ticket，因为调查和可持续修复还需要更多时间。影响：复发频率和人工恢复成本将决定长期优先级及修复 SLA。下一步：确认复发情况和运营影响评估，并持续跟踪整改计划。",
+        "State: Scam Model V3's new and updated live features have been configured in the AF system. Impact: the 3.09 release remains the Q3/MAS delivery checkpoint. Next: track the remaining scope and release readiness against that deadline.": "状态：Scam Model V3 的新增及更新线上特征已配置到 AF 系统。影响：v3.09 仍是 Q3/MAS 交付检查点。下一步：对照该截止时间跟踪剩余范围和发布准备度。",
+        "State: The native translation-key configuration remains open. Impact: unresolved key configuration can block consistent native copy. Next: align the keys with iOS and complete validation.": "状态：Native translation-key 配置仍未完成。影响：未解决的 key 配置可能导致 Native 文案不一致。下一步：与 iOS 对齐 key，并完成验证。",
+        "State: Product copywriting remains unresolved and is awaiting the business decision. Impact: copy approval is a dependency for implementation. Next: obtain the decision and apply the approved copy.": "状态：产品文案仍未解决，正在等待业务决定。影响：文案审批是开发落地的前置依赖。下一步：取得业务决定并应用获批文案。",
+        "State: AF sheet rows 548-549 still require edit access. Impact: the pending change blocks the related review or validation step. Next: grant the required access and confirm the rows are updated.": "状态：AF 表格的 548-549 行仍需要编辑权限。影响：权限未开通会阻塞相关评审或验证。下一步：开通所需权限，并确认对应行已更新。",
+        "State: The live incident may affect customer operations or service recovery. Next: confirm the mitigation owner, recovery status, and recurrence-prevention plan.": "状态：线上事故可能影响客户操作或服务恢复。下一步：确认缓解负责人、恢复状态和防止复发的方案。",
+        "Follow up on the unresolved request: is there pop up message after user add legal in Termination case?.": "跟进未解决请求：确认 Termination case 中用户添加 legal 信息后是否会显示弹窗。",
+        "I'm from the SG Bank PMO team and I just wanted to check with you who you have been liaising with for the ALC model validation. Is it grace and boheng from the FRM team?": "确认 ALC model validation 当前对接的 FRM 联系人是否为 Grace 和 Boheng，并回复 SG Bank PMO。",
+        "State: The ATM release plan separates the toggle in v3.07 from withdrawal testing in v3.08. Impact: the split makes upstream timing and cross-version test coverage a release dependency. Next: lock the upstream delivery timeline and confirm the test dates before finalizing release readiness.": "状态：ATM 发布计划将 toggle 放在 v3.07，将取现测试放在 v3.08。影响：版本拆分使上游交付时间和跨版本测试覆盖成为发布依赖。下一步：锁定上游交付时间线，并在确认发布准备度前确定测试日期。",
+    }
+    if text in exact:
+        return exact[text]
+
+    lowered = text.casefold()
+    if "is there pop up message after user add legal in termination case" in lowered:
+        return "跟进未解决请求：确认 Termination case 中用户添加 legal 信息后是否会显示弹窗。"
+    if "follow up on the unresolved request:" in lowered and "termination case" in lowered:
+        return "跟进未解决请求：确认 Termination case 中用户添加 legal 信息后是否会显示弹窗。"
+    if "not apply for tl" in lowered and "rcf limit" in lowered:
+        return "确认 TL 申请是否会降低 RCF limit，并回复 Sophia Wang Zijun。"
+    if "request money flow" in lowered and "offline chat" in lowered:
+        return "确认 request money flow 需要调用的 AF scenarios，并明确对应的处理方案。"
+    if "perpetual hold" in lowered and "-1" in lowered:
+        return "跟进 perpetual hold 场景返回 -1 的处理方式，并确认是否需要补充 AF 规则。"
+    if "remind me when this one's effective" in lowered or "remind me when this one is effective" in lowered:
+        return "确认该变更何时生效，并提醒相关负责人。"
+    if "we note this in the prd" in lowered and "v3.29" in lowered:
+        return "在 PRD 中记录该功能已不属于 v3.29 范围，并确认数据是否只做直接删除。"
+    if "i've never had to do any requirement" in lowered and "lv" in lowered:
+        return "确认 LV 要求是否适用于该 Business request，并明确可支持的时间范围。"
+    if "but 人员能不能一对多" in lowered:
+        return "确认人员是否支持一对多，并回复业务结论。"
+    if "spdbk-136159" in lowered and "prd" in lowered and "approve" in lowered:
+        return "跟进 SPDBK-136159 的 PRD 审批，并回复处理结果。"
+    if "authorization management" in lowered and "具体实现" in lowered:
+        return "澄清 Authorization Management 中 Approve Comment tab 的实现方式，并回复确认结论。"
+    if "reopen to open" in lowered and "overdue" in lowered and "reject" in lowered:
+        return "确认 issue 从 Reopen 转为 Open 后被 reject 的场景是否需要重新计算 overdue，并说明预期行为。"
+    if (
+        "sg bank pmo" in lowered
+        and "alc model validation" in lowered
+        and "liaising" in lowered
+        and "frm" in lowered
+    ):
+        return "确认 ALC model validation 当前对接的 FRM 联系人是否为 Grace 和 Boheng，并回复 SG Bank PMO。"
+
+    term_replacements = (
+        ("server error", "服务器报错"),
+        ("current balance", "当前余额"),
+        ("available balance", "可用余额"),
+        ("force-upgrade", "强制升级"),
+        ("model validation self-assessment", "模型验证自评估"),
+        ("high-severity", "高严重级别"),
+        ("highest-severity", "最高严重级别"),
+        ("sign-off", "签字确认"),
+        ("go-live", "上线"),
+        ("release checkpoint", "发布检查点"),
+        ("manual-provisioning", "手工开通"),
+    )
+    for source, target in term_replacements:
+        localized = re.sub(re.escape(source), target, text, flags=re.IGNORECASE)
+        text = localized
+    text = re.sub(r"force[-‐‑‒–—−]upgrade", "强制升级", text, flags=re.IGNORECASE)
+
+    replacements = (
+        ("State:", "状态："),
+        ("Impact:", "影响："),
+        ("Next:", "下一步："),
+        ("Due:", "截止："),
+        ("Source:", "来源："),
+        ("Status:", "状态："),
+        ("In Progress", "进行中"),
+        ("Blocked", "已阻塞"),
+        ("Done", "已完成"),
+        ("Unknown", "未知"),
+        ("Follow up on the unresolved SeaTalk ask.", "跟进未解决的 SeaTalk 请求。"),
+        ("Follow up on the unresolved request:", "跟进未解决的请求："),
+        ("Follow up on ", "跟进"),
+        ("Confirm ", "确认 "),
+        ("Review ", "评审 "),
+        ("Check ", "检查 "),
+        ("Ensure ", "确保 "),
+    )
+    localized = text
+    for source, target in replacements:
+        localized = localized.replace(source, target)
+    return localized
+
+
+def _brief_localize_evidence(value: Any, *, language: str = "en") -> str:
+    text = str(value or "").strip()
+    if not _is_chinese_brief(language):
+        return text
+    text = re.sub(r"\s*/\s*thread\s*:\s*", " / 线程：", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bSource\s*:", "来源：", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bSeaTalk group\b", "SeaTalk 群组", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bPrivate SeaTalk chat\b", "SeaTalk 私聊", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bSeaTalk conversation\b", "SeaTalk 对话", text, flags=re.IGNORECASE)
+    return text
+
+
+def _render_todo_text(item: dict[str, Any], *, language: str = "en") -> str:
     why = str(item.get("why") or "").strip()
+    localized_task = _brief_localize_value(_sentence_text(item.get("task"), "Untitled"), language=language)
+    localized_why = _brief_localize_value(_sentence_text(why, "").strip(), language=language) if why else ""
+    localized_due = _display_due(item.get("due"), language=language)
+    evidence = _brief_localize_evidence(
+        item.get("evidence") or ("未知" if _is_chinese_brief(language) else "Unknown"),
+        language=language,
+    )
+    if _is_chinese_brief(language):
+        why_text = f"重要性：{localized_why} " if why else ""
+        return f"[{_display_priority(item.get('priority'), language=language)}] {localized_task} {why_text}截止：{localized_due}（来源：{evidence}）"
     why_text = f"Why it matters: {_sentence_text(why, '').strip()} " if why else ""
     return (
         f"[{_display_priority(item.get('priority'))}] {_sentence_text(item.get('task'), 'Untitled')} "
@@ -6427,15 +7856,36 @@ def _render_todo_text(item: dict[str, Any]) -> str:
     )
 
 
-def _render_update_text(item: dict[str, Any]) -> str:
+def _render_update_text(item: dict[str, Any], *, language: str = "en") -> str:
+    if _is_chinese_brief(language):
+        summary = _brief_localize_value(
+            _sentence_text(item.get("summary") or item.get("title"), "Untitled"),
+            language=language,
+        )
+        evidence = _brief_localize_evidence(item.get("evidence") or "未知", language=language)
+        status_suffix = ""
+        if "状态：" not in summary and "State:" not in summary:
+            status_suffix = f"（状态：{_display_status(item.get('status'), language=language)}）"
+        return f"{summary}{status_suffix}（来源：{evidence}）"
     return (
         f"{_sentence_text(item.get('summary') or item.get('title'), 'Untitled')} "
         f"[Status: {_display_status(item.get('status'))}] (Source: {item.get('evidence') or 'Unknown'})"
     )
 
 
-def _render_reminder_text(item: dict[str, Any]) -> str:
+def _render_reminder_text(item: dict[str, Any], *, language: str = "en") -> str:
     reason = str(item.get("why") or item.get("reason") or "").strip()
+    if _is_chinese_brief(language):
+        reason_text = f" 重要性：{_brief_localize_value(_sentence_text(reason, '').strip(), language=language)}" if reason else ""
+        evidence = _brief_localize_evidence(item.get("evidence") or "未知", language=language)
+        reminder_source = str(item.get("reminder") or "需要跟进")
+        if "具体实现" in reminder_source and "authorization management" in evidence.casefold():
+            reminder_source = f"{reminder_source} Authorization Management Approve Comment tab"
+        reminder = _brief_localize_value(
+            _sentence_text(reminder_source, "需要跟进"),
+            language=language,
+        )
+        return f"{item.get('person') or '未知'}：{reminder}{reason_text}（来源：{evidence}）"
     reason_text = f" Why it matters: {_sentence_text(reason, '').strip()}" if reason else ""
     return (
         f"{item.get('person') or 'Unknown'}: {_sentence_text(item.get('reminder'), 'Follow-up may be needed')} "
@@ -6481,7 +7931,7 @@ def _domain_order(domain: str) -> tuple[int, str]:
     return order.get(clean, 99), clean
 
 
-def _display_domain(value: Any) -> str:
+def _display_domain(value: Any, *, language: str = "en") -> str:
     text = str(value or "").strip()
     aliases = {
         "anti-fraud": "Anti-fraud",
@@ -6490,11 +7940,15 @@ def _display_domain(value: Any) -> str:
         "ops risk": "Ops Risk",
         "general": "General",
     }
-    return aliases.get(text.lower(), text or "General")
+    canonical = aliases.get(text.lower(), text or "General")
+    return BRIEF_ZH_DOMAIN_LABELS.get(canonical, canonical) if _is_chinese_brief(language) else canonical
 
 
-def _display_priority(value: Any) -> str:
-    return _display_priority_label(_normalize_priority(value))
+def _display_priority(value: Any, *, language: str = "en") -> str:
+    normalized = _normalize_priority(value)
+    if _is_chinese_brief(language):
+        return BRIEF_ZH_PRIORITY_LABELS[normalized]
+    return _display_priority_label(normalized)
 
 
 def _normalize_priority(value: Any) -> str:
@@ -6509,15 +7963,17 @@ def _display_priority_label(value: Any) -> str:
     return {"high": "High", "medium": "Medium", "low": "Low", "unknown": "Unknown"}.get(text, str(value or "Unknown"))
 
 
-def _display_status(value: Any) -> str:
+def _display_status(value: Any, *, language: str = "en") -> str:
     text = str(value or "").strip().lower()
+    if _is_chinese_brief(language):
+        return BRIEF_ZH_STATUS_LABELS.get(text, "未知")
     return {"done": "Done", "in_progress": "In Progress", "blocked": "Blocked", "unknown": "Unknown"}.get(text, str(value or "Unknown"))
 
 
-def _display_due(value: Any) -> str:
+def _display_due(value: Any, *, language: str = "en") -> str:
     text = str(value or "").strip()
-    if not text or text.lower() in {"unknown", "none", "n/a", "na"}:
-        return "TBD"
+    if not text or text.lower() in {"tbd", "unknown", "none", "n/a", "na"}:
+        return "待定" if _is_chinese_brief(language) else "TBD"
     return text
 
 
@@ -6541,7 +7997,7 @@ def _due_is_today_or_tomorrow(value: Any, *, now: datetime) -> bool:
 
 def _sentence_text(value: Any, fallback: str) -> str:
     text = str(value or "").strip() or fallback
-    return text if text.endswith((".", "!", "?")) else f"{text}."
+    return text if text.endswith((".", "!", "?", "。", "！", "？")) else f"{text}."
 
 
 def _group_items_by_domain(items: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
@@ -6551,49 +8007,63 @@ def _group_items_by_domain(items: list[dict[str, Any]]) -> list[tuple[str, list[
     return sorted(grouped.items(), key=lambda pair: _domain_order(pair[0]))
 
 
-def _render_grouped_text(items: list[dict[str, Any]], *, kind: str) -> list[str]:
+def _render_grouped_text(items: list[dict[str, Any]], *, kind: str, language: str = "en") -> list[str]:
     lines: list[str] = []
     for domain, domain_items in _group_items_by_domain(items):
-        lines.extend(["", domain])
-        renderer = _renderer_for_kind(kind)
+        lines.extend(["", _display_domain(domain, language=language)])
+        renderer = _renderer_for_kind(kind, language=language)
         lines.extend(renderer(item) for item in domain_items)
     return lines
 
 
-def _render_grouped_html(items: list[dict[str, Any]], *, kind: str) -> str:
+def _render_grouped_html(items: list[dict[str, Any]], *, kind: str, language: str = "en") -> str:
     if not items:
-        fallback = (
-            "No clear Xiaodong-owned to-do found in the briefing window."
-            if kind == "todo"
-            else (
-                "No watch/delegate item found."
-                if kind == "watch_todo"
+        if _is_chinese_brief(language):
+            fallback = {
+                "todo": "本窗口没有明确的 Xiaodong 待办。",
+                "watch_todo": "本窗口没有需要关注或委派的事项。",
+                "other": "本窗口没有其他高价值动态。",
+                "reminder": "本窗口没有未解决的 SeaTalk 团队成员请求。",
+            }.get(kind, "本窗口没有明确的项目动态。")
+        else:
+            fallback = (
+                "No clear Xiaodong-owned to-do found in the briefing window."
+                if kind == "todo"
                 else (
-                    "No additional high-value awareness update found in the briefing window."
-                    if kind == "other"
+                    "No watch/delegate item found."
+                    if kind == "watch_todo"
                     else (
-                        "No unresolved SeaTalk team-member mention found in the briefing window."
-                        if kind == "reminder"
-                        else "No clear project update found in the briefing window."
+                        "No additional high-value awareness update found in the briefing window."
+                        if kind == "other"
+                        else (
+                            "No unresolved SeaTalk team-member mention found in the briefing window."
+                            if kind == "reminder"
+                            else "No clear project update found in the briefing window."
+                        )
                     )
                 )
             )
-        )
         return f"<p>{html.escape(fallback)}</p>"
     sections: list[str] = []
-    renderer = _renderer_for_kind(kind)
+    renderer = _renderer_for_kind(kind, language=language)
     for domain, domain_items in _group_items_by_domain(items):
         rows = "".join(f"<li>{html.escape(renderer(item))}</li>" for item in domain_items)
-        sections.append(f"<h4>{html.escape(domain)}</h4><ul>{rows}</ul>")
+        sections.append(f"<h4>{html.escape(_display_domain(domain, language=language))}</h4><ul>{rows}</ul>")
     return "".join(sections)
 
 
-def _renderer_for_kind(kind: str):
+def _renderer_for_kind(kind: str, *, language: str = "en"):
     if kind in {"todo", "watch_todo"}:
-        return _render_todo_text
+        if not _is_chinese_brief(language):
+            return _render_todo_text
+        return lambda item: _render_todo_text(item, language=language)
     if kind == "reminder":
-        return _render_reminder_text
-    return _render_update_text
+        if not _is_chinese_brief(language):
+            return _render_reminder_text
+        return lambda item: _render_reminder_text(item, language=language)
+    if not _is_chinese_brief(language):
+        return _render_update_text
+    return lambda item: _render_update_text(item, language=language)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

@@ -247,6 +247,9 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertIn("filterRowsByConversationScope", source)
         self.assertIn("monthly-highlight", source)
         self.assertIn("rowMentionsSelf", source)
+        self.assertIn("loadArchivedSessionIds", source)
+        self.assertIn("ARCHIVED_SESSION_STATUS = 2", source)
+        self.assertIn("Archived SeaTalk chats excluded", source)
 
     def test_name_mapping_daily_cache_key_has_candidate_version(self):
         service = SeaTalkDashboardService(
@@ -816,6 +819,26 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertEqual(len(parsed["project_updates"]), 13)
         self.assertEqual(parsed["project_updates"][-1]["domain"], "General")
         self.assertEqual(parsed["project_updates"][-1]["title"], "General awareness")
+
+    def test_insights_preserves_residual_language_repair_items(self):
+        parsed = SeaTalkDashboardService._parse_insights_response(
+            json.dumps(
+                {
+                    "items": [
+                        {
+                            "section": "my_todos",
+                            "index": 0,
+                            "fields": {"task": "确认 ALC model validation 的对接人。"},
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(parsed["items"][0]["section"], "my_todos")
+        self.assertEqual(parsed["items"][0]["index"], 0)
+        self.assertEqual(parsed["items"][0]["fields"]["task"], "确认 ALC model validation 的对接人。")
 
     def test_build_insights_sorts_my_todos_by_priority(self):
         def local_runner(command: list[str]):

@@ -103,6 +103,8 @@ class Settings:
     source_code_qa_codex_session_mode: str = "ephemeral"
     source_code_qa_codex_session_max_turns: int = 8
     source_code_qa_codex_cache_followups: bool = False
+    # Daily Brief uses a high-reasoning synthesis prompt and needs an independent budget.
+    daily_brief_codex_timeout_seconds: int = 900
     monthly_report_codex_timeout_seconds: int = 600
     seatalk_openapi_base_url: str = "https://openapi.seatalk.io"
     seatalk_app_id: str | None = None
@@ -219,6 +221,7 @@ class Settings:
             source_code_qa_codex_session_mode=_env_str("SOURCE_CODE_QA_CODEX_SESSION_MODE", "ephemeral"),
             source_code_qa_codex_session_max_turns=int(_env_str("SOURCE_CODE_QA_CODEX_SESSION_MAX_TURNS", "8")),
             source_code_qa_codex_cache_followups=_env_bool("SOURCE_CODE_QA_CODEX_CACHE_FOLLOWUPS", False),
+            daily_brief_codex_timeout_seconds=_env_int("DAILY_BRIEF_CODEX_TIMEOUT_SECONDS", 900),
             monthly_report_codex_timeout_seconds=int(_env_str("MONTHLY_REPORT_CODEX_TIMEOUT_SECONDS", "600")),
             seatalk_openapi_base_url=_env_str("SEATALK_OPENAPI_BASE_URL", "https://openapi.seatalk.io"),
             seatalk_app_id=_env_str("SEATALK_APP_ID"),

@@ -19,8 +19,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from bpmis_jira_tool.config import Settings
-from bpmis_jira_tool.gmail_dashboard import GMAIL_READONLY_SCOPE, GmailDashboardService
-from bpmis_jira_tool.gmail_sender import StoredGoogleCredentials, credentials_from_payload
 from bpmis_jira_tool.report_intelligence import (
     key_project_candidates_from_team_config,
     load_report_intelligence_config_from_data_root,
@@ -36,11 +34,12 @@ from bpmis_jira_tool.seatalk_daily_email import (
     _filter_gmail_calendar_history,
     _filter_team_member_coverage_items,
     _brief_items_refer_to_same_topic,
+    _daily_brief_contains_english_prose,
     _split_evidence_ref_ids,
+    BRIEF_ZH_SECTION_LABELS,
     build_daily_briefing,
     build_seatalk_service,
     data_root_from_settings,
-    export_window_gmail_threads,
     export_window_history,
     render_email,
     resolve_daily_email_window,
@@ -81,6 +80,18 @@ GENERIC_EXECUTIVE_FILLER_CUES = (
     "confirm owners and delivery dates",
     "confirm the detailed delivery date and owner",
     "confirm the outstanding deliverables and owners",
+)
+ENGLISH_CONTENT_LEAK_CUES = (
+    "state:",
+    "impact:",
+    "next:",
+    "follow up on the unresolved",
+    "respond to the unresolved",
+    "i've never had",
+    "i had an offline chat",
+    "we note this in the prd",
+    "thanks.",
+    "yes, that's correct",
 )
 RESOLVED_FOLLOWUP_CUES = (
     "already fixed",
@@ -175,7 +186,11 @@ def _quality_gates(
 ) -> dict[str, Any]:
     items = _iter_brief_items(briefing)
     findings: list[str] = []
-    sections_present = {section for section in SECTION_NAMES if section in text_body}
+    sections_present = {
+        section
+        for section in SECTION_NAMES
+        if section in text_body or BRIEF_ZH_SECTION_LABELS.get(section, section) in text_body
+    }
     if sections_present != set(SECTION_NAMES):
         findings.append("fixed_five_sections_missing")
     if text_body.count("- 无") < 5 - sum(1 for _, item in items if item):
@@ -189,6 +204,7 @@ def _quality_gates(
     resolved_leaks: list[str] = []
     source_coherence_leaks: list[str] = []
     generic_filler_items: list[str] = []
+    english_content_leaks: list[str] = []
     third_person_xiaodong_actions: list[str] = []
     unstructured_project_updates: list[str] = []
     evidence_ref_mismatches: list[dict[str, Any]] = []
@@ -227,11 +243,18 @@ def _quality_gates(
             flags=re.IGNORECASE,
         ):
             third_person_xiaodong_actions.append(section)
-        if section == "Project Updates" and not all(
-            label in str(item.get("summary") or "").casefold()
-            for label in ("state:", "impact:", "next:")
-        ):
+        summary_text = str(item.get("summary") or "").casefold()
+        has_executive_labels = all(label in summary_text for label in ("state:", "impact:", "next:")) or all(
+            label in summary_text for label in ("状态：", "影响：", "下一步：")
+        )
+        if section == "Project Updates" and not has_executive_labels:
             unstructured_project_updates.append(str(item.get("title") or item.get("summary") or "")[:160])
+        visible_content = " ".join(
+            str(item.get(field) or "")
+            for field in ("task", "title", "summary", "reminder", "priority_reason")
+        )
+        if _daily_brief_contains_english_prose(visible_content):
+            english_content_leaks.append(visible_content[:180])
         if evidence_refs is not None:
             ref_ids = _split_evidence_ref_ids(item.get("evidence_ref_id"))
             unknown_ids = [ref_id for ref_id in ref_ids if ref_id not in refs_by_id]
@@ -286,6 +309,12 @@ def _quality_gates(
         findings.append("source_coherence_or_domain_leak")
     if generic_filler_items:
         findings.append("generic_executive_filler")
+    for line in text_body.splitlines():
+        content = line.split("（来源：", 1)[0].casefold()
+        if any(cue in content for cue in ENGLISH_CONTENT_LEAK_CUES) or _daily_brief_contains_english_prose(content):
+            english_content_leaks.append(line[:180])
+    if english_content_leaks:
+        findings.append("english_content_leak")
     if evidence_ref_mismatches:
         findings.append("evidence_ref_mismatch")
     if third_person_xiaodong_actions:
@@ -329,7 +358,16 @@ def _quality_gates(
             ) else []
         elif name == "ATM v3.07/v3.08":
             source_hit = [cue for cue in cues if cue.casefold() in source_joined] if any(
-                "atm" in line and ("v3.07" in line or "v3.08" in line)
+                "atm" in line
+                and ("v3.07" in line or "v3.08" in line)
+                and any(
+                    marker in line
+                    for marker in (
+                        "blocked", "blocker", "incident", "issue", "problem", "delay",
+                        "delayed", "release", "launch", "timeline", "uat", "live",
+                        "risk", "上线", "延期",
+                    )
+                )
                 for line in source_lines
             ) else []
         elif name == "Mari Stock / fallback":
@@ -375,7 +413,7 @@ def _quality_gates(
         elif name == "Ker Yin edit access":
             source_hit = [cue for cue in cues if cue.casefold() in source_joined] if any(
                 "edit access" in line
-                and any(term in line for term in ("ker yin", "548", "row ", "rows "))
+                and any(term in line for term in ("548-549", "rows 548", "row 548"))
                 for line in source_lines
             ) else []
         elif name == "PH SMS vendor cost":
@@ -422,6 +460,8 @@ def _quality_gates(
         "resolved_followup_leak_count": len(resolved_leaks),
         "source_coherence_leak_count": len(source_coherence_leaks),
         "generic_filler_count": len(generic_filler_items),
+        "english_content_leak_count": len(english_content_leaks),
+        "english_content_leaks": english_content_leaks,
         "evidence_ref_mismatch_count": len(evidence_ref_mismatches),
         "evidence_ref_mismatches": evidence_ref_mismatches,
         "third_person_xiaodong_action_count": len(third_person_xiaodong_actions),
@@ -435,20 +475,6 @@ def _quality_gates(
         "resolved_candidate_count": len(resolved_candidates),
         "filter_summary": filter_summary,
     }
-
-
-def _prepare_credentials(settings: Settings) -> tuple[Any, str, dict[str, Any]]:
-    data_root = data_root_from_settings(settings)
-    owner_email = str(settings.gmail_seatalk_demo_owner_email or settings.seatalk_owner_email or "").strip().lower()
-    store = StoredGoogleCredentials(
-        data_root / "google" / "credentials.json",
-        encryption_key=settings.team_portal_config_encryption_key,
-    )
-    payload = store.load(owner_email=owner_email)
-    scopes = {str(scope).strip() for scope in payload.get("scopes") or []}
-    if GMAIL_READONLY_SCOPE not in scopes:
-        raise RuntimeError("Gmail read-only scope is missing from stored credentials.")
-    return credentials_from_payload(payload), owner_email, payload
 
 
 def _isolated_seatalk_service(settings: Settings, temp_root: Path):
@@ -480,12 +506,6 @@ def run_replay(
     report_config = load_report_intelligence_config_from_data_root(actual_root)
     team_config = load_team_dashboard_config_from_data_root(actual_root)
     key_projects = key_project_candidates_from_team_config(team_config)
-    credentials, owner_email, _ = _prepare_credentials(settings)
-    gmail_service = GmailDashboardService(
-        credentials=credentials,
-        cache_key=owner_email,
-        report_intelligence_config=report_config,
-    )
     output_dir.mkdir(parents=True, exist_ok=True)
     slots = ("morning", "midday") if slot == "all" else (slot,)
     windows = [(day, window_slot) for day in _date_range(start, end) for window_slot in slots]
@@ -517,7 +537,9 @@ def run_replay(
             }
             try:
                 raw_seatalk = export_window_history(service, window_start=window.start, window_end=window.end)
-                raw_gmail = export_window_gmail_threads(gmail_service, window_start=window.start, window_end=window.end)
+                # Gmail is the delivery transport only. Keep replay aligned with
+                # production so Calendar/email content cannot affect candidates.
+                raw_gmail = ""
                 filtered_gmail, suppressed_calendar_count = _filter_gmail_calendar_history(raw_gmail)
                 candidates = _build_team_member_reminder_candidates(_filter_daily_brief_meeting_logistics(raw_seatalk))
                 resolved_candidates = _build_resolved_team_member_reminder_candidates(_filter_daily_brief_meeting_logistics(raw_seatalk))
@@ -532,7 +554,12 @@ def run_replay(
                     include_debug_evidence_refs=True,
                 )
                 evidence_refs = briefing.pop("_debug_evidence_refs", [])
-                subject, text_body, html_body = render_email(briefing=briefing, now=window.end, window_label=window.label)
+                subject, text_body, html_body = render_email(
+                    briefing=briefing,
+                    now=window.end,
+                    window_label=window.label,
+                    language="zh",
+                )
                 quality = _quality_gates(
                     briefing=briefing,
                     text_body=text_body,

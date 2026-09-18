@@ -101,6 +101,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.source_code_qa_codex_session_mode, "ephemeral")
         self.assertEqual(settings.source_code_qa_codex_session_max_turns, 8)
         self.assertFalse(settings.source_code_qa_codex_cache_followups)
+        self.assertEqual(settings.daily_brief_codex_timeout_seconds, 900)
         self.assertEqual(settings.monthly_report_codex_timeout_seconds, 600)
         self.assertIsNone(settings.prd_briefing_codex_model)
         self.assertEqual(settings.local_agent_connect_timeout_seconds, 10)

@@ -21,6 +21,9 @@ const KNOWN_BOT_BUDDY_IDS = new Set([
 const UNKNOWN_ID_PRIMARY_LIMIT = 80;
 const UNKNOWN_ID_DISPLAY_LIMIT = 400;
 const DAILY_BRIEF_SOURCE_WINDOW_SECONDS = 24 * 60 * 60;
+// SeaTalk desktop stores archived conversations as session_info.status = 2.
+// Filter them before export so they cannot become Daily Brief evidence.
+const ARCHIVED_SESSION_STATUS = 2;
 
 function parseArgs(argv) {
   const args = {
@@ -265,6 +268,30 @@ function loadSessionInfoNames(db) {
     return { uidNames: new Map(), sidNames: new Map() };
   }
   return { uidNames, sidNames };
+}
+
+function loadArchivedSessionIds(db) {
+  const columns = tableColumns(db, 'session_info');
+  if (!columns.length) return new Set();
+  const sidColumn = pickColumn(columns, ['sid', 'session_id', 'sessionId', 'id']);
+  const statusColumn = pickColumn(columns, ['status', 'session_status', 'sessionStatus']);
+  if (!sidColumn || !statusColumn) return new Set();
+  const archived = new Set();
+  try {
+    const rows = db.prepare(
+      `SELECT ${quoteIdentifier(sidColumn)} AS sid, ${quoteIdentifier(statusColumn)} AS status FROM session_info`,
+    ).all();
+    for (const row of rows) {
+      const status = String(row.status ?? '').trim().toLowerCase();
+      if (Number(row.status) === ARCHIVED_SESSION_STATUS || ['archived', 'archive', 'hidden'].includes(status)) {
+        const sid = String(row.sid || '').trim();
+        if (sid) archived.add(sid);
+      }
+    }
+  } catch {
+    // Preserve compatibility with older local schemas without a status field.
+  }
+  return archived;
 }
 
 function readIndexedDbVarint(buffer, offset) {
@@ -570,6 +597,7 @@ function buildHistoryText(
   conversationScope = '',
   dataDir = '',
   nameRows = rows,
+  archivedSessionCount = 0,
 ) {
   const { uidNames, sidNames } = buildNameMapsWithConversationEvidence(rows, nameRows, db, dataDir);
   const filteredRows = rows.filter((row) => !isBotConversationRow(row, sidNames));
@@ -581,6 +609,7 @@ function buildHistoryText(
     `Generated at: ${nowIso}`,
     `Includes thread replies when they are stored as regular message rows in the local SeaTalk database. Thread replies are annotated and may not appear as new main-chat messages in SeaTalk.`,
     'Private SeaTalk bot conversations are excluded from this export.',
+    archivedSessionCount > 0 ? `Archived SeaTalk chats excluded: ${archivedSessionCount}.` : '',
     '',
   ].filter((line) => line !== '');
   let currentConversation = '';
@@ -742,7 +771,11 @@ function main() {
         AND (sid LIKE 'group-%' OR sid LIKE 'buddy-%')
       ORDER BY sid ASC, ts ASC, mid ASC
     `).all(ranges.periodStartEpoch, ranges.periodEndEpoch);
-    const rows = allRows.filter((row) => !EXCLUDED_MESSAGE_TYPES.has(String(row.t || '')));
+    const archivedSessionIds = loadArchivedSessionIds(db);
+    const rows = allRows.filter((row) => (
+      !EXCLUDED_MESSAGE_TYPES.has(String(row.t || ''))
+      && !archivedSessionIds.has(String(row.sid || ''))
+    ));
     const scopedRows = args.unknownIdsJson ? rows : filterRowsByConversationScope(rows, uid, args.conversationScope);
     if (args.unknownIdsJson) {
       process.stdout.write(JSON.stringify({
@@ -753,7 +786,19 @@ function main() {
       }));
     } else {
       process.stdout.write(
-        buildHistoryText(scopedRows, uid, args.days, args.now, db, overrides, args.since, args.conversationScope, args.dataDir, allRows),
+        buildHistoryText(
+          scopedRows,
+          uid,
+          args.days,
+          args.now,
+          db,
+          overrides,
+          args.since,
+          args.conversationScope,
+          args.dataDir,
+          allRows,
+          archivedSessionIds.size,
+        ),
       );
     }
   } finally {
