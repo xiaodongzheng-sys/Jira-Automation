@@ -4560,7 +4560,19 @@ def _drop_generic_seatalk_evidence_items(
     for item in items:
         if not isinstance(item, dict):
             continue
-        if _item_uses_seatalk_source(item) and _is_generic_seatalk_evidence(item.get("evidence")):
+        exact_deterministic_xiaodong_action = (
+            str(item.get("followup_source") or "").startswith("deterministic_xiaodong_")
+            and bool(str(item.get("evidence_ref_id") or "").strip())
+        )
+        # _apply_daily_brief_evidence_refs has already validated these items
+        # against an exact ref. The ref can still render as "SeaTalk group"
+        # when no group-name mapping is available, which is not a reason to
+        # erase a direct request addressed to Xiaodong.
+        if (
+            _item_uses_seatalk_source(item)
+            and _is_generic_seatalk_evidence(item.get("evidence"))
+            and not exact_deterministic_xiaodong_action
+        ):
             item["_drop_generic_seatalk_evidence"] = True
             if quality_metrics is not None:
                 quality_metrics["dropped_invalid_evidence_count"] = quality_metrics.get("dropped_invalid_evidence_count", 0) + 1
@@ -4976,6 +4988,26 @@ def _prepare_other_update_items(items: list[dict[str, Any]]) -> list[dict[str, A
     return prepared
 
 
+def _clean_deterministic_fallback_body(value: Any) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+    message_match = re.search(r"\bmessage\s*:\s*(.+)$", text, flags=re.IGNORECASE)
+    if message_match:
+        text = message_match.group(1).strip()
+    text = re.sub(r"https?://\S+", "", text, flags=re.IGNORECASE)
+    text = text.replace("[View detail]", "")
+    text = re.sub(r"\bga_view_source=\S+", "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?<![\w@])@[A-Za-z][A-Za-z0-9_.-]*(?:\s+[A-Z][a-z]+){0,2}",
+        "",
+        text,
+    )
+    text = re.sub(r"\s+\bcc\b.*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\s*(?:hi|hello|hey|hihi)\b[\s,:：，]*", "", text, flags=re.IGNORECASE)
+    return " ".join(text.split()).strip(" ,:;，：")
+
+
 def _synthesize_project_update_summary(item: dict[str, Any]) -> str:
     raw = " ".join(str(item.get("summary") or item.get("title") or "").split())
     if not raw:
@@ -5089,6 +5121,42 @@ def _synthesize_project_update_summary(item: dict[str, Any]) -> str:
         return ""
     if raw_lowered.startswith("state:") and "impact:" in raw_lowered and "next:" in raw_lowered:
         return body.strip()
+    if deterministic_fallback:
+        # Deterministic candidates are selected because they contain a
+        # material risk, blocker, dependency, or release signal. Keep novel
+        # topics visible with a conservative State/Impact/Next synthesis
+        # instead of dropping them merely because they are not in the topic
+        # family whitelist above.
+        body = _clean_deterministic_fallback_body(body).rstrip(" .!?。！？")
+        if not body:
+            return ""
+        if raw.endswith(("?", "？")):
+            state = f"An open decision is being assessed: {body}."
+        else:
+            state = f"{body}."
+        if any(
+            term in lowered
+            for term in (
+                "blocked",
+                "blocker",
+                "dependency",
+                "incident",
+                "delay",
+                "delayed",
+                "failed",
+                "error",
+                "阻塞",
+                "依赖",
+                "事故",
+                "延期",
+            )
+        ):
+            impact = "The unresolved blocker or dependency may affect delivery or operational readiness."
+        elif any(term in lowered for term in ("version", "release", "launch", "go-live", "上线", "放量")):
+            impact = "The version or release decision may affect delivery timing and validation readiness."
+        else:
+            impact = "The update may affect the related delivery or operational work."
+        return f"State: {state} Impact: {impact} Next: Confirm the owner, impact, and next milestone."
     # A transcript-like candidate without a grounded synthesis is lower quality
     # than omission. Known high-signal families are handled explicitly above.
     return ""
@@ -5877,6 +5945,13 @@ def _xiaodong_direct_request_task(candidate: dict[str, str]) -> str:
         text,
         flags=re.IGNORECASE,
     )
+    text = re.split(r"\s*[|｜]\s*", text, maxsplit=1)[0].strip()
+    text = re.sub(r"(?:这个得|这个要|这个需要)\s*$", "", text).strip(" ，,。")
+    chinese_decision = re.match(r"^(?:是否需要|需不需要)\s*(?P<action>.+)$", text)
+    if chinese_decision:
+        action = chinese_decision.group("action").strip(" ，,。")
+        if action:
+            return _sentence_text(f"确认是否需要{action}", "Respond to the unresolved SeaTalk request")
     text = re.sub(r"^(?:hi|hello|hey|boss|老板)[,，:\s-]*", "", text, flags=re.IGNORECASE).strip()
     request_rewrites = (
         (r"^please\s+confirm\s+whether\s+", "Confirm whether "),

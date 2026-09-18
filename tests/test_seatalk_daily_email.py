@@ -2558,6 +2558,46 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertIn("v3.07", summaries)
         self.assertIn("v3.08", summaries)
 
+    def test_deterministic_high_signal_fallback_summarizes_novel_topics(self):
+        prepared = seatalk_daily_email._prepare_project_update_items(
+            [
+                {
+                    "domain": "Anti-fraud",
+                    "title": "CIB AF UAT high-signal update",
+                    "summary": "CIB AF UAT support is currently blocked by a configuration challenge.",
+                    "status": "blocked",
+                    "evidence": "CIB AF UAT support",
+                    "source_type": "seatalk",
+                    "fallback_source": "deterministic_high_signal",
+                }
+            ]
+        )
+
+        self.assertEqual(len(prepared), 1)
+        self.assertIn("State:", prepared[0]["summary"])
+        self.assertIn("Impact:", prepared[0]["summary"])
+        self.assertIn("Next:", prepared[0]["summary"])
+
+    def test_deterministic_high_signal_summary_removes_chat_noise(self):
+        prepared = seatalk_daily_email._prepare_project_update_items(
+            [
+                {
+                    "domain": "Anti-fraud",
+                    "title": "AF UAT high-signal update",
+                    "summary": "Hihi @Wang Chang the config challenge is blocked; please check https://example.test/item cc @Bob",
+                    "status": "blocked",
+                    "evidence": "AF UAT support",
+                    "source_type": "seatalk",
+                    "fallback_source": "deterministic_high_signal",
+                }
+            ]
+        )
+
+        self.assertEqual(len(prepared), 1)
+        self.assertNotIn("Hihi", prepared[0]["summary"])
+        self.assertNotIn("@Wang", prepared[0]["summary"])
+        self.assertNotIn("https://", prepared[0]["summary"])
+
     def test_high_signal_clip_keeps_late_marker_in_long_log_line(self):
         text = "prefix " * 100 + " deviceModel=F30 categoryId"
 
@@ -3911,6 +3951,32 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         )
 
         self.assertEqual(len(items), 1)
+
+    def test_exact_deterministic_xiaodong_action_survives_generic_evidence_gate(self):
+        items = [
+            {
+                "task": "Confirm whether the app should be upgraded quickly.",
+                "evidence": "SeaTalk group",
+                "evidence_ref_id": "st-ref-001",
+                "source_type": "seatalk",
+                "followup_source": "deterministic_xiaodong_direct_request",
+            }
+        ]
+        quality = {}
+
+        seatalk_daily_email._drop_generic_seatalk_evidence_items(items, quality_metrics=quality)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(quality, {})
+
+    def test_xiaodong_direct_chinese_request_is_trimmed_to_the_decision(self):
+        task = seatalk_daily_email._xiaodong_direct_request_task(
+            {
+                "text": "是否需要尽快升级，这个得 @Zheng Xiaodong | PH Business Trip 栋哥拍版",
+            }
+        )
+
+        self.assertEqual(task, "确认是否需要尽快升级.")
 
     def test_gmail_google_docs_mention_backfills_xiaodong_rca_action(self):
         refs = [
