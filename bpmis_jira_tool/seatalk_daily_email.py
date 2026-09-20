@@ -52,11 +52,10 @@ from bpmis_jira_tool.trello_daily_summary import (
 DEFAULT_RECIPIENT = "xiaodong.zheng@npt.sg"
 DEFAULT_HOURS = 24
 DAILY_BRIEF_CODEX_MODEL = "gpt-5.6-luna"
-# One complete-source review must finish inside the Daily Brief delivery SLA.
-# Luna/low keeps full-record synthesis inside the 1-2 minute delivery target.
-# The prompt, source-grounding validators, and evidence checks carry the
-# structural quality guardrails that would otherwise require longer reasoning.
-DAILY_BRIEF_CODEX_REASONING_EFFORT = "low"
+# Full-source Daily Brief recall is protected by the deterministic review index
+# and evidence-gated fallbacks. Medium keeps scheduled runs responsive while
+# leaving the model enough capacity to merge and summarize topics.
+DAILY_BRIEF_CODEX_REASONING_EFFORT = "medium"
 MORNING_SLOT = "morning"
 MIDDAY_SLOT = "midday"
 LEGACY_SLOT = "daily"
@@ -549,9 +548,8 @@ def build_seatalk_service(settings: Settings, *, data_root: Path) -> SeaTalkDash
         codex_concurrency=settings.source_code_qa_codex_concurrency,
         insights_llm_provider=str(os.getenv("DAILY_BRIEF_INSIGHTS_LLM_PROVIDER") or "").strip(),
         insights_codex_route=CODEX_ROUTE_DEEP,
-        # The delivery SLA is a product contract, not a deploy-time tuning
-        # option. Do not let a stale environment override silently restore
-        # xhigh and turn a 1-2 minute brief into a multi-minute job.
+        # Keep the schedule-safe reasoning level stable across local and Cloud
+        # Run environments; a stale deploy variable must not change the brief.
         insights_codex_reasoning_effort=DAILY_BRIEF_CODEX_REASONING_EFFORT,
         claude_model=str(os.getenv("DAILY_BRIEF_CLAUDE_MODEL") or "").strip(),
         claude_binary=str(os.getenv("DAILY_BRIEF_CLAUDE_BINARY") or "").strip(),
@@ -872,16 +870,17 @@ def build_daily_briefing(
         xiaodong_followup_hints=_format_xiaodong_followup_hints(xiaodong_followup_candidates),
         high_signal_review_hints=high_signal_review_hints,
         evidence_context=evidence_context,
-        source_file_path=str(source_file_path) if source_file_path else "",
-        source_text=(raw_seatalk_history_text if reference_style_mode and source_file_path is None else ""),
+        # Codex CLI has no native file-attachment flag. Passing the complete
+        # export through stdin avoids a model-generated shell read of the temp
+        # file, which was the main latency and truncation risk.
+        source_file_path="",
+        source_text=(raw_seatalk_history_text if reference_style_mode else ""),
     )
-    source_file_chars = len(raw_seatalk_history_text) if source_file_path else 0
+    source_file_chars = len(raw_seatalk_history_text) if reference_style_mode else 0
     source_token_ledger["final_prompt_chars"] = len(prompt)
     source_token_ledger["final_estimated_prompt_tokens"] = _estimate_daily_prompt_tokens(prompt)
-    source_token_ledger["effective_input_chars"] = len(prompt) + source_file_chars
-    source_token_ledger["effective_estimated_input_tokens"] = _estimate_daily_prompt_tokens(
-        prompt + raw_seatalk_history_text if source_file_path else prompt
-    )
+    source_token_ledger["effective_input_chars"] = len(prompt)
+    source_token_ledger["effective_estimated_input_tokens"] = _estimate_daily_prompt_tokens(prompt)
     source_token_ledger["prompt_budget_policy"] = "full_source_no_truncation"
     source_token_ledger["prompt_budget_threshold_tokens"] = DAILY_BRIEF_QUALITY_PROMPT_WARNING_TOKENS
     source_token_ledger["quality_preserving_over_budget"] = (
@@ -893,9 +892,7 @@ def build_daily_briefing(
         json.loads(evidence_context).get("evidence_refs", [])
     )
     source_token_ledger["seatalk_source_mode"] = (
-        "full_source_file"
-        if source_file_path is not None
-        else ("full_prompt" if reference_style_mode else "prompt_excerpt")
+        "full_source_inline" if reference_style_mode else "prompt_excerpt"
     )
     source_token_ledger["seatalk_source_file_chars"] = source_file_chars
     source_token_ledger["preserved_followup_candidate_count"] = len(team_member_reminder_candidates or [])
@@ -915,16 +912,11 @@ def build_daily_briefing(
     finally:
         _remove_daily_brief_source_file(source_file_path)
     parsed = _daily_brief_seatalk_only_response(parsed)
+    # Do language repair after deterministic recall, not once before and again
+    # after fallback merging. One final pass keeps Chinese output consistent
+    # without multiplying the expensive full-source CLI run.
     language_repair_attempted = False
     language_repair_count = 0
-    if reference_style_mode and _daily_brief_needs_language_repair(parsed):
-        language_repair_attempted = True
-        _, repaired = service._run_codex_insights_prompt(
-            system_prompt=_daily_brief_system_prompt(),
-            prompt=_daily_brief_language_repair_prompt(parsed),
-        )
-        if _daily_brief_has_items(repaired):
-            parsed = repaired
     project_updates = _dedupe_brief_items(
         _filter_gmail_calendar_items(
             _prepare_project_update_items(
@@ -940,16 +932,16 @@ def build_daily_briefing(
         project_updates = _dedupe_brief_items(
             _prepare_project_update_items([*project_updates, *business_trip_project_updates])
         )
-    # Complete-source model review is the normal production path. Retain
-    # deterministic content generation only for an unexpected legacy mode.
-    high_signal_fallbacks: list[dict[str, Any]] = []
+    # The model is primary, but deterministic high-signal candidates are a
+    # recall guard for long full-source windows. They are synthesized only
+    # from the same SeaTalk evidence and validated again before rendering.
+    high_signal_fallbacks = _build_high_signal_fallback_items(
+        filtered_seatalk_history_text,
+        evidence_refs=evidence_refs,
+        name_mappings=name_mappings,
+        existing_items=project_updates,
+    )
     if not reference_style_mode:
-        high_signal_fallbacks = _build_high_signal_fallback_items(
-            filtered_seatalk_history_text,
-            evidence_refs=evidence_refs,
-            name_mappings=name_mappings,
-            existing_items=project_updates,
-        )
         high_signal_fallbacks.extend(
             _build_gmail_high_signal_fallback_items(
                 gmail_history_text,
@@ -971,7 +963,6 @@ def build_daily_briefing(
     high_signal_fallbacks = project_fallbacks
     high_signal_fallbacks = _prepare_project_update_items(high_signal_fallbacks)
     if high_signal_fallbacks:
-        # Legacy fallback mode only: preserve its existing guarded merge logic.
         project_updates = _prepare_project_update_items(
             _dedupe_brief_items([*high_signal_fallbacks, *project_updates])
         )
@@ -990,14 +981,13 @@ def build_daily_briefing(
         )
     )
     parsed_todos = _normalize_todo_items(_normalize_brief_items(parsed.get("my_todos", []), name_mappings=name_mappings))
-    xiaodong_followup_fallbacks: list[dict[str, Any]] = []
+    xiaodong_followup_fallbacks = _build_xiaodong_followup_items(
+        xiaodong_followup_candidates,
+        evidence_refs=evidence_refs,
+        existing_items=parsed_todos,
+    )
     gmail_xiaodong_action_fallbacks: list[dict[str, Any]] = []
     if not reference_style_mode:
-        xiaodong_followup_fallbacks = _build_xiaodong_followup_items(
-            xiaodong_followup_candidates,
-            evidence_refs=evidence_refs,
-            existing_items=parsed_todos,
-        )
         gmail_xiaodong_action_fallbacks = _build_gmail_xiaodong_action_items(
             evidence_refs,
             existing_items=[*xiaodong_followup_fallbacks, *parsed_todos],
@@ -1080,16 +1070,13 @@ def build_daily_briefing(
             quality_metrics=evidence_quality_metrics,
         )
     my_todos = SeaTalkDashboardService._sort_todos(my_todos)
-    if not reference_style_mode:
-        reminders = _backfill_team_member_reminders_from_candidates(
-            reminders,
-            team_member_reminder_candidates=team_member_reminder_candidates,
-            resolved_candidates=resolved_team_member_reminder_candidates,
-            evidence_refs=evidence_refs,
-            quality_metrics=evidence_quality_metrics,
-        )
-    else:
-        evidence_quality_metrics["deterministic_followup_backfill_count"] = 0
+    reminders = _backfill_team_member_reminders_from_candidates(
+        reminders,
+        team_member_reminder_candidates=team_member_reminder_candidates,
+        resolved_candidates=resolved_team_member_reminder_candidates,
+        evidence_refs=evidence_refs,
+        quality_metrics=evidence_quality_metrics,
+    )
     reminders = _filter_resolved_or_meeting_logistics_followups(
         reminders,
         resolved_candidates=resolved_team_member_reminder_candidates,
@@ -1136,15 +1123,14 @@ def build_daily_briefing(
         watch_delegate_todos=watch_delegate_todos,
         reminders=reminders,
     )
-    if not reference_style_mode:
-        _ensure_high_signal_fallbacks_visible(
-            high_signal_fallbacks=high_signal_fallbacks,
-            project_updates=project_updates,
-            other_updates=other_updates,
-            direct_action_todos=direct_action_todos,
-            watch_delegate_todos=watch_delegate_todos,
-            reminders=reminders,
-        )
+    _ensure_high_signal_fallbacks_visible(
+        high_signal_fallbacks=high_signal_fallbacks,
+        project_updates=project_updates,
+        other_updates=other_updates,
+        direct_action_todos=direct_action_todos,
+        watch_delegate_todos=watch_delegate_todos,
+        reminders=reminders,
+    )
     # Visibility repair can merge a protected fallback into a todo after the
     # first pass. Re-run canonical suppression so that repair cannot re-create
     # a cross-section duplicate.
@@ -1166,44 +1152,20 @@ def build_daily_briefing(
             "team_member_reminders": reminders,
             "team_todos": [],
         }
-        for _ in range(2):
-            if not _daily_brief_needs_language_repair(final_language_payload):
-                break
+        if _daily_brief_needs_language_repair(final_language_payload):
             language_repair_attempted = True
             _, repaired = service._run_codex_insights_prompt(
                 system_prompt=_daily_brief_system_prompt(),
                 prompt=_daily_brief_language_repair_prompt(final_language_payload),
             )
-            if not _daily_brief_has_items(repaired):
-                break
-            language_repair_count += _apply_final_language_repair(
-                project_updates=project_updates,
-                other_updates=other_updates,
-                my_todos=my_todos,
-                reminders=reminders,
-                repaired=repaired,
-            )
-        for _ in range(2):
-            residual_items = _daily_brief_remaining_language_items(
-                project_updates=project_updates,
-                other_updates=other_updates,
-                my_todos=my_todos,
-                reminders=reminders,
-            )
-            if not residual_items:
-                break
-            language_repair_attempted = True
-            _, residual_repaired = service._run_codex_insights_prompt(
-                system_prompt=_daily_brief_residual_language_system_prompt(),
-                prompt=_daily_brief_residual_language_repair_prompt(residual_items),
-            )
-            language_repair_count += _apply_residual_language_repair(
-                project_updates=project_updates,
-                other_updates=other_updates,
-                my_todos=my_todos,
-                reminders=reminders,
-                repaired=residual_repaired,
-            )
+            if _daily_brief_has_items(repaired):
+                language_repair_count += _apply_final_language_repair(
+                    project_updates=project_updates,
+                    other_updates=other_updates,
+                    my_todos=my_todos,
+                    reminders=reminders,
+                    repaired=repaired,
+                )
         evidence_quality_metrics["language_repair_attempted"] = language_repair_attempted
         evidence_quality_metrics["language_repair_count"] = language_repair_count
         # Language repair mutates canonical my_todos. Rebuild the display
@@ -1225,7 +1187,7 @@ def build_daily_briefing(
     )
     project_updates = final_seatalk_response["project_updates"]
     other_updates = final_seatalk_response["other_updates"]
-    my_todos = final_seatalk_response["my_todos"]
+    my_todos = _dedupe_same_topic_items(final_seatalk_response["my_todos"])
     reminders = final_seatalk_response["team_member_reminders"]
     direct_action_todos, watch_delegate_todos = _split_todos_by_action_type(my_todos)
     _clean_daily_brief_evidence(
@@ -1897,6 +1859,12 @@ def _daily_brief_user_prompt(
             source_text=source_text,
             local_now=local_now,
             window_label=window_label or f"previous {hours} hours",
+            match_summary=match_summary,
+            unanswered_question_hints=unanswered_question_hints,
+            team_member_reminder_hints=team_member_reminder_hints,
+            xiaodong_followup_hints=xiaodong_followup_hints,
+            high_signal_review_hints=high_signal_review_hints,
+            evidence_context=evidence_context,
         )
     window_text = window_label or f"previous {hours} hours"
     match_block = (
@@ -2037,30 +2005,48 @@ def _daily_brief_reference_style_user_prompt(
     source_text: str,
     local_now: datetime,
     window_label: str,
+    match_summary: str = "",
+    unanswered_question_hints: str = "",
+    team_member_reminder_hints: str = "",
+    xiaodong_followup_hints: str = "",
+    high_signal_review_hints: str = "",
+    evidence_context: str = "",
 ) -> str:
     """Use the reference report's reasoning shape without copying its data rules.
 
-    The complete export is deliberately kept outside the prompt body. Codex CLI
-    can read the temporary file from its read-only workspace, which avoids the
-    signal-excerpt bias that previously hid context in long windows.
+    Codex CLI accepts the prompt through stdin rather than a native file
+    attachment. Inline the complete export when available so the model does
+    not need an extra shell/tool round trip to read a temporary txt file.
     """
-    source_instruction = (
-        f"完整原始记录文件：{source_file_path}\n"
-        "必须先通读该文件的全部相关群聊和线程；不要只读取开头、结尾或少数命中行。"
-        "该文件是唯一的业务事实来源。"
-        if str(source_file_path or "").strip()
-        else (
+    if str(source_text or "").strip():
+        source_instruction = (
             "下面的 SeaTalk 原始记录是完整输入，必须综合阅读全部相关群聊和线程，"
             "不能只依据少数命中行或最近几条消息。该记录是唯一的业务事实来源。\n\n"
             "=== SeaTalk 原始聊天记录 ===\n"
             f"{source_text}"
         )
-    )
+    elif str(source_file_path or "").strip():
+        source_instruction = (
+            f"完整原始记录文件：{source_file_path}\n"
+            "必须先通读该文件的全部相关群聊和线程；不要只读取开头、结尾或少数命中行。"
+            "该文件是唯一的业务事实来源。"
+        )
+    else:
+        source_instruction = "未提供 SeaTalk 原始记录。"
     return (
         "你现在担任 Xiaodong Zheng 的高级 AI 秘书，同时是一位资深数字银行产品经理。"
         "请完整阅读指定的 SeaTalk 原始聊天记录，再产出一份真正能改变 Xiaodong 下一步行动的每日工作简报。"
         "不要把聊天记录改写成流水账，也不要为了填满版块而保留低价值信息。\n\n"
         f"{source_instruction}\n\n"
+        "## 确定性复核索引\n"
+        "下面的索引由 SeaTalk 原始记录预扫描生成，只用于提醒你逐项回到完整原始文件核验，不是自动输出清单。"
+        "每一个 P0/P1、incident、blocked、MAS/合规、版本/上线变化、关键 dependency、Xiaodong 承诺和团队跟进候选，都必须逐项判断是否保留、合并或因已解决而删除。\n"
+        f"高信号候选：\n{high_signal_review_hints or '无'}\n\n"
+        f"Xiaodong 直接行动候选：\n{xiaodong_followup_hints or '无'}\n\n"
+        f"团队未答复候选：\n{team_member_reminder_hints or '无'}\n\n"
+        f"未回答问题候选：\n{unanswered_question_hints or '无'}\n\n"
+        f"证据索引：\n{evidence_context or '无'}\n\n"
+        "不要因为候选索引很长而略读；必须保留所有经核实的重要不同主题，并合并重复主题。\n\n"
         "在输出 JSON 前，请在本次调用内完成一次内部复核：重新检查所有候选事项是否有后续答复或关闭、是否存在跨 source 拼接、"
         "以及是否遗漏 P0/P1、MAS、incident、blocked、版本/上线变化、关键 dependency、Xiaodong 未完成承诺或白名单成员的未答复请求。"
         "不要输出复核过程，只输出复核后的最终 JSON。\n\n"
@@ -3774,6 +3760,8 @@ def _build_high_signal_fallback_items(
             domain = "Ops Risk"
         elif "kyc" in source_topic and "credit risk" not in source_topic:
             domain = "General"
+        elif re.search(r"\b(?:af|afa|anti[- ]?fraud)\b", haystack, flags=re.IGNORECASE):
+            domain = "Anti-fraud"
         elif "credit" in haystack or "loan" in haystack or "risk tier" in haystack:
             domain = "Credit Risk"
         elif any(term in haystack for term in ("ops", "operation", "operational")):
@@ -3783,6 +3771,19 @@ def _build_high_signal_fallback_items(
         else:
             domain = "General"
         safe_topic = thread or group
+        # Some exports use the first human message as a pseudo-thread title.
+        # It is evidence, but it is not a useful report title; use the real
+        # group name for greetings, mentions, image placeholders, and long
+        # message-shaped labels.
+        if (
+            safe_topic.casefold() in {"[image]", "image"}
+            or safe_topic.casefold().startswith(("hi ", "hii ", "hello ", "hey "))
+            or "@" in safe_topic
+            or len(safe_topic) > 110
+        ):
+            safe_topic = group
+        if "force upgrade" in haystack and "app version" in haystack:
+            safe_topic = "AF App force-upgrade"
         if re.search(r"\b(?:group|buddy)-\d+\b|\bUID\s+\d+\b", safe_topic, flags=re.IGNORECASE):
             safe_topic = "Private SeaTalk chat" if "buddy-" in safe_topic.casefold() or "uid " in safe_topic.casefold() else "SeaTalk group"
         item = {
@@ -7252,11 +7253,9 @@ def _backfill_team_member_reminders_from_candidates(
             continue
         combined.append(item)
         backfilled_count += 1
-        if len(combined) >= MAX_TEAM_MEMBER_REMINDERS:
-            break
     if quality_metrics is not None:
         quality_metrics["deterministic_followup_backfill_count"] = backfilled_count
-    return combined[:MAX_TEAM_MEMBER_REMINDERS]
+    return combined
 
 
 def _seatalk_refs_by_candidate(evidence_refs: list[dict[str, Any]]) -> dict[tuple[str, str, str, str], dict[str, Any]]:
@@ -7450,6 +7449,17 @@ def _build_xiaodong_followup_items(
             continue
         # Unvalidated model items cannot satisfy a deterministic direct request:
         # they may later be dropped for bad evidence and erase the real action.
+        # The model may already have selected the same direct action.  Use the
+        # canonical evidence ref for this cross-pass match; broad text overlap
+        # is intentionally not enough because adjacent commitments can share a
+        # contact and verbs such as "check" or "confirm".
+        ref_id = str(ref.get("id") or "").strip()
+        if ref_id and any(
+            str(item.get("action_type") or "").strip().casefold() == "direct_action"
+            and ref_id in _split_evidence_ref_ids(item.get("evidence_ref_id"))
+            for item in existing_items
+        ):
+            continue
         matching_items = list(items)
         matching_items = [
             todo
@@ -7481,7 +7491,7 @@ def _build_xiaodong_followup_items(
                 ),
             }
         )
-    return items[:MAX_MY_TODOS]
+    return items
 
 
 def _build_gmail_xiaodong_action_items(
@@ -7530,7 +7540,7 @@ def _build_gmail_xiaodong_action_items(
         ):
             continue
         items.append(item)
-    return items[:MAX_MY_TODOS]
+    return items
 
 
 def _build_followup_diagnostics(

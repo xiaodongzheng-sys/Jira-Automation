@@ -172,7 +172,7 @@ class SeaTalkDailyEmailCodexRoutingTests(unittest.TestCase):
 
         self.assertEqual(service.codex_model, "gpt-5.6-luna")
         self.assertEqual(service.insights_codex_route, "deep")
-        self.assertEqual(service.insights_codex_reasoning_effort, "low")
+        self.assertEqual(service.insights_codex_reasoning_effort, "medium")
         self.assertEqual(service.codex_timeout_seconds, 900)
 
     def test_build_seatalk_service_defaults_to_codex_provider(self):
@@ -185,7 +185,7 @@ class SeaTalkDailyEmailCodexRoutingTests(unittest.TestCase):
 
         self.assertEqual(service.insights_llm_provider, LLM_PROVIDER_CODEX_CLI_BRIDGE)
         self.assertEqual(service.codex_model, "gpt-5.6-luna")
-        self.assertEqual(service.insights_codex_reasoning_effort, "low")
+        self.assertEqual(service.insights_codex_reasoning_effort, "medium")
         self.assertIsNone(service.claude_model)
 
     def test_build_seatalk_service_uses_claude_when_env_set(self):
@@ -503,9 +503,9 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertTrue(payload["project_updates"][0].get("evidence_ref_id"))
         self.assertEqual(len(payload["other_updates"]), 1)
         self.assertEqual(payload["other_updates"][0]["signal_type"], "incident")
-        # The only SeaTalk request is addressed to Liye; a model-proposed Ker
-        # Yin reminder is deliberately rejected as source-incoherent.
-        self.assertEqual(payload["team_member_reminders"], [])
+        # The only valid SeaTalk request is addressed to Liye; the model-
+        # proposed Ker Yin reminder remains source-incoherent and is rejected.
+        self.assertEqual([item["person"] for item in payload["team_member_reminders"]], ["Liye"])
 
     def test_build_daily_briefing_allows_limited_useful_awareness_other_updates(self):
         class UsefulAwarenessService(FakeSeaTalkService):
@@ -748,7 +748,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
 
         self.assertEqual(len(payload["team_member_reminders"]), 1)
         self.assertEqual(payload["team_member_reminders"][0]["source_type"], "seatalk")
-        self.assertIn("完整原始记录文件", service.last_prompt)
+        self.assertIn("下面的 SeaTalk 原始记录是完整输入", service.last_prompt)
         self.assertIn("团队跟进仅限白名单成员", service.last_prompt)
 
     def test_build_daily_briefing_filters_non_anti_fraud_team_reminders(self):
@@ -1698,7 +1698,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             2,
         )
 
-    def test_build_daily_briefing_records_omitted_team_member_followup_without_backfill(self):
+    def test_build_daily_briefing_backfills_valid_team_member_followup_and_records_diagnostics(self):
         class NoReminderService(FakeSeaTalkService):
             def _run_codex_insights_prompt(self, *, prompt, system_prompt):
                 self.last_prompt = prompt
@@ -1723,12 +1723,12 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             now=datetime(2026, 5, 21, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
         )
 
-        self.assertEqual(payload["team_member_reminders"], [])
+        self.assertEqual([item["person"] for item in payload["team_member_reminders"]], ["Ker Yin"])
         metrics = payload["quality_metadata"]["evidence_quality_metrics"]
-        self.assertEqual(metrics["deterministic_followup_backfill_count"], 0)
+        self.assertEqual(metrics["deterministic_followup_backfill_count"], 1)
         self.assertEqual(metrics["followup_diagnostics"]["candidate_examples"][0]["person"], "Ker Yin")
 
-    def test_build_daily_briefing_does_not_deterministically_backfill_xiaodong_mention(self):
+    def test_build_daily_briefing_backfills_xiaodong_mention_when_unanswered(self):
         class NoReminderService(FakeSeaTalkService):
             def _run_codex_insights_prompt(self, *, prompt, system_prompt):
                 self.last_prompt = prompt
@@ -1754,7 +1754,13 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["team_member_reminders"], [])
-        self.assertEqual(payload["direct_action_todos"], [])
+        self.assertEqual(len(payload["direct_action_todos"]), 1)
+        self.assertEqual(payload["direct_action_todos"][0]["domain"], "Anti-fraud")
+        self.assertEqual(
+            payload["direct_action_todos"][0]["task"],
+            "Confirm whether the PN false-alarm CS reply wording is okay.",
+        )
+        self.assertEqual(payload["direct_action_todos"][0]["evidence"], "AF launch follow-up")
         metrics = payload["quality_metadata"]["evidence_quality_metrics"]
         self.assertEqual(metrics["followup_diagnostics"]["candidate_examples"], [])
 
@@ -2319,7 +2325,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             key_project_candidates=[{"bpmis_id": "BPMIS-1", "project_name": "Project Alpha", "jira_ids": ["CR-1"]}],
         )
 
-        self.assertIn("完整原始记录文件", service.last_prompt)
+        self.assertIn("下面的 SeaTalk 原始记录是完整输入", service.last_prompt)
         self.assertNotIn("Unused VIP", service.last_prompt)
         self.assertEqual(payload["my_todos"][0]["matched_vips"], ["Boss"])
         self.assertEqual(payload["my_todos"][0]["matched_keywords"], ["BSP"])
@@ -2884,16 +2890,21 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(ledger["compaction_reason"], "not_applied_full_source_model_review")
         self.assertGreaterEqual(ledger["preserved_evidence_ref_count"], 1)
         self.assertGreaterEqual(ledger["preserved_followup_candidate_count"], 1)
-        self.assertEqual(ledger["seatalk_source_mode"], "full_source_file")
+        self.assertEqual(ledger["seatalk_source_mode"], "full_source_inline")
         self.assertGreaterEqual(ledger["seatalk_source_file_chars"], ledger["seatalk_raw_chars"])
         all_prompts = "\n".join(service.prompts)
-        self.assertEqual(all_prompts.count("完整原始记录文件："), 1)
-        self.assertIn("必须先通读该文件的全部相关群聊和线程", all_prompts)
+        self.assertEqual(all_prompts.count("=== SeaTalk 原始聊天记录 ==="), 1)
+        self.assertIn("下面的 SeaTalk 原始记录是完整输入", all_prompts)
         self.assertIn("在输出 JSON 前，请在本次调用内完成一次内部复核", all_prompts)
         self.assertIn("Business Trip Planning 或类似群聊若明确记录 Xiaodong 主导的 AI agent", all_prompts)
         self.assertIn("必须写入 Project Updates，不能因群名含出差而删除", all_prompts)
-        self.assertNotIn("@Ker Yin please confirm", all_prompts)
-        self.assertNotIn("low value filler 200", all_prompts)
+        # The full-source prompt now includes a deterministic review index so
+        # the model can revisit high-signal candidates instead of missing them
+        # while scanning the complete export.  The candidate remains evidence
+        # to verify, not an instruction to emit it blindly.
+        self.assertIn("@Ker Yin please confirm", all_prompts)
+        self.assertIn("只用于提醒你逐项回到完整原始文件核验", all_prompts)
+        self.assertIn("low value filler 200", all_prompts)
         self.assertNotIn("BSP launch approval is pending", all_prompts)
         self.assertFalse(list(Path.cwd().joinpath("tmp").glob(".daily-brief-seatalk-*.txt")))
 
