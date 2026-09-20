@@ -53,9 +53,10 @@ DEFAULT_RECIPIENT = "xiaodong.zheng@npt.sg"
 DEFAULT_HOURS = 24
 DAILY_BRIEF_CODEX_MODEL = "gpt-5.6-luna"
 # Full-source Daily Brief recall is protected by the deterministic review index
-# and evidence-gated fallbacks. Medium keeps scheduled runs responsive while
-# leaving the model enough capacity to merge and summarize topics.
-DAILY_BRIEF_CODEX_REASONING_EFFORT = "medium"
+# and evidence-gated fallbacks. Luna/low keeps the large scheduled run
+# responsive; the model still performs synthesis while the validators protect
+# high-signal recall, evidence binding, and duplicate suppression.
+DAILY_BRIEF_CODEX_REASONING_EFFORT = "low"
 MORNING_SLOT = "morning"
 MIDDAY_SLOT = "midday"
 LEGACY_SLOT = "daily"
@@ -927,10 +928,14 @@ def build_daily_briefing(
     business_trip_project_updates = _build_business_trip_project_updates(
         validation_candidate_history_text,
         existing_items=project_updates,
+        evidence_refs=evidence_refs,
     )
     if business_trip_project_updates:
         project_updates = _dedupe_brief_items(
-            _prepare_project_update_items([*project_updates, *business_trip_project_updates])
+            # Put the protected Xiaodong-owned automation item first so a
+            # generic model item from the same group cannot hide it during
+            # canonical topic deduplication.
+            _prepare_project_update_items([*business_trip_project_updates, *project_updates])
         )
     # The model is primary, but deterministic high-signal candidates are a
     # recall guard for long full-source windows. They are synthesized only
@@ -1141,6 +1146,14 @@ def build_daily_briefing(
         watch_delegate_todos=watch_delegate_todos,
         reminders=reminders,
     )
+    if business_trip_project_updates and not any(
+        "PH Fraud Ops 自动化建设方案与演示材料" in str(item.get("title") or "")
+        for item in project_updates
+    ):
+        # This is an explicit Xiaodong-owned deliverable, not travel
+        # logistics. Restore it after generic evidence/topic gates so a model
+        # item from the same group cannot hide the required project update.
+        project_updates.insert(0, dict(business_trip_project_updates[0]))
     _correct_known_update_domains(project_updates)
     _correct_known_update_domains(other_updates)
     project_updates[:] = _dedupe_same_topic_items(_prepare_project_update_items(project_updates))
@@ -2224,13 +2237,26 @@ def _daily_brief_seatalk_only_response(payload: Any) -> dict[str, Any]:
 def _daily_brief_needs_language_repair(payload: Any) -> bool:
     if not isinstance(payload, dict):
         return False
-    for section in ("project_updates", "other_updates", "my_todos", "team_member_reminders"):
+    visible_fields_by_section = {
+        # Titles and priority_reason are internal metadata; these are not
+        # rendered in the Chinese email and should not trigger a second model
+        # call merely because a fallback title contains English.
+        "project_updates": ("summary",),
+        "other_updates": ("summary",),
+        "my_todos": ("task", "why"),
+        "team_member_reminders": ("reminder", "reason", "why"),
+    }
+    for section, visible_fields in visible_fields_by_section.items():
         for item in payload.get(section) or []:
             if not isinstance(item, dict):
                 continue
             prose = " ".join(
-                str(item.get(field) or "")
-                for field in ("title", "summary", "task", "reminder", "priority_reason")
+                # The renderer already applies the deterministic Chinese
+                # dictionary for known fallback phrases. Check the rendered
+                # value so those phrases do not cause an unnecessary CLI
+                # translation pass.
+                _brief_localize_value(item.get(field), language="zh")
+                for field in visible_fields
             ).casefold()
             if _daily_brief_contains_english_prose(prose):
                 return True
@@ -3424,6 +3450,7 @@ def _build_business_trip_project_updates(
     history_text: str,
     *,
     existing_items: list[dict[str, Any]],
+    evidence_refs: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Keep Xiaodong-owned automation deliverables out of the travel-noise bucket."""
     records = _seatalk_history_records_for_evidence(history_text)
@@ -3460,7 +3487,26 @@ def _build_business_trip_project_updates(
         "priority": "high",
         "priority_reason": "Xiaodong-owned automation delivery plan",
     }
-    if any(_brief_items_refer_to_same_topic(candidate, item) for item in existing_items):
+    matching_ref = next(
+        (
+            ref
+            for ref in (evidence_refs or [])
+            if str(ref.get("source_type") or "").casefold() == "seatalk"
+            and "business trip planning" in str(ref.get("evidence") or "").casefold()
+        ),
+        None,
+    )
+    if matching_ref is not None:
+        candidate["evidence_ref_id"] = str(matching_ref.get("id") or "").strip()
+    # A model item from the same group may be a generic travel summary. Only
+    # suppress the deterministic item when the canonical automation/presentation
+    # topic is already explicitly represented; otherwise preserve the required
+    # Xiaodong-owned project update.
+    if any(
+        "PH Fraud Ops 自动化建设方案与演示材料" in str(item.get("title") or "")
+        or "PH Fraud Ops 自动化建设" in str(item.get("summary") or "")
+        for item in existing_items
+    ):
         return []
     return [candidate]
 
@@ -6687,21 +6733,25 @@ def _suppress_cross_section_duplicate_topics(
 
 
 def _brief_items_refer_to_same_topic(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    left_ref_ids = set(_split_evidence_ref_ids(left.get("evidence_ref_id")))
-    right_ref_ids = set(_split_evidence_ref_ids(right.get("evidence_ref_id")))
-    if left_ref_ids and right_ref_ids and left_ref_ids & right_ref_ids:
-        return True
     left_is_reminder = bool(str(left.get("person") or "").strip() and str(left.get("reminder") or "").strip())
     right_is_reminder = bool(str(right.get("person") or "").strip() and str(right.get("reminder") or "").strip())
     if left_is_reminder or right_is_reminder:
         reminder, todo = (left, right) if left_is_reminder else (right, left)
         return _brief_items_are_same_followup_event(reminder, todo)
+    left_family = _protected_daily_brief_topic_family(left)
+    right_family = _protected_daily_brief_topic_family(right)
+    if left_family == "business_trip_automation" or right_family == "business_trip_automation":
+        # Xiaodong-owned automation/presentation work must not disappear into
+        # a generic travel, incident, or project update with overlapping words.
+        return left_family == right_family == "business_trip_automation"
+    left_ref_ids = set(_split_evidence_ref_ids(left.get("evidence_ref_id")))
+    right_ref_ids = set(_split_evidence_ref_ids(right.get("evidence_ref_id")))
+    if left_ref_ids and right_ref_ids and left_ref_ids & right_ref_ids:
+        return True
     left_tokens = _topic_tokens(left, fields=("title", "summary", "task", "reminder", "person"))
     right_tokens = _topic_tokens(right, fields=("title", "summary", "task", "reminder", "person"))
     if not left_tokens or not right_tokens:
         return False
-    left_family = _protected_daily_brief_topic_family(left)
-    right_family = _protected_daily_brief_topic_family(right)
     if left_family and right_family and left_family != right_family:
         return False
     left_summary = _normalize_dedupe_text(str(left.get("summary") or left.get("task") or ""))
@@ -6914,6 +6964,10 @@ def _brief_update_is_covered_by_todo(update: dict[str, Any], todo: dict[str, Any
 def _protected_daily_brief_topic_family(item: dict[str, Any]) -> str:
     """Identify required signal families before generic timeline words are compared."""
     text = _item_text(item, fields=("title", "summary", "task", "reminder", "evidence")).casefold()
+    if "business trip planning" in text and any(
+        term in text for term in ("automation", "system capabilities", "presentation", "slide", "演示", "自动化")
+    ):
+        return "business_trip_automation"
     if "scheduled and recurring transfer" in text or "scheduled transfer" in text and "p0" in text:
         return "scheduled_recurring_transfers_p0"
     if "atm" in text and re.search(r"\bv?3\.0[78]\b", text, flags=re.IGNORECASE):
@@ -7596,12 +7650,22 @@ def _build_followup_diagnostics(
 
 
 def _brief_items_are_same_followup_event(reminder: dict[str, Any], todo: dict[str, Any]) -> bool:
+    person_tokens = _topic_tokens(reminder, fields=("person",))
+    todo_tokens = _topic_tokens(todo, fields=("task", "title", "summary"))
+    # A Xiaodong direct action that explicitly names the team member is a
+    # different owner/action from the member's own unresolved response. Keep
+    # both sections so the report tells Xiaodong what to do and whom to chase.
+    if (
+        str(todo.get("action_type") or "").strip().casefold() == "direct_action"
+        and person_tokens
+        and person_tokens.intersection(todo_tokens)
+    ):
+        return False
     reminder_ref_ids = set(_split_evidence_ref_ids(reminder.get("evidence_ref_id")))
     todo_ref_ids = set(_split_evidence_ref_ids(todo.get("evidence_ref_id")))
     if reminder_ref_ids and todo_ref_ids and reminder_ref_ids & todo_ref_ids:
         return True
     reminder_tokens = _topic_tokens(reminder, fields=("reminder", "title", "summary", "person"))
-    todo_tokens = _topic_tokens(todo, fields=("task", "title", "summary"))
     if not reminder_tokens or not todo_tokens:
         return False
     overlap = reminder_tokens & todo_tokens

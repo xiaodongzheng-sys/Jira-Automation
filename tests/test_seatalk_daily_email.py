@@ -172,7 +172,7 @@ class SeaTalkDailyEmailCodexRoutingTests(unittest.TestCase):
 
         self.assertEqual(service.codex_model, "gpt-5.6-luna")
         self.assertEqual(service.insights_codex_route, "deep")
-        self.assertEqual(service.insights_codex_reasoning_effort, "medium")
+        self.assertEqual(service.insights_codex_reasoning_effort, "low")
         self.assertEqual(service.codex_timeout_seconds, 900)
 
     def test_build_seatalk_service_defaults_to_codex_provider(self):
@@ -185,7 +185,7 @@ class SeaTalkDailyEmailCodexRoutingTests(unittest.TestCase):
 
         self.assertEqual(service.insights_llm_provider, LLM_PROVIDER_CODEX_CLI_BRIDGE)
         self.assertEqual(service.codex_model, "gpt-5.6-luna")
-        self.assertEqual(service.insights_codex_reasoning_effort, "medium")
+        self.assertEqual(service.insights_codex_reasoning_effort, "low")
         self.assertIsNone(service.claude_model)
 
     def test_build_seatalk_service_uses_claude_when_env_set(self):
@@ -3416,7 +3416,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
 
         self.assertEqual(_build_team_member_reminder_candidates(history), [])
 
-    def test_same_followup_event_keeps_direct_todo_and_suppresses_reminder(self):
+    def test_different_owner_actions_keep_direct_todo_and_team_reminder(self):
         reminder = {
             "domain": "Anti-fraud",
             "person": "Wang Chang",
@@ -3431,7 +3431,8 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             "evidence_ref_id": "st-ref-001",
         }
 
-        self.assertTrue(seatalk_daily_email._brief_items_refer_to_same_topic(reminder, todo))
+        todo["action_type"] = "direct_action"
+        self.assertFalse(seatalk_daily_email._brief_items_refer_to_same_topic(reminder, todo))
 
     def test_high_signal_merge_keeps_todo_action_concise_and_adds_why(self):
         todo = {
