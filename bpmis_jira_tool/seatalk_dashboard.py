@@ -1080,7 +1080,9 @@ class SeaTalkDashboardService:
     def _normalize_project_updates(cls, value: Any) -> list[dict[str, str]]:
         rows = value if isinstance(value, list) else []
         normalized: list[dict[str, str]] = []
-        for row in rows[:20]:
+        # Daily Brief relies on complete-source model selection. Do not silently
+        # discard valid rows before its own evidence and dedupe validation runs.
+        for row in rows:
             if not isinstance(row, dict):
                 continue
             normalized.append(
@@ -1098,7 +1100,7 @@ class SeaTalkDashboardService:
     def _normalize_todos(cls, value: Any) -> list[dict[str, str]]:
         rows = value if isinstance(value, list) else []
         normalized: list[dict[str, str]] = []
-        for row in rows[:20]:
+        for row in rows:
             if not isinstance(row, dict):
                 continue
             normalized.append(
@@ -1118,7 +1120,7 @@ class SeaTalkDashboardService:
     def _normalize_team_member_reminders(cls, value: Any) -> list[dict[str, str]]:
         rows = value if isinstance(value, list) else []
         normalized: list[dict[str, str]] = []
-        for row in rows[:20]:
+        for row in rows:
             if not isinstance(row, dict):
                 continue
             normalized.append(

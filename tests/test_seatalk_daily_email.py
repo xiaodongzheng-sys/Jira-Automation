@@ -161,14 +161,18 @@ class SeaTalkDailyEmailCodexRoutingTests(unittest.TestCase):
     def test_build_seatalk_service_defaults_to_deep_codex_route(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
-            {"TEAM_PORTAL_DATA_DIR": temp_dir, "SEATALK_CODEX_MODEL": "gpt-5.6-luna"},
+            {
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "SEATALK_CODEX_MODEL": "gpt-5.6-luna",
+                "DAILY_BRIEF_CODEX_REASONING_EFFORT": "xhigh",
+            },
             clear=True,
         ), patch("bpmis_jira_tool.config.find_dotenv", return_value=""):
             service = build_seatalk_service(Settings.from_env(), data_root=Path(temp_dir))
 
         self.assertEqual(service.codex_model, "gpt-5.6-luna")
         self.assertEqual(service.insights_codex_route, "deep")
-        self.assertEqual(service.insights_codex_reasoning_effort, "xhigh")
+        self.assertEqual(service.insights_codex_reasoning_effort, "low")
         self.assertEqual(service.codex_timeout_seconds, 900)
 
     def test_build_seatalk_service_defaults_to_codex_provider(self):
@@ -181,7 +185,7 @@ class SeaTalkDailyEmailCodexRoutingTests(unittest.TestCase):
 
         self.assertEqual(service.insights_llm_provider, LLM_PROVIDER_CODEX_CLI_BRIDGE)
         self.assertEqual(service.codex_model, "gpt-5.6-luna")
-        self.assertEqual(service.insights_codex_reasoning_effort, "xhigh")
+        self.assertEqual(service.insights_codex_reasoning_effort, "low")
         self.assertIsNone(service.claude_model)
 
     def test_build_seatalk_service_uses_claude_when_env_set(self):
@@ -368,7 +372,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         debug_payload = build_daily_briefing(service, now=now, include_debug_evidence_refs=True)
         self.assertEqual(debug_payload["_debug_evidence_refs"], [])
 
-    def test_build_daily_briefing_includes_gmail_threads_even_without_seatalk_messages(self):
+    def test_build_daily_briefing_ignores_gmail_when_window_has_no_seatalk_messages(self):
         service = FakeSeaTalkService("SeaTalk Chat History Export\nWindow: since 2026-04-26T19:00:00+08:00\n")
         now = datetime(2026, 4, 27, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
 
@@ -384,11 +388,10 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             ),
         )
 
-        # The fake model cites SeaTalk even though this window contains only
-        # Gmail, so its unsupported action must be discarded.
         self.assertEqual(payload["my_todos"], [])
-        self.assertIn("=== Gmail thread history ===", service.last_prompt)
-        self.assertIn("Subject: CR rollout", service.last_prompt)
+        self.assertEqual(payload["project_updates"], [])
+        self.assertEqual(payload["quality_metadata"]["source_coverage"], "SeaTalk")
+        self.assertGreater(payload["quality_metadata"]["token_ledger"]["ignored_gmail_input_chars"], 0)
 
     def test_direct_gmail_action_requires_evidence_ref(self):
         self.assertTrue(
@@ -449,7 +452,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                     "team_member_reminders": [
                         {
                             "domain": "Ops Risk",
-                            "person": "Liye",
+                            "person": "Ker Yin",
                             "reminder": "Check the unresolved group mention.",
                             "evidence": "Ops Risk group",
                             "source_type": "seatalk",
@@ -496,12 +499,13 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         )
 
         self.assertEqual(len(payload["project_updates"]), 1)
-        self.assertIn(payload["project_updates"][0]["source_type"], {"seatalk", "gmail"})
+        self.assertEqual(payload["project_updates"][0]["source_type"], "seatalk")
         self.assertTrue(payload["project_updates"][0].get("evidence_ref_id"))
         self.assertEqual(len(payload["other_updates"]), 1)
         self.assertEqual(payload["other_updates"][0]["signal_type"], "incident")
-        self.assertEqual(len(payload["team_member_reminders"]), 1)
-        self.assertEqual(payload["team_member_reminders"][0]["source_type"], "seatalk")
+        # The only SeaTalk request is addressed to Liye; a model-proposed Ker
+        # Yin reminder is deliberately rejected as source-incoherent.
+        self.assertEqual(payload["team_member_reminders"], [])
 
     def test_build_daily_briefing_allows_limited_useful_awareness_other_updates(self):
         class UsefulAwarenessService(FakeSeaTalkService):
@@ -564,8 +568,8 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         )
 
         useful_awareness = [item for item in payload["other_updates"] if item["signal_type"] == "useful_awareness"]
-        self.assertEqual(len(useful_awareness), MAX_USEFUL_AWARENESS_OTHER_UPDATES)
-        self.assertIn("useful_awareness", service.last_prompt)
+        self.assertEqual(useful_awareness, [])
+        self.assertIn("cross_product_milestone", service.last_prompt)
 
     def test_build_daily_briefing_treats_missing_other_update_signal_as_useful_awareness(self):
         class MissingSignalService(FakeSeaTalkService):
@@ -592,8 +596,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         service = MissingSignalService("SeaTalk Chat History Export\n[2026-04-27 18:30:00] Bob: please review\n")
         payload = build_daily_briefing(service, now=now)
 
-        self.assertEqual(len(payload["other_updates"]), 1)
-        self.assertEqual(payload["other_updates"][0]["signal_type"], "useful_awareness")
+        self.assertEqual(payload["other_updates"], [])
 
     def test_build_daily_briefing_ignores_bot_alerts_and_reminders(self):
         class BotNoiseService(FakeSeaTalkService):
@@ -655,7 +658,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(payload["other_updates"][0]["title"], "Human incident")
         self.assertEqual(len(payload["team_member_reminders"]), 1)
         self.assertEqual(payload["team_member_reminders"][0]["reminder"], "Check the human unresolved group mention.")
-        self.assertIn("ignore bot-generated alerts", service.last_prompt)
+        self.assertIn("机器人/系统", service.last_prompt)
 
     def test_build_daily_briefing_filters_sdlc_checker_team_followups(self):
         class SdlcCheckerService(FakeSeaTalkService):
@@ -666,7 +669,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                     "other_updates": [],
                     "team_member_reminders": [
                         {
-                            "domain": "Anti-fraud",
+                            "domain": "General",
                             "person": "Wang Chang",
                             "reminder": "The SDLC checker listed SGDB approvals and PRD/TRD documents as pending.",
                             "evidence": "SG BAU SDLC material check",
@@ -689,7 +692,6 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         payload = build_daily_briefing(service, now=now)
 
         self.assertEqual([item["person"] for item in payload["team_member_reminders"]], ["Rene Chong"])
-        self.assertIn("always exclude SDLC Checker", service.last_prompt)
 
     def test_build_daily_briefing_prompt_handles_thread_and_cc_only_mentions(self):
         class ThreadCcService(FakeSeaTalkService):
@@ -714,9 +716,8 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         service = ThreadCcService(history)
         build_daily_briefing(service, now=now)
 
-        self.assertIn("A cc-only mention is not enough", service.last_prompt)
-        self.assertIn("If the source message is annotated as a thread reply", service.last_prompt)
-        self.assertIn("Do not write 'in the group' for thread replies", service.last_prompt)
+        self.assertIn("cc-only", service.last_prompt)
+        self.assertIn("thread 证据必须写明 thread 标题", service.last_prompt)
 
     def test_build_daily_briefing_keeps_seatalk_reminder_when_source_type_missing(self):
         class MissingSourceReminderService(FakeSeaTalkService):
@@ -747,8 +748,8 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
 
         self.assertEqual(len(payload["team_member_reminders"]), 1)
         self.assertEqual(payload["team_member_reminders"][0]["source_type"], "seatalk")
-        self.assertIn("Team Member Reminder Scan", service.last_prompt)
-        self.assertIn("drop it rather than creating a noisy Follow-up", service.last_prompt)
+        self.assertIn("完整原始记录文件", service.last_prompt)
+        self.assertIn("团队跟进仅限白名单成员", service.last_prompt)
 
     def test_build_daily_briefing_filters_non_anti_fraud_team_reminders(self):
         class NonTeamReminderService(FakeSeaTalkService):
@@ -783,7 +784,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
 
         self.assertEqual(len(payload["team_member_reminders"]), 1)
         self.assertEqual(payload["team_member_reminders"][0]["person"], "Rene Chong")
-        self.assertIn("Do not put anyone else, including Wendy", service.last_prompt)
+        self.assertIn("Anti-fraud 团队成员仅限", service.last_prompt)
 
     def test_build_daily_briefing_canonicalizes_team_member_aliases(self):
         class AliasReminderService(FakeSeaTalkService):
@@ -855,7 +856,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
 
         self.assertEqual(payload["team_member_reminders"][0]["person"], "Sophia Wang Zijun")
         self.assertEqual(payload["team_member_reminders"][0]["domain"], "Credit Risk")
-        self.assertIn("Sophia Wang Zijun belongs to Credit Risk", service.last_prompt)
+        self.assertIn("Sophia Wang Zijun 归属 Credit Risk", service.last_prompt)
 
     def test_build_daily_briefing_sanitizes_raw_seatalk_source_ids(self):
         class RawEvidenceService(FakeSeaTalkService):
@@ -984,7 +985,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(payload["watch_delegate_todos"][0]["evidence"], "PH AAF Small Group")
         self.assertEqual(payload["watch_delegate_todos"][0]["evidence_ref_id"], "st-ref-001")
 
-    def test_build_daily_briefing_uses_gmail_ref_for_project_update_evidence(self):
+    def test_build_daily_briefing_ignores_gmail_ref_for_project_update_evidence(self):
         class GmailRefService(FakeSeaTalkService):
             def _run_codex_insights_prompt(self, *, prompt, system_prompt):
                 self.last_prompt = prompt
@@ -1028,18 +1029,25 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             ]
         )
 
-        service = GmailRefService("SeaTalk Chat History Export\n")
+        service = GmailRefService(
+            "SeaTalk Chat History Export\n"
+            "=== General discussion (group-1) ===\n"
+            "[2026-05-13 12:30:00] Alice: FYI only.\n"
+        )
         payload = build_daily_briefing(
             service,
             now=datetime(2026, 5, 13, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
             gmail_history_text=gmail_history,
         )
 
-        self.assertEqual(payload["project_updates"][0]["evidence"], "Gmail: CR rollout approval / Alice <alice@example.com>")
-        self.assertEqual(payload["project_updates"][0]["source_type"], "gmail")
-        self.assertIn('"id":"gm-ref-001"', service.last_prompt)
+        self.assertEqual(payload["project_updates"], [])
+        self.assertIn("只能来自 SeaTalk", service.last_prompt)
+        self.assertEqual(
+            payload["quality_metadata"]["token_ledger"]["ignored_gmail_input_chars"],
+            len(gmail_history),
+        )
 
-    def test_build_daily_briefing_preserves_late_mas_compliance_detail_in_gmail(self):
+    def test_build_daily_briefing_does_not_analyze_mas_detail_from_gmail(self):
         class GmailFallbackService(FakeSeaTalkService):
             def _run_codex_insights_prompt(self, *, prompt, system_prompt):
                 self.last_prompt = prompt
@@ -1079,15 +1087,12 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             gmail_history_text=gmail_history,
         )
 
-        mas_items = [
-            item
-            for item in payload["project_updates"]
-            if "mas" in json.dumps(item, ensure_ascii=False).casefold()
-        ]
-        self.assertTrue(mas_items)
-        self.assertEqual(mas_items[0]["source_type"], "gmail")
-        self.assertEqual(mas_items[0]["status"], "blocked")
-        self.assertIn("MAS", mas_items[0]["summary"])
+        self.assertEqual(payload["project_updates"], [])
+        self.assertEqual(payload["other_updates"], [])
+        self.assertEqual(
+            payload["quality_metadata"]["token_ledger"]["ignored_gmail_input_chars"],
+            len(gmail_history),
+        )
 
     def test_build_daily_briefing_drops_project_update_with_mismatched_ref(self):
         class BadProjectRefService(FakeSeaTalkService):
@@ -1136,7 +1141,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["project_updates"], [])
-        self.assertGreaterEqual(payload["quality_metadata"]["evidence_quality_metrics"]["dropped_invalid_evidence_count"], 1)
+        self.assertEqual(payload["quality_metadata"]["evidence_quality_metrics"]["dropped_invalid_evidence_count"], 0)
 
     def test_seatalk_ref_evidence_uses_name_mapping_and_private_fallback(self):
         mapped_refs = seatalk_daily_email._build_daily_brief_evidence_refs(
@@ -1693,7 +1698,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             2,
         )
 
-    def test_build_daily_briefing_backfills_valid_team_member_followup_and_records_diagnostics(self):
+    def test_build_daily_briefing_records_omitted_team_member_followup_without_backfill(self):
         class NoReminderService(FakeSeaTalkService):
             def _run_codex_insights_prompt(self, *, prompt, system_prompt):
                 self.last_prompt = prompt
@@ -1718,12 +1723,12 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             now=datetime(2026, 5, 21, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
         )
 
-        self.assertEqual([item["person"] for item in payload["team_member_reminders"]], ["Ker Yin"])
+        self.assertEqual(payload["team_member_reminders"], [])
         metrics = payload["quality_metadata"]["evidence_quality_metrics"]
-        self.assertEqual(metrics["deterministic_followup_backfill_count"], 1)
+        self.assertEqual(metrics["deterministic_followup_backfill_count"], 0)
         self.assertEqual(metrics["followup_diagnostics"]["candidate_examples"][0]["person"], "Ker Yin")
 
-    def test_build_daily_briefing_backfills_xiaodong_mention_when_unanswered(self):
+    def test_build_daily_briefing_does_not_deterministically_backfill_xiaodong_mention(self):
         class NoReminderService(FakeSeaTalkService):
             def _run_codex_insights_prompt(self, *, prompt, system_prompt):
                 self.last_prompt = prompt
@@ -1749,13 +1754,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["team_member_reminders"], [])
-        self.assertEqual(len(payload["direct_action_todos"]), 1)
-        self.assertEqual(payload["direct_action_todos"][0]["domain"], "Anti-fraud")
-        self.assertEqual(
-            payload["direct_action_todos"][0]["task"],
-            "Confirm whether the PN false-alarm CS reply wording is okay.",
-        )
-        self.assertEqual(payload["direct_action_todos"][0]["evidence"], "AF launch follow-up")
+        self.assertEqual(payload["direct_action_todos"], [])
         metrics = payload["quality_metadata"]["evidence_quality_metrics"]
         self.assertEqual(metrics["followup_diagnostics"]["candidate_examples"], [])
 
@@ -2084,54 +2083,55 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(thread_metrics["dropped_invalid_evidence_count"], 1)
         self.assertEqual(thread_metrics["repaired_evidence_count"], 1)
 
-    def test_build_daily_briefing_enforces_section_caps(self):
+    def test_build_daily_briefing_preserves_distinct_items_past_legacy_section_caps(self):
         class OverflowService(FakeSeaTalkService):
             def _run_codex_insights_prompt(self, *, prompt, system_prompt):
                 self.last_prompt = prompt
+                item_count = MAX_PROJECT_UPDATES + 3
                 return None, {
                     "project_updates": [
                         {
                             "domain": "General",
-                            "title": f"Project alpha{index}",
-                            "summary": f"Project alpha{index} release migration is blocked.",
+                            "title": f"项目 {index} 发布受阻",
+                            "summary": f"项目 {index} 发布受阻，需要确认负责人和修复时间。",
                             "status": "in_progress",
-                            "evidence": "Project group",
+                            "evidence": f"Project group {index}",
                             "source_type": "seatalk",
                         }
-                        for index in range(MAX_PROJECT_UPDATES + 3)
+                        for index in range(item_count)
                     ],
                     "other_updates": [
                         {
                             "domain": "General",
-                            "title": f"Other {index}",
-                            "summary": f"Other update {index} incident.",
+                            "title": f"线上事故 {index} 仍在处理",
+                            "summary": f"线上事故 {index} 仍在处理，客户流程受影响。",
                             "status": "unknown",
-                            "evidence": "Other group",
+                            "evidence": f"Other group {index}",
                             "source_type": "seatalk",
                             "signal_type": "incident",
                         }
-                        for index in range(MAX_OTHER_UPDATES + 3)
+                        for index in range(item_count)
                     ],
                     "team_member_reminders": [
                         {
-                            "domain": "Ops Risk",
-                            "person": "Liye",
-                            "reminder": f"Reminder {index}.",
-                            "evidence": "Ops Risk group",
+                            "domain": "Anti-fraud",
+                            "person": "Ker Yin",
+                            "reminder": f"请跟进 Project{chr(65 + index)} 并回复结论。",
+                            "evidence": f"Anti-fraud group {index}",
                             "source_type": "seatalk",
                         }
-                        for index in range(MAX_TEAM_MEMBER_REMINDERS + 3)
+                        for index in range(item_count)
                     ],
                     "my_todos": [
                         {
-                            "task": f"Task {index}",
+                            "task": f"Xiaodong 请处理 Task {index}。",
                             "domain": "General",
                             "priority": "medium",
                             "due": "TBD",
-                            "evidence": "Todo group",
+                            "evidence": f"Todo group {index}",
                             "source_type": "seatalk",
                         }
-                        for index in range(MAX_MY_TODOS + 3)
+                        for index in range(item_count)
                     ],
                     "team_todos": [],
                 }
@@ -2140,25 +2140,37 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         overflow_history = "\n".join(
             [
                 "SeaTalk Chat History Export",
-                "=== Ops Risk group (group-1) ===",
                 *[
-                    f"[2026-04-27 18:{30 + index:02d}:00] Bob: Liye please check Reminder {index}."
-                    for index in range(MAX_TEAM_MEMBER_REMINDERS + 3)
-                ],
-                "=== Project group (group-2) ===",
-                *[
-                    f"[2026-04-27 18:{45 + index:02d}:00] Alice: Project alpha{index} release migration is blocked."
+                    part
                     for index in range(MAX_PROJECT_UPDATES + 3)
+                    for part in (
+                        f"=== Anti-fraud group {index} (group-{100 + index}) ===",
+                        f"[2026-04-27 18:{index:02d}:00] Bob: @Ker Yin 请跟进 Project{chr(65 + index)} 并回复结论。",
+                    )
                 ],
-                "=== Other group (group-3) ===",
                 *[
-                    f"[2026-04-27 19:{10 + index:02d}:00] Bob: Other update {index} incident."
+                    part
+                    for index in range(MAX_PROJECT_UPDATES + 3)
+                    for part in (
+                        f"=== Project group {index} (group-{200 + index}) ===",
+                        f"[2026-04-27 18:{20 + index:02d}:00] Alice: 项目 {index} 发布受阻，需要确认负责人和修复时间。",
+                    )
+                ],
+                *[
+                    part
                     for index in range(MAX_OTHER_UPDATES + 3)
+                    for part in (
+                        f"=== Other group {index} (group-{300 + index}) ===",
+                        f"[2026-04-27 19:{10 + index:02d}:00] Bob: 线上事故 {index} 仍在处理，客户流程受影响。",
+                    )
                 ],
-                "=== Todo group (group-4) ===",
                 *[
-                    f"[2026-04-27 19:{index:02d}:00] Zheng Xiaodong: please do Task {index}."
+                    part
                     for index in range(MAX_MY_TODOS + 3)
+                    for part in (
+                        f"=== Todo group {index} (group-{400 + index}) ===",
+                        f"[2026-04-27 19:{index:02d}:00] Alice: @Zheng Xiaodong 请处理 Task {index}。",
+                    )
                 ],
             ]
         )
@@ -2167,10 +2179,10 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             now=now,
         )
 
-        self.assertLessEqual(len(payload["project_updates"]), MAX_PROJECT_UPDATES)
-        self.assertLessEqual(len(payload["other_updates"]), MAX_OTHER_UPDATES)
-        self.assertLessEqual(len(payload["team_member_reminders"]), MAX_TEAM_MEMBER_REMINDERS)
-        self.assertLessEqual(len(payload["my_todos"]), MAX_MY_TODOS)
+        self.assertGreater(len(payload["project_updates"]), MAX_PROJECT_UPDATES)
+        self.assertGreater(len(payload["other_updates"]), MAX_OTHER_UPDATES)
+        self.assertGreater(len(payload["team_member_reminders"]), MAX_TEAM_MEMBER_REMINDERS)
+        self.assertGreater(len(payload["my_todos"]), MAX_MY_TODOS)
 
     def test_build_daily_briefing_adds_pm_action_layers_and_quality_metadata(self):
         class ActionLayerService(FakeSeaTalkService):
@@ -2253,12 +2265,10 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual([item["action_type"] for item in payload["direct_action_todos"]], ["direct_action"])
         self.assertEqual([item["action_type"] for item in payload["watch_delegate_todos"]], ["watch_delegate"])
         self.assertEqual(payload["project_updates"][0]["status"], "in_progress")
-        self.assertEqual(payload["other_updates"][0]["status"], "blocked")
-        self.assertEqual(payload["other_updates"][0]["risk_level"], "high")
-        self.assertEqual(payload["other_updates"][0]["signal_type"], "risk_compliance")
+        self.assertEqual(payload["other_updates"], [])
         self.assertTrue(payload["top_focus"])
         self.assertLessEqual(len(payload["top_focus"]), 3)
-        self.assertEqual(payload["quality_metadata"]["source_coverage"], "SeaTalk + Gmail")
+        self.assertEqual(payload["quality_metadata"]["source_coverage"], "SeaTalk")
         self.assertEqual(payload["quality_metadata"]["high_confidence_todo_count"], 1)
         self.assertIn("deduped_topic_count", payload["quality_metadata"])
         self.assertIn("Vendor onboarding group", payload["watch_delegate_todos"][0]["evidence"])
@@ -2309,11 +2319,8 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             key_project_candidates=[{"bpmis_id": "BPMIS-1", "project_name": "Project Alpha", "jira_ids": ["CR-1"]}],
         )
 
-        self.assertIn("Today's matched VIPs: Boss", service.last_prompt)
-        self.assertIn("Today's matched priority keywords: BSP", service.last_prompt)
-        self.assertIn("Today's matched key projects: BPMIS-1", service.last_prompt)
+        self.assertIn("完整原始记录文件", service.last_prompt)
         self.assertNotIn("Unused VIP", service.last_prompt)
-        self.assertNotIn("OJK", service.last_prompt)
         self.assertEqual(payload["my_todos"][0]["matched_vips"], ["Boss"])
         self.assertEqual(payload["my_todos"][0]["matched_keywords"], ["BSP"])
         self.assertEqual(payload["my_todos"][0]["matched_key_projects"], ["BPMIS-1 / Project Alpha"])
@@ -2786,7 +2793,58 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
 
         self.assertEqual([item["person"] for item in candidates], ["Sabrina Chan"])
 
-    def test_build_daily_briefing_compacts_prompt_sources_and_records_token_ledger(self):
+    def test_business_trip_automation_presentation_is_a_project_update(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== Business Trip Planning (group-1) ===",
+                "[2026-09-18 18:16:36] Zheng Xiaodong: We will compile slides by next Wed on PH trip findings and next step. System capabilities needed and proposed plan to build them. Immediate Next Step.",
+                "[2026-09-18 18:21:06] Zheng Xiaodong: Hui Xian and Liye will work on BIN attack; I can work on system capabilities needed and proposed plan to build them.",
+            ]
+        )
+
+        updates = seatalk_daily_email._build_business_trip_project_updates(history, existing_items=[])
+
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0]["domain"], "General")
+        self.assertEqual(updates[0]["evidence"], "Business Trip Planning")
+        self.assertIn("自动化建设", updates[0]["title"])
+
+    def test_business_trip_meeting_logistics_is_not_a_project_update(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== Business Trip Planning (group-1) ===",
+                "[2026-09-18 16:50:04] Iris Wu: are you able to join today's meeting?",
+                "[2026-09-18 17:18:48] Zheng Xiaodong: Or we reschedule to next week.",
+            ]
+        )
+
+        updates = seatalk_daily_email._build_business_trip_project_updates(history, existing_items=[])
+
+        self.assertEqual(updates, [])
+
+    def test_daily_brief_pipeline_preserves_business_trip_automation_presentation(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== Business Trip Planning (group-1) ===",
+                "[2026-09-18 18:16:36] Zheng Xiaodong: We will compile slides by next Wed on PH trip findings and next step. System capabilities needed and proposed plan to build them. Immediate Next Step.",
+                "[2026-09-18 18:21:06] Zheng Xiaodong: Hui Xian and Liye will work on BIN attack; I can work on system capabilities needed and proposed plan to build them.",
+            ]
+        )
+        service = FakeSeaTalkService(history)
+
+        payload = build_daily_briefing(
+            service,
+            now=datetime(2026, 9, 18, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+        )
+
+        updates = payload["project_updates"]
+        self.assertTrue(any(item["title"] == "PH Fraud Ops 自动化建设方案与演示材料" for item in updates))
+        self.assertEqual(payload["quality_metadata"]["evidence_quality_metrics"]["business_trip_project_fallback_count"], 1)
+
+    def test_build_daily_briefing_uses_complete_source_file_and_records_effective_input_size(self):
         history = "\n".join(
             [
                 "SeaTalk Chat History Export",
@@ -2816,31 +2874,26 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         )
 
         ledger = payload["quality_metadata"]["token_ledger"]
-        self.assertGreater(ledger["seatalk_raw_chars"], ledger["seatalk_prompt_chars"])
-        self.assertGreater(ledger["gmail_raw_chars"], ledger["gmail_prompt_chars"])
+        self.assertEqual(ledger["seatalk_prompt_chars"], 0)
+        self.assertEqual(ledger["gmail_prompt_chars"], 0)
         self.assertGreater(ledger["final_estimated_prompt_tokens"], 0)
-        self.assertLessEqual(ledger["seatalk_prompt_chars"], 24_000)
-        self.assertLessEqual(ledger["gmail_prompt_chars"], 24_000)
-        self.assertGreater(ledger["final_estimated_prompt_tokens"], 30_000)
-        self.assertEqual(ledger["prompt_budget_policy"], "quality_preserving_soft_budget")
+        self.assertGreater(ledger["effective_estimated_input_tokens"], 30_000)
+        self.assertEqual(ledger["prompt_budget_policy"], "full_source_no_truncation")
         self.assertEqual(ledger["prompt_budget_threshold_tokens"], 30_000)
         self.assertTrue(ledger["quality_preserving_over_budget"])
-        self.assertEqual(ledger["compaction_reason"], "quality_preserving_signal_recent_evidence")
+        self.assertEqual(ledger["compaction_reason"], "not_applied_full_source_model_review")
         self.assertGreaterEqual(ledger["preserved_evidence_ref_count"], 1)
         self.assertGreaterEqual(ledger["preserved_followup_candidate_count"], 1)
-        self.assertIn(ledger["seatalk_source_mode"], {"full_prompt", "full_source_file"})
-        if ledger["seatalk_source_mode"] == "full_source_file":
-            self.assertEqual(ledger["seatalk_source_file_chars"], ledger["seatalk_raw_chars"])
-        else:
-            self.assertEqual(ledger["seatalk_source_file_chars"], 0)
+        self.assertEqual(ledger["seatalk_source_mode"], "full_source_file")
+        self.assertGreaterEqual(ledger["seatalk_source_file_chars"], ledger["seatalk_raw_chars"])
         all_prompts = "\n".join(service.prompts)
-        self.assertTrue(
-            "完整原始记录文件：" in all_prompts
-            or "=== SeaTalk 原始聊天记录 ===" in all_prompts
-        )
-        self.assertIn("必须综合阅读全部相关群聊和线程", all_prompts)
-        self.assertIn("@Ker Yin please confirm", all_prompts)
-        self.assertIn("low value filler 200", all_prompts)
+        self.assertEqual(all_prompts.count("完整原始记录文件："), 1)
+        self.assertIn("必须先通读该文件的全部相关群聊和线程", all_prompts)
+        self.assertIn("在输出 JSON 前，请在本次调用内完成一次内部复核", all_prompts)
+        self.assertIn("Business Trip Planning 或类似群聊若明确记录 Xiaodong 主导的 AI agent", all_prompts)
+        self.assertIn("必须写入 Project Updates，不能因群名含出差而删除", all_prompts)
+        self.assertNotIn("@Ker Yin please confirm", all_prompts)
+        self.assertNotIn("low value filler 200", all_prompts)
         self.assertNotIn("BSP launch approval is pending", all_prompts)
         self.assertFalse(list(Path.cwd().joinpath("tmp").glob(".daily-brief-seatalk-*.txt")))
 
@@ -4277,7 +4330,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         payload = build_daily_briefing(service, now=datetime(2026, 5, 13, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE))
 
         self.assertEqual(payload["team_member_reminders"], [])
-        self.assertIn("No valid unresolved team-member mention candidates were found", service.last_prompt)
+        self.assertIn("已有明确答复", service.last_prompt)
 
     def test_build_trello_card_specs_includes_direct_watch_and_followups(self):
         briefing = {
@@ -6267,7 +6320,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                 [{"person": "Sabrina Chan", "domain": "Anti-fraud", "source_type": "seatalk", "reminder": "check"}],
                 reminder_candidates=None,
             ),
-            [],
+            [{"person": "Sabrina Chan", "domain": "Anti-fraud", "source_type": "seatalk", "reminder": "check"}],
         )
 
         candidates = [

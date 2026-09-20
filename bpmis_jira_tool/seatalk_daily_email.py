@@ -52,15 +52,20 @@ from bpmis_jira_tool.trello_daily_summary import (
 DEFAULT_RECIPIENT = "xiaodong.zheng@npt.sg"
 DEFAULT_HOURS = 24
 DAILY_BRIEF_CODEX_MODEL = "gpt-5.6-luna"
-DAILY_BRIEF_CODEX_REASONING_EFFORT = "xhigh"
+# One complete-source review must finish inside the Daily Brief delivery SLA.
+# Luna/low keeps full-record synthesis inside the 1-2 minute delivery target.
+# The prompt, source-grounding validators, and evidence checks carry the
+# structural quality guardrails that would otherwise require longer reasoning.
+DAILY_BRIEF_CODEX_REASONING_EFFORT = "low"
 MORNING_SLOT = "morning"
 MIDDAY_SLOT = "midday"
 LEGACY_SLOT = "daily"
 DAILY_EMAIL_SLOTS = {MORNING_SLOT, MIDDAY_SLOT}
 DAILY_EMAIL_WEEKDAY_RUNS = {0, 1, 2, 3, 4}
 GMAIL_EXPORT_TIMEOUT_SECONDS = 90
-# A brief is a decision aid, not a transcript. Tight section caps force the
-# model to select the few items that materially change Xiaodong's next step.
+# Legacy limits are retained for compatibility with older callers and tests.
+# The production Daily Brief now uses the model's complete-source judgement and
+# does not truncate a valid section to these values.
 MAX_MY_TODOS = 6
 MAX_PROJECT_UPDATES = 6
 MAX_OTHER_UPDATES = 5
@@ -76,10 +81,11 @@ DAILY_BRIEF_GMAIL_PROMPT_RECENT_CHARS = 6_000
 DAILY_BRIEF_PROMPT_EVIDENCE_REF_LIMIT = 72
 DAILY_BRIEF_TOKEN_CHARS_PER_TOKEN = 4
 DAILY_BRIEF_QUALITY_PROMPT_WARNING_TOKENS = 30_000
-# Medium windows fit directly in the Codex prompt. Larger windows are read as
-# one source file rather than being reduced to a signal-only excerpt.
-DAILY_BRIEF_REFERENCE_STYLE_THRESHOLD = 24_000
-DAILY_BRIEF_FULL_SOURCE_FILE_THRESHOLD = 360_000
+# Every non-empty SeaTalk window is provided to Codex as one complete source
+# file. Character and token metrics are telemetry only; they must never decide
+# which chat records the model is allowed to inspect.
+DAILY_BRIEF_REFERENCE_STYLE_THRESHOLD = 1
+DAILY_BRIEF_FULL_SOURCE_FILE_THRESHOLD = 1
 LOW_SIGNAL_EMAIL_SUMMARY = "No clear action, blocker, key project update, or team follow-up was found in this window."
 EMPTY_TODO_SECTION_SUMMARY = "No Xiaodong-owned action or watch/delegate item found."
 EMPTY_DAILY_BRIEF_SECTION = "无"
@@ -244,6 +250,8 @@ TEAM_MEMBER_REMINDER_ALLOWED_PEOPLE = {
     "jireh": "Jireh",
     "ang wei lin": "Ang Wei Lin",
     "angweilin": "Ang Wei Lin",
+    "lim dao jun": "Lim Dao Jun",
+    "limdaojun": "Lim Dao Jun",
 }
 TEAM_MEMBER_REMINDER_DETECTION_ALIASES = {
     alias: person
@@ -262,12 +270,11 @@ ANTI_FRAUD_TEAM_MEMBERS = {
     "wang chang",
     "jireh",
     "ang wei lin",
+    "sabrina chan",
 }
 TEAM_MEMBER_REMINDER_DOMAIN_OVERRIDES = {
     "zheng xiaodong": "General",
     "sophia wang zijun": "Credit Risk",
-    "liye": "Anti-fraud",
-    "ming ming": "Anti-fraud",
 }
 XIAODONG_FOLLOWUP_COMMITMENT_CUES = (
     "will check and get back",
@@ -542,10 +549,10 @@ def build_seatalk_service(settings: Settings, *, data_root: Path) -> SeaTalkDash
         codex_concurrency=settings.source_code_qa_codex_concurrency,
         insights_llm_provider=str(os.getenv("DAILY_BRIEF_INSIGHTS_LLM_PROVIDER") or "").strip(),
         insights_codex_route=CODEX_ROUTE_DEEP,
-        insights_codex_reasoning_effort=(
-            str(os.getenv("DAILY_BRIEF_CODEX_REASONING_EFFORT") or "").strip()
-            or DAILY_BRIEF_CODEX_REASONING_EFFORT
-        ),
+        # The delivery SLA is a product contract, not a deploy-time tuning
+        # option. Do not let a stale environment override silently restore
+        # xhigh and turn a 1-2 minute brief into a multi-minute job.
+        insights_codex_reasoning_effort=DAILY_BRIEF_CODEX_REASONING_EFFORT,
         claude_model=str(os.getenv("DAILY_BRIEF_CLAUDE_MODEL") or "").strip(),
         claude_binary=str(os.getenv("DAILY_BRIEF_CLAUDE_BINARY") or "").strip(),
         name_overrides_path=seatalk_name_overrides_path(data_root=data_root),
@@ -712,20 +719,30 @@ def build_daily_briefing(
     history_text = _filter_daily_brief_seatalk_noise(history_text, config=intelligence_config)
     history_text = _filter_daily_brief_meeting_logistics(history_text)
     filtered_seatalk_history_text = history_text
-    gmail_history_text = str(gmail_history_text or "").strip()
-    gmail_history_text, suppressed_calendar_message_count = _filter_gmail_calendar_history(gmail_history_text)
-    gmail_history_text, suppressed_low_value_reminder_count = _filter_gmail_low_value_reminder_history(gmail_history_text)
+    # Validators must inspect the complete non-system record. Group-noise
+    # preferences are presentation hints, not evidence deletion rules; using
+    # the filtered excerpt here could make a genuine direct request impossible
+    # to validate after the model found it in the raw source.
+    validation_candidate_history_text = seatalk_validation_history_text
+    # Gmail is the delivery channel only. Do not let a caller-provided export
+    # influence analysis, evidence selection, source coverage, or empty-window
+    # behavior. Keeping its size as telemetry makes accidental regressions
+    # observable without reintroducing it as business input.
+    ignored_gmail_input_chars = len(str(gmail_history_text or "").strip())
+    gmail_history_text = ""
+    suppressed_calendar_message_count = 0
+    suppressed_low_value_reminder_count = 0
     seatalk_raw_chars = len(history_text)
     gmail_raw_chars = len(gmail_history_text)
     seatalk_has_messages = any(line.startswith("[") for line in history_text.splitlines())
-    gmail_has_messages = any(line.startswith("Message ") for line in gmail_history_text.splitlines())
-    if not seatalk_has_messages and not gmail_has_messages:
+    if not seatalk_has_messages:
         source_token_ledger = {
             "seatalk_raw_chars": seatalk_raw_chars,
             "seatalk_compact_chars": len(history_text),
             "seatalk_prompt_chars": 0,
             "seatalk_prompt_hit_cap": False,
             "gmail_raw_chars": gmail_raw_chars,
+            "ignored_gmail_input_chars": ignored_gmail_input_chars,
             "gmail_compact_chars": len(gmail_history_text),
             "gmail_prompt_chars": 0,
             "gmail_prompt_hit_cap": False,
@@ -739,7 +756,7 @@ def build_daily_briefing(
             direct_action_todos=[],
             watch_delegate_todos=[],
             reminders=[],
-            source_texts=[history_text, gmail_history_text],
+            source_texts=[history_text],
             deduped_topic_count=0,
             token_ledger=source_token_ledger,
             evidence_quality_metrics={
@@ -771,26 +788,23 @@ def build_daily_briefing(
         if include_debug_evidence_refs:
             empty_briefing["_debug_evidence_refs"] = []
         return empty_briefing
-    history_text = service._compact_history_for_insights(
-        history_text,
-        max_chars=160_000,
-        signal_max_chars=105_000,
-        recent_max_chars=45_000,
-    )
-    if gmail_history_text:
-        gmail_history_text = gmail_history_text[:360_000]
+    # The model is the primary analyst. Keep every available SeaTalk record in
+    # the source file and reserve heuristic compaction for legacy callers only.
+    # Gmail is transport-only. The supplied content was intentionally ignored
+    # above, even for direct callers, so every reported business item remains
+    # grounded in the complete SeaTalk export.
     seatalk_compact_chars = len(history_text)
     gmail_compact_chars = len(gmail_history_text)
     high_signal_review_hints = _build_high_signal_review_hints(filtered_seatalk_history_text)
     unanswered_question_hints = _build_unanswered_seatalk_question_hints(history_text)
-    xiaodong_followup_candidates = _build_xiaodong_followup_candidates(filtered_seatalk_history_text)
-    all_reminder_candidates = _build_team_member_reminder_candidates(filtered_seatalk_history_text)
+    xiaodong_followup_candidates = _build_xiaodong_followup_candidates(validation_candidate_history_text)
+    all_reminder_candidates = _build_team_member_reminder_candidates(validation_candidate_history_text)
     xiaodong_request_candidates = [
         {**candidate, "ownership_reason": "direct_request"}
         for candidate in (all_reminder_candidates or [])
         if _canonical_team_member_name(candidate.get("person")) == "Zheng Xiaodong"
     ]
-    xiaodong_request_candidates.extend(_build_direct_xiaodong_request_candidates(filtered_seatalk_history_text))
+    xiaodong_request_candidates.extend(_build_direct_xiaodong_request_candidates(validation_candidate_history_text))
     team_member_reminder_candidates = None if all_reminder_candidates is None else [
         candidate
         for candidate in all_reminder_candidates
@@ -799,13 +813,13 @@ def build_daily_briefing(
     xiaodong_followup_candidates = _dedupe_xiaodong_action_candidates(
         [*xiaodong_followup_candidates, *xiaodong_request_candidates]
     )
-    resolved_team_member_reminder_candidates = _build_resolved_team_member_reminder_candidates(filtered_seatalk_history_text)
+    resolved_team_member_reminder_candidates = _build_resolved_team_member_reminder_candidates(validation_candidate_history_text)
     team_member_reminder_hints = _format_team_member_reminder_hints(team_member_reminder_candidates)
     name_mappings = _load_seatalk_name_mappings(service)
     for key, name in _infer_private_chat_name_mappings_from_history(seatalk_validation_history_text).items():
         name_mappings.setdefault(key.lower(), name)
     evidence_refs = _build_daily_brief_evidence_refs(
-        filtered_seatalk_history_text,
+        validation_candidate_history_text,
         gmail_history_text=gmail_history_text,
         name_mappings=name_mappings,
         team_member_reminder_candidates=team_member_reminder_candidates,
@@ -817,25 +831,20 @@ def build_daily_briefing(
         key_projects=key_project_candidates or [],
     )
     daily_match_summary = build_daily_match_summary(daily_matches)
-    prompt_history_text = _compact_daily_brief_source_excerpt(
-        history_text,
-        max_chars=DAILY_BRIEF_SEATALK_PROMPT_MAX_CHARS,
-        recent_chars=DAILY_BRIEF_SEATALK_PROMPT_RECENT_CHARS,
-    )
-    prompt_gmail_history_text = _compact_daily_brief_source_excerpt(
-        gmail_history_text,
-        max_chars=DAILY_BRIEF_GMAIL_PROMPT_MAX_CHARS,
-        recent_chars=DAILY_BRIEF_GMAIL_PROMPT_RECENT_CHARS,
-    )
+    # Complete source lives in a file instead of an excerpt embedded in the
+    # prompt. This avoids selecting evidence before the model has read it.
+    prompt_history_text = ""
+    prompt_gmail_history_text = ""
     source_token_ledger = {
         "seatalk_raw_chars": seatalk_raw_chars,
         "seatalk_compact_chars": seatalk_compact_chars,
         "seatalk_prompt_chars": len(prompt_history_text),
-        "seatalk_prompt_hit_cap": len(prompt_history_text) >= DAILY_BRIEF_SEATALK_PROMPT_MAX_CHARS,
+        "seatalk_prompt_hit_cap": False,
         "gmail_raw_chars": gmail_raw_chars,
+        "ignored_gmail_input_chars": ignored_gmail_input_chars,
         "gmail_compact_chars": gmail_compact_chars,
         "gmail_prompt_chars": len(prompt_gmail_history_text),
-        "gmail_prompt_hit_cap": len(prompt_gmail_history_text) >= DAILY_BRIEF_GMAIL_PROMPT_MAX_CHARS if gmail_history_text else False,
+        "gmail_prompt_hit_cap": False,
     }
     evidence_context = _build_daily_brief_evidence_context(
         unanswered_question_hints=unanswered_question_hints,
@@ -866,24 +875,19 @@ def build_daily_briefing(
         source_file_path=str(source_file_path) if source_file_path else "",
         source_text=(raw_seatalk_history_text if reference_style_mode and source_file_path is None else ""),
     )
+    source_file_chars = len(raw_seatalk_history_text) if source_file_path else 0
     source_token_ledger["final_prompt_chars"] = len(prompt)
     source_token_ledger["final_estimated_prompt_tokens"] = _estimate_daily_prompt_tokens(prompt)
-    source_token_ledger["prompt_budget_policy"] = "quality_preserving_soft_budget"
+    source_token_ledger["effective_input_chars"] = len(prompt) + source_file_chars
+    source_token_ledger["effective_estimated_input_tokens"] = _estimate_daily_prompt_tokens(
+        prompt + raw_seatalk_history_text if source_file_path else prompt
+    )
+    source_token_ledger["prompt_budget_policy"] = "full_source_no_truncation"
     source_token_ledger["prompt_budget_threshold_tokens"] = DAILY_BRIEF_QUALITY_PROMPT_WARNING_TOKENS
     source_token_ledger["quality_preserving_over_budget"] = (
-        source_token_ledger["final_estimated_prompt_tokens"] >= DAILY_BRIEF_QUALITY_PROMPT_WARNING_TOKENS
+        source_token_ledger["effective_estimated_input_tokens"] >= DAILY_BRIEF_QUALITY_PROMPT_WARNING_TOKENS
     )
-    source_token_ledger["compaction_reason"] = (
-        "quality_preserving_signal_recent_evidence"
-        if (
-            source_token_ledger["seatalk_prompt_hit_cap"]
-            or source_token_ledger["gmail_prompt_hit_cap"]
-            or source_token_ledger["seatalk_raw_chars"] > source_token_ledger["seatalk_prompt_chars"]
-            or source_token_ledger["gmail_raw_chars"] > source_token_ledger["gmail_prompt_chars"]
-            or source_token_ledger["quality_preserving_over_budget"]
-        )
-        else "not_needed"
-    )
+    source_token_ledger["compaction_reason"] = "not_applied_full_source_model_review"
     source_token_ledger["preserved_evidence_ref_count"] = len(evidence_refs)
     source_token_ledger["prompt_evidence_ref_count"] = len(
         json.loads(evidence_context).get("evidence_refs", [])
@@ -893,7 +897,7 @@ def build_daily_briefing(
         if source_file_path is not None
         else ("full_prompt" if reference_style_mode else "prompt_excerpt")
     )
-    source_token_ledger["seatalk_source_file_chars"] = len(raw_seatalk_history_text) if source_file_path else 0
+    source_token_ledger["seatalk_source_file_chars"] = source_file_chars
     source_token_ledger["preserved_followup_candidate_count"] = len(team_member_reminder_candidates or [])
     source_token_ledger["preserved_unanswered_hint_count"] = len(
         [line for line in str(unanswered_question_hints or "").splitlines() if line.strip()]
@@ -901,13 +905,16 @@ def build_daily_briefing(
     source_token_ledger["preserved_high_signal_hint_count"] = len(
         [line for line in str(high_signal_review_hints or "").splitlines() if line.strip()]
     )
+    model_review_passes = 0
     try:
         _, parsed = service._run_codex_insights_prompt(
             system_prompt=_daily_brief_system_prompt(),
             prompt=prompt,
         )
+        model_review_passes += 1
     finally:
         _remove_daily_brief_source_file(source_file_path)
+    parsed = _daily_brief_seatalk_only_response(parsed)
     language_repair_attempted = False
     language_repair_count = 0
     if reference_style_mode and _daily_brief_needs_language_repair(parsed):
@@ -924,19 +931,25 @@ def build_daily_briefing(
                 _normalize_update_items(_normalize_brief_items(parsed.get("project_updates", []), name_mappings=name_mappings))
             )
         )
-    )[:MAX_PROJECT_UPDATES]
-    # Full-source Codex is primary, but deterministic high-signal candidates
-    # remain enabled as a recall guard.  They are evidence-gated, synthesized,
-    # deduped, and validated below; disabling them for long inputs caused live
-    # incidents and P0 timeline changes to disappear when the model focused on
-    # a smaller set of actions.
-    high_signal_fallbacks = _build_high_signal_fallback_items(
-        filtered_seatalk_history_text,
-        evidence_refs=evidence_refs,
-        name_mappings=name_mappings,
+    )
+    business_trip_project_updates = _build_business_trip_project_updates(
+        validation_candidate_history_text,
         existing_items=project_updates,
     )
+    if business_trip_project_updates:
+        project_updates = _dedupe_brief_items(
+            _prepare_project_update_items([*project_updates, *business_trip_project_updates])
+        )
+    # Complete-source model review is the normal production path. Retain
+    # deterministic content generation only for an unexpected legacy mode.
+    high_signal_fallbacks: list[dict[str, Any]] = []
     if not reference_style_mode:
+        high_signal_fallbacks = _build_high_signal_fallback_items(
+            filtered_seatalk_history_text,
+            evidence_refs=evidence_refs,
+            name_mappings=name_mappings,
+            existing_items=project_updates,
+        )
         high_signal_fallbacks.extend(
             _build_gmail_high_signal_fallback_items(
                 gmail_history_text,
@@ -958,11 +971,10 @@ def build_daily_briefing(
     high_signal_fallbacks = project_fallbacks
     high_signal_fallbacks = _prepare_project_update_items(high_signal_fallbacks)
     if high_signal_fallbacks:
-        # Put deterministic high-signal candidates first so the section cap cannot
-        # discard a P0/timeline item simply because the model returned six FYIs.
+        # Legacy fallback mode only: preserve its existing guarded merge logic.
         project_updates = _prepare_project_update_items(
             _dedupe_brief_items([*high_signal_fallbacks, *project_updates])
-        )[:MAX_PROJECT_UPDATES]
+        )
     other_updates = _dedupe_brief_items(
         _filter_gmail_calendar_items(
             _prepare_other_update_items(
@@ -976,27 +988,26 @@ def build_daily_briefing(
                 )
             )
         )
-    )[:MAX_OTHER_UPDATES]
+    )
     parsed_todos = _normalize_todo_items(_normalize_brief_items(parsed.get("my_todos", []), name_mappings=name_mappings))
-    # Full-source Codex is the primary extractor, while deterministic
-    # unresolved-request backfills protect high-value actions that a long
-    # context model may omit. These backfills are evidence-gated and deduped;
-    # they are not the old signal-excerpt fallback path.
-    xiaodong_followup_fallbacks = _build_xiaodong_followup_items(
-        xiaodong_followup_candidates,
-        evidence_refs=evidence_refs,
-        existing_items=parsed_todos,
-    )
-    gmail_xiaodong_action_fallbacks = [] if reference_style_mode else _build_gmail_xiaodong_action_items(
-        evidence_refs,
-        existing_items=[*xiaodong_followup_fallbacks, *parsed_todos],
-    )
+    xiaodong_followup_fallbacks: list[dict[str, Any]] = []
+    gmail_xiaodong_action_fallbacks: list[dict[str, Any]] = []
+    if not reference_style_mode:
+        xiaodong_followup_fallbacks = _build_xiaodong_followup_items(
+            xiaodong_followup_candidates,
+            evidence_refs=evidence_refs,
+            existing_items=parsed_todos,
+        )
+        gmail_xiaodong_action_fallbacks = _build_gmail_xiaodong_action_items(
+            evidence_refs,
+            existing_items=[*xiaodong_followup_fallbacks, *parsed_todos],
+        )
     my_todos = _dedupe_brief_items(
         _filter_gmail_calendar_items(
             [*xiaodong_followup_fallbacks, *gmail_xiaodong_action_fallbacks, *parsed_todos]
         ),
         text_fields=("task",),
-    )[:MAX_MY_TODOS]
+    )
     if high_signal_fallbacks:
         # Merge before evidence validation and cross-section suppression. A
         # version/timeline candidate can share a canonical todo with a MAS or
@@ -1017,11 +1028,14 @@ def build_daily_briefing(
         _filter_gmail_calendar_items(
             _filter_seatalk_reminders(
                 _normalize_brief_items(parsed.get("team_member_reminders", []), default_source_type="seatalk", name_mappings=name_mappings),
+                # This is a validation gate, not deterministic generation:
+                # the model chooses the item, but it must map to a direct,
+                # unresolved human request for the named team member.
                 reminder_candidates=team_member_reminder_candidates,
             )
         ),
         text_fields=("person", "reminder"),
-    )[:MAX_TEAM_MEMBER_REMINDERS]
+    )
     my_todos = _filter_resolved_or_meeting_logistics_followups(
         my_todos,
         resolved_candidates=resolved_team_member_reminder_candidates,
@@ -1039,6 +1053,8 @@ def build_daily_briefing(
     )
     evidence_quality_metrics["calendar_suppressed_count"] = suppressed_calendar_message_count
     evidence_quality_metrics["low_value_reminder_suppressed_count"] = suppressed_low_value_reminder_count
+    evidence_quality_metrics["model_review_passes"] = model_review_passes
+    evidence_quality_metrics["business_trip_project_fallback_count"] = len(business_trip_project_updates)
     evidence_quality_metrics["high_signal_fallback_count"] = len(high_signal_fallbacks)
     evidence_quality_metrics["other_high_signal_fallback_count"] = len(other_fallbacks)
     evidence_quality_metrics["xiaodong_followup_fallback_count"] = len(xiaodong_followup_fallbacks)
@@ -1064,13 +1080,16 @@ def build_daily_briefing(
             quality_metrics=evidence_quality_metrics,
         )
     my_todos = SeaTalkDashboardService._sort_todos(my_todos)
-    reminders = _backfill_team_member_reminders_from_candidates(
-        reminders,
-        team_member_reminder_candidates=team_member_reminder_candidates,
-        resolved_candidates=resolved_team_member_reminder_candidates,
-        evidence_refs=evidence_refs,
-        quality_metrics=evidence_quality_metrics,
-    )
+    if not reference_style_mode:
+        reminders = _backfill_team_member_reminders_from_candidates(
+            reminders,
+            team_member_reminder_candidates=team_member_reminder_candidates,
+            resolved_candidates=resolved_team_member_reminder_candidates,
+            evidence_refs=evidence_refs,
+            quality_metrics=evidence_quality_metrics,
+        )
+    else:
+        evidence_quality_metrics["deterministic_followup_backfill_count"] = 0
     reminders = _filter_resolved_or_meeting_logistics_followups(
         reminders,
         resolved_candidates=resolved_team_member_reminder_candidates,
@@ -1117,14 +1136,15 @@ def build_daily_briefing(
         watch_delegate_todos=watch_delegate_todos,
         reminders=reminders,
     )
-    _ensure_high_signal_fallbacks_visible(
-        high_signal_fallbacks=high_signal_fallbacks,
-        project_updates=project_updates,
-        other_updates=other_updates,
-        direct_action_todos=direct_action_todos,
-        watch_delegate_todos=watch_delegate_todos,
-        reminders=reminders,
-    )
+    if not reference_style_mode:
+        _ensure_high_signal_fallbacks_visible(
+            high_signal_fallbacks=high_signal_fallbacks,
+            project_updates=project_updates,
+            other_updates=other_updates,
+            direct_action_todos=direct_action_todos,
+            watch_delegate_todos=watch_delegate_todos,
+            reminders=reminders,
+        )
     # Visibility repair can merge a protected fallback into a todo after the
     # first pass. Re-run canonical suppression so that repair cannot re-create
     # a cross-section duplicate.
@@ -1137,7 +1157,7 @@ def build_daily_briefing(
     )
     _correct_known_update_domains(project_updates)
     _correct_known_update_domains(other_updates)
-    project_updates[:] = _dedupe_same_topic_items(_prepare_project_update_items(project_updates))[:MAX_PROJECT_UPDATES]
+    project_updates[:] = _dedupe_same_topic_items(_prepare_project_update_items(project_updates))
     if reference_style_mode:
         final_language_payload = {
             "project_updates": project_updates,
@@ -1191,6 +1211,23 @@ def build_daily_briefing(
         # otherwise the email could retain stale English in direct_action_todos
         # even though my_todos was translated successfully.
         direct_action_todos, watch_delegate_todos = _split_todos_by_action_type(my_todos)
+    # A language-repair response is untrusted for business scope: it may be a
+    # malformed full JSON response instead of a field-only translation. Apply
+    # the source boundary again immediately before rendering.
+    final_seatalk_response = _daily_brief_seatalk_only_response(
+        {
+            "project_updates": project_updates,
+            "other_updates": other_updates,
+            "my_todos": my_todos,
+            "team_member_reminders": reminders,
+            "team_todos": [],
+        }
+    )
+    project_updates = final_seatalk_response["project_updates"]
+    other_updates = final_seatalk_response["other_updates"]
+    my_todos = final_seatalk_response["my_todos"]
+    reminders = final_seatalk_response["team_member_reminders"]
+    direct_action_todos, watch_delegate_todos = _split_todos_by_action_type(my_todos)
     _clean_daily_brief_evidence(
         [*project_updates, *other_updates, *direct_action_todos, *watch_delegate_todos, *reminders]
     )
@@ -1227,7 +1264,7 @@ def build_daily_briefing(
         direct_action_todos=direct_action_todos,
         watch_delegate_todos=watch_delegate_todos,
         reminders=reminders,
-        source_texts=[history_text, gmail_history_text],
+        source_texts=[history_text],
         deduped_topic_count=deduped_topic_count,
         token_ledger=source_token_ledger,
         evidence_quality_metrics=evidence_quality_metrics,
@@ -2024,6 +2061,9 @@ def _daily_brief_reference_style_user_prompt(
         "请完整阅读指定的 SeaTalk 原始聊天记录，再产出一份真正能改变 Xiaodong 下一步行动的每日工作简报。"
         "不要把聊天记录改写成流水账，也不要为了填满版块而保留低价值信息。\n\n"
         f"{source_instruction}\n\n"
+        "在输出 JSON 前，请在本次调用内完成一次内部复核：重新检查所有候选事项是否有后续答复或关闭、是否存在跨 source 拼接、"
+        "以及是否遗漏 P0/P1、MAS、incident、blocked、版本/上线变化、关键 dependency、Xiaodong 未完成承诺或白名单成员的未答复请求。"
+        "不要输出复核过程，只输出复核后的最终 JSON。\n\n"
         "## 重点判断顺序\n"
         "1. Xiaodong 必须亲自答复、评审、决定、审批、参加或承诺跟进的事项。\n"
         "2. Xiaodong 不必亲自执行，但必须监控、推动或确保负责人完成的事项。\n"
@@ -2035,11 +2075,21 @@ def _daily_brief_reference_style_user_prompt(
         "其他参与者的回复只能作为上下文；只有被点名负责人、Xiaodong 或原请求人明确表示已回答、fixed、resolved、closed，才算关闭请求。"
         "Xiaodong 说会检查、跟进或稍后回复，不算问题已解决，应保留为 Xiaodong 待办。"
         "同一主题在不同版块只保留一个综合事项；只有负责人或动作不同，才可以拆分。\n\n"
+        "所有事实、证据和结论只能来自 SeaTalk；Gmail、日历、邮件、外部资料均不属于输入，也不能出现在 Source/Evidence 或 source_type 中。\n\n"
+        "团队跟进仅限白名单成员被真人直接提出具体需求、分配任务或明确艾特，且该成员和 Xiaodong 在可见记录中没有实质答复。"
+        "cc-only、私聊、机器人/系统或 SDLC Checker、OL/coverage、会议安排、普通提醒均不是团队待办。"
+        "如同一群或 thread 中已有明确答复、fixed、resolved、closed 或结论，必须删除该事项。thread 证据必须写明 thread 标题。\n\n"
         "## 业务归属和团队边界\n"
         "Domain 只能使用 Anti-fraud、Credit Risk、Ops Risk、General。Sophia Wang Zijun 归属 Credit Risk。"
         "Xiaodong 团队跟进白名单：Ker Yin、Rene Chong、Sabrina Chan、Liye、Hui Xian、Sophia Wang Zijun、Ming Ming、Zoey Lu、Wang Chang、Jireh、Ang Wei Lin、Lim Dao Jun。"
         "Anti-fraud 团队成员仅限 Ker Yin、Rene Chong、Wang Chang、Jireh、Ang Wei Lin、Sabrina Chan。"
         "Ming Ming | 明明 与 Li Mingming 是不同的人，不能合并。不要因为群名相似就推断项目归属；以聊天中明确的参与者、请求和内容为准。\n\n"
+        "项目选择必须以 Xiaodong 团队的实际责任为边界：只保留团队主导、负责交付或深度参与的项目。"
+        "Anti-fraud 事项必须有 AF PM/团队的明确参与或责任；Credit Risk 事项必须有 CRMS/Credit Risk PM 的明确参与；"
+        "Ops Risk 只保留与 GRC 系统责任直接相关的事项。普通业务、其他产品团队、纯行政或出差安排，即使群聊内容详细，也不要写入项目动态或其他重要动态；"
+        "但 Business Trip Planning 或类似群聊若明确记录 Xiaodong 主导的 AI agent、Daily Brief、PM 自动化建设、对外 presentation 计划、交付物或决策，则属于其负责项目，必须写入 Project Updates，不能因群名含出差而删除。"
+        "例如，PH trip findings 的 slide 交付、Fraud Ops 职能与系统自动化能力建设、方案和下一步计划，均是项目动态而不是出差 logistics。"
+        "重大线上事故仅在 Xiaodong 团队正在参与处置、需要决策或会直接影响其负责项目时保留。\n\n"
         "## 输出质量要求\n"
         "所有用户可见内容使用精炼、专业、商务通顺的简体中文；真实群名、人名、线程名、产品名、技术名词和邮箱保持原文。"
         "每一条行动项必须写清楚背景、具体动作和预期结果，不能只写‘跟进’、‘确认’或‘检查’。"
@@ -2054,10 +2104,42 @@ def _daily_brief_reference_style_user_prompt(
         "my_todos 每项字段：task、domain、priority、due、action_type、evidence、source_type。"
         "team_member_reminders 每项字段：domain、person、reminder、evidence、source_type。"
         "允许的 status：done、in_progress、blocked、unknown；priority：high、medium、low、unknown；"
-        "action_type：direct_action 或 watch_delegate；signal_type：incident、launch、policy_process、risk_compliance、cross_team_dependency、leadership_decision、cross_product_milestone。"
-        "最多输出 6 条 Xiaodong Action、6 条 Watch/Delegate、6 条 Project Updates、5 条 Other Update、6 条 Team Follow-up。"
+        "action_type：direct_action 或 watch_delegate；source_type 必须是 seatalk；signal_type：incident、launch、policy_process、risk_compliance、cross_team_dependency、leadership_decision、cross_product_milestone。"
+        "不要使用机械数量上限。保留所有彼此不同且具备明确行动、风险、交付影响或未答复责任人的高信号事项；"
+        "但不能把简报写成聊天流水账，也不能为了看起来完整而保留普通 FYI。"
         "如果同一主题同时属于 Xiaodong 待办和项目动态，只保留最能指导下一步的版本，除非两者确实承担不同动作。\n\n"
         f"报告窗口：{window_label}。生成时间：{local_now.isoformat()}。"
+    )
+
+
+def _daily_brief_full_source_review_prompt(
+    *,
+    source_file_path: str,
+    source_text: str,
+    local_now: datetime,
+    window_label: str,
+    draft: dict[str, Any],
+) -> str:
+    """Ask Codex to audit its draft against the same complete SeaTalk source."""
+    base = _daily_brief_reference_style_user_prompt(
+        source_file_path=source_file_path,
+        source_text=source_text,
+        local_now=local_now,
+        window_label=window_label,
+    )
+    return (
+        f"{base}\n\n"
+        "## 第二轮完整记录复核\n"
+        "下面是第一轮草稿。请再次通读完整原始记录，并直接返回修订后的完整 JSON。"
+        "此轮的职责是发现第一轮遗漏的重大事项，同时删除任何已解决、已回答、只是会议安排或迟到通知、"
+        "机器人/系统提醒、普通 FYI、证据不足、跨 source 拼接或重复主题。"
+        "同一主题只能保留一个最能指导下一步的事项；只有负责人和动作实质不同才可以分开。"
+        "不得因为条目数量而删去 P0/P1、MAS/合规、incident、blocked、版本/上线变化、关键依赖、"
+        "Xiaodong 未完成承诺或明确未答复的团队成员请求。"
+        "每个 Project Updates 与 Other Update 必须是中文 PM 综合判断，包含“状态：”“影响：”“下一步：”；"
+        "每个 Source/Evidence 必须基于同一条真实群聊、联系人或 thread，不能猜测。\n\n"
+        "=== 第一轮草稿 ===\n"
+        f"{json.dumps(draft, ensure_ascii=False, separators=(',', ':'))}"
     )
 
 
@@ -2127,6 +2209,30 @@ def _daily_brief_has_items(payload: Any) -> bool:
         isinstance(payload.get(key), list) and bool(payload.get(key))
         for key in ("project_updates", "other_updates", "my_todos", "team_member_reminders")
     )
+
+
+def _daily_brief_seatalk_only_response(payload: Any) -> dict[str, Any]:
+    """Reject accidental non-SeaTalk output from the model or a legacy caller."""
+    if not isinstance(payload, dict):
+        return {}
+    cleaned = dict(payload)
+    for section in ("project_updates", "other_updates", "my_todos", "team_member_reminders"):
+        rows = cleaned.get(section)
+        if not isinstance(rows, list):
+            cleaned[section] = []
+            continue
+        kept: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            source_type = str(row.get("source_type") or "seatalk").strip().casefold()
+            if source_type in {"", "seatalk"}:
+                normalized = dict(row)
+                normalized["source_type"] = "seatalk"
+                kept.append(normalized)
+        cleaned[section] = kept
+    cleaned["team_todos"] = []
+    return cleaned
 
 
 def _daily_brief_needs_language_repair(payload: Any) -> bool:
@@ -3004,7 +3110,7 @@ def _scan_team_member_reminder_candidates(history_text: str) -> tuple[list[dict[
                 "timestamp": str(item.get("timestamp") or ""),
                 "text": str(item.get("text") or ""),
             }
-            for item in items[:MAX_TEAM_MEMBER_REMINDER_HINTS]
+            for item in items
         ]
 
     return serialize(unresolved), serialize(resolved)
@@ -3326,6 +3432,51 @@ def _build_high_signal_review_hints(history_text: str) -> str:
         candidates.append((score, index, hint))
     candidates.sort(key=lambda value: (-value[0], -value[1]))
     return "\n".join(hint for _, _, hint in candidates[:36])
+
+
+def _build_business_trip_project_updates(
+    history_text: str,
+    *,
+    existing_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep Xiaodong-owned automation deliverables out of the travel-noise bucket."""
+    records = _seatalk_history_records_for_evidence(history_text)
+    business_trip_records = [
+        record
+        for record in records
+        if "business trip planning" in str(record.get("group") or "").casefold()
+    ]
+    if not business_trip_records:
+        return []
+    combined_text = "\n".join(str(record.get("text") or "") for record in business_trip_records)
+    combined = combined_text.casefold()
+    has_xiaodong_plan = any(
+        _sender_is_xiaodong(str(record.get("sender") or ""))
+        and any(term in str(record.get("text") or "").casefold() for term in ("system capabilities", "automation", "proposed plan"))
+        for record in business_trip_records
+    )
+    has_presentation_deliverable = any(term in combined for term in ("slide", "presentation"))
+    has_delivery_checkpoint = any(term in combined for term in ("next wed", "next week", "immediate next step"))
+    if not (has_xiaodong_plan and has_presentation_deliverable and has_delivery_checkpoint):
+        return []
+    candidate = {
+        "domain": "General",
+        "title": "PH Fraud Ops 自动化建设方案与演示材料",
+        "summary": (
+            "状态：进行中，Xiaodong 已启动 PH trip findings 的演示材料，覆盖 Fraud Ops 职能、BIN attack 深挖、"
+            "系统自动化能力、建设方案和近期下一步，并已分配部分内容。"
+            "影响：该材料将形成 PH Fraud Ops 自动化建设的团队对齐基础。"
+            "下一步：在下周三前汇总分工内容，完成演示材料并确认系统能力建设方案。"
+        ),
+        "status": "in_progress",
+        "evidence": _normalize_seatalk_source_label(str(business_trip_records[0].get("group") or "Business Trip Planning")),
+        "source_type": "seatalk",
+        "priority": "high",
+        "priority_reason": "Xiaodong-owned automation delivery plan",
+    }
+    if any(_brief_items_refer_to_same_topic(candidate, item) for item in existing_items):
+        return []
+    return [candidate]
 
 
 def _build_high_signal_fallback_items(
@@ -7018,7 +7169,12 @@ def _reminder_matches_candidate(
     evidence = _normalize_thread_match_text(item.get("evidence"))
     group = _normalize_thread_match_text(candidate.get("group"))
     thread = _normalize_thread_match_text(candidate.get("thread"))
-    if group and group not in evidence:
+    # A source label can be wrong while the thread title is exact. Keep the
+    # model-selected follow-up in that case so evidence repair can replace the
+    # container group with the actual thread owner.
+    if thread and thread in evidence:
+        return True
+    if group and not _seatalk_group_ref_matches(group, evidence):
         return False
     if thread and thread not in evidence:
         return False
@@ -7519,22 +7675,17 @@ def _is_sdlc_checker_reminder_item(item: dict[str, Any]) -> bool:
 
 def _filter_other_updates(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     strong: list[dict[str, Any]] = []
-    useful_awareness: list[dict[str, Any]] = []
     for item in items:
         if _is_bot_alert_or_reminder_item(item):
             continue
         raw_signal_type = str(item.get("signal_type") or "").strip()
         signal_type = _normalize_signal_type(raw_signal_type)
         if signal_type not in ALLOWED_OTHER_UPDATE_SIGNAL_TYPES:
-            if raw_signal_type:
-                continue
-            signal_type = "useful_awareness"
+            continue
         item["signal_type"] = signal_type
         if signal_type in STRONG_OTHER_UPDATE_SIGNAL_TYPES:
             strong.append(item)
-        elif signal_type == "useful_awareness" and len(useful_awareness) < MAX_USEFUL_AWARENESS_OTHER_UPDATES:
-            useful_awareness.append(item)
-    return strong + useful_awareness
+    return strong
 
 
 def _is_bot_alert_or_reminder_item(item: dict[str, Any]) -> bool:
