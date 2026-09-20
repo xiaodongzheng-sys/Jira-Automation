@@ -2667,6 +2667,56 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertIn("[SP][P0] ATM rollout", hints)
         self.assertIn("v3.08", hints)
 
+    def test_daily_brief_prompt_evidence_index_does_not_repeat_source_snippets(self):
+        refs = [
+            {
+                "id": "st-ref-001",
+                "source_type": "seatalk",
+                "group": "AF group",
+                "thread": "ATM rollout",
+                "sender": "Ker Yin",
+                "timestamp": "2026-08-06 18:00:00",
+                "mentioned_people": ["Wang Chang"],
+                "reply_state": "unanswered",
+                "snippet": "The complete source message should not be repeated in the prompt index.",
+                "subject": "delivery-only field",
+                "to": "delivery-only recipient",
+                "evidence": "AF group / thread: ATM rollout",
+            }
+        ]
+
+        compacted = seatalk_daily_email._compact_daily_brief_prompt_evidence_refs(
+            refs,
+            team_member_reminder_candidates=[],
+            xiaodong_followup_candidates=[],
+        )
+
+        self.assertEqual(compacted[0]["id"], "st-ref-001")
+        self.assertEqual(compacted[0]["evidence"], "AF group / thread: ATM rollout")
+        self.assertNotIn("snippet", compacted[0])
+        self.assertNotIn("subject", compacted[0])
+        self.assertNotIn("to", compacted[0])
+        self.assertNotIn("source_type", compacted[0])
+
+    def test_daily_brief_reference_prompt_has_one_compact_candidate_index(self):
+        long_hint = "- [2026-08-06 18:00:00] AF group / thread: ATM rollout: " + ("detail " * 80)
+        prompt = seatalk_daily_email._daily_brief_reference_style_user_prompt(
+            source_file_path="",
+            source_text="=== AF group ===\n[2026-08-06 18:00:00] Ker Yin: source message",
+            local_now=datetime(2026, 8, 6, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            window_label="2026-08-06 13:00 - 2026-08-06 19:00",
+            high_signal_review_hints=long_hint,
+            team_member_reminder_hints=long_hint,
+            unanswered_question_hints=long_hint,
+            evidence_context='{"high_signal_candidates":["st-ref-001"]}',
+        )
+
+        self.assertIn("统一证据与候选索引", prompt)
+        self.assertNotIn(long_hint, prompt)
+        self.assertNotIn("高信号候选：", prompt)
+        self.assertNotIn("团队未答复候选：", prompt)
+        self.assertNotIn("未回答问题候选：", prompt)
+
     def test_high_signal_fallback_preserves_known_compound_topics(self):
         history = "\n".join(
             [

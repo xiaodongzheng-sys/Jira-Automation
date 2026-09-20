@@ -81,6 +81,7 @@ DAILY_BRIEF_GMAIL_PROMPT_RECENT_CHARS = 6_000
 DAILY_BRIEF_PROMPT_EVIDENCE_REF_LIMIT = 72
 DAILY_BRIEF_TOKEN_CHARS_PER_TOKEN = 4
 DAILY_BRIEF_QUALITY_PROMPT_WARNING_TOKENS = 30_000
+DAILY_BRIEF_PROMPT_HINT_TEXT_LIMIT = 160
 # Every non-empty SeaTalk window is provided to Codex as one complete source
 # file. Character and token metrics are telemetry only; they must never decide
 # which chat records the model is allowed to inspect.
@@ -2054,11 +2055,7 @@ def _daily_brief_reference_style_user_prompt(
         "## 确定性复核索引\n"
         "下面的索引由 SeaTalk 原始记录预扫描生成，只用于提醒你逐项回到完整原始文件核验，不是自动输出清单。"
         "每一个 P0/P1、incident、blocked、MAS/合规、版本/上线变化、关键 dependency、Xiaodong 承诺和团队跟进候选，都必须逐项判断是否保留、合并或因已解决而删除。\n"
-        f"高信号候选：\n{high_signal_review_hints or '无'}\n\n"
-        f"Xiaodong 直接行动候选：\n{xiaodong_followup_hints or '无'}\n\n"
-        f"团队未答复候选：\n{team_member_reminder_hints or '无'}\n\n"
-        f"未回答问题候选：\n{unanswered_question_hints or '无'}\n\n"
-        f"证据索引：\n{evidence_context or '无'}\n\n"
+        f"统一证据与候选索引（原始记录已包含完整消息正文）：\n{evidence_context or '无'}\n\n"
         "不要因为候选索引很长而略读；必须保留所有经核实的重要不同主题，并合并重复主题。\n\n"
         "在输出 JSON 前，请在本次调用内完成一次内部复核：重新检查所有候选事项是否有后续答复或关闭、是否存在跨 source 拼接、"
         "以及是否遗漏 P0/P1、MAS、incident、blocked、版本/上线变化、关键 dependency、Xiaodong 未完成承诺或白名单成员的未答复请求。"
@@ -2545,19 +2542,20 @@ def _build_daily_brief_evidence_context(
         xiaodong_followup_candidates=xiaodong_followup_candidates,
     )
     payload = {
-        "unanswered_mentions": [
-            line[2:] if line.startswith("- ") else line
-            for line in str(unanswered_question_hints or "").splitlines()
-            if line.strip()
-        ][:MAX_UNANSWERED_SEATALK_QUESTION_HINTS],
+        # These are locators only. The full request text remains available in
+        # the chronological source below, so repeating it here wastes context
+        # without improving traceability.
+        "unanswered_mentions": _compact_daily_brief_hint_lines(
+            unanswered_question_hints,
+            limit=DAILY_BRIEF_PROMPT_HINT_TEXT_LIMIT,
+        )[:MAX_UNANSWERED_SEATALK_QUESTION_HINTS],
         "candidate_followups": _compact_daily_followup_candidates(team_member_reminder_candidates),
         "xiaodong_action_candidates": _compact_xiaodong_followup_candidates(xiaodong_followup_candidates),
         "evidence_refs": prompt_evidence_refs,
-        "high_signal_candidates": [
-            line[2:] if line.startswith("- ") else line
-            for line in str(high_signal_review_hints or "").splitlines()
-            if line.strip()
-        ],
+        "high_signal_candidates": _compact_daily_brief_hint_lines(
+            high_signal_review_hints,
+            limit=DAILY_BRIEF_PROMPT_HINT_TEXT_LIMIT,
+        )[:MAX_UNANSWERED_SEATALK_QUESTION_HINTS * 4],
     }
     cap_flags = {
         "seatalk_prompt_hit_cap": bool(source_token_ledger.get("seatalk_prompt_hit_cap")),
@@ -2627,18 +2625,18 @@ def _compact_daily_brief_prompt_evidence_refs(
                 selected[-1] = ref
                 selected_ids.add(ref_id)
 
+    # The complete SeaTalk export is already in the same prompt. Do not repeat
+    # message snippets or delivery-only fields in the evidence index; the
+    # model can use the ref's location to return to the source text, while the
+    # local validator still retains every full ref.
     allowed_fields = (
         "id",
-        "source_type",
         "group",
         "thread",
         "sender",
         "timestamp",
         "mentioned_people",
         "reply_state",
-        "snippet",
-        "subject",
-        "to",
         "evidence",
     )
     return [
@@ -2658,7 +2656,10 @@ def _compact_xiaodong_followup_candidates(candidates: list[dict[str, str]] | Non
                 "source": f"{item.get('group')} / thread: {thread}" if thread else str(item.get("group") or ""),
                 "timestamp": str(item.get("timestamp") or ""),
                 "reason": str(item.get("ownership_reason") or "commitment"),
-                "request_or_commitment": _clip_hint_text(item.get("text"), limit=220),
+                "request_or_commitment": _clip_hint_text(
+                    item.get("text"),
+                    limit=DAILY_BRIEF_PROMPT_HINT_TEXT_LIMIT,
+                ),
             }
         )
     return compacted[:MAX_TEAM_MEMBER_REMINDER_HINTS]
@@ -2692,7 +2693,7 @@ def _compact_daily_followup_candidates(candidates: list[dict[str, str]] | None) 
                 ),
                 "timestamp": str(item.get("timestamp") or "").strip(),
                 "requester": str(item.get("sender") or "").strip(),
-                "ask": _clip_hint_text(item.get("text"), limit=220),
+                "ask": _clip_hint_text(item.get("text"), limit=DAILY_BRIEF_PROMPT_HINT_TEXT_LIMIT),
             }
         )
     return compacted[:MAX_TEAM_MEMBER_REMINDER_HINTS]
@@ -2713,6 +2714,24 @@ def _compact_daily_brief_source_excerpt(text: str, *, max_chars: int, recent_cha
     if len(compacted) <= max_chars:
         return compacted
     return compacted[:max_chars].rstrip()
+
+
+def _compact_daily_brief_hint_lines(value: Any, *, limit: int = DAILY_BRIEF_PROMPT_HINT_TEXT_LIMIT) -> list[str]:
+    """Keep only a short locator for hints whose full text is in the source."""
+    compacted: list[str] = []
+    seen: set[str] = set()
+    for raw_line in str(value or "").splitlines():
+        line = raw_line.strip()
+        if line.startswith("- "):
+            line = line[2:].strip()
+        if not line:
+            continue
+        line = _clip_hint_text(line, limit=limit)
+        if line in seen:
+            continue
+        seen.add(line)
+        compacted.append(line)
+    return compacted
 
 
 def _daily_brief_signal_excerpt(text: str, *, max_chars: int) -> str:
