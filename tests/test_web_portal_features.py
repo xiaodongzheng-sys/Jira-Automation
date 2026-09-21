@@ -5364,6 +5364,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "LOCAL_AGENT_SEATALK_ENABLED": "false",
             },
             clear=False,
         ):
@@ -5390,6 +5391,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "LOCAL_AGENT_SEATALK_ENABLED": "false",
             },
             clear=False,
         ):
@@ -5575,6 +5577,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "LOCAL_AGENT_SEATALK_ENABLED": "false",
             },
             clear=False,
         ):

@@ -202,33 +202,33 @@
           "id": "brief_generation_signal_filtering",
           "description": "Daily brief generation filters reminders, alerts, duplicate topics, and low-signal items.",
           "tests": [
-            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_build_daily_briefing_filters_reminders_and_other_updates",
-            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_build_daily_briefing_ignores_bot_alerts_and_reminders",
-            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_build_daily_briefing_suppresses_cross_section_duplicate_topics"
+            "tests.test_seatalk_daily_email.SeaTalkDailyBriefLegacyPipelineTests.test_build_daily_briefing_filters_reminders_and_other_updates",
+            "tests.test_seatalk_daily_email.SeaTalkDailyBriefLegacyPipelineTests.test_build_daily_briefing_ignores_bot_alerts_and_reminders",
+            "tests.test_seatalk_daily_email.SeaTalkDailyBriefLegacyPipelineTests.test_build_daily_briefing_suppresses_cross_section_duplicate_topics"
           ]
         },
         {
           "id": "gmail_and_seatalk_source_mix",
           "description": "Generation handles Gmail-only, SeaTalk-only, and mixed source evidence.",
           "tests": [
-            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_build_daily_briefing_includes_gmail_threads_even_without_seatalk_messages",
-            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_build_daily_briefing_uses_gmail_ref_for_project_update_evidence",
-            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_build_daily_briefing_repairs_wrong_source_from_ref_and_normalizes_duplicate_group"
+            "tests.test_seatalk_daily_email.SeaTalkDailyBriefOnePassTests.test_build_daily_briefing_ignores_gmail_when_window_has_no_seatalk_messages",
+            "tests.test_seatalk_daily_email.SeaTalkDailyBriefOnePassTests.test_build_daily_briefing_ignores_gmail_when_window_has_no_seatalk_messages",
+            "tests.test_seatalk_daily_email.SeaTalkDailyBriefLegacyPipelineTests.test_build_daily_briefing_repairs_wrong_source_from_ref_and_normalizes_duplicate_group"
           ]
         },
         {
           "id": "report_intelligence_injection",
           "description": "Daily brief injects only matched report intelligence context.",
-          "tests": ["tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_build_daily_briefing_injects_only_matched_report_intelligence"]
+          "tests": ["tests.test_seatalk_daily_email.SeaTalkDailyBriefLegacyPipelineTests.test_build_daily_briefing_injects_only_matched_report_intelligence"]
         },
         {
           "id": "send_schedule_archive_and_failures",
           "description": "Scheduled send skips duplicates/weekends, archives sent output, and reports Gmail failures.",
           "tests": [
-            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_send_daily_email_skips_existing_run_before_work",
-            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_send_daily_email_skips_weekend_before_work",
-            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_send_daily_email_archives_body_and_force_overwrites",
-            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_send_daily_email_reports_gmail_export_timeout"
+            "tests.test_seatalk_daily_email.SeaTalkDailyBriefLegacyPipelineTests.test_send_daily_email_skips_existing_run_before_work",
+            "tests.test_seatalk_daily_email.SeaTalkDailyBriefLegacyPipelineTests.test_send_daily_email_skips_weekend_before_work",
+            "tests.test_seatalk_daily_email.SeaTalkDailyBriefLegacyPipelineTests.test_send_daily_email_archives_body_and_force_overwrites",
+            "tests.test_seatalk_daily_email.SeaTalkDailyBriefLegacyPipelineTests.test_send_daily_email_reports_gmail_export_timeout"
           ]
         },
         {
@@ -269,7 +269,7 @@
           "description": "Monthly report/daily brief generation uses matched report intelligence context.",
             "tests": [
             "tests.test_monthly_report.MonthlyReportTests.test_generate_draft_preserves_highlight_seatalk_topic_matches_outside_product_scope",
-            "tests.test_seatalk_daily_email.SeaTalkDailyEmailTests.test_build_daily_briefing_injects_only_matched_report_intelligence"
+            "tests.test_seatalk_daily_email.SeaTalkDailyBriefLegacyPipelineTests.test_build_daily_briefing_injects_only_matched_report_intelligence"
           ]
         },
         {

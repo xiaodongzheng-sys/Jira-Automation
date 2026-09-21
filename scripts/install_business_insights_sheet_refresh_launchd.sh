@@ -51,8 +51,10 @@ sed \
   -e "s|__STDERR_LOG__|$STDERR_LOG|g" \
   "$TEMPLATE_PATH" >"$PLIST_TARGET"
 
-launchctl unload "$PLIST_TARGET" >/dev/null 2>&1 || true
-launchctl load "$PLIST_TARGET"
+LAUNCHD_DOMAIN="gui/$(id -u)"
+launchctl bootout "$LAUNCHD_DOMAIN/$LABEL" >/dev/null 2>&1 || true
+launchctl enable "$LAUNCHD_DOMAIN/$LABEL"
+launchctl bootstrap "$LAUNCHD_DOMAIN" "$PLIST_TARGET"
 
 echo "Installed Business Insights Sheet refresh launchd job: $LABEL"
 echo "Runs daily at 10:00 local time."
