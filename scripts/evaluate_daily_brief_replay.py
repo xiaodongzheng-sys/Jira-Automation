@@ -30,6 +30,7 @@ from bpmis_jira_tool.seatalk_daily_email import (
     _build_gmail_xiaodong_action_items,
     _build_resolved_team_member_reminder_candidates,
     _build_team_member_reminder_candidates,
+    _canonical_team_member_name,
     _filter_daily_brief_meeting_logistics,
     _filter_gmail_calendar_history,
     _filter_team_member_coverage_items,
@@ -171,6 +172,29 @@ def _evidence_labels_match(displayed: Any, referenced: Any) -> bool:
     if not displayed_text or not referenced_text:
         return False
     return displayed_text == referenced_text or displayed_text in referenced_text or referenced_text in displayed_text
+
+
+def _is_distinct_project_update_and_action(
+    left_section: str,
+    left_item: dict[str, Any],
+    right_section: str,
+    right_item: dict[str, Any],
+) -> bool:
+    action_sections = {
+        "Xiaodong Action Required",
+        "Watch / Delegate",
+        "Suggested Team Follow-up",
+    }
+    if left_section == "Project Updates" and right_section in action_sections:
+        update = left_item
+    elif right_section == "Project Updates" and left_section in action_sections:
+        update = right_item
+    else:
+        return False
+    summary = str(update.get("summary") or "").casefold()
+    return all(label in summary for label in ("状态：", "影响：", "下一步：")) or all(
+        label in summary for label in ("state:", "impact:", "next:")
+    )
 
 
 def _quality_gates(
@@ -325,7 +349,15 @@ def _quality_gates(
     duplicates: list[dict[str, str]] = []
     for index, (left_section, left_item) in enumerate(items):
         for right_section, right_item in items[index + 1 :]:
-            if _brief_items_refer_to_same_topic(left_item, right_item):
+            if (
+                _brief_items_refer_to_same_topic(left_item, right_item)
+                and not _is_distinct_project_update_and_action(
+                    left_section,
+                    left_item,
+                    right_section,
+                    right_item,
+                )
+            ):
                 duplicates.append({"left": left_section, "right": right_section})
     if duplicates:
         findings.append("duplicate_topic")
@@ -541,7 +573,16 @@ def run_replay(
                 # production so Calendar/email content cannot affect candidates.
                 raw_gmail = ""
                 filtered_gmail, suppressed_calendar_count = _filter_gmail_calendar_history(raw_gmail)
-                candidates = _build_team_member_reminder_candidates(_filter_daily_brief_meeting_logistics(raw_seatalk))
+                candidates = [
+                    candidate
+                    for candidate in (
+                        _build_team_member_reminder_candidates(
+                            _filter_daily_brief_meeting_logistics(raw_seatalk)
+                        )
+                        or []
+                    )
+                    if _canonical_team_member_name(candidate.get("person")) != "Zheng Xiaodong"
+                ]
                 resolved_candidates = _build_resolved_team_member_reminder_candidates(_filter_daily_brief_meeting_logistics(raw_seatalk))
                 briefing = build_daily_briefing(
                     service,
@@ -570,6 +611,7 @@ def run_replay(
                     resolved_candidates=resolved_candidates,
                     evidence_refs=evidence_refs,
                 )
+                briefing.pop("raw_source_text", None)
                 record.update(
                     {
                         "status": "passed" if quality["passed"] else "failed",

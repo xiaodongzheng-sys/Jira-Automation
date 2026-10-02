@@ -408,6 +408,7 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
         payload = seatalk_daily_email_module.build_daily_briefing(
             service,
             now=datetime(2026, 9, 18, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            include_debug_evidence_refs=True,
         )
 
         self.assertEqual(len(service.prompts), 1)
@@ -415,9 +416,16 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
         self.assertIn("# 角色", prompt)
         self.assertIn("核心业务板块与提取规则", prompt)
         self.assertIn("A-card v2.1", prompt)
+        self.assertIn("不要使用固定项目关键词白名单", prompt)
+        self.assertIn("跨线程或跨群的内容只有明确属于同一事件时才综合", prompt)
+        self.assertIn("对“这个/that/this one”等指代词，只有记录能明确解析到对应问题时才关联", prompt)
+        self.assertIn("若 Xiaodong 已承诺亲自继续跟进且事项未解决", prompt)
+        self.assertIn("SeaTalk sender 显示 UID 不代表机器人", prompt)
+        self.assertIn("let us know if anything we need to do", prompt)
         self.assertNotIn("第二轮完整记录复核", prompt)
         self.assertNotIn("统一证据与候选索引", prompt)
         self.assertEqual(payload["raw_source_text"], history)
+        self.assertTrue(payload["_debug_evidence_refs"])
         metadata = payload["quality_metadata"]
         self.assertEqual(metadata["evidence_quality_metrics"]["model_review_passes"], 1)
         self.assertTrue(metadata["evidence_quality_metrics"]["one_pass_mode"])
@@ -614,7 +622,7 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
 
         self.assertEqual(len(payload["team_member_reminders"]), 1)
         self.assertEqual(payload["team_member_reminders"][0]["person"], "Rene Chong")
-        self.assertIn("Anti-fraud 团队成员仅限", service.last_prompt)
+        self.assertIn("Anti-fraud 成员仅限", service.last_prompt)
 
     def test_build_daily_briefing_canonicalizes_team_member_aliases(self):
         class AliasReminderService(FakeSeaTalkService):
@@ -1273,7 +1281,7 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
             "bank 接入ALC v12 沟通 / thread: ALC v12 pass-through",
         )
 
-    def test_build_daily_briefing_suppresses_project_update_already_covered_by_todo(self):
+    def test_build_daily_briefing_keeps_project_status_separate_from_distinct_todo(self):
         class DuplicateTopicService(FakeSeaTalkService):
             def _run_codex_insights_prompt(self, *, prompt, system_prompt):
                 self.last_prompt = prompt
@@ -1282,7 +1290,7 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
                         {
                             "domain": "Anti-fraud",
                             "title": "Customer PN false alarm",
-                            "summary": "Grace needs to confirm wording before Xiaodong coordinates the CS reply for the PN false alarm.",
+                            "summary": "状态：PN false alarm 客诉回复措辞仍待确认。影响：客服暂时无法给客户明确答复。下一步：Xiaodong 先确认措辞，再协调 CS 回复。",
                             "status": "in_progress",
                             "evidence": "PH AF UAT物料沟通",
                             "evidence_ref_id": "st-ref-001",
@@ -1319,11 +1327,11 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
             now=datetime(2026, 5, 21, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
         )
 
-        self.assertEqual(payload["project_updates"], [])
+        self.assertEqual(len(payload["project_updates"]), 1)
         self.assertEqual(payload["direct_action_todos"][0]["evidence"], "PH AF UAT物料沟通")
-        self.assertEqual(payload["quality_metadata"]["evidence_quality_metrics"]["suppressed_update_duplicate_count"], 1)
+        self.assertEqual(payload["quality_metadata"]["evidence_quality_metrics"]["suppressed_update_duplicate_count"], 0)
 
-    def test_build_daily_briefing_backfills_valid_team_member_followup_and_records_diagnostics(self):
+    def test_build_daily_briefing_does_not_invent_unselected_team_followup(self):
         class NoReminderService(FakeSeaTalkService):
             def _run_codex_insights_prompt(self, *, prompt, system_prompt):
                 self.last_prompt = prompt
@@ -1348,12 +1356,14 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
             now=datetime(2026, 5, 21, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
         )
 
-        self.assertEqual([item["person"] for item in payload["team_member_reminders"]], ["Ker Yin"])
+        self.assertEqual(payload["team_member_reminders"], [])
         metrics = payload["quality_metadata"]["evidence_quality_metrics"]
-        self.assertEqual(metrics["deterministic_followup_backfill_count"], 1)
+        self.assertEqual(metrics["deterministic_followup_backfill_count"], 0)
+        self.assertEqual(metrics["candidate_followup_count"], 1)
+        self.assertEqual(metrics["final_followup_count"], 0)
         self.assertEqual(metrics["followup_diagnostics"]["candidate_examples"][0]["person"], "Ker Yin")
 
-    def test_build_daily_briefing_backfills_xiaodong_mention_when_unanswered(self):
+    def test_build_daily_briefing_does_not_invent_xiaodong_action_when_model_omits_it(self):
         class NoReminderService(FakeSeaTalkService):
             def _run_codex_insights_prompt(self, *, prompt, system_prompt):
                 self.last_prompt = prompt
@@ -1379,17 +1389,11 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["team_member_reminders"], [])
-        self.assertEqual(len(payload["direct_action_todos"]), 1)
-        self.assertEqual(payload["direct_action_todos"][0]["domain"], "Anti-fraud")
-        self.assertEqual(
-            payload["direct_action_todos"][0]["task"],
-            "Confirm whether the PN false-alarm CS reply wording is okay.",
-        )
-        self.assertEqual(payload["direct_action_todos"][0]["evidence"], "AF launch follow-up")
+        self.assertEqual(payload["direct_action_todos"], [])
         metrics = payload["quality_metadata"]["evidence_quality_metrics"]
         self.assertEqual(metrics["followup_diagnostics"]["candidate_examples"], [])
 
-    def test_build_daily_briefing_keeps_backfilled_followup_with_exact_message_source(self):
+    def test_build_daily_briefing_does_not_invent_team_followup_with_exact_message_source(self):
         class NoReminderService(FakeSeaTalkService):
             def _run_codex_insights_prompt(self, *, prompt, system_prompt):
                 self.last_prompt = prompt
@@ -1415,11 +1419,86 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
             now=datetime(2026, 5, 21, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
         )
 
-        self.assertEqual(len(payload["team_member_reminders"]), 1)
-        self.assertEqual(payload["team_member_reminders"][0]["person"], "Zoey Lu")
-        self.assertEqual(payload["team_member_reminders"][0]["evidence"], "PH AF DB拆库讨论")
+        self.assertEqual(payload["team_member_reminders"], [])
         metrics = payload["quality_metadata"]["evidence_quality_metrics"]
-        self.assertEqual(metrics["followup_diagnostics"]["reason_buckets"]["invalid_ref"], 0)
+        self.assertEqual(metrics["candidate_followup_count"], 1)
+        self.assertEqual(metrics["final_followup_count"], 0)
+
+    def test_build_daily_briefing_drops_resolved_model_todo(self):
+        class ResolvedTodoService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [],
+                    "other_updates": [],
+                    "team_member_reminders": [],
+                    "my_todos": [
+                        {
+                            "task": "Confirm with Ker Yin whether Self Service Unlock Card via App for N0/1/2 Block Code has gone live.",
+                            "domain": "Anti-fraud",
+                            "priority": "medium",
+                            "due": "无",
+                            "action_type": "direct_action",
+                            "evidence": "AF App",
+                            "source_type": "seatalk",
+                        }
+                    ],
+                }
+
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== AF App (group-101) ===",
+                "[2026-05-20 17:02:13] Alice: @Ker Yin please confirm whether Self Service Unlock Card via App for N0/1/2 Block Code has gone live.",
+                "[2026-05-20 17:06:00] Ker Yin: It has gone live; the rollout is complete.",
+            ]
+        )
+
+        payload = seatalk_daily_email_module.build_daily_briefing(
+            ResolvedTodoService(history),
+            now=datetime(2026, 5, 20, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+        )
+
+        self.assertEqual(payload["my_todos"], [])
+
+    def test_build_daily_briefing_keeps_xiaodong_open_followup_commitment(self):
+        class OpenCommitmentService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [],
+                    "other_updates": [],
+                    "team_member_reminders": [],
+                    "my_todos": [
+                        {
+                            "task": "Follow up with Fraud Risk on the S0027 Trojan rule question and report back.",
+                            "domain": "Anti-fraud",
+                            "priority": "medium",
+                            "due": "无",
+                            "action_type": "direct_action",
+                            "evidence": "ID Security Group / thread: S0027 rule (Risky Device: Trojan)",
+                            "source_type": "seatalk",
+                        }
+                    ],
+                }
+
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== ID Security Group (group-101) ===",
+                "[2026-10-02 11:13:00] Wendy: @Zheng Xiaodong could you check whether the S0027 Trojan rule needs an update?",
+                "[2026-10-02 11:16:00] Zheng Xiaodong: I will follow up with Fraud Risk and report back.",
+            ]
+        )
+
+        payload = seatalk_daily_email_module.build_daily_briefing(
+            OpenCommitmentService(history),
+            now=datetime(2026, 10, 2, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+        )
+
+        self.assertEqual(len(payload["direct_action_todos"]), 1)
+        self.assertIn("S0027", payload["direct_action_todos"][0]["task"])
+        self.assertEqual(payload["team_member_reminders"], [])
 
     def test_build_daily_briefing_drops_generic_seatalk_group_update(self):
         class GenericGroupUpdateService(FakeSeaTalkService):
@@ -1757,7 +1836,7 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
                     ],
                     "my_todos": [
                         {
-                            "task": f"Xiaodong 请处理 Task {index}。",
+                            "task": f"Xiaodong 请处理 Task {index} launch review decision。",
                             "domain": "General",
                             "priority": "medium",
                             "due": "TBD",
@@ -1802,7 +1881,7 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
                     for index in range(MAX_MY_TODOS + 3)
                     for part in (
                         f"=== Todo group {index} (group-{400 + index}) ===",
-                        f"[2026-04-27 19:{index:02d}:00] Alice: @Zheng Xiaodong 请处理 Task {index}。",
+                        f"[2026-04-27 19:{index:02d}:00] Alice: @Zheng Xiaodong 请处理 Task {index} launch review decision。",
                     )
                 ],
             ]
@@ -1897,7 +1976,7 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
         self.assertIn("action_type", service.last_prompt)
         self.assertEqual([item["action_type"] for item in payload["direct_action_todos"]], ["direct_action"])
         self.assertEqual([item["action_type"] for item in payload["watch_delegate_todos"]], ["watch_delegate"])
-        self.assertEqual(payload["project_updates"], [])
+        self.assertEqual(len(payload["project_updates"]), 1)
         self.assertEqual(payload["other_updates"], [])
         self.assertTrue(payload["top_focus"])
         self.assertLessEqual(len(payload["top_focus"]), 3)
@@ -3495,6 +3574,46 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
         )
 
         self.assertEqual(items[0]["signal_type"], "cross_team_dependency")
+
+    def test_chinese_incident_remains_visible_as_other_update(self):
+        items = seatalk_daily_email._prepare_other_update_items(
+            [
+                {"summary": "状态：高流量导致调查日志处理延迟，23:25恢复。影响：反欺诈处理时效短时受影响。下一步：观察是否有积压。"},
+                {"summary": "状态：CBS Report达到容量上限并触发告警。影响：可能产生额外成本。下一步：观察采购量。"},
+            ]
+        )
+
+        self.assertEqual([item["signal_type"] for item in items], ["incident", "incident"])
+
+    def test_team_followup_drops_project_from_another_source(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "=== TransUnion (group-101) ===",
+                "[2026-10-02 10:00:00] Bob: @Liye please confirm the Day 1 scope.",
+                "=== Credit Risk & Collection PM Team (group-102) ===",
+                "[2026-10-02 10:01:00] Xiaodong: @Liye please clarify UDL risk pricing.",
+            ]
+        )
+        refs = seatalk_daily_email._build_daily_brief_evidence_refs(history)
+        credit_ref = next(ref for ref in refs if str(ref.get("group") or "").startswith("Credit Risk"))
+        mixed = {
+            "person": "Liye",
+            "reminder": "确认 TransUnion Day 1 范围，并说明 UDL 风险定价。",
+            "evidence_ref_id": credit_ref["id"],
+        }
+        local = {
+            "person": "Liye",
+            "reminder": "说明 UDL 风险定价。",
+            "evidence_ref_id": credit_ref["id"],
+        }
+
+        kept, suppressed = seatalk_daily_email._filter_cross_source_team_reminders(
+            [mixed, local], evidence_refs=refs, history_text=history
+        )
+
+        self.assertEqual(kept, [local])
+        self.assertEqual(suppressed, 1)
 
     def test_normalize_direct_action_removes_third_person_xiaodong_possessive(self):
         items = seatalk_daily_email._normalize_todo_items(

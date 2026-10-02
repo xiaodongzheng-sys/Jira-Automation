@@ -203,26 +203,17 @@ DAILY_BRIEF_HIGH_SIGNAL_TERMS = (
     "golive",
     "release",
     "version",
-    "v3.07",
-    "v3.08",
-    "f30",
-    "dev starts",
-    "device model",
-    "devicemodel",
-    "atm",
-    "qris",
-    "translation",
-    "copywriting",
-    "querytransferrecipient",
     "fallback",
-    "recurring",
-    "mari stock",
-    "548-549",
+    "rollback",
+    "cutover",
     "上线",
     "延期",
     "阻塞",
     "依赖",
     "事故",
+    "监管",
+    "合规",
+    "回滚",
 )
 TEAM_MEMBER_REMINDER_ALLOWED_PEOPLE = {
     "xiaodong": "Zheng Xiaodong",
@@ -1332,19 +1323,26 @@ def _daily_brief_original_prompt(
     """
     return (
         "# 角色\n"
-        "你是一位资深的数字银行产品经理专家（Digital Banking Product Manager），现在你正在担任 Xiaodong Zheng 的高级 AI 秘书，负责为他从大量的 SeaTalk 团队聊天记录中提炼出最高质量、具备极高行动指引的每日工作简报（Daily Brief）。\n\n"
+        "你是一位资深的数字银行产品经理专家（Digital Banking Product Manager），现在担任 Xiaodong Zheng 的高级 AI 秘书。你需要从大量 SeaTalk 团队聊天记录中提炼高信号、可追溯、能直接指导行动的每日工作简报。\n\n"
         "# 目标任务\n"
-        "分析并综合下方提供的 SeaTalk 原始聊天记录。你必须无视日常寒暄、感谢话语、无实际结论的会议预约和迟到通知、机器人/系统自动化警报日志。请站在产品经理角度，提炼真正重要的行动项、项目风险、关键决定和沉默的团队跟进请求。输出必须具备严格可追溯性。\n\n"
+        "分析并综合下面完整的 SeaTalk 原始聊天记录。站在 Xiaodong 的高级 PM 视角，识别真正重要的行动项、项目风险、关键决定、里程碑和未答复请求。不要逐条复述聊天，也不要为了填满版块而加入低价值内容。优先保证事实准确、业务上下文完整、动作明确和来源可核验。\n\n"
+        "# 分析范围与相关性\n"
+        "仅分析本次提供的 SeaTalk 记录，不使用 Gmail 或外部信息，不假设输入中未出现的事实。优先保留 Anti-fraud、Credit Risk，以及 Ops Risk 中与 GRC 系统相关、由 Xiaodong 团队深度参与或主导的事项。其他团队事项只有在对上述团队造成明确重大风险、关键依赖、线上影响或管理决策时才保留；仅在群里出现、被抄送或一般性 FYI 不足以构成相关性。不要使用固定项目关键词白名单；按每次记录里的实际负责人、团队参与、影响和决策判断。\n\n"
         "# 核心业务板块与提取规则\n"
-        "1. Xiaodong Action Required：仅保留 Xiaodong 本人亲自答复、评审、参加、决策、审批或已承诺但尚未完成的事项，任务必须具体。\n"
-        "2. Watch / Delegate：保留 Xiaodong 不必亲自执行但需要关注、推动或确保负责人完成的事项。\n"
-        "3. Project Updates：提炼项目关键进展、里程碑变化、延期、阻塞、上线节点和依赖；优先保留 blocked、in progress、P0/P1、MAS、incident、版本延期和关键 dependency。\n"
-        "4. Other Update：仅保留对数字银行 PM 有实际价值的 incident、launch、policy_process、risk_compliance、cross_team_dependency、leadership_decision 或 cross_product_milestone。\n"
-        "5. Suggested Team Follow-up：扫描所有群聊，找出真人对以下团队成员提出具体需求、分配任务或直接艾特，但在可见后续中负责人和 Xiaodong 都没有实质回复的未解决请求：Ker Yin、Rene Chong、Sabrina Chan、Liye、Hui Xian、Sophia Wang Zijun、Ming Ming、Zoey Lu、Wang Chang、Jireh、Ang Wei Lin、Lim Dao Jun。Sophia Wang Zijun 属于 Credit Risk；Anti-fraud 团队成员仅限 Ker Yin、Rene Chong、Zoey Lu、Wang Chang、Jireh、Ang Wei Lin、Sabrina Chan。\n\n"
-        "# 数据质量与清洗规则\n"
-        "业务领域只能使用 Anti-fraud、Credit Risk、Ops Risk、General；状态只能使用 done、in_progress、blocked、unknown。不要在证据中输出原始 group/buddy/UID 数字 ID；使用真实群名、联系人或 thread 标题，若无则使用 SeaTalk group 或 Private SeaTalk chat。每条事项必须带简短 Source/Evidence；thread 回复必须写明 thread 标题。Li Mingming 与 Ming Ming | 明明是不同的人。已解决、已回答、已关闭、被负责人跟进、会议迟到、Calendar invite、RSVP、updated invitation、普通提醒和低价值 FYI 不得进入简报。相同主题只保留一个综合事项，除非负责人和动作不同。所有内容使用精炼、专业的简体中文，真实群名、人名、线程名、产品名和技术名词保持原文。\n\n"
+        "1. Xiaodong Action Required（行动项）：只列 Xiaodong 本人需要亲自答复、评审、参加、决策、审批或已经承诺但尚未完成的具体动作。明确动作对象和预期结果；若 Xiaodong 已承诺亲自继续跟进且事项未解决，保留为他的待办。若他已给出结论或问题已解决，则删除。不要把已由他回答的问题改写成待办。\n"
+        "2. Watch / Delegate（关注/跟进）：列出 Xiaodong 不必亲自执行、但需要他监控进度、推动负责人或确保关键依赖完成的事项。写清负责人、要观察的结果及其重要性；仅提醒或没有实际推进意义的事项不列。\n"
+        "3. Project Updates（项目动态）：按项目/主题综合对话，说明最新状态、重要背景、影响和下一步。优先保留进行中或受阻事项，以及 P0/P1 风险、MAS/监管承诺、重大 incident、版本延期、上线节点、关键 dependency 和明确决策。对每个更新采用“状态：…影响：…下一步：…”结构。只有聊天证据表明依赖未解决并影响交付/合规/上线时才标为 blocked；不得仅因提到 MAS、合规或风险词汇就推断 blocked。不要把零散聊天原句拼在一起充作总结。\n"
+        "4. Other Update（其他高价值动态）：列出 Xiaodong 未直接负责、但对其团队/数字银行 PM 有实质价值的跨团队动态。分类仅限 incident、launch、policy_process、risk_compliance、cross_team_dependency、leadership_decision、cross_product_milestone。例行系统播报、普通提醒和无明确业务影响的 FYI 忽略；机器人/系统发出的信息只有在证据显示为真实、重要的线上事故、风险或里程碑时才保留。\n"
+        "5. Suggested Team Follow-up（建议团队跟进）：检查真人消息中对团队成员的具体任务分配、问题或请求，并阅读可见的后续消息。不要只依赖 @：通过“Hi Zoey”等称呼、直接向成员提问或请求协助，即使没有 @ 也可能是有效指派；SeaTalk sender 显示 UID 不代表机器人，应根据消息内容判断是否为真人。明确要求成员检查/确认/反馈，或以“let us know if anything we need to do”请求后续动作的消息，即使是测试结果、错误现象、礼貌或间接表达，也要作为可能的未答复请求核对，不能因没有问号或没有 @ 自动忽略。逐一检查白名单成员在整个窗口中的未解决请求，不要只挑一两条或因没有 @ 而漏掉明确事项。若 Xiaodong 向某位组员提出了仍未答复的行动/结论请求，且没有明确承诺自己接手，应只列该组员跟进，不要再把同一请求列为 Xiaodong 待办。只有 Xiaodong 明确承诺亲自调查、决定、交付或继续跟进，且事项未解决时，才列入 Xiaodong Action Required；该承诺不应在本节重复。其他成员的一般回复不能自动视为被点名负责人已处理；请求人明确确认 fixed/resolved/closed 时应删除。不要把单纯提及姓名、CC、代班/请假覆盖、会议协调或迟到通知当成任务。白名单：Ker Yin、Rene Chong、Sabrina Chan、Liye、Hui Xian、Sophia Wang Zijun、Ming Ming、Zoey Lu、Wang Chang、Jireh、Ang Wei Lin、Lim Dao Jun。Sophia Wang Zijun 属于 Credit Risk，不属于 Ops Risk；Anti-fraud 成员仅限 Ker Yin、Rene Chong、Zoey Lu、Wang Chang、Jireh、Ang Wei Lin、Sabrina Chan。\n\n"
+        "# 过滤、汇总与证据规则\n"
+        "忽略寒暄、感谢、没有实际结论的会议预约、会议迟到/晚加入通知、Calendar invite/RSVP/updated invitation、普通提醒、纯抄送、重复转述及无业务结论的机器人告警。已解决、已关闭、已得到负责人或 Xiaodong 明确回答的事项不得进入待办/建议跟进；但仍有独立重要风险或里程碑的项目动态可以简要保留并标明最新状态。\n"
+        "同一群或同一 thread 标题下可能讨论多个子事项；不可仅因群名、thread 标题、参与人或关键词相同就合并。逐条确认回复所指的具体事项；对“这个/that/this one”等指代词，只有记录能明确解析到对应问题时才关联，若指代不清则用中性表述保留明确请求，不要擅自绑定到邻近的项目、PRD 或 UAT 项。跨线程或跨群的内容只有明确属于同一事件时才综合，并保持每个结论与其证据一一对应。五个版块之间默认不重复同一事件；但项目动态若补充了关键状态、时间线、影响或依赖，而待办/跟进是另一负责人要执行的不同动作，应保留两者并写清差异。只有内容和动作实质相同才合并。不得把消息里的假设写成事实，也不得编造 owner、影响、截止日期、根因、决策或状态；没有明确截止日期写“无”，未知状态用 unknown。除真实群名、人名、thread 名、产品名和技术名词外，所有任务、摘要、提醒和优先级理由必须用简体中文；禁止复制英文聊天句子。\n"
+        "Suggested Team Follow-up 的每一项只对应一个来源中的一个具体请求。同一成员在不同群、不同 thread 或同一长消息中被问到不同事项时，按事项分条；不要把其他来源的项目、负责人或动作拼进来。若无法用该项的 Source 支持整句内容，省略该项。\n"
+        "业务领域标签只能是 Anti-fraud、Credit Risk、Ops Risk、General；状态只能是 done、in_progress、blocked、unknown。证据中严禁输出原始 group/buddy/UID 数字 ID；有真实群名时使用真实群名，无群名时写 SeaTalk group 或 Private SeaTalk chat。每项必须带简短 Source；若依据 thread 回复，必须同时写 thread: 真实话题。群名、联系人、人名、Email、thread 标题和技术名词保持原文。Li Mingming 与 Ming Ming | 明明是不同的人。\n\n"
         "# 输出格式\n"
-        "必须只返回合法 JSON，不要 Markdown 或解释。顶层字段固定为 project_updates、other_updates、my_todos、team_member_reminders、team_todos；team_todos 固定为空数组。没有高信号内容的版块返回空数组。project_updates 每项包含 domain、title、summary、status、evidence、source_type；summary 必须包含 状态：、影响：、下一步：。other_updates 每项另含 signal_type。my_todos 每项包含 task、domain、priority、due、action_type、evidence、source_type。team_member_reminders 每项包含 domain、person、reminder、evidence、source_type。\n\n"
+        "用精炼、专业、商务通顺的简体中文输出。必须只返回合法 JSON，不要 Markdown 或解释。顶层字段固定为 project_updates、other_updates、my_todos、team_member_reminders、team_todos；team_todos 固定为空数组。无高信号内容的版块返回空数组。\n"
+        "project_updates 每项字段：domain、title、summary、status、evidence、source_type；summary 必须包含“状态：…影响：…下一步：…”。other_updates 每项字段：domain、title、summary、status、signal_type、evidence、source_type。my_todos 每项字段：task、domain、priority、due、action_type、evidence、source_type；action_type 只能为 direct_action 或 watch_delegate。team_member_reminders 每项字段：domain、person、reminder、evidence、source_type。所有 source_type 固定为 seatalk。不要输出额外版块或字段。\n\n"
+        "在生成前先在内部完成全量扫描、按主题合并、核对时间顺序与最新结论、检查解决状态、确认团队归属和来源，最后再输出；不要展示分析过程。不要因原文较长而只看开头或结尾，也不要在本次调用中要求第二轮。\n\n"
         f"报告窗口：{window_label}。生成时间：{local_now.isoformat()}。\n\n"
         "# 原始 SeaTalk 聊天记录\n"
         f"{source_text}"
@@ -1393,7 +1391,11 @@ def _build_daily_briefing_one_pass(
         team_member_reminder_candidates=_build_team_member_reminder_candidates(raw_source_text),
         xiaodong_followup_candidates=[*_build_xiaodong_followup_candidates(raw_source_text), *_build_direct_xiaodong_request_candidates(raw_source_text)],
     )
-    team_member_reminder_candidates = _build_team_member_reminder_candidates(raw_source_text) or []
+    team_member_reminder_candidates = [
+        candidate
+        for candidate in (_build_team_member_reminder_candidates(raw_source_text) or [])
+        if _canonical_team_member_name(candidate.get("person")) != "Zheng Xiaodong"
+    ]
     resolved_team_member_reminder_candidates = _build_resolved_team_member_reminder_candidates(raw_source_text)
     xiaodong_followup_candidates = [
         *_build_xiaodong_followup_candidates(raw_source_text),
@@ -1406,6 +1408,7 @@ def _build_daily_briefing_one_pass(
         reminders=reminders,
         evidence_refs=evidence_refs,
     )
+    evidence_quality_metrics["english_prose_suppressed_count"] = 0
     _repair_generic_seatalk_evidence(
         [*project_updates, *other_updates, *parsed_todos, *reminders],
         history_text=raw_source_text,
@@ -1426,76 +1429,64 @@ def _build_daily_briefing_one_pass(
             section_items,
             quality_metrics=evidence_quality_metrics,
         )
+    parsed_todos = _filter_resolved_xiaodong_todos(
+        parsed_todos,
+        resolved_candidates=resolved_team_member_reminder_candidates,
+        open_xiaodong_candidates=xiaodong_followup_candidates,
+        evidence_refs=evidence_refs,
+    )
     _apply_report_intelligence_matches([*project_updates, *other_updates, *parsed_todos], daily_matches={})
     project_updates = _sort_report_intelligence_items(project_updates)
     other_updates = _sort_report_intelligence_items(other_updates)
     parsed_todos = _sort_report_intelligence_items(parsed_todos)
-    reminders = _backfill_team_member_reminders_from_candidates(
-        reminders,
-        team_member_reminder_candidates=team_member_reminder_candidates,
-        resolved_candidates=resolved_team_member_reminder_candidates,
-        evidence_refs=evidence_refs,
-        quality_metrics=evidence_quality_metrics,
-    )
     reminders = [item for item in reminders if _canonical_team_member_name(item.get("person")) != "Zheng Xiaodong"]
     reminders = _filter_resolved_or_meeting_logistics_followups(reminders, resolved_candidates=resolved_team_member_reminder_candidates)
-    project_updates[:] = _dedupe_same_topic_items(_prepare_project_update_items(project_updates))
-    other_updates[:] = _dedupe_same_topic_items(_prepare_other_update_items(other_updates))
-    parsed_todos[:] = _dedupe_same_topic_items(parsed_todos)
+    reminders, mixed_source_reminder_count = _filter_cross_source_team_reminders(
+        reminders,
+        evidence_refs=evidence_refs,
+        history_text=raw_source_text,
+    )
+    parsed_todos, delegation_duplicate_count = _drop_todos_covered_by_team_followups(
+        parsed_todos,
+        reminders,
+        xiaodong_followup_candidates=xiaodong_followup_candidates,
+        evidence_refs=evidence_refs,
+    )
+    project_updates[:] = _dedupe_exact_daily_brief_items(_prepare_project_update_items(project_updates))
+    other_updates[:] = _dedupe_exact_daily_brief_items(_prepare_other_update_items(other_updates))
+    parsed_todos[:] = _dedupe_exact_daily_brief_items(parsed_todos)
     reminders[:] = _filter_seatalk_reminders(
-        _dedupe_same_topic_items(reminders),
+        _dedupe_exact_daily_brief_items(reminders),
         reminder_candidates=None,
     )
-    deterministic_followup_backfill_count = len(reminders)
     reminders = _filter_resolved_or_meeting_logistics_followups(reminders, resolved_candidates=[])
     reminders = _filter_team_member_coverage_items(reminders)
     parsed_todos = SeaTalkDashboardService._sort_todos(parsed_todos)
-    _filter_reminders_already_covered_by_watch_delegate(
-        reminders,
-        [item for item in parsed_todos if item.get("action_type") == "watch_delegate"],
-    )
-    suppressed_update_duplicate_count = _suppress_updates_covered_by_todos(
-        project_updates=project_updates,
-        other_updates=other_updates,
-        direct_action_todos=[item for item in parsed_todos if item.get("action_type") == "direct_action"],
-        watch_delegate_todos=[item for item in parsed_todos if item.get("action_type") == "watch_delegate"],
-    )
-    suppressed_cross_section_duplicate_count = _suppress_cross_section_duplicate_topics(
-        project_updates=project_updates,
-        other_updates=other_updates,
-        direct_action_todos=[item for item in parsed_todos if item.get("action_type") == "direct_action"],
-        watch_delegate_todos=[item for item in parsed_todos if item.get("action_type") == "watch_delegate"],
-        reminders=reminders,
-    )
+    reminders[:] = [
+        reminder
+        for reminder in reminders
+        if not any(_brief_items_are_same_followup_event(reminder, todo) for todo in parsed_todos)
+    ]
     _correct_known_update_domains(project_updates)
     _correct_known_update_domains(other_updates)
-    xiaodong_followup_fallbacks = _build_xiaodong_followup_items(
-        xiaodong_followup_candidates,
-        evidence_refs=evidence_refs,
-        existing_items=parsed_todos,
-    )
-    if xiaodong_followup_fallbacks:
-        parsed_todos = _normalize_todo_items([*xiaodong_followup_fallbacks, *parsed_todos])
     for item in reminders:
         if str(item.get("person", "")).startswith("Rene Chong"):
             item["person"] = "Rene Chong"
         if item.get("person") == "Sophia Wang Zijun":
             item["domain"] = "Credit Risk"
     direct_action_todos, watch_delegate_todos = _split_todos_by_action_type(parsed_todos)
-    evidence_quality_metrics["suppressed_update_duplicate_count"] = suppressed_update_duplicate_count
-    evidence_quality_metrics["suppressed_cross_section_duplicate_count"] = suppressed_cross_section_duplicate_count
+    evidence_quality_metrics["suppressed_update_duplicate_count"] = 0
+    evidence_quality_metrics["suppressed_cross_section_duplicate_count"] = 0
     evidence_quality_metrics["business_trip_project_fallback_count"] = 0
-    evidence_quality_metrics["deterministic_followup_backfill_count"] = deterministic_followup_backfill_count
+    evidence_quality_metrics["delegation_duplicate_suppressed_count"] = delegation_duplicate_count
+    evidence_quality_metrics["mixed_source_reminder_suppressed_count"] = mixed_source_reminder_count
+    evidence_quality_metrics["deterministic_followup_backfill_count"] = 0
     evidence_quality_metrics["followup_diagnostics"] = {
         "candidate_examples": [
             candidate for candidate in team_member_reminder_candidates
             if _canonical_team_member_name(candidate.get("person")) != "Zheng Xiaodong"
         ],
-        "reason_buckets": {
-            "invalid_ref": 0,
-            "resolved": 0,
-            "model_omitted": 0,
-        },
+        "resolved_candidate_count": len(resolved_team_member_reminder_candidates),
     }
     token_ledger = {
         "seatalk_raw_chars": len(raw_source_text),
@@ -1508,13 +1499,13 @@ def _build_daily_briefing_one_pass(
         "prompt_budget_policy": "full_source_no_truncation_one_pass",
     }
     metrics = {
+        **evidence_quality_metrics,
         "model_review_passes": 1,
         "one_pass_mode": True,
-        "candidate_followup_count": 0,
+        "candidate_followup_count": len(team_member_reminder_candidates),
         "final_followup_count": len(reminders),
         "calendar_suppressed_count": 0,
         "low_value_reminder_suppressed_count": 0,
-        **evidence_quality_metrics,
     }
     briefing = {
         "project_updates": project_updates,
@@ -1551,7 +1542,7 @@ def _build_daily_briefing_one_pass(
         "raw_source_text": raw_source_text,
     }
     if include_debug_evidence_refs:
-        briefing["_debug_evidence_refs"] = []
+        briefing["_debug_evidence_refs"] = evidence_refs
     return briefing
 
 
@@ -2569,6 +2560,22 @@ def _daily_brief_contains_english_prose(value: Any) -> bool:
     words = re.findall(r"\b[a-z]{2,}\b", prose)
     connector_count = sum(word in _DAILY_BRIEF_ENGLISH_CONNECTOR_WORDS for word in words)
     return len(words) >= 10 and connector_count >= 3
+
+
+def _suppress_daily_brief_english_prose(items: list[dict[str, Any]]) -> int:
+    kept: list[dict[str, Any]] = []
+    suppressed = 0
+    for item in items:
+        visible_text = " ".join(
+            str(item.get(field) or "")
+            for field in ("task", "summary", "reminder", "priority_reason")
+        )
+        if _daily_brief_contains_english_prose(visible_text):
+            suppressed += 1
+            continue
+        kept.append(item)
+    items[:] = kept
+    return suppressed
 
 
 def _daily_brief_has_items(payload: Any) -> bool:
@@ -5408,7 +5415,11 @@ def _build_daily_brief_evidence_refs(
                 add_ref(
                     record,
                     person=str(candidate.get("person") or ""),
-                    reply_state="xiaodong_commitment" if not candidate.get("person") else "unanswered",
+                    reply_state=(
+                        "xiaodong_commitment"
+                        if str(candidate.get("ownership_reason") or "").strip() == "commitment"
+                        else "unanswered"
+                    ),
                 )
 
         def evidence_priority(record: dict[str, str]) -> int:
@@ -5763,13 +5774,63 @@ def _split_evidence_ref_ids(value: Any) -> list[str]:
 
 
 def _seatalk_ref_supports_xiaodong_action(ref: dict[str, Any]) -> bool:
-    if str(ref.get("reply_state") or "").strip() == "xiaodong_commitment":
+    snippet = str(ref.get("snippet") or "").strip()
+    sender = str(ref.get("sender") or "")
+    if _sender_is_xiaodong(sender):
+        if str(ref.get("reply_state") or "").strip() == "xiaodong_commitment":
+            return True
+        if _has_explicit_xiaodong_action_commitment(snippet):
+            return True
+        teammate_mentions = [
+            person
+            for person in (ref.get("mentioned_people") or [])
+            if _canonical_team_member_name(person) not in {"", "Zheng Xiaodong"}
+        ]
+        if teammate_mentions and (
+            _looks_like_team_member_request(snippet)
+            or "?" in snippet
+            or "？" in snippet
+        ):
+            return False
         return True
-    if _sender_is_xiaodong(str(ref.get("sender") or "")):
+    return _seatalk_ref_directly_requests_xiaodong(snippet)
+
+
+def _has_explicit_xiaodong_action_commitment(text: Any) -> bool:
+    normalized = " ".join(str(text or "").casefold().split())
+    if _looks_like_xiaodong_followup_commitment(normalized):
         return True
-    source_text = " ".join(str(ref.get(field) or "") for field in ("snippet", "thread"))
-    normalized = _normalize_person_key(source_text)
-    return "xiaodong" in normalized or "zheng xiaodong" in normalized
+    return bool(
+        re.search(
+            r"\b(?:i|we)\s+(?:will|shall|need to|must|can)\s+(?:personally\s+)?(?:review|update|submit|prepare|provide|draft|complete|send|decide|approve|investigate|check|confirm|follow up)\b",
+            normalized,
+        )
+        or re.search(r"我(?:会|将|来).{0,16}(?:评审|更新|提交|准备|提供|起草|完成|发送|决定|审批|调查|检查|确认|跟进)", normalized)
+    )
+
+
+def _seatalk_ref_directly_requests_xiaodong(text: Any) -> bool:
+    snippet = str(text or "").strip()
+    lowered = snippet.casefold()
+    name_pattern = r"(?:@\s*)?(?:zheng\s+)?xiaodong(?:\s+zheng)?\b"
+    for match in re.finditer(name_pattern, lowered, flags=re.IGNORECASE):
+        before = lowered[max(0, match.start() - 36) : match.start()]
+        after = lowered[match.end() : match.end() + 64]
+        if re.search(r"\b(?:could|can|would|please|pls|kindly|need|ask|help)\s+(?:you\s+)?$", before):
+            return True
+        if re.match(
+            r"[^a-z0-9\u4e00-\u9fff]{0,12}(?:please|pls|kindly|could you|can you|would you|help|check|confirm|review|clarify|advise|provide|update|to clarify|to confirm|to check|to provide|to advise)\b",
+            after,
+        ):
+            return True
+        if re.match(r"[\s,，:：-]{0,12}(?:请|麻烦|能否|可否|帮忙|确认|检查|评审|回复|处理|跟进)", after):
+            return True
+    return bool(
+        re.search(
+            r"@?(?:郑晓东|郑小东|小东)\s*(?:请|麻烦|能否|可否|帮忙|确认|检查|评审|解释|回复|决定|提供|跟进)",
+            snippet,
+        )
+    )
 
 
 def _correct_update_domain_from_evidence(item: dict[str, Any], refs: list[dict[str, Any]]) -> None:
@@ -6781,7 +6842,10 @@ def _prepare_other_update_items(items: list[dict[str, Any]]) -> list[dict[str, A
         if _is_placeholder_update_summary(summary):
             continue
         combined = " ".join(str(clean.get(field) or "") for field in ("title", "summary", "evidence")).casefold()
-        if any(term in combined for term in ("incident", "outage", "downtime", "ddos")):
+        if any(term in combined for term in (
+            "incident", "outage", "downtime", "ddos", "故障", "事故", "中断", "系統異常",
+            "系统异常", "线上异常", "處理延遲", "处理延迟",
+        )) or ("容量上限" in combined and "告警" in combined):
             clean["signal_type"] = "incident"
         elif (
             re.search(r"(?:usd|sgd|php|idr|\$)\s*[\d,.]+\s*[km]?", combined, flags=re.IGNORECASE)
@@ -7084,6 +7148,34 @@ def _dedupe_same_topic_items(items: list[dict[str, Any]]) -> list[dict[str, Any]
             deduped.append(item)
             continue
         _merge_item_evidence(duplicate, item)
+    return deduped
+
+
+def _dedupe_exact_daily_brief_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove literal duplicate rows without project-specific topic heuristics."""
+    deduped: list[dict[str, Any]] = []
+    seen: dict[tuple[str, ...], dict[str, Any]] = {}
+    for item in items:
+        if str(item.get("task") or "").strip():
+            kind = "todo"
+            content = _normalize_dedupe_text(item.get("task"))
+            detail = str(item.get("action_type") or "").strip().casefold()
+        elif str(item.get("reminder") or "").strip():
+            kind = "reminder"
+            content = _normalize_dedupe_text(item.get("reminder"))
+            detail = _normalize_person_key(item.get("person"))
+        else:
+            kind = "update"
+            content = _normalize_dedupe_text(item.get("summary") or item.get("title"))
+            detail = _normalize_dedupe_text(item.get("title"))
+        evidence = _seatalk_evidence_source_root(item.get("evidence")) or _normalize_dedupe_text(item.get("evidence"))
+        key = (kind, detail, content, evidence)
+        if not content or key not in seen:
+            deduped.append(item)
+            if content:
+                seen[key] = item
+            continue
+        _merge_item_evidence(seen[key], item)
     return deduped
 
 
@@ -7651,6 +7743,75 @@ def _filter_seatalk_reminders(
     return filtered
 
 
+def _filter_cross_source_team_reminders(
+    items: list[dict[str, Any]],
+    *,
+    evidence_refs: list[dict[str, Any]],
+    history_text: str,
+) -> tuple[list[dict[str, Any]], int]:
+    """Reject a follow-up that names another chat's topic without support in its cited conversation."""
+    records = _seatalk_history_records_for_evidence(history_text)
+    if not items or not records:
+        return items, 0
+    refs_by_id = {str(ref.get("id") or ""): ref for ref in evidence_refs}
+    records_by_key = {
+        (
+            str(record.get("group") or ""),
+            str(record.get("thread") or ""),
+            str(record.get("timestamp") or ""),
+            _message_fingerprint(record.get("text")),
+        ): record
+        for record in records
+    }
+    group_names = {
+        group: _normalize_seatalk_source_label(group)
+        for group in {str(record.get("group") or "") for record in records}
+    }
+    kept: list[dict[str, Any]] = []
+    suppressed = 0
+    for item in items:
+        ref_ids = _split_evidence_ref_ids(item.get("evidence_ref_id"))
+        ref = refs_by_id.get(ref_ids[0]) if len(ref_ids) == 1 else None
+        if not ref:
+            kept.append(item)
+            continue
+        source_group = str(ref.get("group") or "")
+        source_thread = str(ref.get("thread") or "")
+        key = (
+            source_group,
+            source_thread,
+            str(ref.get("timestamp") or ""),
+            str(ref.get("_message_fingerprint") or ""),
+        )
+        source_record = records_by_key.get(key)
+        if not source_record:
+            kept.append(item)
+            continue
+        if source_thread:
+            context = " ".join(
+                str(record.get("text") or "")
+                for record in records
+                if record.get("group") == source_group and record.get("thread") == source_thread
+            )
+        else:
+            context = str(source_record.get("text") or "")
+        context = f"{source_thread} {context}".casefold()
+        reminder = str(item.get("reminder") or "").casefold()
+        mixed_source = any(
+            group != source_group
+            and len(name) >= 10
+            and not name.casefold().startswith(("seatalk group", "private seatalk chat"))
+            and name.casefold() in reminder
+            and name.casefold() not in context
+            for group, name in group_names.items()
+        )
+        if mixed_source:
+            suppressed += 1
+        else:
+            kept.append(item)
+    return kept, suppressed
+
+
 def _team_member_followup_is_in_scope(person: str, context: Any) -> bool:
     text = " ".join(str(context or "").casefold().split())
     if any(term in text for term in ("grant access", "edit access", "view access", "没有权限", "授权一下")) and not any(
@@ -7945,6 +8106,35 @@ def _xiaodong_candidate_matches_todo(candidate: dict[str, str], ref: dict[str, A
     return bool(overlap) and (same_source or (generic_todo_source and len(overlap) >= 1))
 
 
+def _filter_resolved_xiaodong_todos(
+    items: list[dict[str, Any]],
+    *,
+    resolved_candidates: list[dict[str, str]],
+    open_xiaodong_candidates: list[dict[str, str]],
+    evidence_refs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop answered requests, but retain Xiaodong's unresolved follow-up commitments."""
+    refs_by_candidate = _seatalk_refs_by_candidate(evidence_refs)
+    kept: list[dict[str, Any]] = []
+    for item in items:
+        text = _item_text(item, fields=("task", "title", "summary"))
+        if _is_meeting_logistics_or_availability_notice(text):
+            continue
+        if str(item.get("source_type") or "").strip().lower() in {"seatalk", "mixed"}:
+            open_xiaodong_work = any(
+                (ref := refs_by_candidate.get(_candidate_ref_key(candidate))) is not None
+                and _xiaodong_candidate_matches_todo(candidate, ref, item)
+                for candidate in open_xiaodong_candidates
+            )
+            if not open_xiaodong_work and any(
+                _item_matches_resolved_followup(item, candidate)
+                for candidate in resolved_candidates
+            ):
+                continue
+        kept.append(item)
+    return kept
+
+
 def _build_xiaodong_followup_items(
     candidates: list[dict[str, str]] | None,
     *,
@@ -8110,19 +8300,21 @@ def _build_followup_diagnostics(
 def _brief_items_are_same_followup_event(reminder: dict[str, Any], todo: dict[str, Any]) -> bool:
     person_tokens = _topic_tokens(reminder, fields=("person",))
     todo_tokens = _topic_tokens(todo, fields=("task", "title", "summary"))
-    # A Xiaodong direct action that explicitly names the team member is a
-    # different owner/action from the member's own unresolved response. Keep
-    # both sections so the report tells Xiaodong what to do and whom to chase.
-    if (
-        str(todo.get("action_type") or "").strip().casefold() == "direct_action"
-        and person_tokens
-        and person_tokens.intersection(todo_tokens)
-    ):
-        return False
     reminder_ref_ids = set(_split_evidence_ref_ids(reminder.get("evidence_ref_id")))
     todo_ref_ids = set(_split_evidence_ref_ids(todo.get("evidence_ref_id")))
     if reminder_ref_ids and todo_ref_ids and reminder_ref_ids & todo_ref_ids:
-        return True
+        todo_text = _normalize_dedupe_text(_item_text(todo, fields=("task", "title", "summary")))
+        reminder_text = _normalize_dedupe_text(_item_text(reminder, fields=("reminder", "title", "summary")))
+        is_xiaodong_chase = (
+            str(todo.get("action_type") or "").strip().casefold() == "direct_action"
+            and bool(person_tokens.intersection(todo_tokens))
+            and any(term in todo_text for term in ("follow up", "follow-up", "check with", "confirm with", "跟进", "催办", "催促"))
+        )
+        if is_xiaodong_chase and reminder_text and any(
+            term in reminder_text for term in ("follow up", "follow-up", "confirm", "check", "跟进", "确认", "检查")
+        ):
+            return True
+        return False
     reminder_tokens = _topic_tokens(reminder, fields=("reminder", "title", "summary", "person"))
     if not reminder_tokens or not todo_tokens:
         return False
@@ -8147,6 +8339,62 @@ def _brief_items_are_same_followup_event(reminder: dict[str, Any], todo: dict[st
     if same_evidence and len(overlap) >= 1:
         return True
     return False
+
+
+def _drop_todos_covered_by_team_followups(
+    todos: list[dict[str, Any]],
+    reminders: list[dict[str, Any]],
+    *,
+    xiaodong_followup_candidates: list[dict[str, str]],
+    evidence_refs: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Do not turn an unanswered request to a teammate into Xiaodong's own todo."""
+    refs_by_candidate = _seatalk_refs_by_candidate(evidence_refs)
+    commitments = [
+        candidate
+        for candidate in xiaodong_followup_candidates
+        if str(candidate.get("ownership_reason") or "").strip() == "commitment"
+    ]
+    kept: list[dict[str, Any]] = []
+    suppressed = 0
+    for todo in todos:
+        todo_text = _normalize_dedupe_text(_item_text(todo, fields=("task", "title", "summary")))
+        todo_tokens = _topic_tokens(todo, fields=("task", "title", "summary"))
+        todo_ref_ids = set(_split_evidence_ref_ids(todo.get("evidence_ref_id")))
+        is_duplicate_delegation = False
+        if str(todo.get("action_type") or "").strip().casefold() == "direct_action":
+            for reminder in reminders:
+                person = str(reminder.get("person") or "").strip()
+                person_tokens = _topic_tokens({"person": person}, fields=("person",))
+                if not person_tokens or not person_tokens.intersection(todo_tokens):
+                    continue
+                if not any(term in todo_text for term in ("follow up", "follow-up", "check with", "confirm with", "跟进", "催办", "催促")):
+                    continue
+                reminder_ref_ids = set(_split_evidence_ref_ids(reminder.get("evidence_ref_id")))
+                same_ref = bool(todo_ref_ids and reminder_ref_ids and todo_ref_ids & reminder_ref_ids)
+                same_source = bool(
+                    _seatalk_evidence_source_root(todo.get("evidence"))
+                    and _seatalk_evidence_source_root(todo.get("evidence"))
+                    == _seatalk_evidence_source_root(reminder.get("evidence"))
+                )
+                reminder_tokens = _topic_tokens(reminder, fields=("reminder", "title", "summary", "person"))
+                same_topic = len(todo_tokens & reminder_tokens) >= 3
+                if not same_ref and not (same_source and same_topic):
+                    continue
+                owned_commitment = False
+                for candidate in commitments:
+                    ref = refs_by_candidate.get(_candidate_ref_key(candidate))
+                    if ref and _xiaodong_candidate_matches_todo(candidate, ref, todo):
+                        owned_commitment = True
+                        break
+                if not owned_commitment:
+                    is_duplicate_delegation = True
+                    break
+        if is_duplicate_delegation:
+            suppressed += 1
+        else:
+            kept.append(todo)
+    return kept, suppressed
 
 
 def _topic_tokens(item: dict[str, Any], *, fields: tuple[str, ...]) -> set[str]:
