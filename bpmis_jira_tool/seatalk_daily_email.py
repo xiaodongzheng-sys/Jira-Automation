@@ -54,7 +54,7 @@ from bpmis_jira_tool.trello_daily_summary import (
 DEFAULT_RECIPIENT = "xiaodong.zheng@npt.sg"
 DEFAULT_HOURS = 24
 DAILY_BRIEF_CODEX_MODEL = "gpt-5.6-luna"
-DAILY_BRIEF_CODEX_REASONING_EFFORT = "medium"
+DAILY_BRIEF_CODEX_REASONING_EFFORT = "xhigh"
 DAILY_BRIEF_ONE_PASS = True
 MORNING_SLOT = "morning"
 MIDDAY_SLOT = "midday"
