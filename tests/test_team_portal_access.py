@@ -96,6 +96,19 @@ class _SlowPortalJobService:
 
 
 class TeamPortalAccessTests(unittest.TestCase):
+    def setUp(self):
+        # Direct unittest runs also need isolation from the host's live .env.
+        env_patch = patch.dict(os.environ, {
+            "ENV_FILE": os.devnull,
+            "VERSION_PLAN_STORE_BACKEND": "local",
+            "VERSION_PLAN_FIRESTORE_PROJECT": "",
+            "VERSION_PLAN_FIRESTORE_DOCUMENT": "",
+            "GOOGLE_CLOUD_PROJECT": "",
+            "FIRESTORE_ACCESS_TOKEN": "",
+        })
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+
     @staticmethod
     def _login_non_admin(client, email="teammate@npt.sg"):
         with client.session_transaction() as session:

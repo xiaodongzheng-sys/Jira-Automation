@@ -39,7 +39,18 @@ class GateStep:
 
 def _run_command(name: str, command: list[str]) -> GateStep:
     env = dict(os.environ)
-    env.setdefault("ENV_FILE", os.devnull)
+    # Release shells may inherit the live .env and Firestore configuration.
+    # Gate subprocesses must use local storage; individual tests can explicitly
+    # override these defaults when exercising a mocked Firestore client.
+    env["ENV_FILE"] = os.devnull
+    env["VERSION_PLAN_STORE_BACKEND"] = "local"
+    for key in (
+        "VERSION_PLAN_FIRESTORE_PROJECT",
+        "VERSION_PLAN_FIRESTORE_DOCUMENT",
+        "GOOGLE_CLOUD_PROJECT",
+        "FIRESTORE_ACCESS_TOKEN",
+    ):
+        env.pop(key, None)
     existing_pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = str(ROOT_DIR) if not existing_pythonpath else f"{ROOT_DIR}{os.pathsep}{existing_pythonpath}"
     completed = subprocess.run(command, cwd=ROOT_DIR, env=env, capture_output=True, text=True, check=False)
