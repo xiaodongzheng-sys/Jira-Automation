@@ -41,6 +41,7 @@ from bpmis_jira_tool.team_dashboard_version_plan import (
     mark_version_plan_sync_error,
     mark_version_plan_sync_running,
     merge_version_plan_editable_state,
+    suggest_pipeline_bpmis_projects,
     update_version_plan_cell,
     update_version_plan_rows,
     version_plan_payload,
@@ -664,6 +665,22 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             if _version_plan_sync_running(snapshot.config):
                 return _version_plan_sync_running_response()
             updated = update_version_plan_cell(snapshot.config, payload)
+            if str(payload.get("field") or "").strip() == "bpmis_project_id":
+                row_id = str(payload.get("row_id") or "").strip()
+                row = next(item for item in updated["version_plan"]["af"]["pipeline_rows"] if item["row_id"] == row_id)
+                if row["bpmis_project_id"]:
+                    try:
+                        project = _build_bpmis_client_for_current_user(settings).get_biz_project(row["bpmis_project_id"])
+                        row["bpmis_project_name"] = str(project.get("project_name") or "").strip()
+                        if row["bpmis_project_name"]:
+                            row["feature"] = row["bpmis_project_name"]
+                        else:
+                            row["bpmis_project_lookup_error"] = "BPMIS project name is unavailable."
+                    except (ConfigError, ToolError) as error:
+                        row["bpmis_project_lookup_error"] = str(error)
+                    except Exception:  # noqa: BLE001
+                        current_app.logger.exception("Pipeline BPMIS project name lookup failed.")
+                        row["bpmis_project_lookup_error"] = "Could not look up the project name. Re-enter the ID to retry."
             expected_revision = str(payload.get("document_revision") or payload.get("revision") or "").strip() or None
             saved = _version_plan_save_config(
                 store,
@@ -675,6 +692,37 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             return _version_plan_conflict_response(error)
         except ValueError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+
+    def team_dashboard_version_plan_project_suggestions():
+        access_gate = _require_team_dashboard_version_plan_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        if not _can_sync_version_plan():
+            return jsonify({"status": "error", "message": "Version Plan suggestions are admin-only."}), HTTPStatus.FORBIDDEN
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"status": "error", "message": "JSON payload is required."}), HTTPStatus.BAD_REQUEST
+        snapshot = _version_plan_load_snapshot(_get_version_plan_store())
+        row_id = str(payload.get("row_id") or "").strip()
+        rows = version_plan_payload(snapshot.config)["pipeline_rows"]
+        row = next((item for item in rows if item["row_id"] == row_id), None)
+        if row is None:
+            return jsonify({"status": "error", "message": "Pipeline project was not found. Refresh Version Plan."}), HTTPStatus.BAD_REQUEST
+        feature = str(row.get("feature") or "").strip()
+        if not feature:
+            return jsonify({"status": "error", "message": "Enter a pipeline project name before suggesting an ID."}), HTTPStatus.BAD_REQUEST
+        try:
+            projects = _build_bpmis_client_for_current_user(settings).list_unfinished_biz_projects()
+            return jsonify({
+                "status": "ok", "row_id": row_id, "feature": feature,
+                "suggestions": suggest_pipeline_bpmis_projects(feature, projects),
+            })
+        except (ConfigError, ToolError) as error:
+            return jsonify({"status": "error", "message": str(error), **_classify_portal_error(error)}), HTTPStatus.BAD_REQUEST
+        except Exception:  # noqa: BLE001
+            current_app.logger.exception("Pipeline BPMIS project suggestions failed.")
+            return jsonify({"status": "error", "message": "Could not load BPMIS project suggestions. Please retry."}), HTTPStatus.INTERNAL_SERVER_ERROR
 
 
     def team_dashboard_version_plan_rows():
@@ -1765,6 +1813,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         team_dashboard_version_plan_sync_status=team_dashboard_version_plan_sync_status,
         team_dashboard_version_plan_cell=team_dashboard_version_plan_cell,
         team_dashboard_version_plan_rows=team_dashboard_version_plan_rows,
+        team_dashboard_version_plan_project_suggestions=team_dashboard_version_plan_project_suggestions,
         version_plan_page=version_plan_page,
         team_dashboard_monthly_report_template=team_dashboard_monthly_report_template,
         team_dashboard_monthly_report_style_guide_refresh=team_dashboard_monthly_report_style_guide_refresh,
@@ -1799,6 +1848,7 @@ def register_team_dashboard_routes(app: Any, handlers: Any) -> None:
     _add_route(app, "/api/team-dashboard/version-plan/af/sync-status", handlers.team_dashboard_version_plan_sync_status)
     _add_route(app, "/api/team-dashboard/version-plan/af/cell", handlers.team_dashboard_version_plan_cell, methods=["POST"])
     _add_route(app, "/api/team-dashboard/version-plan/af/rows", handlers.team_dashboard_version_plan_rows, methods=["POST"])
+    _add_route(app, "/api/team-dashboard/version-plan/af/project-suggestions", handlers.team_dashboard_version_plan_project_suggestions, methods=["POST"])
     _add_route(app, "/api/team-dashboard/monthly-report/template", handlers.team_dashboard_monthly_report_template)
     _add_route(app, "/api/team-dashboard/monthly-report/style-guide/refresh", handlers.team_dashboard_monthly_report_style_guide_refresh, methods=["POST"])
     _add_route(app, "/api/team-dashboard/monthly-report/latest-draft", handlers.team_dashboard_monthly_report_latest_draft)

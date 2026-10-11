@@ -1124,6 +1124,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "team_dashboard_version_plan_af",
                 "team_dashboard_version_plan_cell",
                 "team_dashboard_version_plan_rows",
+                "team_dashboard_version_plan_project_suggestions",
                 "team_dashboard_version_plan_sync",
                 "team_dashboard_version_plan_sync_status",
                 "link_team_dashboard_biz_project",

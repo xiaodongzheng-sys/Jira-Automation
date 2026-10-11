@@ -1091,6 +1091,12 @@ class RemoteBPMISClient:
     def list_biz_projects_for_pm_email(self, email: str) -> list[dict[str, str]]:
         return self._call("list_biz_projects_for_pm_email", email) or []
 
+    def list_unfinished_biz_projects(self) -> list[dict[str, str]]:
+        return self._call("list_unfinished_biz_projects") or []
+
+    def get_biz_project(self, project_id: str) -> dict[str, str]:
+        return self._call("get_biz_project", project_id) or {}
+
     def list_biz_projects_for_pm_emails(self, emails: list[str]) -> list[dict[str, Any]]:
         return self._call("list_biz_projects_for_pm_emails", emails) or []
 

@@ -767,6 +767,7 @@
 
   const renderVersionPlanRows = (rows, { scope, versionId = '', readOnly = false, title = 'Rows', headerFeature = 'Feature' } = {}) => {
     const rowItems = Array.isArray(rows) ? rows : [];
+    const pipeline = scope === 'pipeline';
     const empty = '';
     const rowChangesPaused = isVersionPlanRowChangesPaused();
     const body = rowItems.map((row) => {
@@ -784,6 +785,18 @@
           <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-cell-drag" data-label="Move">
             ${manualActionsEnabled ? '<button class="button button-secondary team-dashboard-version-plan-drag" type="button" draggable="true" aria-label="Drag row" title="Drag row"><span aria-hidden="true">↕</span></button>' : ''}
           </div>
+          ${pipeline ? `
+            <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-cell-bpmis" data-label="BPMIS Project ID">
+              ${manualActionsEnabled && canSyncVersionPlan ? `
+                <input type="text" inputmode="numeric" maxlength="6" pattern="[0-9]{6}"
+                  data-version-plan-cell="bpmis_project_id" aria-label="BPMIS Project ID (6 digits)"
+                  value="${escapeHtml(row.bpmis_project_id || '')}" placeholder="-">
+                <button class="button button-secondary team-dashboard-version-plan-suggest" type="button"
+                  data-version-plan-suggest-id aria-label="Suggest BPMIS project ID" title="Suggest BPMIS project ID">⌕</button>
+              ` : escapeHtml(row.bpmis_project_id || '-')}
+              ${row.bpmis_project_lookup_error ? `<span class="team-dashboard-version-plan-lookup-error" role="status" title="${escapeHtml(row.bpmis_project_lookup_error)}">ID saved. ${escapeHtml(row.bpmis_project_lookup_error)}</span>` : ''}
+            </div>
+          ` : ''}
           <div class="team-dashboard-version-plan-cell team-dashboard-version-plan-cell-feature" data-label="Feature">
             ${manualActionsEnabled ? '<div class="team-dashboard-version-plan-row-tools"><button class="button button-secondary team-dashboard-version-plan-delete" type="button" data-version-plan-row-action="delete" aria-label="Delete row" title="Delete row"><span aria-hidden="true">🗑</span></button></div>' : ''}
             ${versionPlanRowFeature(row, readOnly)}
@@ -826,6 +839,7 @@
       <div class="team-dashboard-version-plan-sheet" data-version-plan-sheet="${escapeHtml(scope)}" data-version-id="${escapeHtml(versionId)}">
         <div class="team-dashboard-version-plan-row team-dashboard-version-plan-header" aria-hidden="true">
           <div></div>
+          ${pipeline ? '<div>BPMIS Project ID</div>' : ''}
           <div>${headerFeature}</div>
           <div>Priority</div>
           <div>PM</div>
@@ -837,6 +851,87 @@
         ${addRow}
       </div>
     `;
+  };
+
+  const suggestVersionPlanBpmisId = async (button) => {
+    const rowId = button.closest('[data-version-plan-row-id]')?.dataset.versionPlanRowId;
+    if (!rowId || !canSyncVersionPlan || isVersionPlanSyncRunning()) return;
+    await versionPlanCellMutationQueue;
+    await waitForVersionPlanRowMutation();
+    if (isVersionPlanRowChangesPaused()) return;
+    const pipelineRow = () => versionPlanState?.pipeline_rows?.find((row) => row.row_id === rowId);
+    if (!pipelineRow()) return;
+    const feature = pipelineRow().feature || '';
+    if (!feature.trim()) {
+      setVersionPlanStatus('Enter a pipeline project name before suggesting an ID.', 'error');
+      return;
+    }
+    const dialog = document.createElement('dialog');
+    dialog.className = 'team-dashboard-version-plan-suggestions-dialog';
+    dialog.setAttribute('aria-labelledby', 'version-plan-bpmis-suggestions-title');
+    dialog.innerHTML = `
+      <h3 id="version-plan-bpmis-suggestions-title">Suggest BPMIS Project ID</h3>
+      <p>${escapeHtml(feature)}</p>
+      <div data-version-plan-suggestions-results aria-live="polite"><p>Finding unfinished BPMIS projects…</p></div>
+      <form method="dialog"><button class="button button-secondary" autofocus>Cancel</button></form>
+    `;
+    document.body.append(dialog);
+    const controller = new AbortController();
+    dialog.addEventListener('close', () => {
+      controller.abort();
+      dialog.remove();
+    }, { once: true });
+    dialog.showModal();
+    const results = dialog.querySelector('[data-version-plan-suggestions-results]');
+    try {
+      const response = await fetch(root.dataset.versionPlanProjectSuggestionsUrl || '/api/team-dashboard/version-plan/af/project-suggestions', {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        signal: controller.signal,
+        body: JSON.stringify({ row_id: rowId }),
+      });
+      const payload = await readJson(response, 'Could not suggest a BPMIS project ID.');
+      if (!dialog.open) return;
+      const suggestions = Array.isArray(payload.suggestions) ? payload.suggestions : [];
+      results.innerHTML = suggestions.length ? `
+        <label for="version-plan-bpmis-project-choice">BPMIS Biz Project</label>
+        <select id="version-plan-bpmis-project-choice" data-version-plan-project-choice>
+          <option value="">Select BPMIS ID — Biz Project Name</option>
+          ${suggestions.map((item) => `<option value="${escapeHtml(item.bpmis_id)}">${escapeHtml(item.bpmis_id)} — ${escapeHtml(item.project_name)}</option>`).join('')}
+        </select>
+        <p data-version-plan-project-choice-details>Select a project to save its ID and update the Pipeline project name.</p>
+        <button class="button button-primary" type="button" data-version-plan-apply-id disabled>Use selected project</button>
+      ` : '<p>No close match found among unfinished BPMIS projects. You can enter the ID manually.</p>';
+      const projectChoice = results.querySelector('[data-version-plan-project-choice]');
+      projectChoice?.addEventListener('change', () => {
+        const selected = suggestions.find((item) => item.bpmis_id === projectChoice.value);
+        results.querySelector('[data-version-plan-apply-id]').disabled = !selected;
+        results.querySelector('[data-version-plan-project-choice-details]').textContent = selected
+          ? `${selected.project_name} · ${selected.status} · ${Math.round(Number(selected.match_score || 0) * 100)}% name match`
+          : 'Select a project to save its ID and update the Pipeline project name.';
+      });
+      results.addEventListener('click', (event) => {
+        const apply = event.target.closest('[data-version-plan-apply-id]');
+        if (!apply || !projectChoice.value) return;
+        if (!pipelineRow() || pipelineRow().feature !== payload.feature || isVersionPlanRowChangesPaused()) {
+          dialog.close();
+          setVersionPlanStatus('The pipeline row changed. Suggest its ID again.', 'neutral');
+          return;
+        }
+        const rowElement = Array.from(versionPlanContent.querySelectorAll('[data-version-plan-row-id]'))
+          .find((row) => row.dataset.versionPlanScope === 'pipeline' && row.dataset.versionPlanRowId === rowId);
+        const input = rowElement?.querySelector('[data-version-plan-cell="bpmis_project_id"]');
+        dialog.close();
+        if (!input) return;
+        input.value = projectChoice.value;
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    } catch (error) {
+      if (error.name !== 'AbortError' && dialog.open) {
+        results.innerHTML = `<p class="productization-inline-status" data-tone="error">${escapeHtml(error.message || 'Could not load suggestions.')}</p>`;
+      }
+    }
   };
 
   const renderVersionPlanBundle = (bundle) => {
@@ -1041,6 +1136,7 @@
       return;
     }
     const value = edit.value;
+    if (field === 'bpmis_project_id' && value) setVersionPlanStatus('Looking up BPMIS Biz Project name…', 'neutral');
     try {
       const response = await fetch(root.dataset.versionPlanCellUrl || '/api/team-dashboard/version-plan/af/cell', {
         method: 'POST',
@@ -1056,7 +1152,7 @@
         }),
       });
       const payload = await readJson(response, 'Could not save Version Plan cell.');
-      if (field === 'priority' || field === 'pm') {
+      if (field === 'priority' || field === 'pm' || field === 'bpmis_project_id') {
         renderVersionPlan(payload);
       } else {
         commitVersionPlanMetadata(payload);
@@ -1070,7 +1166,8 @@
           : null;
         if (cachedRow) cachedRow[field] = value;
       }
-      setVersionPlanStatus('Saved.', 'success');
+      const lookupRow = field === 'bpmis_project_id' ? payload.pipeline_rows?.find((row) => row.row_id === edit.rowId) : null;
+      setVersionPlanStatus(lookupRow?.bpmis_project_lookup_error ? `ID saved. ${lookupRow.bpmis_project_lookup_error}` : 'Saved.', lookupRow?.bpmis_project_lookup_error ? 'error' : 'success');
     } catch (error) {
       if (retryOnConflict && error?.payload?.error_category === 'version_plan_conflict') {
         await refreshVersionPlanRevision();
@@ -3301,6 +3398,12 @@
   versionPlanContent?.addEventListener('change', (event) => {
     const input = event.target.closest('[data-version-plan-cell]');
     if (input) {
+      if (input.dataset.versionPlanCell === 'bpmis_project_id') {
+        input.value = input.value.trim();
+        input.setCustomValidity(input.value && !/^[0-9]{6}$/.test(input.value)
+          ? 'Enter exactly 6 digits, or leave the BPMIS project ID empty.' : '');
+        if (!input.reportValidity()) return;
+      }
       const edit = versionPlanCellEditFromInput(input);
       if (!edit) return;
       // Keep edits in event order. The input itself may be replaced by a render
@@ -3321,7 +3424,15 @@
         });
     }
   });
+  versionPlanContent?.addEventListener('input', (event) => {
+    if (event.target.matches('[data-version-plan-cell="bpmis_project_id"]')) event.target.setCustomValidity('');
+  });
   versionPlanContent?.addEventListener('click', async (event) => {
+    const suggestButton = event.target.closest('[data-version-plan-suggest-id]');
+    if (suggestButton) {
+      await suggestVersionPlanBpmisId(suggestButton);
+      return;
+    }
     const toggle = event.target.closest('[data-version-plan-bundle-toggle]');
     if (toggle) {
       const bundleId = toggle.dataset.versionPlanBundleId || '';

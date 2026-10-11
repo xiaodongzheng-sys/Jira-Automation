@@ -81,6 +81,8 @@ BPMIS_PROXY_OPERATIONS = {
     "list_biz_projects_for_pm_email",
     "list_biz_projects_for_pm_emails",
     "search_biz_projects_by_title_keywords",
+    "list_unfinished_biz_projects",
+    "get_biz_project",
     "list_jira_tasks_for_project_created_by_email",
     "list_jira_tasks_for_projects_created_by_emails",
     "list_jira_tasks_created_by_emails",

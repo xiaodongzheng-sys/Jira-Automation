@@ -57,6 +57,12 @@ class BPMISClient(ABC):
     def search_biz_projects_by_title_keywords(self, keywords: str, *, max_pages: int | None = None) -> list[dict[str, str]]:
         raise NotImplementedError
 
+    def list_unfinished_biz_projects(self) -> list[dict[str, str]]:
+        raise NotImplementedError
+
+    def get_biz_project(self, project_id: str) -> dict[str, str]:
+        raise NotImplementedError
+
     @abstractmethod
     def list_jira_tasks_for_project_created_by_email(self, project_issue_id: str, email: str) -> list[dict[str, Any]]:
         raise NotImplementedError
@@ -487,6 +493,65 @@ class BPMISDirectApiClient(BPMISClient):
                 break
             page += 1
         return self._normalize_team_dashboard_biz_project_rows(rows)
+
+    def get_biz_project(self, project_id: str) -> dict[str, str]:
+        normalized_id = str(project_id or "").strip()
+        if not re.fullmatch(r"[0-9]{6}", normalized_id):
+            raise BPMISError("BPMIS project ID must contain exactly 6 digits.")
+        response = self._api_request(
+            "/api/v1/issues/list",
+            params={"search": json.dumps({
+                "joinType": "and",
+                "subQueries": [{"id": [int(normalized_id)]}, {"typeId": [self.BIZ_PROJECT_TYPE_ID]}],
+                "page": 1, "pageSize": 1, "mapping": True,
+            })},
+        )
+        for row in (response.get("data") or {}).get("rows") or []:
+            project = self._normalize_team_dashboard_parent_project(row)
+            if str(project.get("bpmis_id") or "").lstrip("0") == normalized_id.lstrip("0"):
+                return {"bpmis_id": normalized_id, "project_name": str(project.get("project_name") or "")}
+        raise BPMISError("BPMIS Biz Project was not found for this ID.")
+
+    def list_unfinished_biz_projects(self) -> list[dict[str, str]]:
+        status_labels = dict(self.TEAM_DASHBOARD_BIZ_PROJECT_STATUS_ID_LABELS)
+        for label in ("Draft", "KIV"):
+            status_id = self._resolve_biz_project_status_id(label)
+            if status_id is None:
+                raise BPMISError(f"Could not resolve BPMIS Biz Project status '{label}' for ID suggestions.")
+            status_labels[str(status_id)] = label
+        allowed_statuses = {label.casefold() for label in status_labels.values()}
+        projects: dict[str, dict[str, str]] = {}
+        page = 1
+        page_size = 200
+        while True:
+            response = self._api_request(
+                "/api/v1/issues/list",
+                params={"search": json.dumps({
+                    "joinType": "and",
+                    "subQueries": [
+                        {"typeId": [self.BIZ_PROJECT_TYPE_ID]},
+                        {"statusId": [int(value) for value in status_labels]},
+                    ],
+                    "page": page, "pageSize": page_size, "mapping": True,
+                })},
+            )
+            rows = (response.get("data") or {}).get("rows") or []
+            for row in rows:
+                project = self._normalize_team_dashboard_parent_project(row)
+                project_id = str(project.get("bpmis_id") or "").strip()
+                status = str(project.get("status") or "").strip()
+                status = status_labels.get(status, status)
+                if project_id and status.casefold() in allowed_statuses:
+                    projects[project_id] = {
+                        "bpmis_id": project_id,
+                        "project_name": str(project.get("project_name") or ""),
+                        "market": str(project.get("market") or ""),
+                        "status": status,
+                    }
+            if len(rows) < page_size:
+                break
+            page += 1
+        return list(projects.values())
 
     def get_single_brd_doc_link_for_project(self, project_issue_id: str) -> str:
         return self.get_single_brd_doc_links_for_projects([project_issue_id]).get(str(project_issue_id).strip(), "")

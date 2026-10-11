@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import date, datetime, timedelta
+from difflib import SequenceMatcher
 import re
 import uuid
 from typing import Any
@@ -383,10 +384,16 @@ def version_plan_auto_sync_attempted_today(config: dict[str, Any], *, now: datet
 def update_version_plan_cell(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     plan = normalize_version_plan_state(config.get("version_plan") if isinstance(config, dict) else {})
     field = str(payload.get("field") or "").strip()
-    if field not in {"feature", "priority", "pm", "productization_efforts"}:
+    if field not in {"feature", "priority", "pm", "productization_efforts", "bpmis_project_id"}:
         raise ValueError("Unsupported Version Plan field.")
+    if field == "bpmis_project_id" and str(payload.get("scope") or "").strip() != "pipeline":
+        raise ValueError("BPMIS project IDs can only be edited in Pipeline.")
     row = _find_version_plan_cell_row(plan, payload, field)
-    if field == "priority":
+    if field == "bpmis_project_id":
+        row[field] = _normalize_bpmis_project_id(payload.get("value"))
+        row["bpmis_project_name"] = ""
+        row["bpmis_project_lookup_error"] = ""
+    elif field == "priority":
         row[field] = _normalize_priority(payload.get("value"))
     elif field == "pm":
         row[field] = _normalize_pm_values(payload.get("value"))
@@ -422,6 +429,7 @@ def update_version_plan_rows(config: dict[str, Any], payload: dict[str, Any]) ->
                 {
                     "row_id": str(payload.get("row_id") or "").strip(),
                     "feature": str(payload.get("feature") or "").strip(),
+                    "bpmis_project_id": _normalize_bpmis_project_id(payload.get("bpmis_project_id")),
                     "priority": payload.get("priority"),
                     "pm": payload.get("pm"),
                     "remarks": str(payload.get("remarks") or "").strip(),
@@ -498,6 +506,9 @@ def _manual_row(row: dict[str, Any]) -> dict[str, Any]:
         "row_id": str(row.get("row_id") or f"manual-{uuid.uuid4().hex}"),
         "row_type": "manual",
         "feature": str(row.get("feature") or "").strip(),
+        "bpmis_project_id": _normalize_bpmis_project_id(row.get("bpmis_project_id")),
+        "bpmis_project_name": str(row.get("bpmis_project_name") or "").strip() if row.get("bpmis_project_id") else "",
+        "bpmis_project_lookup_error": str(row.get("bpmis_project_lookup_error") or "").strip() if row.get("bpmis_project_id") else "",
         "priority": _normalize_priority(row.get("priority")),
         "pm": _normalize_pm_values(row.get("pm")),
         "remarks": str(row.get("remarks") or "").strip(),
@@ -507,6 +518,52 @@ def _manual_row(row: dict[str, Any]) -> dict[str, Any]:
         "sort_order": _safe_int(row.get("sort_order"), 0),
         "updated_at": str(row.get("updated_at") or "").strip(),
     }
+
+
+def _normalize_bpmis_project_id(value: Any) -> str:
+    text = str(value if value is not None else "").strip()
+    if text and not re.fullmatch(r"[0-9]{6}", text):
+        raise ValueError("BPMIS project ID must contain exactly 6 digits, or be empty.")
+    return text
+
+
+def suggest_pipeline_bpmis_projects(feature: str, projects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rank unfinished Biz Projects without assigning an ID automatically."""
+    def match_text(value: str) -> str:
+        value = re.sub(r"\[(?:SG|ID|PH|REG|ALL)\]", " ", value, flags=re.IGNORECASE)
+        return " ".join(re.sub(r"[^\w]+|_", " ", value.casefold()).split())
+
+    source = match_text(feature)
+    if not source:
+        return []
+    source_tokens = set(source.split())
+    source_markets = set(re.findall(r"\[(SG|ID|PH)\]", feature.upper()))
+    unfinished = {"draft", "pending review", "confirmed", "kiv", "developing", "testing", "uat"}
+    matches: dict[str, dict[str, Any]] = {}
+    for project in projects:
+        project_id = str(project.get("bpmis_id") or project.get("issue_id") or "").strip()
+        name = str(project.get("project_name") or "").strip()
+        status = str(project.get("status") or "").strip()
+        target = match_text(name)
+        if not re.fullmatch(r"[0-9]{6}", project_id) or not target or status.casefold() not in unfinished:
+            continue
+        target_markets = set(re.findall(r"\[(SG|ID|PH)\]", name.upper()))
+        target_markets.update(re.findall(r"\b(SG|ID|PH)\b", str(project.get("market") or "").upper()))
+        if source_markets and target_markets and source_markets.isdisjoint(target_markets):
+            continue
+        target_tokens = set(target.split())
+        token_score = 2 * len(source_tokens & target_tokens) / (len(source_tokens) + len(target_tokens))
+        score = max(
+            SequenceMatcher(None, source, target).ratio(),
+            SequenceMatcher(None, " ".join(sorted(source_tokens)), " ".join(sorted(target_tokens))).ratio(),
+            token_score,
+        )
+        if score < 0.45:
+            continue
+        item = {"bpmis_id": project_id, "project_name": name, "status": status, "match_score": round(score, 4)}
+        if project_id not in matches or score > matches[project_id]["match_score"]:
+            matches[project_id] = item
+    return sorted(matches.values(), key=lambda item: (-item["match_score"], item["project_name"].casefold(), item["bpmis_id"]))[:5]
 
 
 def _normalize_manual_rows(value: Any) -> list[dict[str, Any]]:
