@@ -392,6 +392,7 @@ def update_version_plan_cell(config: dict[str, Any], payload: dict[str, Any]) ->
     if field == "bpmis_project_id":
         row[field] = _normalize_bpmis_project_id(payload.get("value"))
         row["bpmis_project_name"] = ""
+        row["bpmis_project_market"] = ""
         row["bpmis_project_lookup_error"] = ""
     elif field == "priority":
         row[field] = _normalize_priority(payload.get("value"))
@@ -508,6 +509,7 @@ def _manual_row(row: dict[str, Any]) -> dict[str, Any]:
         "feature": str(row.get("feature") or "").strip(),
         "bpmis_project_id": _normalize_bpmis_project_id(row.get("bpmis_project_id")),
         "bpmis_project_name": str(row.get("bpmis_project_name") or "").strip() if row.get("bpmis_project_id") else "",
+        "bpmis_project_market": str(row.get("bpmis_project_market") or "").strip() if row.get("bpmis_project_id") else "",
         "bpmis_project_lookup_error": str(row.get("bpmis_project_lookup_error") or "").strip() if row.get("bpmis_project_id") else "",
         "priority": _normalize_priority(row.get("priority")),
         "pm": _normalize_pm_values(row.get("pm")),
@@ -527,10 +529,39 @@ def _normalize_bpmis_project_id(value: Any) -> str:
     return text
 
 
+def pipeline_bpmis_project_display_name(project: dict[str, Any]) -> str:
+    """Prefix the canonical Biz Project name with its BPMIS Market label."""
+    name = str(project.get("project_name") or "").strip()
+    market = str(project.get("market") or "").strip()
+    if not name or not market or market.isdigit():
+        return name
+    aliases = {
+        "sg": "SG", "singapore": "SG",
+        "id": "ID", "indonesia": "ID",
+        "ph": "PH", "philippines": "PH",
+        "reg": "Regional", "regional": "Regional", "all": "Regional",
+        "fe horizontal": "FE Horizontal",
+    }
+    labels = []
+    for value in re.split(r"[,;|]", market):
+        value = value.strip().strip("[]").strip()
+        label = aliases.get(value.casefold(), value)
+        if label and not label.isdigit() and label not in labels:
+            labels.append(label)
+    if not labels:
+        return name
+    # Replace existing Market tags, preserving task/system tags such as [TP].
+    name = re.sub(
+        r"^(?:\[(?:SG|Singapore|ID|Indonesia|PH|Philippines|REG|Regional|ALL|FE Horizontal)\]\s*)+",
+        "", name, flags=re.IGNORECASE,
+    ).strip()
+    return f"{''.join(f'[{label}]' for label in labels)} {name}".strip()
+
+
 def suggest_pipeline_bpmis_projects(feature: str, projects: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Rank unfinished Biz Projects without assigning an ID automatically."""
     def match_text(value: str) -> str:
-        value = re.sub(r"\[(?:SG|ID|PH|REG|ALL)\]", " ", value, flags=re.IGNORECASE)
+        value = re.sub(r"\[(?:SG|ID|PH|REG|Regional|ALL|FE Horizontal)\]", " ", value, flags=re.IGNORECASE)
         return " ".join(re.sub(r"[^\w]+|_", " ", value.casefold()).split())
 
     source = match_text(feature)
@@ -560,7 +591,12 @@ def suggest_pipeline_bpmis_projects(feature: str, projects: list[dict[str, Any]]
         )
         if score < 0.45:
             continue
-        item = {"bpmis_id": project_id, "project_name": name, "status": status, "match_score": round(score, 4)}
+        item = {
+            "bpmis_id": project_id,
+            "project_name": pipeline_bpmis_project_display_name(project),
+            "market": str(project.get("market") or "").strip(),
+            "status": status, "match_score": round(score, 4),
+        }
         if project_id not in matches or score > matches[project_id]["match_score"]:
             matches[project_id] = item
     return sorted(matches.values(), key=lambda item: (-item["match_score"], item["project_name"].casefold(), item["bpmis_id"]))[:5]

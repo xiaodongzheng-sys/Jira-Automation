@@ -509,7 +509,11 @@ class BPMISDirectApiClient(BPMISClient):
         for row in (response.get("data") or {}).get("rows") or []:
             project = self._normalize_team_dashboard_parent_project(row)
             if str(project.get("bpmis_id") or "").lstrip("0") == normalized_id.lstrip("0"):
-                return {"bpmis_id": normalized_id, "project_name": str(project.get("project_name") or "")}
+                return {
+                    "bpmis_id": normalized_id,
+                    "project_name": str(project.get("project_name") or ""),
+                    "market": str(project.get("market") or ""),
+                }
         raise BPMISError("BPMIS Biz Project was not found for this ID.")
 
     def list_unfinished_biz_projects(self) -> list[dict[str, str]]:

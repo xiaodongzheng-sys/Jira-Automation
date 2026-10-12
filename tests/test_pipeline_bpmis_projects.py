@@ -94,7 +94,7 @@ class PipelineBPMISProjectTests(unittest.TestCase):
             self.assertEqual(set(query["subQueries"][1]["statusId"]), {1, 4, 6, 10, 11, 12, 23})
         client._api_request.reset_mock(side_effect=True)
         client._api_request.return_value = {"data": {"rows": [{"id": 1234, "summary": "BPMIS canonical name", "statusId": "Done"}]}}
-        self.assertEqual(client.get_biz_project("001234"), {"bpmis_id": "001234", "project_name": "BPMIS canonical name"})
+        self.assertEqual(client.get_biz_project("001234"), {"bpmis_id": "001234", "project_name": "BPMIS canonical name", "market": ""})
         query = json.loads(client._api_request.call_args.kwargs["params"]["search"])
         self.assertEqual(query["subQueries"], [{"id": [1234]}, {"typeId": [1]}])
         client._api_request.return_value = {"data": {"rows": []}}

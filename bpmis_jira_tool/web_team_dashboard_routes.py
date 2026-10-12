@@ -41,6 +41,7 @@ from bpmis_jira_tool.team_dashboard_version_plan import (
     mark_version_plan_sync_error,
     mark_version_plan_sync_running,
     merge_version_plan_editable_state,
+    pipeline_bpmis_project_display_name,
     suggest_pipeline_bpmis_projects,
     update_version_plan_cell,
     update_version_plan_rows,
@@ -672,8 +673,9 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
                     try:
                         project = _build_bpmis_client_for_current_user(settings).get_biz_project(row["bpmis_project_id"])
                         row["bpmis_project_name"] = str(project.get("project_name") or "").strip()
+                        row["bpmis_project_market"] = str(project.get("market") or "").strip()
                         if row["bpmis_project_name"]:
-                            row["feature"] = row["bpmis_project_name"]
+                            row["feature"] = pipeline_bpmis_project_display_name(project)
                         else:
                             row["bpmis_project_lookup_error"] = "BPMIS project name is unavailable."
                     except (ConfigError, ToolError) as error:
