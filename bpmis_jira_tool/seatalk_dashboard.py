@@ -1092,6 +1092,7 @@ class SeaTalkDashboardService:
                     "summary": cls._clean_text(row.get("summary"), ""),
                     "status": cls._clean_choice(row.get("status"), {"done", "in_progress", "blocked", "unknown"}, "unknown"),
                     "evidence": cls._clean_text(row.get("evidence"), ""),
+                    **cls._insight_item_metadata(row),
                 }
             )
         return normalized
@@ -1111,6 +1112,7 @@ class SeaTalkDashboardService:
                         "priority": cls._clean_choice(row.get("priority"), {"high", "medium", "low", "unknown"}, "unknown"),
                         "due": cls._clean_text(row.get("due"), "unknown"),
                         "evidence": cls._clean_text(row.get("evidence"), ""),
+                        **cls._insight_item_metadata(row),
                     }
                 )
             )
@@ -1129,9 +1131,29 @@ class SeaTalkDashboardService:
                     "person": cls._clean_text(row.get("person"), "Unknown"),
                     "reminder": cls._clean_text(row.get("reminder"), "Untitled reminder"),
                     "evidence": cls._clean_text(row.get("evidence"), ""),
+                    **cls._insight_item_metadata(row),
                 }
             )
         return normalized
+
+    @classmethod
+    def _insight_item_metadata(cls, row: dict[str, Any]) -> dict[str, Any]:
+        # Keep the model's routing and evidence fields through the shared parser.
+        metadata: dict[str, Any] = {}
+        for field, allowed in (
+            ("action_type", {"direct_action", "watch_delegate"}),
+            ("source_type", {"seatalk", "gmail", "mixed", "unknown"}),
+        ):
+            value = cls._clean_choice(row.get(field), allowed, "")
+            if value:
+                metadata[field] = value
+        for field in ("evidence_ref_id", "evidence_timestamp", "signal_type", "priority_reason"):
+            if isinstance(row.get(field), str) and row[field].strip():
+                metadata[field] = cls._clean_text(row[field], "")
+        for field in ("matched_vips", "matched_keywords", "matched_key_projects"):
+            if isinstance(row.get(field), list):
+                metadata[field] = [cls._clean_text(value, "") for value in row[field] if isinstance(value, str)]
+        return metadata
 
     @classmethod
     def _todo_with_id(cls, todo: dict[str, str]) -> dict[str, str]:

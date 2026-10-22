@@ -1088,6 +1088,9 @@ def build_daily_briefing(
         reminders=reminders,
         evidence_refs=evidence_refs,
     )
+    evidence_quality_metrics["input_direct_action_count"] = sum(
+        item.get("action_type") == "direct_action" for item in parsed.get("my_todos", [])
+    )
     evidence_quality_metrics["calendar_suppressed_count"] = suppressed_calendar_message_count
     evidence_quality_metrics["low_value_reminder_suppressed_count"] = suppressed_low_value_reminder_count
     evidence_quality_metrics["model_review_passes"] = model_review_passes
@@ -1330,6 +1333,7 @@ def _daily_brief_original_prompt(
         "仅分析本次提供的 SeaTalk 记录，不使用 Gmail 或外部信息，不假设输入中未出现的事实。优先保留 Anti-fraud、Credit Risk，以及 Ops Risk 中与 GRC 系统相关、由 Xiaodong 团队深度参与或主导的事项。其他团队事项只有在对上述团队造成明确重大风险、关键依赖、线上影响或管理决策时才保留；仅在群里出现、被抄送或一般性 FYI 不足以构成相关性。不要使用固定项目关键词白名单；按每次记录里的实际负责人、团队参与、影响和决策判断。\n\n"
         "# 核心业务板块与提取规则\n"
         "1. Xiaodong Action Required（行动项）：只列 Xiaodong 本人需要亲自答复、评审、参加、决策、审批或已经承诺但尚未完成的具体动作。明确动作对象和预期结果；若 Xiaodong 已承诺亲自继续跟进且事项未解决，保留为他的待办。若他已给出结论或问题已解决，则删除。不要把已由他回答的问题改写成待办。\n"
+        "私聊中对方直接提出的问题或请求，默认接收人就是 Xiaodong，不要求消息中重复写他的姓名或 @。个人待办也包括 General 类的直接指派，不因不属于团队项目而删除。“我晚上再看下”“我再看下让你知道”“Let me try out tonight and let you know”都是未完成承诺，不是解决结论；开发称已修复但仍请 Xiaodong 验证时，保留他的验证动作，不把原缺陷写成仍未修复。\n"
         "2. Watch / Delegate（关注/跟进）：列出 Xiaodong 不必亲自执行、但需要他监控进度、推动负责人或确保关键依赖完成的事项。写清负责人、要观察的结果及其重要性；仅提醒或没有实际推进意义的事项不列。\n"
         "3. Project Updates（项目动态）：按项目/主题综合对话，说明最新状态、重要背景、影响和下一步。优先保留进行中或受阻事项，以及 P0/P1 风险、MAS/监管承诺、重大 incident、版本延期、上线节点、关键 dependency 和明确决策。对每个更新采用“状态：…影响：…下一步：…”结构。只有聊天证据表明依赖未解决并影响交付/合规/上线时才标为 blocked；不得仅因提到 MAS、合规或风险词汇就推断 blocked。不要把零散聊天原句拼在一起充作总结。\n"
         "4. Other Update（其他高价值动态）：列出 Xiaodong 未直接负责、但对其团队/数字银行 PM 有实质价值的跨团队动态。分类仅限 incident、launch、policy_process、risk_compliance、cross_team_dependency、leadership_decision、cross_product_milestone。例行系统播报、普通提醒和无明确业务影响的 FYI 忽略；机器人/系统发出的信息只有在证据显示为真实、重要的线上事故、风险或里程碑时才保留。\n"
@@ -1342,6 +1346,7 @@ def _daily_brief_original_prompt(
         "# 输出格式\n"
         "用精炼、专业、商务通顺的简体中文输出。必须只返回合法 JSON，不要 Markdown 或解释。顶层字段固定为 project_updates、other_updates、my_todos、team_member_reminders、team_todos；team_todos 固定为空数组。无高信号内容的版块返回空数组。\n"
         "project_updates 每项字段：domain、title、summary、status、evidence、source_type；summary 必须包含“状态：…影响：…下一步：…”。other_updates 每项字段：domain、title、summary、status、signal_type、evidence、source_type。my_todos 每项字段：task、domain、priority、due、action_type、evidence、source_type；action_type 只能为 direct_action 或 watch_delegate。team_member_reminders 每项字段：domain、person、reminder、evidence、source_type。所有 source_type 固定为 seatalk。不要输出额外版块或字段。\n\n"
+        "每项另带 evidence_timestamp，从对应原始消息复制完整时间 YYYY-MM-DD HH:MM:SS；个人待办使用直接请求或本人未完成承诺的时间。不得编造时间。evidence 只写真实联系人或群名，若有真实 thread 则用“群名 / thread: 原始标题”；不要把解释、时间或自己生成的摘要当成 thread 名。priority 只用 high、medium、low、unknown。\n\n"
         "在生成前先在内部完成全量扫描、按主题合并、核对时间顺序与最新结论、检查解决状态、确认团队归属和来源，最后再输出；不要展示分析过程。不要因原文较长而只看开头或结尾，也不要在本次调用中要求第二轮。\n\n"
         f"报告窗口：{window_label}。生成时间：{local_now.isoformat()}。\n\n"
         "# 原始 SeaTalk 聊天记录\n"
@@ -1390,6 +1395,7 @@ def _build_daily_briefing_one_pass(
         name_mappings=name_mappings,
         team_member_reminder_candidates=_build_team_member_reminder_candidates(raw_source_text),
         xiaodong_followup_candidates=[*_build_xiaodong_followup_candidates(raw_source_text), *_build_direct_xiaodong_request_candidates(raw_source_text)],
+        include_all_records=True,
     )
     team_member_reminder_candidates = [
         candidate
@@ -1401,12 +1407,18 @@ def _build_daily_briefing_one_pass(
         *_build_xiaodong_followup_candidates(raw_source_text),
         *_build_direct_xiaodong_request_candidates(raw_source_text),
     ]
+    input_direct_action_count = sum(item.get("action_type") == "direct_action" for item in parsed_todos)
     evidence_quality_metrics = _apply_daily_brief_evidence_refs(
         project_updates=project_updates,
         other_updates=other_updates,
         my_todos=parsed_todos,
         reminders=reminders,
         evidence_refs=evidence_refs,
+    )
+    evidence_quality_metrics["input_direct_action_count"] = input_direct_action_count
+    evidence_quality_metrics["unanswered_private_request_count"] = sum(
+        candidate.get("ownership_reason") == "direct_request" and _is_private_seatalk_group(candidate.get("group"))
+        for candidate in xiaodong_followup_candidates
     )
     evidence_quality_metrics["english_prose_suppressed_count"] = 0
     _repair_generic_seatalk_evidence(
@@ -3229,7 +3241,12 @@ def _looks_like_xiaodong_followup_commitment(text: Any) -> bool:
     normalized = " ".join(str(text or "").casefold().split())
     if not normalized or _is_meeting_logistics_or_availability_notice(normalized):
         return False
-    return any(cue in normalized for cue in XIAODONG_FOLLOWUP_COMMITMENT_CUES)
+    return any(cue in normalized for cue in XIAODONG_FOLLOWUP_COMMITMENT_CUES) or bool(
+        re.search(r"\b(?:let me|i(?:'ll| will| can))\s+(?:also\s+)?(?:try(?: out)?|re-?check|test|verify|take a look)\b", normalized)
+        or re.search(r"我.{0,12}(?:再|会|来|将|稍后|之后|今晚|晚上).{0,8}(?:看下|看看|检查|验证|确认|跟进|回复)", normalized)
+        or re.search(r"我(?:再)?(?:看看|看下)(?:吧|哈|让你知道|后回复|后反馈|[。！!,.，\s]|$)", normalized)
+        or re.search(r"我(?:再|会|来|先)?(?:找|查|试|测)(?:一下|下|一遍)(?:再)?(?:告诉你|让你知道|后回复|后反馈)", normalized)
+    )
 
 
 def _build_xiaodong_followup_candidates(history_text: str) -> list[dict[str, str]]:
@@ -3283,7 +3300,7 @@ def _build_xiaodong_followup_candidates(history_text: str) -> list[dict[str, str
     ][-MAX_TEAM_MEMBER_REMINDER_HINTS:]
 
 
-def _looks_like_direct_xiaodong_request(text: Any) -> bool:
+def _looks_like_direct_xiaodong_request(text: Any, *, private_chat: bool = False) -> bool:
     """Recognize a human request addressed to Xiaodong, including private chats."""
     normalized = " ".join(str(text or "").casefold().split())
     if not normalized or _is_meeting_logistics_or_availability_notice(normalized):
@@ -3291,12 +3308,19 @@ def _looks_like_direct_xiaodong_request(text: Any) -> bool:
     direct_name = bool(
         re.search(r"(?:@|\b)(?:zheng\s+xiaodong|xiaodong\s+zheng|xiaodong)\b", normalized)
     )
-    if not direct_name:
+    if not direct_name and not private_chat:
         return False
     if _is_team_member_coverage_notice(normalized) or _is_assignment_statement(normalized):
         return False
     if any(cue in normalized for cue in ("heads up", "heads-up", "just want to give you a headsup", "for visibility")):
         return False
+    if private_chat:
+        return _looks_like_unanswered_question(normalized) or bool(re.search(
+            r"\b(?:can|could|would)\s+(?:you|u|help)\b|\b(?:please|pls|plz|kindly|any update)\b"
+            r"|\blet (?:me|us) know\b|\bneed (?:you|your)\b"
+            r"|^(?:check|confirm|review|re-?check|provide|send)\b"
+            r"|请问|麻烦|帮忙|能否|可否|请你|确认下|看下|看看", normalized
+        ))
     if re.search(r"\bcc\s+@?(?:zheng\s+)?xiaodong\b", normalized):
         return False
     name_match = re.search(r"(?:@|\b)(?:zheng\s+xiaodong|xiaodong\s+zheng|xiaodong)\b", normalized)
@@ -3347,8 +3371,6 @@ def _build_direct_xiaodong_request_candidates(history_text: str) -> list[dict[st
                         "已确认",
                         "confirmed",
                         "改好了",
-                        "ok",
-                        "okay",
                     )
                 ) and not any(
                     cue in text.casefold()
@@ -3360,7 +3382,9 @@ def _build_direct_xiaodong_request_candidates(history_text: str) -> list[dict[st
                 # "the page is still showing a server error". The request is
                 # resolved only by an explicit closure in the visible window.
                 continue
-        if _sender_is_xiaodong(sender) or not _looks_like_direct_xiaodong_request(text):
+        if _sender_is_xiaodong(sender) or not _looks_like_direct_xiaodong_request(
+            text, private_chat=_is_private_seatalk_group(group)
+        ):
             continue
         pending.append(
             {
@@ -3400,8 +3424,10 @@ def _build_direct_xiaodong_request_candidates(history_text: str) -> list[dict[st
 
     return [
         {key: str(value) for key, value in candidate.items() if key not in {"context", "resolved"}}
-        for candidate in sorted(pending, key=priority, reverse=True)[:MAX_TEAM_MEMBER_REMINDER_HINTS]
-        if not candidate.get("resolved")
+        for candidate in sorted(
+            (candidate for candidate in pending if not candidate.get("resolved")),
+            key=priority, reverse=True,
+        )[:MAX_TEAM_MEMBER_REMINDER_HINTS]
     ][-MAX_TEAM_MEMBER_REMINDER_HINTS:]
 
 
@@ -5355,10 +5381,19 @@ def _build_daily_brief_evidence_refs(
     name_mappings: dict[str, str] | None = None,
     team_member_reminder_candidates: list[dict[str, str]] | None = None,
     xiaodong_followup_candidates: list[dict[str, str]] | None = None,
+    include_all_records: bool = False,
 ) -> list[dict[str, Any]]:
     records = _seatalk_history_records_for_evidence(history_text)
     refs: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str, str]] = set()
+    request_contexts: dict[int, str] = {}
+    recent: dict[tuple[str, str], list[str]] = {}
+    for record in records:
+        context_key = (record.get("group", ""), record.get("thread", ""))
+        if _sender_is_xiaodong(record.get("sender", "")) and _looks_like_xiaodong_followup_commitment(record.get("text")):
+            request_contexts[id(record)] = " ".join(recent.get(context_key, []))
+        recent.setdefault(context_key, []).append(record.get("text", ""))
+        recent[context_key] = recent[context_key][-3:]
 
     def add_ref(record: dict[str, str], *, person: str = "", reply_state: str = "unknown") -> None:
         key = (
@@ -5386,6 +5421,8 @@ def _build_daily_brief_evidence_refs(
                 "mentioned_people": mentioned_people,
                 "reply_state": reply_state,
                 "snippet": _clip_hint_text(record.get("text"), limit=240),
+                "_full_text": str(record.get("text") or ""),
+                "_request_context": request_contexts.get(id(record), ""),
                 # Candidate matching must not depend on the display snippet,
                 # which is intentionally truncated before it enters prompts.
                 "_message_fingerprint": _message_fingerprint(record.get("text")),
@@ -5435,6 +5472,9 @@ def _build_daily_brief_evidence_refs(
         regular_record_count = 0
         for record in sorted(records, key=evidence_priority, reverse=True):
             text = str(record.get("text") or "")
+            if include_all_records and _is_meaningful_human_seatalk_line(record.get("sender", ""), text):
+                selected_records.append(record)
+                continue
             qualifies = _looks_like_team_member_request(text) or _looks_like_xiaodong_followup_commitment(text) or _is_unanswered_question_candidate(
                 text,
                 group=str(record.get("group") or ""),
@@ -5640,6 +5680,7 @@ def _apply_daily_brief_evidence_refs(
         "generic_evidence_count": 0,
         "candidate_followup_count": 0,
         "final_followup_count": 0,
+        "evidence_rejections": [],
     }
     refs_by_id = {str(ref.get("id") or "").strip(): ref for ref in evidence_refs if str(ref.get("id") or "").strip()}
     if not refs_by_id:
@@ -5649,6 +5690,16 @@ def _apply_daily_brief_evidence_refs(
         for ref in evidence_refs
         if str(ref.get("source_type") or "").strip()
     }
+
+    def reject(item: dict[str, Any], section: str, reason: str) -> bool:
+        metrics["dropped_invalid_evidence_count"] += 1
+        metrics["evidence_rejections"].append({
+            "section": section,
+            "reason": reason,
+            "item": _item_text(item, fields=("task", "title", "reminder")),
+            "evidence": str(item.get("evidence") or ""),
+        })
+        return False
 
     def apply_to_item(item: dict[str, Any], *, section: str, require_ref: bool) -> bool:
         ref_id = str(item.get("evidence_ref_id") or "").strip()
@@ -5660,12 +5711,12 @@ def _apply_daily_brief_evidence_refs(
                 ref = refs_by_id.get(ref_id)
         if not ref:
             if ref_id or require_ref:
-                metrics["dropped_invalid_evidence_count"] += 1
-                return False
+                return reject(item, section, "no_matching_source_record")
             return True
+        if item.get("evidence_timestamp") and ref.get("source_type") == "seatalk" and not _evidence_ref_matches_timestamp(item, ref):
+            return reject(item, section, "timestamp_or_source_mismatch")
         if not _evidence_ref_matches_item_people(item, ref):
-            metrics["dropped_invalid_evidence_count"] += 1
-            return False
+            return reject(item, section, "person_mismatch")
         deterministic_xiaodong = str(item.get("followup_source") or "").startswith("deterministic_xiaodong_")
         if (
             section == "my_todos"
@@ -5674,11 +5725,9 @@ def _apply_daily_brief_evidence_refs(
             and not deterministic_xiaodong
             and not _seatalk_ref_supports_xiaodong_action(ref)
         ):
-            metrics["dropped_invalid_evidence_count"] += 1
-            return False
+            return reject(item, section, "no_xiaodong_ownership")
         if not deterministic_xiaodong and not _evidence_refs_match_project_item(item, [ref]):
-            metrics["dropped_invalid_evidence_count"] += 1
-            return False
+            return reject(item, section, "topic_mismatch")
         explicit_locator = _evidence_ref_matches_explicit_locator(item, ref)
         evidence = str(ref.get("evidence") or "").strip()
         if evidence and evidence != str(item.get("evidence") or "").strip():
@@ -5702,18 +5751,17 @@ def _apply_daily_brief_evidence_refs(
             if inferred_ref:
                 ref_ids = [str(inferred_ref.get("id") or "").strip()]
             else:
-                metrics["dropped_invalid_evidence_count"] += 1
-                return False
+                return reject(item, section, "no_matching_source_record")
         if not ref_ids:
             return True
         refs = [refs_by_id.get(ref_id) for ref_id in ref_ids]
         if any(ref is None for ref in refs):
-            metrics["dropped_invalid_evidence_count"] += 1
-            return False
+            return reject(item, section, "unknown_evidence_ref_id")
         valid_refs = [ref for ref in refs if isinstance(ref, dict)]
+        if item.get("evidence_timestamp") and not any(_evidence_ref_matches_timestamp(item, ref) for ref in valid_refs):
+            return reject(item, section, "timestamp_or_source_mismatch")
         if not _evidence_refs_match_project_item(item, valid_refs):
-            metrics["dropped_invalid_evidence_count"] += 1
-            return False
+            return reject(item, section, "topic_mismatch")
         explicit_locator = bool(valid_refs) and all(
             _evidence_ref_matches_explicit_locator(item, ref) for ref in valid_refs
         )
@@ -5774,8 +5822,10 @@ def _split_evidence_ref_ids(value: Any) -> list[str]:
 
 
 def _seatalk_ref_supports_xiaodong_action(ref: dict[str, Any]) -> bool:
-    snippet = str(ref.get("snippet") or "").strip()
+    snippet = str(ref.get("_full_text") or ref.get("snippet") or "").strip()
     sender = str(ref.get("sender") or "")
+    if not _is_meaningful_human_seatalk_line(sender, snippet):
+        return False
     if _sender_is_xiaodong(sender):
         if str(ref.get("reply_state") or "").strip() == "xiaodong_commitment":
             return True
@@ -5792,7 +5842,9 @@ def _seatalk_ref_supports_xiaodong_action(ref: dict[str, Any]) -> bool:
             or "？" in snippet
         ):
             return False
-        return True
+        return False
+    if _is_private_seatalk_group(ref.get("group")):
+        return _looks_like_direct_xiaodong_request(snippet, private_chat=True)
     return _seatalk_ref_directly_requests_xiaodong(snippet)
 
 
@@ -5885,13 +5937,23 @@ def _best_evidence_ref_for_item(
             continue
         if source_type == "gmail" and ref_source_type != "gmail":
             continue
+        if section == "my_todos" and item.get("action_type") == "direct_action" and ref_source_type == "seatalk":
+            if not _seatalk_ref_supports_xiaodong_action(ref):
+                continue
+        if item.get("evidence_timestamp") and ref_source_type == "seatalk":
+            if not _evidence_ref_matches_timestamp(item, ref):
+                continue
         ref_text = " ".join(
             str(ref.get(field) or "")
-            for field in ("group", "thread", "subject", "participants", "sender", "snippet", "evidence")
+            for field in ("group", "thread", "subject", "participants", "sender", "_full_text", "snippet", "evidence")
         )
+        if section == "my_todos":
+            ref_text += " " + str(ref.get("_request_context") or "")
         ref_evidence = _normalize_thread_match_text(ref.get("evidence"))
         explicit_locator = _evidence_ref_matches_explicit_locator(item, ref)
         score = 0
+        if _evidence_ref_matches_timestamp(item, ref):
+            score += 100
         if explicit_locator:
             score += 50
         if item_evidence and ref_evidence and not _is_generic_seatalk_evidence(item_evidence):
@@ -5931,9 +5993,49 @@ def _best_evidence_ref_for_item(
     return best[1] if best else None
 
 
+def _evidence_ref_matches_timestamp(item: dict[str, Any], ref: dict[str, Any]) -> bool:
+    value = str(item.get("evidence_timestamp") or "").strip()
+    if not value or str(ref.get("source_type") or "").lower() != "seatalk":
+        return False
+    try:
+        def local_timestamp(text: str) -> datetime:
+            parsed = datetime.fromisoformat(text)
+            return parsed.replace(tzinfo=SEATALK_INSIGHTS_TIMEZONE) if parsed.tzinfo is None else parsed.astimezone(SEATALK_INSIGHTS_TIMEZONE)
+        if local_timestamp(value) != local_timestamp(str(ref.get("timestamp") or "")):
+            return False
+    except ValueError:
+        return False
+    parsed_source = _parse_seatalk_evidence_ref(item.get("evidence"))
+    group, thread = parsed_source["group"], parsed_source["thread"]
+    if thread and _normalize_thread_match_text(thread) != _normalize_thread_match_text(ref.get("thread")):
+        return False
+    if group.casefold() == "private seatalk chat":
+        return _is_private_seatalk_group(ref.get("group"))
+    if _is_private_seatalk_group(ref.get("group")):
+        def contact_label(label: Any) -> str:
+            text = _normalize_seatalk_source_label(label)
+            text = re.sub(r"^private seatalk chat\s*(?:with\b|[:：(/（])?\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"\s*/\s*private seatalk chat\s*$", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"\b\+?\d{7,}\b", " ", text)
+            return _normalize_thread_match_text(text)
+        source_contact = contact_label(group)
+        ref_contact = contact_label(ref.get("evidence"))
+        if source_contact and ref_contact and (
+            f" {source_contact} " in f" {ref_contact} " or f" {ref_contact} " in f" {source_contact} "
+        ):
+            return True
+    return bool(group) and (
+        _is_generic_seatalk_evidence(group)
+        or _seatalk_group_ref_matches(group, ref.get("group"))
+        or _seatalk_group_ref_matches(group, ref.get("evidence"))
+    )
+
+
 def _evidence_ref_matches_explicit_locator(item: dict[str, Any], ref: dict[str, Any]) -> bool:
     if str(ref.get("source_type") or "").strip().lower() != "seatalk":
         return False
+    if _evidence_ref_matches_timestamp(item, ref):
+        return True
     parsed = _parse_seatalk_evidence_ref(item.get("evidence"))
     group = str(parsed.get("group") or "").strip()
     thread = str(parsed.get("thread") or "").strip()
@@ -5945,7 +6047,8 @@ def _evidence_ref_matches_explicit_locator(item: dict[str, Any], ref: dict[str, 
         return False
     if thread:
         return _normalize_thread_match_text(thread) == _normalize_thread_match_text(ref.get("thread"))
-    return not str(ref.get("thread") or "").strip()
+    # A group name alone does not identify a message or a sub-topic.
+    return False
 
 
 def _evidence_refs_match_project_item(item: dict[str, Any], refs: list[dict[str, Any]]) -> bool:
@@ -5959,6 +6062,7 @@ def _evidence_refs_match_project_item(item: dict[str, Any], refs: list[dict[str,
     ref_text_parts: list[str] = []
     for ref in refs:
         ref_text = " ".join(str(ref.get(field) or "") for field in ("group", "thread", "subject", "participants", "sender", "snippet", "evidence"))
+        ref_text += " " + str(ref.get("_full_text") or "")
         ref_text_parts.append(ref_text)
         ref_tokens.update(_evidence_match_tokens(ref_text))
     if _evidence_ref_has_domain_mismatch(item, " ".join(ref_text_parts), item_tokens):
@@ -6071,7 +6175,7 @@ def _evidence_ref_matches_item_people(item: dict[str, Any], ref: dict[str, Any])
     ref_people = " ".join(
         [
             str(ref.get("sender") or ""),
-            str(ref.get("snippet") or ""),
+            str(ref.get("_full_text") or ref.get("snippet") or ""),
             " ".join(str(person or "") for person in ref.get("mentioned_people") or []),
         ]
     )
@@ -6480,7 +6584,7 @@ def _item_uses_seatalk_source(item: dict[str, Any]) -> bool:
 
 
 def _parse_seatalk_evidence_ref(value: Any) -> dict[str, str]:
-    text = " ".join(str(value or "").strip().split())
+    text = _canonicalize_model_seatalk_evidence(value)
     if not text:
         return {"group": "", "thread": ""}
     match = re.search(r"^(?P<group>.*?)\s*/\s*thread:\s*(?P<thread>.+)$", text, flags=re.IGNORECASE)
@@ -6657,6 +6761,7 @@ def _canonicalize_model_seatalk_evidence(value: Any) -> str:
     text = re.sub(r"^\[?(?:source|evidence|来源|证据)\s*[:：]\s*", "", text, flags=re.IGNORECASE)
     if text.endswith("]") and text.count("[") < text.count("]"):
         text = text[:-1].strip()
+    text = re.sub(r"\s*[,，;；/]\s*(?:thread|线程)\s*[:：]\s*", " / thread: ", text, flags=re.IGNORECASE)
     quoted = re.match(
         r'^(?:群|群聊|SeaTalk\s+group)\s*[“\"](?P<group>[^”\"]+)[”\"]'
         r'(?:\s*[｜|/]\s*(?:线程|thread)\s*[“\"](?P<thread>[^”\"]+)[”\"])?',
@@ -7687,6 +7792,10 @@ def _build_quality_metadata(
         source_types.add("gmail")
     high_confidence = sum(1 for item in direct_action_todos if _normalize_priority(item.get("priority")) == "high")
     manual_notes: list[str] = []
+    if not direct_action_todos and (evidence_quality_metrics or {}).get("input_direct_action_count", 0):
+        manual_notes.append("个人待办候选全部被过滤，请检查证据拒绝原因。")
+    elif not direct_action_todos and (evidence_quality_metrics or {}).get("unanswered_private_request_count", 0):
+        manual_notes.append("源记录有未答复的私聊请求，但个人待办为空，请复核。")
     if any(_display_due(item.get("due")) == "TBD" for item in my_todos):
         manual_notes.append("Some to-do due dates are TBD.")
     if any(item.get("status") in {"unknown", "in_progress"} and any(hint in _item_text(item) for hint in PENDING_STATUS_HINTS) for item in [*project_updates, *other_updates]):
