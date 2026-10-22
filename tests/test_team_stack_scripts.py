@@ -269,7 +269,7 @@ exit 0
 
         self.assertEqual(captured_envs[0]["ENV_FILE"], os.devnull)
 
-    def test_system_full_test_gate_preserves_explicit_env_file(self):
+    def test_system_full_test_gate_isolates_explicit_live_environment(self):
         import importlib.util
 
         gate_path = PROJECT_ROOT / "scripts/run_system_full_test_gate.py"
@@ -285,13 +285,24 @@ exit 0
             captured_envs.append(kwargs["env"])
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-        with patch.dict(os.environ, {"ENV_FILE": "/tmp/explicit.env"}, clear=True), patch(
+        live_env = {
+            "ENV_FILE": "/tmp/explicit.env",
+            "VERSION_PLAN_STORE_BACKEND": "firestore",
+            "VERSION_PLAN_FIRESTORE_PROJECT": "production-project",
+            "VERSION_PLAN_FIRESTORE_DOCUMENT": "portal/version_plan_live",
+            "GOOGLE_CLOUD_PROJECT": "production-project",
+            "FIRESTORE_ACCESS_TOKEN": "test-token",
+        }
+        with patch.dict(os.environ, live_env, clear=True), patch(
             "subprocess.run",
             side_effect=fake_run,
         ):
             module._run_command("unit", [sys.executable, "-c", "pass"])
 
-        self.assertEqual(captured_envs[0]["ENV_FILE"], "/tmp/explicit.env")
+        self.assertEqual(captured_envs[0]["ENV_FILE"], os.devnull)
+        self.assertEqual(captured_envs[0]["VERSION_PLAN_STORE_BACKEND"], "local")
+        for key in live_env.keys() - {"ENV_FILE", "VERSION_PLAN_STORE_BACKEND"}:
+            self.assertNotIn(key, captured_envs[0])
 
     def test_local_agent_launcher_uses_agent_data_root_for_pid_and_logs(self):
         script = (PROJECT_ROOT / "scripts/run_local_agent.sh").read_text(encoding="utf-8")
