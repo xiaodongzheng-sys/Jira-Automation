@@ -374,6 +374,136 @@ class TeamDashboardVersionPlanTest(unittest.TestCase):
         self.assertEqual(spdbp_row["productization_efforts"], "Y")
         self.assertEqual(spdbp_row["jira_link"], "https://jira.shopee.io/browse/SPDBP-94945")
 
+    def test_af_window_rows_require_membership_in_the_bpmis_af_version_id_query(self) -> None:
+        current_name = "AF_v1.0.92_20261120"
+        next_name = "AF_v1.0.93_20261204"
+
+        class StrictAfIdClient(FakeBPMISVersionPlanClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.version_queries: list[str] = []
+
+            def search_versions(self, query: str) -> list[dict]:
+                if query == "AF_":
+                    return [
+                        {
+                            "id": 7387, "fullName": current_name,
+                            "timelineEnd": "2026-11-19T16:00:00.000Z",
+                            "timeline": {"prdDueDate": "2026-10-23"},
+                        },
+                        {
+                            "id": 7388, "fullName": next_name,
+                            "timelineEnd": "2026-12-03T16:00:00.000Z",
+                            "timeline": {"prdDueDate": "2026-11-06"},
+                        },
+                    ]
+                market_versions = {
+                    "DBPSG_": {"id": 6651, "fullName": "DBPSG_v3.13_1126", "timelineEnd": "2026-11-26"},
+                    "DBPID_": {"id": 6978, "fullName": "DBPID_v3.57_1130", "timelineEnd": "2026-11-30"},
+                    "DBPPH_": {"id": 5369, "fullName": "DBPPH_v3.33_1203", "timelineEnd": "2026-12-03"},
+                }
+                return [market_versions[query]] if query in market_versions else []
+
+            def list_issues_for_version(self, version_id: str) -> list[dict]:
+                self.version_queries.append(version_id)
+                return [{
+                    "jiraKey": "SPDBP-current", "summary": "Current AF version", "status": "Developing",
+                    "fixVersionId": [{"id": 7387, "fullName": current_name}],
+                }] if version_id == "7387" else []
+
+            def list_jira_tasks_created_by_emails(self, emails: list[str], **kwargs) -> list[dict]:
+                self.release_window_calls.append({"emails": emails, **kwargs})
+                return [
+                    {
+                        "jira_id": "SPDBP-109365", "version": next_name,
+                        "release_date": "2026-12-03T16:00:00.000Z",
+                        "raw_response": {"fixVersionId": [{"id": 7388, "fullName": next_name}]},
+                    },
+                    {
+                        "jira_id": "SPDBP-numeric-only",
+                        "raw_response": {"fields": {"fixVersionId": [7388]}},
+                    },
+                    {"jira_id": "SPDBP-name-only", "version": current_name},
+                    {
+                        "jira_id": "SPDBP-unconfirmed-id", "version": current_name,
+                        "raw_response": {"fixVersionId": [{"id": 7387, "fullName": current_name}]},
+                    },
+                    {
+                        "jira_id": "SPDBP-af-and-market",
+                        "raw_response": {"fixVersionId": [
+                            {"id": 7388, "fullName": next_name},
+                            {"id": 6651, "fullName": "DBPSG_v3.13_1126"},
+                        ]},
+                    },
+                    {"jira_id": "SPDBP-live-af", "version": "DBPSG_v3.13_1126"},
+                    {"jira_id": "SGDB-market", "version": "DBPSG_v3.13_1126"},
+                ]
+
+            def get_jira_ticket_details(self, jira_ids: list[str]) -> dict:
+                return {"SPDBP-live-af": {"fixVersions": [next_name]}}
+
+        client = StrictAfIdClient()
+        synced = version_plan_sync(
+            {"version_plan": normalize_version_plan_state({})}, client,
+            now=datetime.fromisoformat("2026-10-22T14:00:00+08:00"),
+        )
+        bundle = synced["version_plan"]["af"]["bundles"]["7387"]
+
+        self.assertEqual(client.version_queries, ["7387"])
+        self.assertEqual({row["jira_id"] for row in bundle["synced_rows"]}, {"SPDBP-current", "SGDB-market"})
+
+    def test_af_query_rejects_wrong_ids_even_when_names_match_and_accepts_multiple_ids(self) -> None:
+        current_name = "AF_v1.0.92_20261120"
+
+        class WrongIdClient(FakeBPMISVersionPlanClient):
+            def list_issues_for_version(self, version_id: str) -> list[dict]:
+                self.asserted_version_id = version_id
+                return [
+                    {
+                        "jiraKey": "SPDBP-same-name-wrong-id", "summary": "Wrong BPMIS ID",
+                        "fixVersionId": [{"id": 7388, "fullName": current_name}],
+                    },
+                    {
+                        "jiraKey": "SPDBP-multiple-ids", "summary": "Includes the current BPMIS ID",
+                        "fixVersionId": [
+                            {"id": 7388, "fullName": "AF_v1.0.93_20261204"},
+                            {"id": "7387", "fullName": current_name},
+                        ],
+                    },
+                ]
+
+            def list_jira_tasks_created_by_emails(self, emails: list[str], **kwargs) -> list[dict]:
+                return [{
+                    "jira_id": "SPDBP-same-name-wrong-id", "version": current_name,
+                    "raw_response": {"mapping": {"fixVersionId": [{"value": 7388}]}},
+                }]
+
+        client = WrongIdClient()
+        rows = vplan._sync_rows_for_bundle(
+            client, {"version_id": "7387", "version_name": current_name, "release_date": "2026-11-20"}, {},
+        )
+
+        self.assertEqual(client.asserted_version_id, "7387")
+        self.assertEqual([row["jira_id"] for row in rows], ["SPDBP-multiple-ids"])
+
+    def test_af_query_membership_is_sufficient_when_the_response_omits_version_metadata(self) -> None:
+        class MatchedQueryClient(FakeBPMISVersionPlanClient):
+            def list_issues_for_version(self, version_id: str) -> list[dict]:
+                return [{"jiraKey": "SPDBP-current", "summary": "Returned by the exact ID query"}]
+
+            def list_jira_tasks_created_by_emails(self, emails: list[str], **kwargs) -> list[dict]:
+                return []
+
+            def get_jira_ticket_details(self, jira_ids: list[str]) -> dict:
+                return {"SPDBP-current": {"fixVersions": ["AF_v1.0.92_20261120"]}}
+
+        rows = vplan._sync_rows_for_bundle(
+            MatchedQueryClient(),
+            {"version_id": "7387", "version_name": "AF_v1.0.92_20261120", "release_date": "2026-11-20"}, {},
+        )
+
+        self.assertEqual([row["jira_id"] for row in rows], ["SPDBP-current"])
+
     def test_direct_version_row_wins_when_release_window_duplicate_has_less_pm_data(self) -> None:
         class PreferDirectVersionClient(FakeBPMISVersionPlanClient):
             def list_jira_tasks_created_by_emails(self, emails: list[str], **kwargs) -> list[dict]:

@@ -243,6 +243,11 @@ def version_plan_sync(config: dict[str, Any], bpmis_client: Any, *, now: datetim
     next_bundles: dict[str, dict[str, Any]] = {}
     all_versions_by_id = dict(af["seen_versions"])
     all_versions_by_id.update({row["version_id"]: row for row in af_versions})
+    af_release_version_ids = {
+        version_id
+        for version_id, version in all_versions_by_id.items()
+        if _is_formal_af_version_name(str(version.get("version_name") or ""))
+    }
     candidate_versions = list(upcoming)
     for seen_version in af["seen_versions"].values():
         release_date = _parse_date(seen_version.get("release_date"))
@@ -265,6 +270,7 @@ def version_plan_sync(config: dict[str, Any], bpmis_client: Any, *, now: datetim
                 version,
                 mapped_dbp_versions,
                 existing.get("synced_rows") if isinstance(existing, dict) else [],
+                af_release_version_ids=af_release_version_ids,
             )
         next_bundles[version_id] = {
             **version,
@@ -740,6 +746,8 @@ def _sync_rows_for_bundle(
     af_version: dict[str, Any],
     mapped_versions: dict[str, Any],
     existing_synced_rows: Any = None,
+    *,
+    af_release_version_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -751,9 +759,19 @@ def _sync_rows_for_bundle(
     release_after = str(af_version.get("release_date") or "").strip()
     release_before = _latest_mapped_release_date(mapped_versions)
     af_version_id = str(af_version.get("version_id") or "").strip()
-    candidates: list[dict[str, Any]] = []
+    known_af_version_ids = set(af_release_version_ids or ())
+    if af_version_id and _is_formal_af_version_name(str(af_version.get("version_name") or "")):
+        known_af_version_ids.add(af_version_id)
+    direct_af_rows = []
     if af_version_id:
-        candidates.extend(_list_productization_issues_for_version_or_raise(bpmis_client, af_version_id))
+        direct_af_rows = [
+            row
+            for row in _list_issues_for_version_or_raise(bpmis_client, af_version_id)
+            if not (version_ids := _bpmis_fix_version_ids(row)) or af_version_id in version_ids
+        ]
+    direct_af_jira_ids = {_extract_jira_id(row) for row in direct_af_rows}
+    candidates: list[dict[str, Any]] = []
+    candidates.extend(row for row in direct_af_rows if _row_is_productization_ticket(row))
     candidates.extend(
         _list_jira_tasks_for_release_window_or_raise(
             bpmis_client,
@@ -775,8 +793,16 @@ def _sync_rows_for_bundle(
         jira_id = _extract_jira_id(raw)
         if not jira_id or jira_id in seen:
             continue
-        seen.add(jira_id)
         _apply_jira_live_detail(raw, jira_id, jira_live_details)
+        bpmis_version_ids = _bpmis_fix_version_ids(raw)
+        if _row_has_af_release_version(raw, known_af_version_ids):
+            # AF membership comes only from the query for this BPMIS version ID.
+            # Release dates and Jira version names cannot establish that membership.
+            if jira_id not in direct_af_jira_ids:
+                continue
+            if bpmis_version_ids and af_version_id not in bpmis_version_ids:
+                continue
+        seen.add(jira_id)
         parent = _task_parent_project(raw)
         priority = _extract_sync_row_priority(raw, parent)
         if not priority:
@@ -866,6 +892,50 @@ def _row_has_excluded_task_type(row: dict[str, Any]) -> bool:
 
 def _row_has_planning_version(row: dict[str, Any]) -> bool:
     return any(name.startswith("planning") for name in _row_jira_version_names(row))
+
+
+def _is_formal_af_version_name(value: str) -> bool:
+    return bool(re.fullmatch(r"AF_v\d+\.\d+\.\d+_\d{8}", value.strip(), flags=re.IGNORECASE))
+
+
+def _row_has_af_release_version(row: dict[str, Any], known_af_version_ids: set[str]) -> bool:
+    if _bpmis_fix_version_ids(row) & known_af_version_ids:
+        return True
+    return any(
+        _is_formal_af_version_name(name)
+        for value in _row_jira_version_names(row)
+        for name in value.split(",")
+    )
+
+
+def _bpmis_fix_version_ids(row: dict[str, Any]) -> set[str]:
+    """Read BPMIS version IDs without using Jira IDs or version-name aliases."""
+    ids: set[str] = set()
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            for key in ("id", "value", "versionId", "fixVersionId"):
+                collect(value.get(key))
+        elif isinstance(value, (list, tuple, set)):
+            for item in value:
+                collect(item)
+        elif not isinstance(value, bool):
+            text = str(value or "").strip()
+            if text.isdigit():
+                ids.add(str(int(text)))
+
+    payload = row["raw_response"] if isinstance(row.get("raw_response"), dict) else row
+    containers = [payload]
+    containers.extend(
+        payload[key]
+        for key in ("fields", "mapping", "data", "detail", "row")
+        if isinstance(payload.get(key), dict)
+    )
+    for container in containers:
+        for key, value in container.items():
+            if str(key).casefold() == "fixversionid":
+                collect(value)
+    return ids
 
 
 def _is_sabrina_grc_ticket(row: dict[str, Any]) -> bool:
