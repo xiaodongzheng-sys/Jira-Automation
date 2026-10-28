@@ -13,7 +13,9 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
+import threading
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -24,8 +26,9 @@ from bpmis_jira_tool.team_dashboard_version_plan import normalize_version_plan_s
 
 
 SGT = ZoneInfo("Asia/Singapore")
-VERSION_PLAN_SCHEMA_VERSION = 1
+VERSION_PLAN_SCHEMA_VERSION = 2
 _METADATA_ACCESS_TOKEN_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+_CONFIG_STORE_SAVE_LOCK = threading.RLock()
 
 
 class VersionPlanConflictError(ValueError):
@@ -104,16 +107,41 @@ class LocalTeamDashboardVersionPlanStore(TeamDashboardVersionPlanStore):
         return self._snapshot(self.config_store.load())
 
     def save_config(self, config: dict[str, Any], *, expected_revision: str | None = None) -> VersionPlanSnapshot:
-        current = self.load_snapshot()
-        if expected_revision and expected_revision != current.revision:
-            raise VersionPlanConflictError("Version Plan was updated by another session. Refresh and try again.")
-        return self._snapshot(self.config_store.save(config))
+        if not hasattr(self.config_store, "db_path"):
+            remote_save = getattr(self.config_store, "save_version_plan", None)
+            if callable(remote_save):
+                return self._snapshot(remote_save(config, expected_revision=expected_revision))
+            with _CONFIG_STORE_SAVE_LOCK:
+                current = self.load_snapshot()
+                if expected_revision and expected_revision != current.revision:
+                    raise VersionPlanConflictError("Version Plan was updated by another session. Refresh and try again.")
+                return self._snapshot(self.config_store.save(config))
+        # Hold the SQLite write lock across the revision check and the complete plan write.
+        with sqlite3.connect(self.config_store.db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            stored = connection.execute(
+                "SELECT config_json FROM team_dashboard_configs WHERE config_key = ?",
+                (self.config_store.CONFIG_KEY,),
+            ).fetchone()
+            current_config = self.config_store.normalize_config(json.loads(stored[0])) if stored else self.config_store.default_config()
+            current = self._snapshot(current_config)
+            if expected_revision and expected_revision != current.revision:
+                raise VersionPlanConflictError("Version Plan was updated by another session. Refresh and try again.")
+            current_config["version_plan"] = config.get("version_plan") or {}
+            normalized = self.config_store.normalize_config(current_config)
+            connection.execute(
+                "INSERT INTO team_dashboard_configs (config_key, config_json, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(config_key) DO UPDATE SET config_json = excluded.config_json, updated_at = CURRENT_TIMESTAMP",
+                (self.config_store.CONFIG_KEY, json.dumps(normalized, ensure_ascii=False)),
+            )
+        return self._snapshot(normalized)
 
 
 class _FirestoreRestSnapshot:
-    def __init__(self, payload: dict[str, Any] | None) -> None:
+    def __init__(self, payload: dict[str, Any] | None, *, update_time: str = "") -> None:
         self.payload = payload
         self.exists = payload is not None
+        self.update_time = update_time
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self.payload or {})
@@ -140,15 +168,29 @@ class _FirestoreRestDocument:
         if response.status_code == 404:
             return _FirestoreRestSnapshot(None)
         response.raise_for_status()
-        return _FirestoreRestSnapshot(_decode_firestore_fields(response.json().get("fields") or {}))
+        body = response.json()
+        return _FirestoreRestSnapshot(_decode_firestore_fields(body.get("fields") or {}), update_time=body.get("updateTime") or "")
 
-    def set(self, payload: dict[str, Any]) -> None:
+    def set(self, payload: dict[str, Any], *, snapshot: _FirestoreRestSnapshot | None = None) -> None:
+        options: dict[str, Any] = {}
+        if snapshot is not None:
+            if snapshot.exists:
+                if not snapshot.update_time:
+                    raise RuntimeError("Firestore snapshot has no updateTime; refusing an unconditional write.")
+                options["params"] = {"currentDocument.updateTime": snapshot.update_time}
+            else:
+                options["params"] = {"currentDocument.exists": "false"}
         response = requests.patch(
             self.url,
             headers=self._headers(),
             json={"fields": _encode_firestore_fields(payload)},
             timeout=20,
+            **options,
         )
+        if response.status_code in {409, 412} or (
+            response.status_code == 400 and response.json().get("error", {}).get("status") == "FAILED_PRECONDITION"
+        ):
+            raise VersionPlanConflictError("Version Plan was updated by another session. Refresh and try again.")
         response.raise_for_status()
 
 
@@ -365,7 +407,11 @@ class FirestoreVersionPlanStore(TeamDashboardVersionPlanStore):
             if expected_revision and expected_revision != current_revision:
                 raise VersionPlanConflictError("Version Plan was updated by another session. Refresh and try again.")
             doc = self._doc_for_config(config, existing=existing)
-            self.document_ref.set(doc)
+            document = self.document_ref
+            if isinstance(document, _FirestoreRestDocument):
+                document.set(doc, snapshot=snapshot)
+            else:
+                document.set(doc)
             return self._snapshot_from_doc(doc)
         try:
             from google.cloud import firestore  # type: ignore

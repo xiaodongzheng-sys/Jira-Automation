@@ -1471,7 +1471,18 @@ def create_local_agent_app() -> Flask:
         config = payload.get("config")
         if not isinstance(config, dict):
             return jsonify({"status": "error", "message": "config must be an object."}), HTTPStatus.BAD_REQUEST
-        saved = _build_team_dashboard_config_store(settings).save(config)
+        store = _build_team_dashboard_config_store(settings)
+        if payload.get("version_plan_only") is True:
+            from bpmis_jira_tool.team_dashboard_version_plan_store import LocalTeamDashboardVersionPlanStore, VersionPlanConflictError
+
+            try:
+                saved = LocalTeamDashboardVersionPlanStore(store).save_config(
+                    config, expected_revision=str(payload.get("expected_revision") or "").strip() or None,
+                ).config
+            except VersionPlanConflictError as error:
+                return jsonify({"status": "error", "error_category": "version_plan_conflict", "message": str(error)}), HTTPStatus.CONFLICT
+        else:
+            saved = store.save(config)
         return jsonify({"status": "ok", "config": saved})
 
     @app.get("/api/local-agent/team-dashboard/daily-briefs")

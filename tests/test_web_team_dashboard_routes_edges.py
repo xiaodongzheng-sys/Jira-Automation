@@ -343,8 +343,9 @@ class WebTeamDashboardRouteEdgeTests(unittest.TestCase):
                     "/api/team-dashboard/version-plan/af/cell",
                     json={"scope": "pipeline", "row_id": row_id, "field": "productization_efforts", "value": "Y"},
                 )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()["store_backend"], "team_dashboard_config")
+        # A remote revision cannot authorize an overwrite of a different local cache.
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["error_category"], "version_plan_conflict")
 
         class DictSaveStore:
             def __init__(self):

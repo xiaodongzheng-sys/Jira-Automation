@@ -10,7 +10,7 @@ import unittest
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from cryptography.fernet import Fernet
 
@@ -4093,7 +4093,7 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
         self.assertEqual(payload["team_member_reminders"], [])
         self.assertNotIn("已有明确答复", service.last_prompt)
 
-    def test_build_trello_card_specs_includes_direct_watch_and_followups(self):
+    def test_build_trello_card_specs_includes_direct_watch_but_not_team_followups(self):
         briefing = {
             "direct_action_todos": [
                 {
@@ -4131,7 +4131,6 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
         self.assertEqual([spec.name for spec in specs], [
             "[Direct] Review rollout note",
             "[Watch] Follow up with Rene on closure",
-            "[Follow-up] Rene Chong: Check the ID appeal case",
         ])
         self.assertIn("Section: Xiaodong Action Required", specs[0].description)
         self.assertIn("Due: today", specs[0].description)
@@ -4140,8 +4139,19 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
         self.assertEqual(specs[0].due, "")
         self.assertIn("Section: Watch / Delegate", specs[1].description)
         self.assertEqual(specs[1].target_list, "Watch / Risk")
-        self.assertIn("Person: Rene Chong", specs[2].description)
-        self.assertEqual(specs[2].target_list, "Waiting / Follow-up")
+        self.assertEqual(briefing["team_member_reminders"][0]["person"], "Rene Chong")
+
+    def test_team_followups_only_do_not_create_trello_or_touch_existing_cards(self):
+        briefing = {"team_member_reminders": [{"person": "Rene Chong", "reminder": "Check the case", "domain": "Anti-fraud"}]}
+        client = Mock()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = sync_daily_summary_to_trello(
+                briefing=briefing, run_date="2026-10-28", data_root=Path(temp_dir),
+                now=datetime(2026, 10, 28, 19, tzinfo=SEATALK_INSIGHTS_TIMEZONE), trello_client=client,
+            )
+        self.assertEqual(result.status, "no_cards")
+        self.assertEqual(result.created_count, 0)
+        self.assertEqual(client.mock_calls, [])
 
     def test_build_trello_card_specs_routes_direct_by_due_window(self):
         briefing = {
@@ -4516,10 +4526,10 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
                 trello_store=store,
             )
 
-        self.assertEqual(first.created_count, 3)
+        self.assertEqual(first.created_count, 2)
         self.assertEqual(first.skipped_count, 0)
         self.assertEqual(second.created_count, 0)
-        self.assertEqual(second.skipped_count, 3)
+        self.assertEqual(second.skipped_count, 2)
 
     def test_daily_trello_sync_is_disabled_when_env_is_missing(self):
         briefing = {
@@ -5052,12 +5062,11 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
 
         self.assertEqual(result.status, "sent")
         self.assertEqual(result.trello_status, "synced")
-        self.assertEqual(result.trello_created_count, 3)
+        self.assertEqual(result.trello_created_count, 2)
         self.assertEqual(result.trello_skipped_count, 0)
         self.assertEqual([card["name"] for card in result.trello_cards], [
             "[本人处理] 评审 rollout",
             "[关注] Monitor closure",
-            "[跟进] Rene Chong：检查 the case",
         ])
 
     def test_send_daily_email_dry_run_does_not_archive(self):
@@ -5263,7 +5272,7 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
         }
         specs = build_trello_card_specs(briefing=briefing, run_date="2026-05-01", window_label="13:00-19:00")
 
-        self.assertEqual({spec.target_list for spec in specs}, {"Today", "Watch / Risk", "Waiting / Follow-up"})
+        self.assertEqual({spec.target_list for spec in specs}, {"Today", "Watch / Risk"})
         self.assertTrue(any("AF-SG" in spec.labels for spec in specs))
         self.assertTrue(any("Credit Risk" in spec.labels for spec in specs))
 

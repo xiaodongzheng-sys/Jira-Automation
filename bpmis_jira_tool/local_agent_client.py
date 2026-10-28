@@ -549,6 +549,13 @@ class LocalAgentClient:
         saved = payload.get("config")
         return saved if isinstance(saved, dict) else {}
 
+    def team_dashboard_version_plan_save(self, config: dict[str, Any], *, expected_revision: str | None = None) -> dict[str, Any]:
+        payload = self._request("POST", "/api/local-agent/team-dashboard/config/save", {
+            "config": config, "version_plan_only": True, "expected_revision": expected_revision,
+        })
+        saved = payload.get("config")
+        return saved if isinstance(saved, dict) else {}
+
     def bpmis_projects_list(self, *, user_key: str) -> list[dict[str, Any]]:
         payload = self._request("POST", "/api/local-agent/bpmis/projects/list", {"user_key": user_key})
         projects = payload.get("projects")
@@ -859,6 +866,10 @@ class LocalAgentClient:
                 detail += f" Response starts with: {body_preview}"
             raise ToolError(f"Mac local-agent returned an unreadable response.{detail}") from error
         if response.status_code >= 400 or response_payload.get("status") == "error":
+            if response_payload.get("error_category") == "version_plan_conflict":
+                from bpmis_jira_tool.team_dashboard_version_plan_store import VersionPlanConflictError
+
+                raise VersionPlanConflictError(str(response_payload.get("message") or "Version Plan was updated by another session."))
             message = str(response_payload.get("message") or f"Mac local-agent request failed with HTTP {response.status_code}.")
             raise ToolError(message)
         return response_payload
@@ -927,11 +938,16 @@ class LocalAgentClient:
                 response_payload = response.json()
                 message = str(response_payload.get("message") or f"Mac local-agent request failed with HTTP {response.status_code}.")
             except ValueError:
+                response_payload = {}
                 body_preview = response.text.strip().replace("\n", " ")[:160]
                 host = urlsplit(url).netloc or self.base_url
                 message = f"Mac local-agent request failed with HTTP {response.status_code} from {host}."
                 if body_preview:
                     message += f" Response starts with: {body_preview}"
+            if response_payload.get("error_category") == "version_plan_conflict":
+                from bpmis_jira_tool.team_dashboard_version_plan_store import VersionPlanConflictError
+
+                raise VersionPlanConflictError(message)
             raise ToolError(message)
         return response
 
@@ -1298,6 +1314,9 @@ class RemoteTeamDashboardConfigStore:
 
     def save(self, config: dict[str, Any]) -> dict[str, Any]:
         return self.client.team_dashboard_config_save(config)
+
+    def save_version_plan(self, config: dict[str, Any], *, expected_revision: str | None = None) -> dict[str, Any]:
+        return self.client.team_dashboard_version_plan_save(config, expected_revision=expected_revision)
 
 
 class RemoteSourceCodeQASessionStore:

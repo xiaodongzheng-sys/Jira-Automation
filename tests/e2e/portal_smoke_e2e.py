@@ -301,10 +301,10 @@ class PortalE2ESmokeTest(unittest.TestCase):
             page.route(re.compile(r".*/api/team-dashboard/version-plan/af(?:\?.*)?$"), version_plan)
             page.goto("/", wait_until="domcontentloaded")
             self.assertIn("Risk PM Workspace", page.locator("body").inner_text(timeout=5000))
-            self.assertEqual(page.locator(".site-switcher").count(), 0)
+            self.assertEqual(page.locator(".site-switcher").count(), 1)
             page.get_by_role("link", name="Open Version Plan").click()
             page.wait_for_url("**/version-plan", timeout=5000)
-            self.assertEqual(page.locator(".site-switcher").count(), 0)
+            self.assertEqual(page.locator(".site-switcher").count(), 1)
             page.locator('[data-version-plan-row-id="cloud-home-pipe-1"]').get_by_text(
                 "Cloud homepage version plan row"
             ).wait_for(timeout=5000)
@@ -325,15 +325,17 @@ class PortalE2ESmokeTest(unittest.TestCase):
                     ]
                 )
                 non_af_page = non_af_context.new_page()
+                non_af_page.route(re.compile(r".*/api/team-dashboard/version-plan/af(?:\?.*)?$"), version_plan)
                 non_af_errors: list[str] = []
                 non_af_page.on("pageerror", lambda error: non_af_errors.append(str(error)))
                 non_af_page.goto("/", wait_until="domcontentloaded")
                 non_af_body = non_af_page.locator("body").inner_text(timeout=5000)
                 self.assertIn("Risk PM Workspace", non_af_body)
-                self.assertNotIn("Open Version Plan", non_af_body)
-                self.assertEqual(non_af_page.locator("[data-version-plan-card]").count(), 0)
+                self.assertIn("Open Version Plan", non_af_body)
+                self.assertEqual(non_af_page.locator("[data-version-plan-card]").count(), 1)
                 non_af_page.goto("/version-plan", wait_until="domcontentloaded")
-                self.assertEqual(urlparse(non_af_page.url).path, "/access-denied")
+                self.assertEqual(urlparse(non_af_page.url).path, "/version-plan")
+                self.assertFalse(non_af_page.locator('[data-version-plan-sync]').is_visible())
                 self.assertEqual([], non_af_errors)
             finally:
                 non_af_context.close()
@@ -853,6 +855,8 @@ class PortalE2ESmokeTest(unittest.TestCase):
                     "row_id": "pipe-1",
                     "row_type": "manual",
                     "feature": "Pipeline fallback",
+                    "focus_area": "Yes",
+                    "prd_status": "PRD Reviewed",
                     "priority": "SP",
                     "pm": ["TBC"],
                     "productization_efforts": "",
@@ -899,6 +903,24 @@ class PortalE2ESmokeTest(unittest.TestCase):
         release_version_cell = row.locator('[data-label="Release Version"]')
         self.assertEqual(release_version_cell.inner_text(timeout=5000), "AF_1.0.76_20260520")
         self.assertEqual(row.locator('[data-label="Remarks"]').count(), 0)
+
+        pipeline = page.locator('[data-version-plan-sheet="pipeline"]')
+        self.assertEqual(pipeline.locator('.team-dashboard-version-plan-header > div').all_text_contents(), [
+            '', 'BPMIS Project ID', 'Pipeline Section', 'Priority', 'Focus Area', 'PM', 'PRD Status',
+        ])
+        self.assertEqual(pipeline.locator('[data-label="Component"]').count(), 0)
+        self.assertEqual(pipeline.locator('[data-label="Release Version"]').count(), 0)
+        self.assertEqual(pipeline.locator('[data-label="Productization Efforts?"]').count(), 0)
+
+        teammate = self._new_teammate_page()
+        teammate.route("**/api/team-dashboard/config", config)
+        teammate.route(re.compile(r".*/api/team-dashboard/version-plan/af(?:\?.*)?$"), version_plan)
+        teammate.goto("/version-plan", wait_until="domcontentloaded")
+        readonly = teammate.locator('[data-version-plan-row-id="pipe-1"]')
+        readonly.wait_for(timeout=5000)
+        self.assertEqual(readonly.locator('[data-label="Focus Area"]').inner_text(), 'Yes')
+        self.assertEqual(readonly.locator('[data-label="PRD Status"]').inner_text(), 'PRD Reviewed')
+        self.assertEqual(readonly.locator('[data-version-plan-cell="focus_area"], [data-version-plan-cell="prd_status"]').count(), 0)
 
     def test_team_dashboard_version_plan_manual_row_controls_smoke(self) -> None:
         page = self._new_admin_page()
@@ -1014,6 +1036,32 @@ class PortalE2ESmokeTest(unittest.TestCase):
         self.assertEqual(captured_cell_updates[-1]["row_id"], added_row_id)
         self.assertEqual(captured_cell_updates[-1]["field"], "feature")
         self.assertEqual(captured_cell_updates[-1]["value"], "Manual row from browser smoke")
+
+        focus = added_row.locator('[data-version-plan-cell="focus_area"]')
+        self.assertEqual(focus.input_value(), "No")
+        with page.expect_response("**/api/team-dashboard/version-plan/af/cell"):
+            focus.select_option("Yes")
+        page.wait_for_function("() => document.querySelector('[data-version-plan-row-id^=\"manual-client-\"] [data-version-plan-cell=\"focus_area\"]')?.value === 'Yes'")
+        self.assertEqual(captured_cell_updates[-1]["field"], "focus_area")
+        self.assertEqual(captured_cell_updates[-1]["value"], "Yes")
+        status = added_row.locator('[data-version-plan-cell="prd_status"]')
+        self.assertEqual(status.locator('option').all_text_contents(), ['Not Started', 'PRD In Progress', 'PRD Reviewed'])
+        for value in ('PRD In Progress', 'PRD Reviewed'):
+            with page.expect_response("**/api/team-dashboard/version-plan/af/cell"):
+                status.select_option(value)
+            page.wait_for_function(
+                "value => document.querySelector('[data-version-plan-row-id^=\"manual-client-\"] [data-version-plan-cell=\"prd_status\"]')?.value === value", arg=value,
+            )
+            self.assertEqual(captured_cell_updates[-1]["field"], "prd_status")
+            self.assertEqual(captured_cell_updates[-1]["value"], value)
+
+        for width, name in ((1280, "desktop"), (390, "mobile")):
+            page.set_viewport_size({"width": width, "height": 900})
+            pipeline = page.locator('[data-version-plan-sheet="pipeline"]')
+            self.assertTrue(pipeline.is_visible())
+            self.assertEqual(pipeline.locator('[data-label="Component"]').count(), 0)
+            self.assertTrue(pipeline.evaluate('(el) => el.scrollWidth >= el.clientWidth'))
+            page.screenshot(path=str(PROJECT_ROOT / '.team-portal' / 'run' / f'pipeline-focus-{name}.png'), full_page=True)
 
         self.assertEqual(added_row.locator('[data-version-plan-row-action="up"]').count(), 0)
         self.assertEqual(added_row.locator('[data-version-plan-row-action="down"]').count(), 0)
@@ -1249,7 +1297,7 @@ class PortalE2ESmokeTest(unittest.TestCase):
         pm_filter = page.locator('[data-version-plan-pm-filter]')
         self.assertEqual(
             pm_filter.locator("option").all_text_contents(),
-            ["All PMs", "-", "Wang Chang", "Zoey", "Jireh", "Ker Yin", "Rene", "Jun Wei", "Xiaodong"],
+            ["All PMs", "-", "Wang Chang", "Zoey", "Jireh", "Ker Yin", "Rene", "Jun Wei", "Xiaodong", "Sabrina", "Wei Lin"],
         )
 
         pm_filter.select_option("Zoey")

@@ -1933,11 +1933,6 @@ def build_trello_card_specs(
         direct_action_todos, watch_delegate_todos = _split_todos_by_action_type(
             _normalize_todo_items([item for item in briefing.get("my_todos") or [] if isinstance(item, dict)])
         )
-    reminders = _filter_reminders_already_covered_by_watch_delegate(
-        [item for item in briefing.get("team_member_reminders") or [] if isinstance(item, dict)],
-        watch_delegate_todos,
-    )
-
     specs: list[TrelloCardSpec] = []
     for item in direct_action_todos:
         task = _sentence_text(item.get("task"), "Untitled").rstrip(".")
@@ -1979,29 +1974,6 @@ def build_trello_card_specs(
                 target_list=TRELLO_WORKFLOW_LIST_WATCH,
                 labels=_trello_domain_labels(item.get("domain"), task),
                 due=due,
-            )
-        )
-    for item in reminders:
-        person = str(item.get("person") or "Unknown").strip()
-        reminder = _sentence_text(item.get("reminder"), "Follow-up may be needed").rstrip(".")
-        specs.append(
-            TrelloCardSpec(
-                section=_brief_label("Suggested Team Follow-up", language=language),
-                name=(
-                    f"[跟进] {person}：{_brief_localize_value(reminder, language=language)}"
-                    if _is_chinese_brief(language)
-                    else f"[Follow-up] {person}: {reminder}"
-                ),
-                description=_trello_reminder_description(
-                    item,
-                    run_date=run_date,
-                    window_label=window_label,
-                    language=language,
-                ),
-                fingerprint_text=f"{person} {reminder}",
-                domain=_display_domain(item.get("domain")),
-                target_list=TRELLO_WORKFLOW_LIST_FOLLOW_UP,
-                labels=_trello_domain_labels(item.get("domain"), reminder),
             )
         )
     return specs

@@ -42,6 +42,7 @@ from bpmis_jira_tool.team_dashboard_version_plan import (
     mark_version_plan_sync_running,
     merge_version_plan_editable_state,
     pipeline_bpmis_project_display_name,
+    pipeline_focus_area,
     suggest_pipeline_bpmis_projects,
     update_version_plan_cell,
     update_version_plan_rows,
@@ -683,7 +684,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
                     except Exception:  # noqa: BLE001
                         current_app.logger.exception("Pipeline BPMIS project name lookup failed.")
                         row["bpmis_project_lookup_error"] = "Could not look up the project name. Re-enter the ID to retry."
-            expected_revision = str(payload.get("document_revision") or payload.get("revision") or "").strip() or None
+            expected_revision = str(payload.get("document_revision") or payload.get("revision") or "").strip() or snapshot.revision
             saved = _version_plan_save_config(
                 store,
                 _audit_version_plan_config(updated, action="cell_update", payload=payload),
@@ -694,6 +695,20 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             return _version_plan_conflict_response(error)
         except ValueError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+
+    def team_dashboard_version_plan_focus_area():
+        access_gate = _require_team_dashboard_version_plan_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            snapshot = _version_plan_load_snapshot(_get_version_plan_store())
+            record = pipeline_focus_area(snapshot.config, request.args.get("bpmis_project_id"))
+        except ValueError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        if record is None:
+            return jsonify({"status": "error", "message": "BPMIS Focus Area was not found."}), HTTPStatus.NOT_FOUND
+        return jsonify({"status": "ok", **record})
 
 
     def team_dashboard_version_plan_project_suggestions():
@@ -743,7 +758,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
             if _version_plan_sync_running(snapshot.config):
                 return _version_plan_sync_running_response()
             updated = update_version_plan_rows(snapshot.config, payload)
-            expected_revision = str(payload.get("document_revision") or payload.get("revision") or "").strip() or None
+            expected_revision = str(payload.get("document_revision") or payload.get("revision") or "").strip() or snapshot.revision
             saved = _version_plan_save_config(
                 store,
                 _audit_version_plan_config(updated, action=f"row_{row_action}", payload=payload),
@@ -1814,6 +1829,7 @@ def build_team_dashboard_handlers(ctx: Any) -> Any:
         team_dashboard_version_plan_sync=team_dashboard_version_plan_sync,
         team_dashboard_version_plan_sync_status=team_dashboard_version_plan_sync_status,
         team_dashboard_version_plan_cell=team_dashboard_version_plan_cell,
+        team_dashboard_version_plan_focus_area=team_dashboard_version_plan_focus_area,
         team_dashboard_version_plan_rows=team_dashboard_version_plan_rows,
         team_dashboard_version_plan_project_suggestions=team_dashboard_version_plan_project_suggestions,
         version_plan_page=version_plan_page,
@@ -1850,6 +1866,7 @@ def register_team_dashboard_routes(app: Any, handlers: Any) -> None:
     _add_route(app, "/api/team-dashboard/version-plan/af/sync-status", handlers.team_dashboard_version_plan_sync_status)
     _add_route(app, "/api/team-dashboard/version-plan/af/cell", handlers.team_dashboard_version_plan_cell, methods=["POST"])
     _add_route(app, "/api/team-dashboard/version-plan/af/rows", handlers.team_dashboard_version_plan_rows, methods=["POST"])
+    _add_route(app, "/api/team-dashboard/version-plan/af/focus-area", handlers.team_dashboard_version_plan_focus_area, methods=["GET"])
     _add_route(app, "/api/team-dashboard/version-plan/af/project-suggestions", handlers.team_dashboard_version_plan_project_suggestions, methods=["POST"])
     _add_route(app, "/api/team-dashboard/monthly-report/template", handlers.team_dashboard_monthly_report_template)
     _add_route(app, "/api/team-dashboard/monthly-report/style-guide/refresh", handlers.team_dashboard_monthly_report_style_guide_refresh, methods=["POST"])

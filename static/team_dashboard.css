@@ -1310,6 +1310,10 @@
   row-gap: 8px;
 }
 
+.team-dashboard-version-plan-bundle > .productization-inline-status {
+  grid-column: 1 / -1;
+}
+
 .team-dashboard-version-plan-bundle,
 .team-dashboard-version-plan-archive {
   padding: 0;
@@ -1374,11 +1378,11 @@
 }
 
 .team-dashboard-version-plan-sheet[data-version-plan-sheet="pipeline"] {
-  --version-plan-sheet-grid: 32px 130px minmax(320px, 1fr) 76px 116px 118px minmax(120px, 0.4fr) minmax(120px, 0.4fr);
+  --version-plan-sheet-grid: 32px 130px minmax(320px, 1fr) 76px 96px 116px 156px;
 }
 
 .team-dashboard-version-plan-sheet[data-version-plan-sheet="pipeline"] .team-dashboard-version-plan-row {
-  min-width: 1180px;
+  min-width: 926px;
 }
 
 .team-dashboard-version-plan-sheet[data-version-plan-sheet="pipeline"] .team-dashboard-version-plan-header > div:nth-child(3),
@@ -1388,8 +1392,8 @@
   overflow-wrap: anywhere;
 }
 
-.team-dashboard-version-plan-sheet[data-version-plan-sheet="pipeline"] .team-dashboard-version-plan-header > div:nth-child(6),
-.team-dashboard-version-plan-sheet[data-version-plan-sheet="pipeline"] .team-dashboard-version-plan-row .team-dashboard-version-plan-cell:nth-child(6) {
+.team-dashboard-version-plan-sheet[data-version-plan-sheet="pipeline"] .team-dashboard-version-plan-header > div:nth-child(7),
+.team-dashboard-version-plan-sheet[data-version-plan-sheet="pipeline"] .team-dashboard-version-plan-row .team-dashboard-version-plan-cell:nth-child(7) {
   text-align: center;
 }
 

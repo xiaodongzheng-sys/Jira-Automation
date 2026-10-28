@@ -739,6 +739,9 @@
   };
 
   const versionPlanManualField = (row, field, readOnly) => {
+    if (!canSyncVersionPlan && ['focus_area', 'prd_status'].includes(field)) {
+      return escapeHtml(row[field] || (field === 'focus_area' ? 'No' : 'Not Started'));
+    }
     if (!readOnly && isVersionPlanRowChangesPaused()) {
       if (field === 'pm') return escapeHtml(versionPlanPmDisplay(row.pm || []));
       return escapeHtml(row[field] || '-');
@@ -753,6 +756,14 @@
     if (field === 'pm') {
       return `<select data-version-plan-cell="pm" aria-label="PM">${versionPlanPmOptions(row.pm || [])}</select>`;
     }
+    if (field === 'focus_area') {
+      return `
+        <select data-version-plan-cell="focus_area" aria-label="Focus Area">
+          <option value="No"${row.focus_area !== 'Yes' ? ' selected' : ''}>No</option>
+          <option value="Yes"${row.focus_area === 'Yes' ? ' selected' : ''}>Yes</option>
+        </select>
+      `;
+    }
     if (field === 'productization_efforts') {
       return `
         <select data-version-plan-cell="productization_efforts" aria-label="Productization Efforts">
@@ -761,6 +772,14 @@
           <option value="N"${row.productization_efforts === 'N' ? ' selected' : ''}>N</option>
         </select>
       `;
+    }
+    if (field === 'prd_status') {
+      const status = row.prd_status || 'Not Started';
+      return `<select data-version-plan-cell="prd_status" aria-label="PRD Status">${
+        ['Not Started', 'PRD In Progress', 'PRD Reviewed'].map((value) => (
+          `<option value="${value}"${status === value ? ' selected' : ''}>${value}</option>`
+        )).join('')
+      }</select>`;
     }
     return `<textarea rows="1" spellcheck="true" data-version-plan-cell="${escapeHtml(field)}">${escapeHtml(row[field] || '')}</textarea>`;
   };
@@ -804,18 +823,21 @@
           <div class="team-dashboard-version-plan-cell" data-label="Priority">
             ${versionPlanManualField(row, 'priority', readOnly)}
           </div>
+          ${pipeline ? `<div class="team-dashboard-version-plan-cell" data-label="Focus Area">
+            ${versionPlanManualField(row, 'focus_area', readOnly)}
+          </div>` : ''}
           <div class="team-dashboard-version-plan-cell" data-label="PM">
             ${versionPlanManualField(row, 'pm', readOnly)}
           </div>
-          <div class="team-dashboard-version-plan-cell" data-label="Productization Efforts?">
-            ${versionPlanManualField(row, 'productization_efforts', readOnly)}
+          <div class="team-dashboard-version-plan-cell" data-label="${pipeline ? 'PRD Status' : 'Productization Efforts?'}">
+            ${versionPlanManualField(row, pipeline ? 'prd_status' : 'productization_efforts', readOnly)}
           </div>
-          <div class="team-dashboard-version-plan-cell" data-label="Component">
+          ${!pipeline ? `<div class="team-dashboard-version-plan-cell" data-label="Component">
             ${escapeHtml(row.component || '-')}
           </div>
           <div class="team-dashboard-version-plan-cell" data-label="Release Version">
             ${escapeHtml(row.release_version || '-')}
-          </div>
+          </div>` : ''}
         </div>
       `;
     }).join('');
@@ -842,10 +864,10 @@
           ${pipeline ? '<div>BPMIS Project ID</div>' : ''}
           <div>${headerFeature}</div>
           <div>Priority</div>
+          ${pipeline ? '<div>Focus Area</div>' : ''}
           <div>PM</div>
-          <div>Productization Efforts? (Y/N)</div>
-          <div>Component</div>
-          <div>Release Version</div>
+          ${pipeline ? '<div>PRD Status</div>' : '<div>Productization Efforts? (Y/N)</div>'}
+          ${!pipeline ? '<div>Component</div><div>Release Version</div>' : ''}
         </div>
         ${body || empty}
         ${addRow}
@@ -1152,7 +1174,7 @@
         }),
       });
       const payload = await readJson(response, 'Could not save Version Plan cell.');
-      if (field === 'priority' || field === 'pm' || field === 'bpmis_project_id') {
+      if (field === 'priority' || field === 'pm' || field === 'bpmis_project_id' || field === 'focus_area' || field === 'prd_status') {
         renderVersionPlan(payload);
       } else {
         commitVersionPlanMetadata(payload);
@@ -1285,6 +1307,8 @@
         pm: [],
         remarks: '',
         productization_efforts: '',
+        focus_area: 'No',
+        prd_status: 'Not Started',
         sort_order: nextVersionPlanSortOrder(rows),
         updated_at: '',
       });

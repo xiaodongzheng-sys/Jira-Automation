@@ -134,6 +134,7 @@ def normalize_version_plan_state(value: Any) -> dict[str, Any]:
     pipeline_rows = _normalize_manual_rows(raw_pipeline_rows)
     if not isinstance(raw_pipeline_rows, list):
         pipeline_rows = _pipeline_seed_rows()
+    pipeline_rows, focus_areas, pipeline_history = _normalize_pipeline_focus_state(raw_af, pipeline_rows)
 
     seen_versions = raw_af.get("seen_versions") if isinstance(raw_af.get("seen_versions"), dict) else {}
     normalized_seen: dict[str, dict[str, Any]] = {}
@@ -157,6 +158,8 @@ def normalize_version_plan_state(value: Any) -> dict[str, Any]:
         "af": {
             "bundles": normalized_bundles,
             "pipeline_rows": pipeline_rows,
+            "pipeline_focus_areas": focus_areas,
+            "pipeline_history": pipeline_history,
             "seen_versions": normalized_seen,
             "sync_state": normalized_sync_state,
             "audit_log": audit_log,
@@ -333,6 +336,8 @@ def merge_version_plan_editable_state(synced_config: dict[str, Any], current_con
     synced_af = synced_plan["af"]
     current_af = current_plan["af"]
     synced_af["pipeline_rows"] = _normalize_manual_rows(current_af.get("pipeline_rows"))
+    synced_af["pipeline_focus_areas"] = deepcopy(current_af["pipeline_focus_areas"])
+    synced_af["pipeline_history"] = deepcopy(current_af["pipeline_history"])
     synced_af["audit_log"] = _normalize_audit_log(current_af.get("audit_log"))
     for version_id, current_bundle in current_af["bundles"].items():
         synced_bundle = synced_af["bundles"].get(version_id)
@@ -390,13 +395,20 @@ def version_plan_auto_sync_attempted_today(config: dict[str, Any], *, now: datet
 def update_version_plan_cell(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     plan = normalize_version_plan_state(config.get("version_plan") if isinstance(config, dict) else {})
     field = str(payload.get("field") or "").strip()
-    if field not in {"feature", "priority", "pm", "productization_efforts", "bpmis_project_id"}:
+    if field not in {"feature", "priority", "pm", "productization_efforts", "bpmis_project_id", "focus_area", "prd_status"}:
         raise ValueError("Unsupported Version Plan field.")
-    if field == "bpmis_project_id" and str(payload.get("scope") or "").strip() != "pipeline":
-        raise ValueError("BPMIS project IDs can only be edited in Pipeline.")
+    if field in {"bpmis_project_id", "focus_area", "prd_status"} and str(payload.get("scope") or "").strip() != "pipeline":
+        raise ValueError("BPMIS project IDs, Focus Area and PRD Status can only be edited in Pipeline.")
     row = _find_version_plan_cell_row(plan, payload, field)
     if field == "bpmis_project_id":
-        row[field] = _normalize_bpmis_project_id(payload.get("value"))
+        project_id = _normalize_bpmis_project_id(payload.get("value"))
+        _assert_pipeline_project_available(plan["af"], project_id, row_id=row["row_id"])
+        if project_id != row["bpmis_project_id"]:
+            _remember_pipeline_focus(plan["af"], row)
+            _archive_pipeline_row(plan["af"], row, reason="project_id_changed")
+            saved_focus = plan["af"]["pipeline_focus_areas"].get(project_id)
+            row["focus_area"] = saved_focus["focus_area"] if saved_focus else "No"
+        row[field] = project_id
         row["bpmis_project_name"] = ""
         row["bpmis_project_market"] = ""
         row["bpmis_project_lookup_error"] = ""
@@ -404,9 +416,15 @@ def update_version_plan_cell(config: dict[str, Any], payload: dict[str, Any]) ->
         row[field] = _normalize_priority(payload.get("value"))
     elif field == "pm":
         row[field] = _normalize_pm_values(payload.get("value"))
+    elif field == "focus_area":
+        row[field] = _normalize_focus_area(payload.get("value"))
+    elif field == "prd_status":
+        row[field] = _normalize_prd_status(payload.get("value"))
     else:
         row[field] = str(payload.get("value") or "").strip()
     row["updated_at"] = _now_text()
+    if str(payload.get("scope") or "").strip() == "pipeline":
+        _remember_pipeline_focus(plan["af"], row)
     config = dict(config)
     config["version_plan"] = plan
     return config
@@ -430,13 +448,26 @@ def update_version_plan_rows(config: dict[str, Any], payload: dict[str, Any]) ->
         return config
 
     rows = _manual_rows_for_scope(plan, payload)
+    pipeline = str(payload.get("scope") or "").strip() == "pipeline"
     if action == "add":
+        project_id = _normalize_bpmis_project_id(payload.get("bpmis_project_id"))
+        focus_area = _normalize_focus_area(payload.get("focus_area", "No"))
+        if pipeline:
+            _assert_pipeline_project_available(plan["af"], project_id)
+            saved_focus = plan["af"]["pipeline_focus_areas"].get(project_id)
+            if saved_focus:
+                focus_area = saved_focus["focus_area"]
+        row_id = str(payload.get("row_id") or "").strip()
+        if row_id and any(row["row_id"] == row_id for row in rows):
+            raise ValueError("Version Plan row ID already exists.")
         rows.append(
             _manual_row(
                 {
                     "row_id": str(payload.get("row_id") or "").strip(),
                     "feature": str(payload.get("feature") or "").strip(),
-                    "bpmis_project_id": _normalize_bpmis_project_id(payload.get("bpmis_project_id")),
+                    "bpmis_project_id": project_id,
+                    "focus_area": focus_area,
+                    "prd_status": _normalize_prd_status(payload.get("prd_status", "Not Started")),
                     "priority": payload.get("priority"),
                     "pm": payload.get("pm"),
                     "remarks": str(payload.get("remarks") or "").strip(),
@@ -446,8 +477,15 @@ def update_version_plan_rows(config: dict[str, Any], payload: dict[str, Any]) ->
                 }
             )
         )
+        if pipeline:
+            _remember_pipeline_focus(plan["af"], rows[-1])
     elif action == "delete":
         row_id = str(payload.get("row_id") or "").strip()
+        if pipeline:
+            for row in rows:
+                if row.get("row_id") == row_id:
+                    _remember_pipeline_focus(plan["af"], row)
+                    _archive_pipeline_row(plan["af"], row, reason="deleted")
         rows[:] = [row for row in rows if row.get("row_id") != row_id]
     elif action == "reorder":
         order = [str(item or "").strip() for item in payload.get("row_ids") or [] if str(item or "").strip()]
@@ -487,8 +525,17 @@ def _move_version_plan_manual_row(plan: dict[str, Any], payload: dict[str, Any])
             remaining_rows.append(row)
     if moving_row is None:
         raise ValueError("Version Plan manual row was not found.")
+    if target_payload["scope"] == "pipeline":
+        _assert_pipeline_project_available(plan["af"], moving_row["bpmis_project_id"])
+        saved_focus = plan["af"]["pipeline_focus_areas"].get(moving_row["bpmis_project_id"])
+        if saved_focus:
+            moving_row["focus_area"] = saved_focus["focus_area"]
+    if source_payload["scope"] == "pipeline":
+        _remember_pipeline_focus(plan["af"], moving_row)
     source_rows[:] = remaining_rows
     moving_row["updated_at"] = _now_text()
+    if target_payload["scope"] == "pipeline":
+        _remember_pipeline_focus(plan["af"], moving_row)
     target_before_row_id = str(payload.get("target_before_row_id") or "").strip()
     target_index = next(
         (index for index, row in enumerate(target_rows) if row.get("row_id") == target_before_row_id),
@@ -503,13 +550,14 @@ def _move_version_plan_manual_row(plan: dict[str, Any], payload: dict[str, Any])
 
 def _pipeline_seed_rows() -> list[dict[str, Any]]:
     return [
-        _manual_row({"feature": feature, "priority": priority, "pm": _split_pm_values(pm), "sort_order": index})
+        _manual_row({"row_id": f"pipeline-seed-{index}", "feature": feature, "priority": priority, "pm": _split_pm_values(pm), "sort_order": index})
         for index, (feature, priority, pm) in enumerate(PIPELINE_SEED_ROWS)
     ]
 
 
 def _manual_row(row: dict[str, Any]) -> dict[str, Any]:
     return {
+        **deepcopy(row),
         "row_id": str(row.get("row_id") or f"manual-{uuid.uuid4().hex}"),
         "row_type": "manual",
         "feature": str(row.get("feature") or "").strip(),
@@ -518,6 +566,8 @@ def _manual_row(row: dict[str, Any]) -> dict[str, Any]:
         "bpmis_project_market": str(row.get("bpmis_project_market") or "").strip() if row.get("bpmis_project_id") else "",
         "bpmis_project_lookup_error": str(row.get("bpmis_project_lookup_error") or "").strip() if row.get("bpmis_project_id") else "",
         "priority": _normalize_priority(row.get("priority")),
+        "focus_area": _normalize_focus_area(row.get("focus_area", "No")),
+        "prd_status": _normalize_prd_status(row.get("prd_status", "Not Started")),
         "pm": _normalize_pm_values(row.get("pm")),
         "remarks": str(row.get("remarks") or "").strip(),
         "productization_efforts": str(row.get("productization_efforts") or "").strip().upper() if str(row.get("productization_efforts") or "").strip().upper() in {"Y", "N"} else "",
@@ -525,6 +575,104 @@ def _manual_row(row: dict[str, Any]) -> dict[str, Any]:
         "release_version": "",
         "sort_order": _safe_int(row.get("sort_order"), 0),
         "updated_at": str(row.get("updated_at") or "").strip(),
+    }
+
+
+def _normalize_prd_status(value: Any) -> str:
+    if value not in ("Not Started", "PRD In Progress", "PRD Reviewed"):
+        raise ValueError("PRD Status must be Not Started, PRD In Progress or PRD Reviewed.")
+    return value
+
+
+def _normalize_focus_area(value: Any) -> str:
+    if value not in ("Yes", "No"):
+        raise ValueError("Focus Area must be Yes or No.")
+    return value
+
+
+def _remember_pipeline_focus(af: dict[str, Any], row: dict[str, Any]) -> None:
+    project_id = row.get("bpmis_project_id")
+    if project_id:
+        af["pipeline_focus_areas"][project_id] = {
+            "focus_area": row["focus_area"],
+            "updated_at": row.get("updated_at") or "",
+        }
+
+
+def _archive_pipeline_row(af: dict[str, Any], row: dict[str, Any], *, reason: str) -> None:
+    af["pipeline_history"].append({"row": deepcopy(row), "reason": reason, "archived_at": _now_text()})
+
+
+def _pipeline_row_recency(row: dict[str, Any]) -> tuple[float, str]:
+    try:
+        updated = datetime.fromisoformat(str(row.get("updated_at") or ""))
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=VERSION_PLAN_TIMEZONE)
+        timestamp = updated.timestamp()
+    except (ValueError, OverflowError):
+        timestamp = float("-inf")
+    return timestamp, str(row.get("row_id") or "")
+
+
+def _normalize_pipeline_focus_state(
+    raw_af: dict[str, Any], rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
+    raw_registry = raw_af.get("pipeline_focus_areas")
+    registry = {}
+    if isinstance(raw_registry, dict):
+        for project_id, record in raw_registry.items():
+            if re.fullmatch(r"[0-9]{6}", str(project_id)) and isinstance(record, dict):
+                registry[project_id] = {
+                    "focus_area": _normalize_focus_area(record.get("focus_area", "No")),
+                    "updated_at": str(record.get("updated_at") or ""),
+                }
+    history = [deepcopy(item) for item in raw_af.get("pipeline_history") or [] if isinstance(item, dict)]
+    winners: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        project_id = row["bpmis_project_id"]
+        if project_id and (project_id not in winners or _pipeline_row_recency(row) > _pipeline_row_recency(winners[project_id])):
+            winners[project_id] = row
+    active_rows = []
+    raw_rows = [item for item in raw_af.get("pipeline_rows") or [] if isinstance(item, dict)]
+    for index, row in enumerate(rows):
+        project_id = row["bpmis_project_id"]
+        if project_id and winners[project_id] is not row:
+            original = raw_rows[index] if index < len(raw_rows) else {}
+            history.append({
+                "row": {**deepcopy(row), **deepcopy(original)},
+                "reason": "duplicate_bpmis_project_id",
+                "archived_at": row["updated_at"],
+                "retained_row_id": winners[project_id]["row_id"],
+            })
+            continue
+        if project_id:
+            original = raw_rows[index] if index < len(raw_rows) else {}
+            if "focus_area" not in original and project_id in registry:
+                row["focus_area"] = registry[project_id]["focus_area"]
+            registry[project_id] = {"focus_area": row["focus_area"], "updated_at": row["updated_at"]}
+        active_rows.append(row)
+    return active_rows, registry, history
+
+
+def _assert_pipeline_project_available(af: dict[str, Any], project_id: str, *, row_id: str = "") -> None:
+    if project_id and any(row["bpmis_project_id"] == project_id and row["row_id"] != row_id for row in af["pipeline_rows"]):
+        raise ValueError(f"BPMIS project {project_id} already has an active Pipeline row.")
+
+
+def pipeline_focus_area(config: dict[str, Any], project_id: Any) -> dict[str, Any] | None:
+    project_id = _normalize_bpmis_project_id(project_id)
+    if not project_id:
+        raise ValueError("BPMIS project ID is required.")
+    af = normalize_version_plan_state(config.get("version_plan"))["af"]
+    row = next((row for row in af["pipeline_rows"] if row["bpmis_project_id"] == project_id), None)
+    record = row or af["pipeline_focus_areas"].get(project_id)
+    if record is None:
+        return None
+    return {
+        "bpmis_project_id": project_id,
+        "focus_area": record["focus_area"],
+        "has_active_pipeline_row": row is not None,
+        "updated_at": record.get("updated_at") or "",
     }
 
 
