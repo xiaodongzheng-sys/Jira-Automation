@@ -38,7 +38,7 @@ _SKIP_DIR_NAMES = {
 }
 _SKIP_FILE_NAMES = {
     ".DS_Store",
-    "package-lock.json", "npm-shrinkwrap.json", "composer.lock",
+    "package-lock.json", "npm-shrinkwrap.json", "composer.lock", "pnpm-lock.yaml",
 }
 
 BUNDLE_FORMAT = "source-and-index-v2"
@@ -127,7 +127,7 @@ def build_repo_download_zip(service: SourceCodeQAService, scope_key: str) -> tup
 
     manifest = {
         "format": BUNDLE_FORMAT,
-        "contents": "Source code, build/configuration files, file indexes and symbol indexes. No documentation, images, dependency packages or compiled output.",
+        "contents": "Source code, build/configuration files, file indexes and symbol indexes. No documentation, images, runtime datasets, dependency packages or compiled output.",
         "max_archive_bytes": MAX_BUNDLE_BYTES,
         "scope_key": key,
         "scope_label": scope["label"],
@@ -244,6 +244,8 @@ def _write_repo_to_archive(archive: zipfile.ZipFile, *, repo_path: Path, archive
             if path.suffix.lower() not in _SOURCE_SUFFIXES and path.name not in _SOURCE_FILENAMES:
                 continue
             if path.name.endswith((".min.js", ".min.css")):
+                continue
+            if path.suffix.lower() == ".json" and "resources/data/" in relative.as_posix():
                 continue
             content = path.read_bytes()
             if b"\x00" in content:
