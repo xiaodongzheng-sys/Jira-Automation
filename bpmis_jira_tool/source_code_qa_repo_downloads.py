@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
+import os
 import re
+import sqlite3
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,10 +32,30 @@ _SKIP_DIR_NAMES = {
     ".idea",
     ".vscode",
     ".team_portal",
+    "node_modules", "vendor", "target", "dist", "build", "out",
+    "coverage", ".gradle", ".next", ".nuxt", ".venv", "venv",
+    "docs", "doc", "documentation", "uml",
 }
 _SKIP_FILE_NAMES = {
     ".DS_Store",
+    "package-lock.json", "npm-shrinkwrap.json", "composer.lock",
 }
+
+BUNDLE_FORMAT = "source-and-index-v2"
+MAX_BUNDLE_BYTES = 20_000_000
+_SOURCE_SUFFIXES = {
+    ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".fs", ".go",
+    ".java", ".kt", ".kts", ".scala", ".groovy", ".gradle",
+    ".py", ".pyi", ".rb", ".php", ".rs", ".swift", ".m", ".mm",
+    ".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".dart",
+    ".html", ".htm", ".css", ".scss", ".sass", ".less", ".jsp", ".jspx",
+    ".sh", ".bash", ".zsh", ".ps1", ".lua", ".pl", ".pm", ".r",
+    ".sql", ".graphql", ".gql", ".proto", ".thrift", ".xsd", ".wsdl",
+    ".xml", ".json", ".yaml", ".yml", ".properties", ".toml", ".ini",
+    ".conf", ".cfg", ".tf", ".hcl", ".ftl", ".vm", ".j2", ".tpl",
+    ".clj", ".cljs", ".ex", ".exs", ".erl", ".hrl", ".sol",
+}
+_SOURCE_FILENAMES = {"Dockerfile", "Makefile", "Jenkinsfile", "Gemfile", "Rakefile", "Procfile"}
 
 
 def _slugify_scope_label(label: str) -> str:
@@ -70,6 +93,7 @@ def build_repo_download_zip(service: SourceCodeQAService, scope_key: str) -> tup
         raise ToolError(f"No repositories are configured for {scope['label']}.")
 
     repo_items: list[dict[str, Any]] = []
+    used_archive_folders: set[str] = set()
     for entry in entries:
         repo_path = service._repo_path(key, entry)
         git_dir = repo_path / ".git"
@@ -79,17 +103,32 @@ def build_repo_download_zip(service: SourceCodeQAService, scope_key: str) -> tup
         if not revision:
             raise ToolError(f"{entry.display_name} does not have a readable git revision for {scope['label']}.")
         fingerprint = service._repo_fingerprint(repo_path)
+        index_info = service._repo_index_info(key, entry, repo_path)
+        if index_info.get("state") != "ready":
+            raise ToolError(f"{entry.display_name} needs a current code index. Run Sync / Refresh first.")
+        archive_folder = _repo_archive_folder_name(entry.display_name)
+        if archive_folder in used_archive_folders:
+            suffix = 2
+            while f"{archive_folder}-{suffix}" in used_archive_folders:
+                suffix += 1
+            archive_folder = f"{archive_folder}-{suffix}"
+        used_archive_folders.add(archive_folder)
         repo_items.append(
             {
                 "entry": entry,
                 "path": repo_path,
                 "revision": revision,
                 "fingerprint": fingerprint,
-                "folder": _repo_archive_folder_name(entry.display_name),
+                "folder": archive_folder,
+                "index_path": service._index_path(repo_path),
+                "index_version": index_info.get("index_version"),
             }
         )
 
     manifest = {
+        "format": BUNDLE_FORMAT,
+        "contents": "Source code, build/configuration files, file indexes and symbol indexes. No documentation, images, dependency packages or compiled output.",
+        "max_archive_bytes": MAX_BUNDLE_BYTES,
         "scope_key": key,
         "scope_label": scope["label"],
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -100,6 +139,9 @@ def build_repo_download_zip(service: SourceCodeQAService, scope_key: str) -> tup
                 "git_revision": item["revision"],
                 "fingerprint": item["fingerprint"],
                 "archive_root": item["folder"],
+                "index_version": item["index_version"],
+                "file_index": f"indexes/{item['folder']}.files.jsonl",
+                "symbol_index": f"indexes/{item['folder']}.symbols.jsonl",
             }
             for item in repo_items
         ],
@@ -113,18 +155,35 @@ def build_repo_download_zip(service: SourceCodeQAService, scope_key: str) -> tup
         "scope_label": scope["label"],
         "filename": scope["filename"],
         "generated_at": manifest["generated_at"],
+        "format": BUNDLE_FORMAT,
+        "repo_count": len(repo_items),
     }
     if archive_path.exists():
         content = archive_path.read_bytes()
+        _require_bundle_size(content)
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            cached_manifest = json.loads(archive.read("manifest.json"))
+        metadata["generated_at"] = cached_manifest["generated_at"]
+        metadata["size_bytes"] = len(content)
         return metadata, content
 
     buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        for item, repo_manifest in zip(repo_items, manifest["repos"]):
+            files = _write_repo_to_archive(archive, repo_path=item["path"], archive_root=item["folder"])
+            archive.writestr(repo_manifest["file_index"], _json_lines(files))
+            symbols = _source_symbols(item["index_path"], files, item["folder"])
+            archive.writestr(repo_manifest["symbol_index"], _json_lines(symbols))
+            repo_manifest["source_files"] = len(files)
+            repo_manifest["symbols"] = len(symbols)
         archive.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
-        for item in repo_items:
-            _write_repo_to_archive(archive, repo_path=item["path"], archive_root=item["folder"])
-    archive_path.write_bytes(buffer.getvalue())
-    return metadata, buffer.getvalue()
+    content = buffer.getvalue()
+    _require_bundle_size(content)
+    temp_path = archive_path.with_name(f".{archive_path.name}.{os.getpid()}.tmp")
+    temp_path.write_bytes(content)
+    os.replace(temp_path, archive_path)
+    metadata["size_bytes"] = len(content)
+    return metadata, content
 
 
 def existing_repo_download_archive(service: SourceCodeQAService, scope_key: str) -> tuple[dict[str, Any], Path] | None:
@@ -157,7 +216,7 @@ def existing_repo_download_archive(service: SourceCodeQAService, scope_key: str)
 
 
 def _manifest_signature(manifest: dict[str, Any]) -> str:
-    payload = json.dumps(manifest.get("repos") or [], sort_keys=True, separators=(",", ":")).encode("utf-8")
+    payload = json.dumps({"format": manifest.get("format"), "repos": manifest.get("repos") or []}, sort_keys=True, separators=(",", ":")).encode("utf-8")
     import hashlib
 
     return hashlib.sha1(payload).hexdigest()[:16]
@@ -173,22 +232,51 @@ def _sanitize_source_url(url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.hostname or parsed.netloc.split("@")[-1], parsed.path, "", ""))
 
 
-def _write_repo_to_archive(archive: zipfile.ZipFile, *, repo_path: Path, archive_root: str) -> None:
-    for path in sorted(repo_path.rglob("*")):
-        relative = path.relative_to(repo_path)
-        if _should_skip_path(relative, path.is_dir()):
-            continue
-        if path.is_dir():
-            continue
-        if not path.is_file():
-            continue
-        target = Path(archive_root) / relative
-        archive.write(path, arcname=target.as_posix())
+def _write_repo_to_archive(archive: zipfile.ZipFile, *, repo_path: Path, archive_root: str) -> list[dict[str, Any]]:
+    files = []
+    for directory, directories, names in os.walk(repo_path, followlinks=False):
+        directories[:] = sorted(name for name in directories if not _should_skip_path(Path(directory).relative_to(repo_path) / name, True))
+        for name in sorted(names):
+            path = Path(directory) / name
+            relative = path.relative_to(repo_path)
+            if _should_skip_path(relative, False) or path.is_symlink() or not path.is_file():
+                continue
+            if path.suffix.lower() not in _SOURCE_SUFFIXES and path.name not in _SOURCE_FILENAMES:
+                continue
+            if path.name.endswith((".min.js", ".min.css")):
+                continue
+            content = path.read_bytes()
+            if b"\x00" in content:
+                continue
+            target = (Path(archive_root) / relative).as_posix()
+            archive.writestr(target, content)
+            files.append({"path": target, "bytes": len(content), "lines": len(content.splitlines()), "sha256": hashlib.sha256(content).hexdigest()})
+    return files
+
+
+def _source_symbols(index_path: Path, files: list[dict[str, Any]], folder: str) -> list[dict[str, Any]]:
+    allowed = {item["path"] for item in files}
+    symbols = []
+    with sqlite3.connect(f"{index_path.as_uri()}?mode=ro", uri=True) as connection:
+        for name, kind, file_path, line in connection.execute("select name, kind, file_path, line_no from definitions order by file_path, line_no, name, kind"):
+            target = f"{folder}/{file_path}"
+            if target in allowed:
+                symbols.append({"path": target, "line": line, "name": name, "kind": kind})
+    return symbols
+
+
+def _json_lines(rows: list[dict[str, Any]]) -> str:
+    return "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows)
+
+
+def _require_bundle_size(content: bytes) -> None:
+    if len(content) >= MAX_BUNDLE_BYTES:
+        raise ToolError(f"Source bundle is {len(content) / 1_000_000:.2f} MB; it must be smaller than 20 MB. No oversized bundle was published.")
 
 
 def _should_skip_path(relative: Path, is_dir: bool) -> bool:
     parts = relative.parts
-    if any(part in _SKIP_DIR_NAMES for part in parts):
+    if any(part.lower() in _SKIP_DIR_NAMES for part in parts):
         return True
     name = parts[-1] if parts else ""
     if name in _SKIP_FILE_NAMES:
