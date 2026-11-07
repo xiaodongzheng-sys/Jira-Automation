@@ -188,7 +188,10 @@ def build_repo_download_zip(service: SourceCodeQAService, scope_key: str) -> tup
 
 def existing_repo_download_archive(service: SourceCodeQAService, scope_key: str) -> tuple[dict[str, Any], Path] | None:
     scope = resolve_repo_download_scope(scope_key)
-    data_root = getattr(service, "data_root", None)
+    # The remote QA wrapper still has a local service with published bundles.
+    # Read those files before trying GCS or rebuilding through the local agent.
+    local_service = getattr(service, "fallback_service", service)
+    data_root = getattr(local_service, "data_root", None)
     if not isinstance(data_root, Path):
         return None
     archive_path = data_root / "repo_downloads" / scope["filename"]
