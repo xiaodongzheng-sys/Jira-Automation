@@ -276,6 +276,20 @@ class SourceCodeQARouteTests(unittest.TestCase):
             self.assertIn("Portal-Repo/README.md", names)
             self.assertNotIn("Portal-Repo/.git/config", names)
 
+    def test_repo_download_rejects_anonymous_and_external_users_before_building(self):
+        with self.app.test_client() as client, patch(
+            "bpmis_jira_tool.web.build_repo_download_zip",
+            return_value=({"filename": "source.zip"}, b"private-source"),
+        ) as build:
+            anonymous = client.get("/api/source-code-qa/repo-downloads/SG_MARKET:All")
+            self._login(client, "external@example.com")
+            external = client.get("/api/source-code-qa/repo-downloads/SG_MARKET:All")
+        self.assertIn(anonymous.status_code, {401, 403})
+        self.assertEqual(external.status_code, 403)
+        self.assertNotIn(b"private-source", anonymous.data)
+        self.assertNotIn(b"private-source", external.data)
+        build.assert_not_called()
+
     def test_repo_download_cloud_gcs_branch_redirects_to_signed_url(self):
         with self.app.test_client() as client, patch.dict(
             os.environ,
@@ -287,6 +301,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             "bpmis_jira_tool.public_artifacts_gcs.fetch_repo_download_signed_url",
             return_value=({"filename": "source-code-repos-AF-All.zip", "size_bytes": 1024}, "https://signed.example.com/af-all.zip"),
         ):
+            self._login(client, "teammate@npt.sg")
             download = client.get("/api/source-code-qa/repo-downloads/AF:All", follow_redirects=False)
 
         self.assertEqual(download.status_code, 302)
@@ -350,6 +365,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             "bpmis_jira_tool.web._build_local_agent_client",
             return_value=_UnexpectedLocalAgentClient(),
         ):
+            self._login(client, "teammate@npt.sg")
             download = client.get("/api/source-code-qa/repo-downloads/AF:All", follow_redirects=False)
 
         self.assertEqual(download.status_code, 302)
@@ -394,6 +410,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             "bpmis_jira_tool.web.public_gcs_read_bucket",
             return_value="test-bucket",
         ):
+            self._login(client, "teammate@npt.sg")
             download = client.get("/api/source-code-qa/repo-downloads/AF:All")
 
         self.assertEqual(download.status_code, 200)

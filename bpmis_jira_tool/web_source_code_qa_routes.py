@@ -163,6 +163,9 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
 
     @app.get("/api/source-code-qa/repo-downloads/<scope_key>")
     def source_code_qa_repo_download_api(scope_key: str):
+        access_gate = _require_source_code_qa_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
         try:
             scope = resolve_repo_download_scope(scope_key)
             service = _build_source_code_qa_service()
