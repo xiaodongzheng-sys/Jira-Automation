@@ -170,6 +170,9 @@
   );
   const isCountrySpecificTeam = (team = pmTeam?.value) => countrySpecificTeams.includes(String(team || '').trim());
   const isSharedCodeTeam = (team = pmTeam?.value) => sharedCodeTeams.includes(String(team || '').trim());
+  const isAllCountryOnlyTeam = (team = pmTeam?.value) => Boolean(
+    options.pm_teams?.find((item) => item.code === team)?.all_country_only
+  );
   const runtimeCapabilities = () => options.runtime_capabilities || {};
   const countryCapability = (team, countryCode) => {
     const teamCapabilities = runtimeCapabilities()?.[team] || {};
@@ -190,6 +193,9 @@
   const runtimeContextHelp = () => {
     const team = pmTeam?.value || 'AF';
     const selectedCountry = currentCountry();
+    if (isAllCountryOnlyTeam(team)) {
+      return 'Country is fixed to All for this Market team. Repository Admin can save GitLab URLs and run Sync / Refresh.';
+    }
     if (isCountrySpecificTeam(team)) {
       return `Country-specific code requires a specific country. Runtime context: ${team}:${selectedCountry} (${capabilityLabel(team, selectedCountry)}).`;
     }
@@ -1197,7 +1203,9 @@
     const countries = runtimeCountries();
     const allValue = allCountryValue();
     const previous = country.value || '';
-    const allowedCountries = isCountrySpecificTeam(team) ? countries : [allValue, ...countries];
+    const allowedCountries = isAllCountryOnlyTeam(team)
+      ? [allValue]
+      : (isCountrySpecificTeam(team) ? countries : [allValue, ...countries]);
     const nextValue = allowedCountries.includes(previous)
       ? previous
       : (isCountrySpecificTeam(team) ? countries[0] || 'SG' : allValue);
@@ -1205,14 +1213,12 @@
     allowedCountries.forEach((countryCode) => {
       const option = document.createElement('option');
       option.value = countryCode;
-      option.textContent = countryCode === allValue
-        ? `${allValue} · ${capabilityLabel(team, countryCode)}`
-        : `${countryCode} · ${capabilityLabel(team, countryCode)}`;
+      option.textContent = isAllCountryOnlyTeam(team) ? allValue : `${countryCode} · ${capabilityLabel(team, countryCode)}`;
       country.appendChild(option);
     });
     country.value = nextValue;
-    country.disabled = false;
-    countryWrap?.classList.remove('source-qa-country-disabled');
+    country.disabled = isAllCountryOnlyTeam(team);
+    countryWrap?.classList.toggle('source-qa-country-disabled', country.disabled);
     if (countryHelp) countryHelp.textContent = runtimeContextHelp();
   };
 
@@ -1375,6 +1381,7 @@
       llmPolicy = payload.llm_policy || {};
       indexHealthPayload = payload.index_health || {};
       if (payload.options) {
+        options.pm_teams = payload.options.pm_teams || options.pm_teams;
         options.countries = payload.options.countries || options.countries;
         options.all_country = payload.options.all_country || options.all_country;
         options.runtime_capabilities = payload.options.runtime_capabilities || options.runtime_capabilities || {};

@@ -174,6 +174,9 @@ def gcs_upload_bytes(bucket_name: str, content: bytes, remote_path: str, *, cont
 
 def publish_repo_download_archive(metadata: dict[str, Any], content: bytes) -> bool:
     """Best-effort publish of a freshly built repo source bundle (Mac side)."""
+    from bpmis_jira_tool.source_code_qa_repo_downloads import require_repo_download_size
+
+    require_repo_download_size(len(content))
     bucket_name = public_gcs_publish_bucket()
     if not bucket_name:
         return False
@@ -274,7 +277,9 @@ def fetch_repo_download_signed_url(filename: str, *, expiration_seconds: int = 9
         blob = _bucket(bucket_name).blob(f"repo-downloads/{filename}")
         if not blob.exists():
             return None
-        url = blob.generate_signed_url(version="v4", expiration=expiration_seconds, method="GET")
+        blob.reload()
+        size_bytes = int(blob.size)
+        url = blob.generate_signed_url(version="v4", expiration=expiration_seconds, method="GET", generation=blob.generation)
     except Exception:
         logger.warning("Could not generate signed URL for gs://%s/repo-downloads/%s", bucket_name, filename, exc_info=True)
         return None
@@ -287,6 +292,10 @@ def fetch_repo_download_signed_url(filename: str, *, expiration_seconds: int = 9
                 metadata.update(parsed)
         except (ValueError, UnicodeDecodeError):
             pass
+    from bpmis_jira_tool.source_code_qa_repo_downloads import require_repo_download_size
+
+    require_repo_download_size(size_bytes)
+    metadata["size_bytes"] = size_bytes
     return metadata, url
 
 

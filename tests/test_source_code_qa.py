@@ -119,6 +119,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         repo_path = service._repo_path(key, entry)
         repo_path.mkdir(parents=True, exist_ok=True)
         (repo_path / "README.md").write_text("# portal repo\n", encoding="utf-8")
+        (repo_path / "app.py").write_text("def main():\n    return 'portal'\n", encoding="utf-8")
         (repo_path / ".gitignore").write_text(".pytest_cache/\n", encoding="utf-8")
         subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True, text=True)
         subprocess.run(["git", "add", "."], cwd=repo_path, check=True, capture_output=True, text=True)
@@ -129,6 +130,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+        service._build_repo_index(key, entry, repo_path)
         return repo_path
 
     def test_npt_user_gets_repo_download_page_but_blocked_chat_apis(self):
@@ -283,7 +285,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             clear=False,
         ), patch(
             "bpmis_jira_tool.public_artifacts_gcs.fetch_repo_download_signed_url",
-            return_value=({"filename": "source-code-repos-AF-All.zip"}, "https://signed.example.com/af-all.zip"),
+            return_value=({"filename": "source-code-repos-AF-All.zip", "size_bytes": 1024}, "https://signed.example.com/af-all.zip"),
         ):
             download = client.get("/api/source-code-qa/repo-downloads/AF:All", follow_redirects=False)
 
@@ -343,7 +345,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             clear=False,
         ), patch(
             "bpmis_jira_tool.public_artifacts_gcs.fetch_repo_download_signed_url",
-            return_value=({"filename": "source-code-repos-AF-All.zip"}, "https://signed.example.com/af-all.zip"),
+            return_value=({"filename": "source-code-repos-AF-All.zip", "size_bytes": 1024}, "https://signed.example.com/af-all.zip"),
         ), patch(
             "bpmis_jira_tool.web._build_local_agent_client",
             return_value=_UnexpectedLocalAgentClient(),

@@ -41,8 +41,8 @@
         <label class="field-group">
           <span>PM Team</span>
           <select data-source-pm-team>
-            {% for code, profile in team_profiles.items() %}
-              <option value="{{ code }}">{{ profile.label }} ({{ code }})</option>
+            {% for team in options.pm_teams %}
+              <option value="{{ team.code }}">{{ team.label }}{% if not team.all_country_only %} ({{ team.code }}){% endif %}</option>
             {% endfor %}
           </select>
         </label>
@@ -183,7 +183,7 @@
         <div>
           <p class="eyebrow">Source Bundles</p>
           <h2>Repo Download</h2>
-          <p class="card-help">Download the latest synced source zip for each configured Source Code Q&amp;A scope.</p>
+          <p class="card-help">Download a ZIP smaller than 20 MB. Each bundle includes source code, file and symbol indexes, build settings, and key code documents. Large scopes keep the highest-priority files; the manifest records omitted file counts.</p>
         </div>
       </div>
       <div class="table-scroll">
@@ -277,10 +277,10 @@
         <section class="panel panel-wide source-qa-admin">
           <div class="panel-head">
             <div>
-              <p class="eyebrow">Owner Admin</p>
+              <p class="eyebrow">Repository Admin</p>
               <h2>Repository Mapping</h2>
               <p class="card-help">
-                Add one HTTPS clone URL per line. Optional format: <code>Display Name | https://gitlab.example.com/group/repo.git</code>.
+                Select a PM Team above, then add one GitLab HTTPS clone URL per line. Optional format: <code>Display Name | https://gitlab.example.com/group/repo.git</code>. Market teams use Country All.
               </p>
             </div>
             <div class="button-row">

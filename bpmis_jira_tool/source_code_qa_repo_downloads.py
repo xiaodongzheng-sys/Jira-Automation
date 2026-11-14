@@ -22,6 +22,9 @@ REPO_DOWNLOAD_SCOPES: tuple[dict[str, str], ...] = (
     {"label": "Credit Risk-SG", "scope_key": "CRMS:SG", "filename": "source-code-repos-Credit-Risk-SG.zip"},
     {"label": "Credit Risk-PH", "scope_key": "CRMS:PH", "filename": "source-code-repos-Credit-Risk-PH.zip"},
     {"label": "GRC-All", "scope_key": "GRC:All", "filename": "source-code-repos-GRC-All.zip"},
+    {"label": "SG Market", "scope_key": "SG_MARKET:All", "filename": "source-code-repos-SG-Market-All.zip"},
+    {"label": "ID Market", "scope_key": "ID_MARKET:All", "filename": "source-code-repos-ID-Market-All.zip"},
+    {"label": "PH Market", "scope_key": "PH_MARKET:All", "filename": "source-code-repos-PH-Market-All.zip"},
 )
 
 _SKIP_DIR_NAMES = {
@@ -34,14 +37,14 @@ _SKIP_DIR_NAMES = {
     ".team_portal",
     "node_modules", "vendor", "target", "dist", "build", "out",
     "coverage", ".gradle", ".next", ".nuxt", ".venv", "venv",
-    "docs", "doc", "documentation", "uml",
+    "uml",
 }
 _SKIP_FILE_NAMES = {
     ".DS_Store",
     "package-lock.json", "npm-shrinkwrap.json", "composer.lock", "pnpm-lock.yaml",
 }
 
-BUNDLE_FORMAT = "source-and-index-v2"
+BUNDLE_FORMAT = "source-and-index-v3"
 MAX_BUNDLE_BYTES = 20_000_000
 _SOURCE_SUFFIXES = {
     ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".fs", ".go",
@@ -55,7 +58,10 @@ _SOURCE_SUFFIXES = {
     ".conf", ".cfg", ".tf", ".hcl", ".ftl", ".vm", ".j2", ".tpl",
     ".clj", ".cljs", ".ex", ".exs", ".erl", ".hrl", ".sol",
 }
-_SOURCE_FILENAMES = {"Dockerfile", "Makefile", "Jenkinsfile", "Gemfile", "Rakefile", "Procfile"}
+_SOURCE_FILENAMES = {"Dockerfile", "Makefile", "Jenkinsfile", "Gemfile", "Rakefile", "Procfile", "go.mod", "go.sum", ".gitmodules"}
+_CONTEXT_SUFFIXES = {".md", ".rst", ".adoc", ".txt"}
+_CONTEXT_NAME_PATTERN = re.compile(r"^(readme|agents|architecture|design|overview|flow|domain|api|openapi|swagger)(?:[._-]|$)", re.I)
+_CONFIG_SUFFIXES = {".xml", ".json", ".yaml", ".yml", ".properties", ".toml", ".ini", ".conf", ".cfg"}
 
 
 def _slugify_scope_label(label: str) -> str:
@@ -127,7 +133,8 @@ def build_repo_download_zip(service: SourceCodeQAService, scope_key: str) -> tup
 
     manifest = {
         "format": BUNDLE_FORMAT,
-        "contents": "Source code, build/configuration files, file indexes and symbol indexes. No documentation, images, runtime datasets, dependency packages or compiled output.",
+        "contents": "Source code, file and symbol indexes, build/configuration files and key code documents. Excludes images, runtime datasets, dependencies and compiled output.",
+        "selection": {"priority": "production source, build/configuration, key code documents, tests/examples", "omitted_files": 0},
         "max_archive_bytes": MAX_BUNDLE_BYTES,
         "scope_key": key,
         "scope_label": scope["label"],
@@ -165,6 +172,7 @@ def build_repo_download_zip(service: SourceCodeQAService, scope_key: str) -> tup
             cached_manifest = json.loads(archive.read("manifest.json"))
         metadata["generated_at"] = cached_manifest["generated_at"]
         metadata["size_bytes"] = len(content)
+        metadata["omitted_files"] = cached_manifest.get("selection", {}).get("omitted_files", 0)
         return metadata, content
 
     buffer = io.BytesIO()
@@ -177,12 +185,13 @@ def build_repo_download_zip(service: SourceCodeQAService, scope_key: str) -> tup
             repo_manifest["source_files"] = len(files)
             repo_manifest["symbols"] = len(symbols)
         archive.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
-    content = buffer.getvalue()
+    content = _fit_bundle_to_limit(buffer.getvalue(), manifest)
     _require_bundle_size(content)
     temp_path = archive_path.with_name(f".{archive_path.name}.{os.getpid()}.tmp")
     temp_path.write_bytes(content)
     os.replace(temp_path, archive_path)
     metadata["size_bytes"] = len(content)
+    metadata["omitted_files"] = manifest["selection"]["omitted_files"]
     return metadata, content
 
 
@@ -196,6 +205,9 @@ def existing_repo_download_archive(service: SourceCodeQAService, scope_key: str)
         return None
     archive_path = data_root / "repo_downloads" / scope["filename"]
     if not archive_path.is_file():
+        return None
+    if archive_path.stat().st_size >= MAX_BUNDLE_BYTES:
+        # Rebuild old oversized archives using the current selection policy.
         return None
     metadata: dict[str, Any] = {
         "scope_key": scope["scope_key"],
@@ -244,7 +256,8 @@ def _write_repo_to_archive(archive: zipfile.ZipFile, *, repo_path: Path, archive
             relative = path.relative_to(repo_path)
             if _should_skip_path(relative, False) or path.is_symlink() or not path.is_file():
                 continue
-            if path.suffix.lower() not in _SOURCE_SUFFIXES and path.name not in _SOURCE_FILENAMES:
+            is_context = path.suffix.lower() in _CONTEXT_SUFFIXES and _CONTEXT_NAME_PATTERN.match(path.name)
+            if path.suffix.lower() not in _SOURCE_SUFFIXES and path.name not in _SOURCE_FILENAMES and not is_context:
                 continue
             if path.name.endswith((".min.js", ".min.css")):
                 continue
@@ -274,9 +287,74 @@ def _json_lines(rows: list[dict[str, Any]]) -> str:
     return "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows)
 
 
+def _bundle_file_priority(filename: str) -> tuple[int, str]:
+    path = Path(filename)
+    parts = {part.lower() for part in path.parts[1:-1]}
+    if parts & {"test", "tests", "__tests__", "fixtures", "examples", "samples"} or re.search(r"(?:[._-](?:test|spec)|_test)\.", path.name):
+        return 3, filename
+    if path.suffix.lower() in _CONTEXT_SUFFIXES or parts & {"docs", "doc", "documentation"}:
+        return 2, filename
+    if path.suffix.lower() in _CONFIG_SUFFIXES or path.name in _SOURCE_FILENAMES:
+        return 1, filename
+    return 0, filename
+
+
+def _fit_bundle_to_limit(content: bytes, manifest: dict[str, Any]) -> bytes:
+    """Keep higher-priority files and their matching indexes within the limit.
+
+    Use actual compressed source sizes and conservative uncompressed index
+    costs. Every selected file keeps its whole contents and symbol records.
+    """
+    if len(content) < MAX_BUNDLE_BYTES:
+        return content
+    with zipfile.ZipFile(io.BytesIO(content)) as original:
+        candidates = []
+        for repo in manifest["repos"]:
+            files = [json.loads(line) for line in original.read(repo["file_index"]).splitlines()]
+            symbols_by_path: dict[str, list[dict[str, Any]]] = {}
+            for line in original.read(repo["symbol_index"]).splitlines():
+                symbol = json.loads(line)
+                symbols_by_path.setdefault(symbol["path"], []).append(symbol)
+            for row in files:
+                name = row["path"]
+                symbols = symbols_by_path.get(name, [])
+                info = original.getinfo(name)
+                # Two ZIP headers, file and symbol records, plus deflate margin.
+                cost = info.compress_size + 2 * len(name.encode("utf-8")) + 128
+                cost += len(_json_lines([row, *symbols]).encode("utf-8")) * 2
+                candidates.append((name, row, symbols, cost))
+        budget = MAX_BUNDLE_BYTES - 4096 - 2 * len(json.dumps(manifest).encode("utf-8"))
+        selected: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
+        for name, row, symbols, cost in sorted(candidates, key=lambda item: _bundle_file_priority(item[0])):
+            if cost <= budget:
+                selected[name] = (row, symbols)
+                budget -= cost
+        manifest["selection"]["omitted_files"] = len(candidates) - len(selected)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+            for name in selected:
+                archive.writestr(name, original.read(name))
+            for repo in manifest["repos"]:
+                prefix = repo["archive_root"] + "/"
+                rows = [item for name, item in selected.items() if name.startswith(prefix)]
+                files = [row for row, _ in rows]
+                symbols = [symbol for _, items in rows for symbol in items]
+                repo["omitted_files"] = repo["source_files"] - len(files)
+                repo["source_files"] = len(files)
+                repo["symbols"] = len(symbols)
+                archive.writestr(repo["file_index"], _json_lines(files))
+                archive.writestr(repo["symbol_index"], _json_lines(symbols))
+            archive.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
+        return buffer.getvalue()
+
+
+def require_repo_download_size(size_bytes: int) -> None:
+    if size_bytes >= MAX_BUNDLE_BYTES:
+        raise ToolError(f"Source bundle is {size_bytes / 1_000_000:.2f} MB; it must be smaller than 20 MB. Run Sync / Refresh to rebuild it.")
+
+
 def _require_bundle_size(content: bytes) -> None:
-    if len(content) >= MAX_BUNDLE_BYTES:
-        raise ToolError(f"Source bundle is {len(content) / 1_000_000:.2f} MB; it must be smaller than 20 MB. No oversized bundle was published.")
+    require_repo_download_size(len(content))
 
 
 def _should_skip_path(relative: Path, is_dir: bool) -> bool:

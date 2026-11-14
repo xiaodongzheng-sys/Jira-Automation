@@ -236,6 +236,12 @@ def _log_source_code_qa_timing(component: str, *, elapsed_ms: int, **fields: Any
     LOGGER.warning("source_code_qa_timing %s", json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
 
+MARKET_TEAM_PROFILES = {
+    f"{country}_MARKET": {"label": f"{country} Market", "all_country_only": True}
+    for country in ("SG", "ID", "PH")
+}
+
+
 class SourceCodeQAService:
     def __init__(
         self,
@@ -277,7 +283,8 @@ class SourceCodeQAService:
         self.lock_root = self.data_root / "locks"
         self.domain_profile_path = Path(os.getenv("SOURCE_CODE_QA_DOMAIN_PROFILES", str(DEFAULT_DOMAIN_PROFILE_PATH)))
         self.domain_knowledge_pack_path = Path(os.getenv("SOURCE_CODE_QA_DOMAIN_KNOWLEDGE_PACKS", str(DEFAULT_DOMAIN_KNOWLEDGE_PACK_PATH)))
-        self.team_profiles = team_profiles
+        # Market scopes belong to Source Code Q&A, not the BPMIS team registry.
+        self.team_profiles = {**team_profiles, **MARKET_TEAM_PROFILES}
         self.gitlab_token = str(gitlab_token or "").strip()
         self.gitlab_username = str(gitlab_username or "oauth2").strip() or "oauth2"
         self.llm_provider_name = self.normalize_query_llm_provider(llm_provider)
@@ -417,7 +424,11 @@ class SourceCodeQAService:
     def options_payload(self) -> dict[str, Any]:
         return {
             "pm_teams": [
-                {"code": code, "label": str(profile.get("label") or code)}
+                {
+                    "code": code,
+                    "label": str(profile.get("label") or code),
+                    "all_country_only": code in MARKET_TEAM_PROFILES,
+                }
                 for code, profile in self.team_profiles.items()
             ],
             "countries": list(CRMS_COUNTRIES),
@@ -3237,6 +3248,8 @@ class SourceCodeQAService:
     def normalize_country(pm_team: str, country: str) -> str:
         team = str(pm_team or "").strip().upper()
         value = str(country or "").strip().upper()
+        if team in MARKET_TEAM_PROFILES and value not in {"", ALL_COUNTRY.upper()}:
+            raise ToolError("Market teams support Country All only.")
         if team == "CRMS":
             if value not in CRMS_COUNTRIES:
                 raise ToolError("Credit Risk source repositories require country SG, ID, or PH.")

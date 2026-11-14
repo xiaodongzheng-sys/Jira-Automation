@@ -9,6 +9,7 @@ from flask import after_this_request, redirect
 
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.source_code_qa_patterns import PLACEHOLDER_HOST_PATTERN
+from bpmis_jira_tool.source_code_qa_repo_downloads import require_repo_download_size
 
 
 def _reject_placeholder_repo_urls(repositories: object) -> None:
@@ -107,7 +108,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
         disposition = response.headers.get("Content-Disposition") or ""
         match = re.search(r'filename="?([^";]+)"?', disposition)
         if match:
-            fallback_name = match.group(1)
+            fallback_name = match.group(1).replace("\\", "/").rsplit("/", 1)[-1] or fallback_name
         temp_dir = tempfile.mkdtemp(prefix="source-code-local-agent-download-")
         temp_path = None
         try:
@@ -115,9 +116,15 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
 
             temp_path = Path(temp_dir) / fallback_name
             with temp_path.open("wb") as handle:
+                size_bytes = 0
                 for chunk in response.iter_content(chunk_size=1024 * 1024):
                     if chunk:
+                        size_bytes += len(chunk)
+                        require_repo_download_size(size_bytes)
                         handle.write(chunk)
+        except Exception:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
         finally:
             response.close()
         return temp_dir, temp_path, content_type, fallback_name
@@ -182,12 +189,19 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
 
                 signed = fetch_repo_download_signed_url(scope["filename"])
                 if signed is not None:
-                    _, signed_url = signed
+                    signed_metadata, signed_url = signed
+                    require_repo_download_size(int(signed_metadata["size_bytes"]))
                     return redirect(signed_url, code=302)
 
                 temp_dir = tempfile.mkdtemp(prefix="source-code-repo-download-")
                 temp_path = Path(temp_dir) / scope["filename"]
-                metadata = fetch_repo_download_archive_to_file(scope["filename"], temp_path)
+                try:
+                    metadata = fetch_repo_download_archive_to_file(scope["filename"], temp_path)
+                    if metadata is not None:
+                        require_repo_download_size(temp_path.stat().st_size)
+                except Exception:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    raise
                 if metadata is not None:
                     @after_this_request
                     def _cleanup_repo_download_temp(response):
@@ -200,6 +214,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
                         download_name=str(metadata.get("filename") or scope["filename"]),
                         as_attachment=True,
                     )
+                shutil.rmtree(temp_dir, ignore_errors=True)
             if _local_agent_source_code_qa_enabled(settings):
                 response = _build_local_agent_client(settings).source_code_qa_repo_download(scope["scope_key"])
                 temp_dir, temp_path, content_type, download_name = _download_local_agent_archive(
