@@ -9,7 +9,7 @@ from flask import after_this_request, redirect
 
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.source_code_qa_patterns import PLACEHOLDER_HOST_PATTERN
-from bpmis_jira_tool.source_code_qa_repo_downloads import require_repo_download_size
+from bpmis_jira_tool.source_code_qa_repo_downloads import require_repo_download_size, validate_repo_download_archive
 
 
 def _reject_placeholder_repo_urls(repositories: object) -> None:
@@ -122,6 +122,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
                         size_bytes += len(chunk)
                         require_repo_download_size(size_bytes)
                         handle.write(chunk)
+            validate_repo_download_archive(temp_path)
         except Exception:
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise
@@ -201,7 +202,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
                 try:
                     metadata = fetch_repo_download_archive_to_file(scope["filename"], temp_path)
                     if metadata is not None:
-                        require_repo_download_size(temp_path.stat().st_size)
+                        validate_repo_download_archive(temp_path, expected_scope=scope["scope_key"])
                 except Exception:
                     shutil.rmtree(temp_dir, ignore_errors=True)
                     raise

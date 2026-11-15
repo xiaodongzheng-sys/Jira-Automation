@@ -112,6 +112,10 @@ class RiskAllTests(unittest.TestCase):
                     content = base64.b64encode(os.urandom(2048))
                     files.append({'path': path, 'bytes': len(content)})
                     archive.writestr(path, content)
+                readme = f'{repo}/README.md'
+                content = base64.b64encode(os.urandom(3000))
+                files.append({'path': readme, 'bytes': len(content)})
+                archive.writestr(readme, content)
                 item = {'archive_root': repo, 'display_name': repo, 'source_files': len(files),
                         'file_index': f'indexes/{repo}.files.jsonl',
                         'symbol_index': f'indexes/{repo}.symbols.jsonl'}
@@ -126,7 +130,7 @@ class RiskAllTests(unittest.TestCase):
             self.assertIsNone(archive.testzip())
             repos = json.loads(archive.read('manifest.json'))['repos']
             self.assertEqual(len(repos), 3)
-            self.assertTrue(all(repo['source_files'] > 0 for repo in repos))
+            self.assertTrue(all(repo['code_files'] > 0 for repo in repos))
 
     def test_migration_preserves_indexes_and_history_and_purges_all_uploads(self):
         entries = {

@@ -174,9 +174,9 @@ def gcs_upload_bytes(bucket_name: str, content: bytes, remote_path: str, *, cont
 
 def publish_repo_download_archive(metadata: dict[str, Any], content: bytes) -> bool:
     """Best-effort publish of a freshly built repo source bundle (Mac side)."""
-    from bpmis_jira_tool.source_code_qa_repo_downloads import require_repo_download_size
+    from bpmis_jira_tool.source_code_qa_repo_downloads import repo_download_validation_metadata
 
-    require_repo_download_size(len(content))
+    metadata = {**metadata, **repo_download_validation_metadata(content)}
     bucket_name = public_gcs_publish_bucket()
     if not bucket_name:
         return False
@@ -185,13 +185,14 @@ def publish_repo_download_archive(metadata: dict[str, Any], content: bytes) -> b
         return False
     ok = gcs_upload_bytes(bucket_name, content, f"repo-downloads/{filename}", content_type="application/zip")
     if ok:
-        gcs_upload_bytes(
+        ok = gcs_upload_bytes(
             bucket_name,
             json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8"),
             f"repo-downloads/{filename}.json",
             content_type="application/json",
         )
-        logger.info("Published repo download bundle %s to gs://%s", filename, bucket_name)
+        if ok:
+            logger.info("Published repo download bundle %s to gs://%s", filename, bucket_name)
     return ok
 
 
@@ -214,11 +215,30 @@ def fetch_repo_download_status(filename: str) -> dict[str, Any] | None:
     if metadata_bytes:
         try:
             parsed = json.loads(metadata_bytes.decode("utf-8"))
+            status["available"] = status["available"] and isinstance(parsed, dict)
             if isinstance(parsed, dict):
                 status["generated_at"] = parsed.get("generated_at")
-        except (ValueError, UnicodeDecodeError):
-            pass
+                status["available"] = status["available"] and _verified_repo_download_metadata(blob, parsed)
+        except (ValueError, TypeError, UnicodeDecodeError):
+            status["available"] = False
+    if not metadata_bytes:
+        status["available"] = False
     return status
+
+
+def _verified_repo_download_metadata(blob, metadata: dict[str, Any]) -> bool:
+    from bpmis_jira_tool.source_code_qa_repo_downloads import BUNDLE_FORMAT, MAX_BUNDLE_BYTES
+
+    return bool(
+        metadata.get("format") == BUNDLE_FORMAT
+        and metadata.get("source_verified") is True
+        and metadata.get("repo_count", 0) > 0
+        and metadata.get("source_files", 0) > 0
+        and metadata.get("md5_base64")
+        and metadata["md5_base64"] == getattr(blob, "md5_hash", None)
+        and metadata.get("size_bytes") == int(blob.size or 0)
+        and 0 < int(blob.size or 0) < MAX_BUNDLE_BYTES
+    )
 
 
 def fetch_repo_download_archive(filename: str) -> tuple[dict[str, Any], bytes] | None:
@@ -238,6 +258,9 @@ def fetch_repo_download_archive(filename: str) -> tuple[dict[str, Any], bytes] |
                 metadata.update(parsed)
         except (ValueError, UnicodeDecodeError):
             pass
+    from bpmis_jira_tool.source_code_qa_repo_downloads import repo_download_validation_metadata
+
+    metadata.update(repo_download_validation_metadata(content))
     return metadata, content
 
 
@@ -261,6 +284,9 @@ def fetch_repo_download_archive_to_file(filename: str, local_path: Path) -> dict
                 metadata.update(parsed)
         except (ValueError, UnicodeDecodeError):
             pass
+    from bpmis_jira_tool.source_code_qa_repo_downloads import validate_repo_download_archive
+
+    validate_repo_download_archive(Path(local_path))
     return metadata
 
 
@@ -279,7 +305,6 @@ def fetch_repo_download_signed_url(filename: str, *, expiration_seconds: int = 9
             return None
         blob.reload()
         size_bytes = int(blob.size)
-        url = blob.generate_signed_url(version="v4", expiration=expiration_seconds, method="GET", generation=blob.generation)
     except Exception:
         logger.warning("Could not generate signed URL for gs://%s/repo-downloads/%s", bucket_name, filename, exc_info=True)
         return None
@@ -295,6 +320,13 @@ def fetch_repo_download_signed_url(filename: str, *, expiration_seconds: int = 9
     from bpmis_jira_tool.source_code_qa_repo_downloads import require_repo_download_size
 
     require_repo_download_size(size_bytes)
+    if not _verified_repo_download_metadata(blob, metadata):
+        return None
+    try:
+        url = blob.generate_signed_url(version="v4", expiration=expiration_seconds, method="GET", generation=blob.generation)
+    except Exception:
+        logger.warning("Could not sign verified repo bundle %s", filename, exc_info=True)
+        return None
     metadata["size_bytes"] = size_bytes
     return metadata, url
 

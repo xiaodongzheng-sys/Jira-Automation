@@ -204,12 +204,15 @@ class MarketTeamTests(unittest.TestCase):
 
     def test_signed_gcs_download_checks_actual_blob_size_and_pins_generation(self):
         blob = SimpleNamespace(
-            exists=lambda: True, reload=lambda: None, size=20_000_000, generation=7,
+            exists=lambda: True, reload=lambda: None, size=20_000_000, generation=7, md5_hash="verified-md5",
             generate_signed_url=lambda **kwargs: "https://signed.company.test/archive",
         )
         with patch.dict(os.environ, {"TEAM_PORTAL_PUBLIC_GCS_BUCKET": "test"}), patch.object(
             gcs, "_bucket", return_value=SimpleNamespace(blob=lambda filename: blob)
-        ), patch.object(gcs, "gcs_read_bytes", return_value=b'{"size_bytes":1}'):
+        ), patch.object(gcs, "gcs_read_bytes", return_value=json.dumps({
+            "format": bundles.BUNDLE_FORMAT, "source_verified": True, "repo_count": 1,
+            "source_files": 1, "size_bytes": 1024, "md5_base64": "verified-md5",
+        }).encode()):
             with self.assertRaises(ToolError):
                 gcs.fetch_repo_download_signed_url("bundle.zip")
             blob.size = 1024
@@ -265,6 +268,85 @@ class MarketTeamTests(unittest.TestCase):
             with self.assertRaises(ToolError):
                 gcs.publish_repo_download_archive({"filename": "bundle.zip"}, b"1234567890")
             upload.assert_not_called()
+
+    def test_all_six_scopes_build_verified_source_bundles(self):
+        for scope in bundles.REPO_DOWNLOAD_SCOPES:
+            with self.subTest(scope=scope["scope_key"]):
+                self.seed(scope["scope_key"].split(":")[0])
+                metadata, content = bundles.build_repo_download_zip(self.service, scope["scope_key"])
+                self.assertLess(len(content), 20_000_000)
+                self.assertTrue(metadata["source_verified"])
+                self.assertGreater(metadata["code_files"], 0)
+                bundles.validate_repo_download_archive(content, expected_scope=scope["scope_key"])
+
+    def test_download_indexes_do_not_require_a_full_qa_index(self):
+        self.seed()
+        with patch.object(self.service, "_repo_index_info", side_effect=AssertionError("must not read QA index")):
+            metadata, content = bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
+        self.assertTrue(metadata["source_verified"])
+        self.assertGreater(metadata["code_files"], 0)
+        bundles.validate_repo_download_archive(content, expected_scope="SG_MARKET:All")
+
+    def test_readme_only_and_index_only_archives_are_rejected(self):
+        self.seed()
+        _, content = bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
+        for drop_source in [True, False]:
+            output = io.BytesIO()
+            with zipfile.ZipFile(io.BytesIO(content)) as source, zipfile.ZipFile(output, "w") as target:
+                for name in source.namelist():
+                    if drop_source and name.endswith(".py"):
+                        continue
+                    if not drop_source and name == "manifest.json":
+                        manifest = json.loads(source.read(name))
+                        manifest["format"] = "source-and-index-v3"
+                        target.writestr(name, json.dumps(manifest))
+                    else:
+                        target.writestr(name, source.read(name))
+            with self.assertRaises(ToolError):
+                bundles.validate_repo_download_archive(output.getvalue())
+            with patch.dict(os.environ, {"TEAM_PORTAL_PUBLIC_GCS_PUBLISH_BUCKET": "test"}), patch.object(gcs, "gcs_upload_bytes") as upload:
+                with self.assertRaises(ToolError):
+                    gcs.publish_repo_download_archive({"filename": "bundle.zip"}, output.getvalue())
+                upload.assert_not_called()
+
+    def test_corrupt_cache_is_rebuilt_with_source(self):
+        self.seed()
+        _, original = bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
+        next((self.service.data_root / "repo_download_cache").glob("*.zip")).write_bytes(b"invalid")
+        _, rebuilt = bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
+        self.assertEqual(bundles.validate_repo_download_archive(original)["repos"], bundles.validate_repo_download_archive(rebuilt)["repos"])
+
+    def test_source_checksum_and_unlisted_content_are_rejected(self):
+        self.seed()
+        _, content = bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
+        for corrupt_source in [True, False]:
+            output = io.BytesIO()
+            with zipfile.ZipFile(io.BytesIO(content)) as source, zipfile.ZipFile(output, "w") as target:
+                for name in source.namelist():
+                    target.writestr(name, b"changed" if corrupt_source and name.endswith("decision.py") else source.read(name))
+                if not corrupt_source:
+                    target.writestr("uploads/material.sql", "must not be served")
+            with self.assertRaises(ToolError):
+                bundles.validate_repo_download_archive(output.getvalue())
+
+    def test_configuration_only_repository_is_identified(self):
+        root = self.seed()
+        (root / "src/decision.py").unlink()
+        subprocess.run(["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qam", "configuration only"], check=True, capture_output=True)
+        _, content = bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
+        repo = bundles.validate_repo_download_archive(content)["repos"][0]
+        self.assertEqual(repo["source_kind"], "configuration")
+        self.assertEqual(repo["code_files"], 0)
+        (root / "application.yml").unlink()
+        subprocess.run(["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qam", "docs only"], check=True, capture_output=True)
+        with self.assertRaisesRegex(ToolError, "no downloadable source"):
+            bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
+
+    def test_signed_url_rejects_unverified_or_mismatched_metadata(self):
+        blob = SimpleNamespace(exists=lambda: True, reload=lambda: None, size=1024, generation=7, md5_hash="actual", generate_signed_url=lambda **kwargs: "https://signed.test")
+        for sidecar in [{}, {"format": bundles.BUNDLE_FORMAT, "source_verified": True, "repo_count": 1, "source_files": 2, "size_bytes": 1024, "md5_base64": "old-archive"}]:
+            with patch.dict(os.environ, {"TEAM_PORTAL_PUBLIC_GCS_BUCKET": "test"}), patch.object(gcs, "_bucket", return_value=SimpleNamespace(blob=lambda filename: blob)), patch.object(gcs, "gcs_read_bytes", return_value=json.dumps(sidecar).encode()):
+                self.assertIsNone(gcs.fetch_repo_download_signed_url("bundle.zip"))
 
 
 if __name__ == "__main__":

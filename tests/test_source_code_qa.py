@@ -311,19 +311,11 @@ class SourceCodeQARouteTests(unittest.TestCase):
         archive_dir = Path(self.temp_dir.name) / "source_code_qa" / "repo_downloads"
         archive_dir.mkdir(parents=True, exist_ok=True)
         archive_path = archive_dir / "source-code-repos-AF-All.zip"
-        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr(
-                "manifest.json",
-                json.dumps(
-                    {
-                        "generated_at": "2026-07-14T10:00:00Z",
-                        "repos": [{"display_name": "real-af-repo"}],
-                        "scope_key": "AF:All",
-                        "scope_label": "AF-All",
-                    }
-                ),
-            )
-            archive.writestr("real-af-repo/README.md", "real bundle")
+        from bpmis_jira_tool.source_code_qa_repo_downloads import build_repo_download_zip
+
+        self._seed_repo_download_scope(display_name="real-af-repo")
+        _, content = build_repo_download_zip(self.app.config["SOURCE_CODE_QA_SERVICE"], "AF:All")
+        archive_path.write_bytes(content)
 
         with self.app.test_client() as client, patch.dict(
             os.environ,
@@ -372,17 +364,22 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(download.headers["Location"], "https://signed.example.com/af-all.zip")
 
     def test_repo_download_falls_back_to_local_agent_when_gcs_unavailable(self):
+        from bpmis_jira_tool.source_code_qa_repo_downloads import build_repo_download_zip
+
+        self._seed_repo_download_scope()
+        _, content = build_repo_download_zip(self.app.config["SOURCE_CODE_QA_SERVICE"], "AF:All")
+
         class _FakeStreamingResponse:
             def __init__(self):
                 self.headers = {
                     "Content-Type": "application/zip",
                     "Content-Disposition": "attachment; filename=source-code-repos-AF-All.zip",
-                    "Content-Length": "9",
+                    "Content-Length": str(len(content)),
                 }
                 self.closed = False
 
             def iter_content(self, chunk_size=0):
-                yield b"zip-bytes"
+                yield content
 
             def close(self):
                 self.closed = True
@@ -414,9 +411,9 @@ class SourceCodeQARouteTests(unittest.TestCase):
             download = client.get("/api/source-code-qa/repo-downloads/AF:All")
 
         self.assertEqual(download.status_code, 200)
-        self.assertEqual(download.data, b"zip-bytes")
+        self.assertEqual(download.data, content)
         self.assertEqual(download.headers["Content-Type"], "application/zip")
-        self.assertEqual(download.headers["Content-Length"], "9")
+        self.assertEqual(download.headers["Content-Length"], str(len(content)))
         self.assertTrue(fake_response.closed)
 
     def test_sync_refresh_uses_sync_job_status_endpoint(self):
