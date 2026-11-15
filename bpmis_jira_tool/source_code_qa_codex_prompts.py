@@ -154,8 +154,6 @@ def build_codex_sql_generation_brief(
         "- Still inspect source code before answering. Candidate paths and data dictionary rows are hints, not proof.",
         "- Use read-only `rg` and file reads inside the allowed scope roots to verify mapper/XML/DAO/repository/source SQL, table joins, filters, enums, and timestamp assumptions.",
         "- Start direct_answer with the table/row selection logic and business meaning. Do not start with country DB routing, no-country-filter, or execution caveats.",
-        "- For AF and GRC, data_dictionary uploads apply to SG, ID, PH, and All; table and field definitions are shared across countries.",
-        "- For AF and GRC, the selected country runs against that country's separate DB instance. Mention this as an execution caveat only after the SQL/table logic if relevant.",
         "- For GRC reviewer SQL questions, RC and Compliance are business aliases for the same review stage.",
         "- Put generated SQL in a fenced ```sql block or a `sql` field so the portal can build query.sql.",
         "- If a requested column is not explicitly defined, state the best code-backed approximation and list the missing evidence.",

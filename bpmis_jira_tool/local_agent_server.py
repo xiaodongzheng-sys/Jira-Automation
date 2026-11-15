@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from bpmis_jira_tool.source_code_qa_scope import current_source_context
+
 import base64
 import io
 import json
@@ -312,6 +314,8 @@ def create_local_agent_app() -> Flask:
     @app.post("/api/local-agent/source-code-qa/query")
     def source_code_qa_query():
         payload = request.get_json(silent=True) or {}
+        if payload.get("runtime_evidence"):
+            return jsonify({"status": "error", "message": "DB / Apollo Uploads has been removed."}), HTTPStatus.BAD_REQUEST
         service = _source_code_qa_service(payload.get("llm_provider"))
         service = service.with_codex_timeout_seconds(payload.get("codex_timeout_seconds"))
         result = service.query(
@@ -322,7 +326,7 @@ def create_local_agent_app() -> Flask:
             answer_mode=str(payload.get("answer_mode") or "auto"),
             llm_budget_mode=str(payload.get("llm_budget_mode") or "auto"),
             query_mode=str(payload.get("query_mode") or "deep"),
-            conversation_context=payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None,
+            conversation_context=current_source_context(payload.get("conversation_context")),
             attachments=payload.get("attachments") if isinstance(payload.get("attachments"), list) else None,
             runtime_evidence=payload.get("runtime_evidence") if isinstance(payload.get("runtime_evidence"), list) else None,
             effort_assessment=bool(payload.get("effort_assessment")),
@@ -332,6 +336,8 @@ def create_local_agent_app() -> Flask:
     @app.post("/api/local-agent/source-code-qa/query-async")
     def source_code_qa_query_async():
         payload = request.get_json(silent=True) or {}
+        if payload.get("runtime_evidence"):
+            return jsonify({"status": "error", "message": "DB / Apollo Uploads has been removed."}), HTTPStatus.BAD_REQUEST
         job_id = uuid.uuid4().hex
         _update_query_job(
             job_id,
@@ -1145,58 +1151,19 @@ def create_local_agent_app() -> Flask:
 
     @app.post("/api/local-agent/source-code-qa/runtime-evidence/list")
     def source_code_qa_runtime_evidence_list():
-        payload = request.get_json(silent=True) or {}
-        try:
-            evidence = _build_source_code_qa_runtime_evidence_store(settings).list(
-                pm_team=str(payload.get("pm_team") or ""),
-                country=str(payload.get("country") or ""),
-            )
-            return jsonify({"status": "ok", "evidence": evidence})
-        except ToolError as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        return jsonify({"status": "error", "message": "DB / Apollo Uploads has been removed."}), HTTPStatus.GONE
 
     @app.post("/api/local-agent/source-code-qa/runtime-evidence/save")
     def source_code_qa_runtime_evidence_save():
-        payload = request.get_json(silent=True) or {}
-        try:
-            content = base64.b64decode(str(payload.get("content_base64") or "").encode("ascii"))
-            evidence = _build_source_code_qa_runtime_evidence_store(settings).save_bytes(
-                pm_team=str(payload.get("pm_team") or ""),
-                country=str(payload.get("country") or ""),
-                source_type=str(payload.get("source_type") or ""),
-                uploaded_by=str(payload.get("uploaded_by") or ""),
-                filename=str(payload.get("filename") or "runtime-evidence"),
-                mime_type=str(payload.get("mime_type") or ""),
-                content=content,
-            )
-            return jsonify({"status": "ok", "evidence": evidence})
-        except ToolError as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        return jsonify({"status": "error", "message": "DB / Apollo Uploads has been removed."}), HTTPStatus.GONE
 
     @app.post("/api/local-agent/source-code-qa/runtime-evidence/resolve")
     def source_code_qa_runtime_evidence_resolve():
-        payload = request.get_json(silent=True) or {}
-        try:
-            evidence = _build_source_code_qa_runtime_evidence_store(settings).resolve_scope(
-                pm_team=str(payload.get("pm_team") or ""),
-                country=str(payload.get("country") or ""),
-            )
-            return jsonify({"status": "ok", "evidence": evidence})
-        except ToolError as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        return jsonify({"status": "error", "message": "DB / Apollo Uploads has been removed."}), HTTPStatus.GONE
 
     @app.post("/api/local-agent/source-code-qa/runtime-evidence/delete")
     def source_code_qa_runtime_evidence_delete():
-        payload = request.get_json(silent=True) or {}
-        try:
-            deleted = _build_source_code_qa_runtime_evidence_store(settings).delete(
-                pm_team=str(payload.get("pm_team") or ""),
-                country=str(payload.get("country") or ""),
-                evidence_id=str(payload.get("evidence_id") or ""),
-            )
-            return jsonify({"status": "ok", "deleted": deleted})
-        except ToolError as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        return jsonify({"status": "error", "message": "DB / Apollo Uploads has been removed."}), HTTPStatus.GONE
 
     @app.post("/api/local-agent/seatalk/overview")
     def seatalk_overview():
@@ -1868,7 +1835,7 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                 answer_mode=str(payload.get("answer_mode") or "auto"),
                 llm_budget_mode=str(payload.get("llm_budget_mode") or "auto"),
                 query_mode=str(payload.get("query_mode") or "deep"),
-                conversation_context=payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None,
+                conversation_context=current_source_context(payload.get("conversation_context")),
                 attachments=payload.get("attachments") if isinstance(payload.get("attachments"), list) else None,
                 runtime_evidence=payload.get("runtime_evidence") if isinstance(payload.get("runtime_evidence"), list) else None,
                 effort_assessment=bool(payload.get("effort_assessment")),

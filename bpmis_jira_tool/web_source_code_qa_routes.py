@@ -488,56 +488,14 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
         access_gate = _require_source_code_qa_manage_access(settings, api=True)
         if access_gate is not None:
             return access_gate
-        store = _get_source_code_qa_runtime_evidence_store()
-        if request.method == "GET":
-            try:
-                evidence = store.list(
-                    pm_team=str(request.args.get("pm_team") or ""),
-                    country=str(request.args.get("country") or ""),
-                )
-                return jsonify({"status": "ok", "evidence": evidence})
-            except ToolError as error:
-                return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-
-        uploaded = request.files.get("file")
-        if uploaded is None:
-            return jsonify({"status": "error", "message": "Upload a file field named file."}), HTTPStatus.BAD_REQUEST
-        try:
-            evidence = store.save_bytes(
-                pm_team=str(request.form.get("pm_team") or ""),
-                country=str(request.form.get("country") or ""),
-                source_type=str(request.form.get("source_type") or "other"),
-                uploaded_by=_current_google_email() or "local",
-                filename=uploaded.filename or "runtime-evidence",
-                mime_type=uploaded.mimetype or "",
-                content=uploaded.read(),
-            )
-            return jsonify({"status": "ok", "evidence": evidence, "items": store.list(pm_team=evidence["pm_team"], country=evidence["country"])})
-        except ToolError as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        return jsonify({"status": "error", "message": "DB / Apollo Uploads has been removed."}), HTTPStatus.GONE
 
     @app.delete("/api/source-code-qa/runtime-evidence/<evidence_id>")
     def source_code_qa_runtime_evidence_delete_api(evidence_id: str):
         access_gate = _require_source_code_qa_manage_access(settings, api=True)
         if access_gate is not None:
             return access_gate
-        try:
-            pm_team = str(request.args.get("pm_team") or "")
-            country = str(request.args.get("country") or "")
-            deleted = _get_source_code_qa_runtime_evidence_store().delete(
-                pm_team=pm_team,
-                country=country,
-                evidence_id=evidence_id,
-            )
-            return jsonify(
-                {
-                    "status": "ok",
-                    "deleted": deleted,
-                    "evidence": _get_source_code_qa_runtime_evidence_store().list(pm_team=pm_team, country=country),
-                }
-            )
-        except ToolError as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        return jsonify({"status": "error", "message": "DB / Apollo Uploads has been removed."}), HTTPStatus.GONE
 
     @app.post("/api/source-code-qa/query")
     def source_code_qa_query_api():
@@ -545,6 +503,8 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
         if access_gate is not None:
             return access_gate
         payload = request.get_json(silent=True) or {}
+        if payload.get("runtime_evidence"):
+            return jsonify({"status": "error", "message": "DB / Apollo Uploads has been removed."}), HTTPStatus.BAD_REQUEST
         if payload.get("async"):
             if not _source_code_qa_provider_available(payload.get("llm_provider")):
                 return jsonify({"status": "error", "message": "Selected Source Code Q&A model is unavailable."}), HTTPStatus.BAD_REQUEST
@@ -587,12 +547,17 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
             conversation_context = payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None
             if conversation_context is None and session_id:
                 conversation_context = session_store.get_context(session_id, owner_email=owner_email)
+            from bpmis_jira_tool.source_code_qa_scope import current_source_context
+            conversation_context = current_source_context(conversation_context)
             if isinstance(payload.get("_resolved_attachments"), list):
                 attachments = payload.get("_resolved_attachments") or []
             else:
                 attachments = _resolve_source_code_qa_query_attachments(payload, owner_email=owner_email, session_id=session_id)
             pm_team = str(payload.get("pm_team") or "")
             country = str(payload.get("country") or "")
+            if pm_team.upper() in {"CRMS", "GRC"}:
+                country = SourceCodeQAService.normalize_country(pm_team, country)
+                payload = {**payload, "country": country}
             query_mode = _source_code_qa_query_mode(payload.get("query_mode"))
             runtime_evidence = _resolve_source_code_qa_runtime_evidence(pm_team=pm_team, country=country)
             auto_sync = _prepare_source_code_qa_auto_sync(service, pm_team=pm_team, country=country)

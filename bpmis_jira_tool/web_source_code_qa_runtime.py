@@ -215,24 +215,6 @@ def _source_code_qa_runtime_capabilities_payload() -> dict[str, dict[str, dict[s
         }
         for team in teams
     }
-    try:
-        store = _get_source_code_qa_runtime_evidence_store()
-        for team in teams:
-            for country in countries:
-                try:
-                    evidence_items = store.list(pm_team=team, country=country)
-                except ToolError:
-                    evidence_items = []
-                for item in evidence_items:
-                    source_type = str(item.get("source_type") or "").strip().lower()
-                    if source_type == "apollo":
-                        capabilities[team][country]["hasConfig"] = True
-                    elif source_type == "db":
-                        capabilities[team][country]["hasDB"] = True
-                    elif source_type == "data_dictionary":
-                        capabilities[team][country]["hasDictionary"] = True
-    except Exception:  # noqa: BLE001 - capability badges are advisory only.
-        return capabilities
     return capabilities
 
 
@@ -292,16 +274,8 @@ def _source_code_qa_public_attachments(attachments: list[dict[str, Any]]) -> lis
 
 
 def _resolve_source_code_qa_runtime_evidence(*, pm_team: str, country: str) -> list[dict[str, Any]]:
-    normalized_country = str(country or "").strip().upper()
-    if normalized_country in {"", ALL_COUNTRY.upper()}:
-        return []
-    try:
-        return _get_source_code_qa_runtime_evidence_store().resolve_scope(pm_team=pm_team, country=country)
-    except ToolError:
-        raise
-    except Exception as error:  # noqa: BLE001 - runtime evidence must not break code Q&A.
-        current_app.logger.warning("Source Code Q&A runtime evidence could not be loaded: %s", error)
-        return []
+    # The dedicated upload evidence feature has been retired for every team.
+    return []
 
 
 def _source_code_qa_public_runtime_evidence(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -378,7 +352,9 @@ def _build_source_code_qa_session_context(result: dict[str, Any], request_payloa
             if isinstance(item, dict) and str(item.get("trace_stage") or "") == "followup_memory"
         ]
     session_id = str(codex_trace.get("session_id") or "").strip()
+    from bpmis_jira_tool.source_code_qa_scope import SOURCE_CONTEXT_VERSION
     return {
+        "source_context_version": SOURCE_CONTEXT_VERSION,
         "key": f"{request_payload.get('pm_team') or ''}:{request_payload.get('country') or ALL_COUNTRY}",
         "pm_team": request_payload.get("pm_team") or "",
         "country": request_payload.get("country") or ALL_COUNTRY,

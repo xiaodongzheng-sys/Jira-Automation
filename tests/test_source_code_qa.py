@@ -542,13 +542,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("const formatSessionTime = (value) => {\n    return formatSingaporeTimestamp(value);\n  };", script)
         self.assertIn("timeZone: 'Asia/Singapore'", script)
         self.assertIn("${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} SGT", script)
-        self.assertIn("formatSingaporeTimestamp(item.created_at || '')", script)
         self.assertNotIn("(item.created_at || '').replace('T', ' ').replace('Z', '')", script)
-        self.assertIn("data-source-runtime-delete-team", script)
-        self.assertIn("data-source-runtime-delete-country", script)
-        self.assertIn("const deleteRuntimeEvidence = async (evidenceId, itemScope = {}) =>", script)
-        self.assertIn("pm_team: itemScope.pm_team || scope.pm_team", script)
-        self.assertIn("await loadRuntimeEvidence();", script)
+        self.assertNotIn("await loadRuntimeEvidence();", script)
         self.assertIn("data-source-message-role", script)
         self.assertIn("data-source-message-live", script)
         self.assertNotIn("Continue with Deep Mode", script)
@@ -821,7 +816,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
                 },
                 content_type="multipart/form-data",
             )
-            evidence_id = saved_runtime.get_json()["evidence"]["id"]
+            evidence_id = "retired"
             runtime_deleted = client.delete(f"/api/source-code-qa/runtime-evidence/{evidence_id}?pm_team=AF&country=All")
             runtime_delete_error = client.delete("/api/source-code-qa/runtime-evidence/not-a-valid-id?pm_team=AF&country=All")
 
@@ -833,12 +828,11 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(missing_attachment.status_code, 404)
         self.assertEqual(missing_artifact_session.status_code, 400)
         self.assertEqual(missing_artifact.status_code, 404)
-        self.assertEqual(runtime_list_error.status_code, 400)
-        self.assertEqual(runtime_missing_file.status_code, 400)
-        self.assertEqual(saved_runtime.status_code, 200)
-        self.assertEqual(runtime_deleted.status_code, 200)
-        self.assertTrue(runtime_deleted.get_json()["deleted"])
-        self.assertEqual(runtime_delete_error.status_code, 400)
+        self.assertEqual(runtime_list_error.status_code, 410)
+        self.assertEqual(runtime_missing_file.status_code, 410)
+        self.assertEqual(saved_runtime.status_code, 410)
+        self.assertEqual(runtime_deleted.status_code, 410)
+        self.assertEqual(runtime_delete_error.status_code, 410)
         self.assertEqual(feedback_error.status_code, 400)
 
     def test_source_code_qa_route_async_queue_and_event_stream_boundaries(self):
@@ -1171,7 +1165,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("Do not include visible sections named Evidence", prompt)
         self.assertNotIn("5. Confirmed / Inferred / Missing Evidence", prompt)
 
-    def test_effort_assessment_builds_optimized_prompt_and_passes_runtime_evidence(self):
+    def test_effort_assessment_builds_optimized_prompt_without_retired_uploads(self):
         captured_calls = []
 
         def fake_query(**kwargs):
@@ -1240,7 +1234,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
                     time.sleep(0.05)
                 events_response = client.get(f"/api/source-code-qa/effort-assessment-jobs/{payload['job_id']}/events")
 
-        self.assertEqual(upload.status_code, 200)
+        self.assertEqual(upload.status_code, 410)
         self.assertEqual(snapshot.get("state"), "completed")
         result = snapshot["results"][0]
         self.assertEqual(result["assessment"]["type"], "effort_assessment")
@@ -1249,7 +1243,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("business_plan", result["assessment"])
         self.assertIn("technical_candidates", result["assessment"])
         self.assertIn("estimation_rubric", result["assessment"])
-        self.assertEqual(result["runtime_evidence"][0]["filename"], "apollo.properties")
+        self.assertEqual(result["runtime_evidence"], [])
         self.assertGreaterEqual(len(captured_calls), 2)
         evidence_call = captured_calls[0]
         synthesis_call = captured_calls[1]
@@ -1274,7 +1268,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(synthesis_call["pm_team"], "AF")
         self.assertEqual(synthesis_call["country"], "SG")
         self.assertEqual(synthesis_call["query_mode"], "deep")
-        self.assertIn("new.feature.enabled=true", synthesis_call["runtime_evidence"][0]["text"])
+        self.assertEqual(synthesis_call["runtime_evidence"], [])
         self.assertIn("effort_evidence_query", result)
         self.assertIn("effort_evidence_matrix", result)
         self.assertIn("effort_evidence_matrix_quality", result)
@@ -1527,7 +1521,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
                 llm_provider="codex_cli_bridge",
                 question="first question",
                 result={"status": "ok", "summary": "first", "llm_answer": "first answer", "trace_id": "trace-1", "matches": []},
-                context={"question": "first question", "trace_id": "trace-1", "matches_snapshot": [{"path": "src/First.java"}]},
+                context={"source_context_version": 1, "question": "first question", "trace_id": "trace-1", "matches_snapshot": [{"path": "src/First.java"}]},
             )
             with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today", return_value={"attempted": False, "status": "fresh"}), patch(
                 "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
@@ -1629,209 +1623,9 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(payload["attachments"][0]["id"], uploaded["id"])
         self.assertEqual(payload["session"]["messages"][-2]["attachments"][0]["filename"], "context.md")
 
-    def test_runtime_evidence_upload_is_scoped_and_passed_to_query(self):
-        captured = {}
 
-        def fake_query(**kwargs):
-            captured.update(kwargs)
-            return {
-                "status": "ok",
-                "answer_mode": "auto",
-                "summary": "answer summary",
-                "llm_answer": "direct answer",
-                "llm_provider": "codex_cli_bridge",
-                "llm_model": "codex-cli",
-                "trace_id": "trace-runtime",
-                "matches": [],
-            }
 
-        with self.app.test_client() as client:
-            self._login(client, "xiaodong.zheng@npt.sg")
-            sg_upload = client.post(
-                "/api/source-code-qa/runtime-evidence",
-                data={
-                    "pm_team": "AF",
-                    "country": "SG",
-                    "source_type": "apollo",
-                    "file": (io.BytesIO(b"apollo.sg.rule.enabled=true"), "apollo.properties"),
-                },
-                content_type="multipart/form-data",
-            )
-            ph_upload = client.post(
-                "/api/source-code-qa/runtime-evidence",
-                data={
-                    "pm_team": "AF",
-                    "country": "PH",
-                    "source_type": "db",
-                    "file": (io.BytesIO(b"rule_id,status\nC0204v2,online"), "rules.csv"),
-                },
-                content_type="multipart/form-data",
-            )
-            listed = client.get("/api/source-code-qa/runtime-evidence?pm_team=AF&country=SG")
-            with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today", return_value={"attempted": False, "status": "fresh"}), patch(
-                "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
-                side_effect=fake_query,
-            ):
-                response = client.post(
-                    "/api/source-code-qa/query",
-                    json={
-                        "pm_team": "AF",
-                        "country": "SG",
-                        "question": "compare runtime config",
-                        "llm_provider": "codex_cli_bridge",
-                    },
-                )
 
-        self.assertEqual(sg_upload.status_code, 200)
-        self.assertEqual(ph_upload.status_code, 200)
-        self.assertEqual(listed.status_code, 200)
-        self.assertEqual(listed.get_json()["evidence"][0]["country"], "SG")
-        self.assertEqual(response.status_code, 200)
-        countries = {item["country"] for item in captured["runtime_evidence"]}
-        self.assertEqual(countries, {"SG"})
-        self.assertTrue(any("apollo.sg.rule.enabled" in item.get("text", "") for item in captured["runtime_evidence"]))
-        self.assertEqual(response.get_json()["runtime_evidence"][0]["pm_team"], "AF")
-
-    def test_runtime_evidence_all_scope_does_not_merge_country_evidence(self):
-        with self.app.test_client() as client:
-            self._login(client, "xiaodong.zheng@npt.sg")
-            for country, filename in [("SG", "sg.txt"), ("PH", "ph.txt"), ("ID", "id.txt"), ("All", "all.txt")]:
-                response = client.post(
-                    "/api/source-code-qa/runtime-evidence",
-                    data={
-                        "pm_team": "AF",
-                        "country": country,
-                        "source_type": "db",
-                        "file": (io.BytesIO(f"{country} runtime evidence".encode("utf-8")), filename),
-                    },
-                    content_type="multipart/form-data",
-                )
-                self.assertEqual(response.status_code, 200)
-                time.sleep(0.01)
-            listed = client.get("/api/source-code-qa/runtime-evidence?pm_team=AF&country=All")
-
-        self.assertEqual(listed.status_code, 200)
-        payload = listed.get_json()
-        self.assertEqual({(item["pm_team"], item["country"]) for item in payload["evidence"]}, {("AF", "All")})
-
-    def test_all_country_query_ignores_runtime_evidence_and_uses_code_only(self):
-        captured = {}
-
-        def fake_query(**kwargs):
-            captured.update(kwargs)
-            return {
-                "status": "ok",
-                "answer_mode": "auto",
-                "summary": "code-only answer",
-                "llm_answer": "code-only answer",
-                "llm_provider": "codex_cli_bridge",
-                "llm_model": "codex-cli",
-                "trace_id": "trace-all-code-only",
-                "matches": [],
-            }
-
-        with self.app.test_client() as client:
-            self._login(client, "xiaodong.zheng@npt.sg")
-            for country, filename, content in [
-                ("SG", "apollo-sg.properties", b"apollo.sg.rule.enabled=true"),
-                ("All", "apollo-all.properties", b"apollo.all.rule.enabled=true"),
-            ]:
-                upload = client.post(
-                    "/api/source-code-qa/runtime-evidence",
-                    data={
-                        "pm_team": "AF",
-                        "country": country,
-                        "source_type": "apollo",
-                        "file": (io.BytesIO(content), filename),
-                    },
-                    content_type="multipart/form-data",
-                )
-                self.assertEqual(upload.status_code, 200)
-            with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today", return_value={"attempted": False, "status": "fresh"}), patch(
-                "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
-                side_effect=fake_query,
-            ):
-                response = client.post(
-                    "/api/source-code-qa/query",
-                    json={"pm_team": "AF", "country": "All", "question": "check all-country code path", "llm_provider": "codex_cli_bridge"},
-                )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(captured["runtime_evidence"], [])
-        self.assertEqual(response.get_json()["runtime_evidence"], [])
-
-    def test_grc_and_af_country_query_uses_all_country_data_dictionary(self):
-        captured = {}
-
-        def fake_query(**kwargs):
-            captured.update(kwargs)
-            return {
-                "status": "ok",
-                "answer_mode": "auto",
-                "summary": "answer summary",
-                "llm_answer": "direct answer",
-                "llm_provider": "codex_cli_bridge",
-                "llm_model": "codex-cli",
-                "trace_id": "trace-dictionary",
-                "matches": [],
-            }
-
-        with self.app.test_client() as client:
-            self._login(client, "xiaodong.zheng@npt.sg")
-            grc_dictionary = client.post(
-                "/api/source-code-qa/runtime-evidence",
-                data={
-                    "pm_team": "GRC",
-                    "country": "All",
-                    "source_type": "data_dictionary",
-                    "file": (io.BytesIO(b"table,column,meaning\nbcf_global_lock,lock_key,Global lock key"), "grc-dictionary.csv"),
-                },
-                content_type="multipart/form-data",
-            )
-            grc_db = client.post(
-                "/api/source-code-qa/runtime-evidence",
-                data={
-                    "pm_team": "GRC",
-                    "country": "SG",
-                    "source_type": "db",
-                    "file": (io.BytesIO(b"bcf_global_lock rows from SG"), "grc-sg-db.txt"),
-                },
-                content_type="multipart/form-data",
-            )
-            af_dictionary = client.post(
-                "/api/source-code-qa/runtime-evidence",
-                data={
-                    "pm_team": "AF",
-                    "country": "All",
-                    "source_type": "data_dictionary",
-                    "file": (io.BytesIO(b"table,column,meaning\naf_rule,rule_id,Risk rule id"), "af-dictionary.csv"),
-                },
-                content_type="multipart/form-data",
-            )
-            with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today", return_value={"attempted": False, "status": "fresh"}), patch(
-                "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
-                side_effect=fake_query,
-            ):
-                grc_response = client.post(
-                    "/api/source-code-qa/query",
-                    json={"pm_team": "GRC", "country": "SG", "question": "write SQL for global lock", "llm_provider": "codex_cli_bridge"},
-                )
-                grc_runtime = list(captured["runtime_evidence"])
-                af_response = client.post(
-                    "/api/source-code-qa/query",
-                    json={"pm_team": "AF", "country": "PH", "question": "write SQL for rule", "llm_provider": "codex_cli_bridge"},
-                )
-                af_runtime = list(captured["runtime_evidence"])
-
-        self.assertEqual(grc_dictionary.status_code, 200)
-        self.assertEqual(grc_db.status_code, 200)
-        self.assertEqual(af_dictionary.status_code, 200)
-        self.assertEqual(grc_response.status_code, 200)
-        self.assertEqual(af_response.status_code, 200)
-        self.assertEqual({(item["pm_team"], item["country"], item["source_type"]) for item in grc_runtime}, {("GRC", "All", "data_dictionary"), ("GRC", "SG", "db")})
-        self.assertTrue(any("bcf_global_lock" in item.get("text", "") for item in grc_runtime))
-        self.assertEqual({(item["pm_team"], item["country"], item["source_type"]) for item in af_runtime}, {("AF", "All", "data_dictionary")})
-        self.assertTrue(any("af_rule" in item.get("text", "") for item in af_runtime))
 
     def test_data_dictionary_xlsx_extracts_many_table_sheets(self):
         workbook = Workbook()
@@ -1884,30 +1678,14 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
         self.assertIn("late_table_name", section)
         self.assertIn("Data dictionary handling", section)
-        self.assertIn("AF and GRC, data_dictionary uploads apply to all country selections", section)
-        self.assertIn("SG, ID, and PH share the same table and data-field definitions", section)
+        self.assertNotIn("AF and GRC, data_dictionary uploads apply to all country selections", section)
+        self.assertNotIn("SG, ID, and PH share the same table and data-field definitions", section)
         self.assertIn("RC and Compliance are business aliases", section)
         self.assertIn("first explain the actual SQL/table logic", section)
         self.assertIn("chosen table names, key filters, joins, reviewer/status rows, and timestamp assumptions", section)
-        self.assertIn("selected country points to that country's separate runtime DB instance", section)
-        self.assertIn("not the first sentence or main conclusion", section)
+        self.assertNotIn("selected country points to that country's separate runtime DB instance", section)
+        self.assertNotIn("not the first sentence or main conclusion", section)
 
-    def test_crms_cannot_use_all_country_runtime_evidence(self):
-        with self.app.test_client() as client:
-            self._login(client, "xiaodong.zheng@npt.sg")
-            response = client.post(
-                "/api/source-code-qa/runtime-evidence",
-                data={
-                    "pm_team": "CRMS",
-                    "country": "All",
-                    "source_type": "data_dictionary",
-                    "file": (io.BytesIO(b"table,column,meaning\ncr_customer,id,Customer id"), "crms-dictionary.csv"),
-                },
-                content_type="multipart/form-data",
-            )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("supported only for AF and GRC", response.get_json()["message"])
 
     def test_source_code_qa_sql_answer_creates_downloadable_package(self):
         def fake_query(**kwargs):
@@ -1955,7 +1733,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             artifact = payload["generated_artifacts"][0]
             download = client.get(f"/api/source-code-qa/generated-artifacts/{artifact['id']}?session_id={session_id}")
 
-        self.assertEqual(upload.status_code, 200)
+        self.assertEqual(upload.status_code, 410)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(download.status_code, 200)
         self.assertEqual(download.headers["Content-Type"], "application/zip")
@@ -1966,8 +1744,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
             self.assertIn("SELECT lock_key", sql)
             self.assertRegex(sql, r"\n\s+FROM bcf_global_lock")
             readme = archive.read("README.md").decode("utf-8")
-            self.assertIn("GRC:SG", readme)
-            self.assertIn("grc-dictionary.csv", readme)
+            self.assertIn("GRC:ALL", readme)
+            self.assertNotIn("grc-dictionary.csv", readme)
             self.assertIn("mapper/GlobalLockMapper.xml", readme)
             self.assertIn("## SQL Rough Logic", readme)
             self.assertIn("Uses table(s): bcf_global_lock", readme)
@@ -2029,39 +1807,6 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("Builds intermediate CTE(s): latest_ticket", readme)
         self.assertIn("`ticket_info`", readme)
 
-    def test_source_code_qa_config_includes_runtime_capabilities(self):
-        with self.app.test_client() as client:
-            self._login(client, "xiaodong.zheng@npt.sg")
-            apollo_upload = client.post(
-                "/api/source-code-qa/runtime-evidence",
-                data={
-                    "pm_team": "AF",
-                    "country": "SG",
-                    "source_type": "apollo",
-                    "file": (io.BytesIO(b"apollo.sg.rule.enabled=true"), "apollo.properties"),
-                },
-                content_type="multipart/form-data",
-            )
-            db_upload = client.post(
-                "/api/source-code-qa/runtime-evidence",
-                data={
-                    "pm_team": "AF",
-                    "country": "SG",
-                    "source_type": "db",
-                    "file": (io.BytesIO(b"rule_id,status\nC0204v2,online"), "rules.csv"),
-                },
-                content_type="multipart/form-data",
-            )
-            response = client.get("/api/source-code-qa/config")
-
-        self.assertEqual(apollo_upload.status_code, 200)
-        self.assertEqual(db_upload.status_code, 200)
-        self.assertEqual(response.status_code, 200)
-        capabilities = response.get_json()["options"]["runtime_capabilities"]
-        self.assertTrue(capabilities["AF"]["SG"]["hasConfig"])
-        self.assertTrue(capabilities["AF"]["SG"]["hasDB"])
-        self.assertFalse(capabilities["AF"]["PH"]["hasConfig"])
-        self.assertFalse(capabilities["CRMS"]["ID"]["hasDB"])
 
     def test_runtime_evidence_prompt_marks_apollo_as_uat_reference_only(self):
         section = SourceCodeQAService._runtime_evidence_prompt_section(
@@ -2085,59 +1830,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("choose the matching app namespace", section)
         self.assertNotIn("production DB/Apollo/config snapshots", section)
 
-    def test_runtime_evidence_apollo_zip_extracts_nested_text_configs(self):
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w") as archive:
-            archive.writestr("sg/application.properties", "apollo.sg.rule.enabled=true")
-            archive.writestr("sg/nested/rules.yaml", "challenge: C0204v2")
-            archive.writestr("sg/ignore.bin", b"\x00\x01binary")
-        zip_buffer.seek(0)
 
-        with self.app.test_client() as client:
-            self._login(client, "xiaodong.zheng@npt.sg")
-            upload = client.post(
-                "/api/source-code-qa/runtime-evidence",
-                data={
-                    "pm_team": "AF",
-                    "country": "SG",
-                    "source_type": "apollo",
-                    "file": (zip_buffer, "apollo-config.zip"),
-                },
-                content_type="multipart/form-data",
-            )
-
-        self.assertEqual(upload.status_code, 200)
-        evidence = upload.get_json()["evidence"]
-        self.assertEqual(evidence["filename"], "apollo-config.zip")
-        self.assertEqual(evidence["kind"], "archive")
-        self.assertIn("sg/application.properties", evidence["summary"])
-        self.assertIn("apollo.sg.rule.enabled=true", evidence["summary"])
-        self.assertIn("sg/nested/rules.yaml", evidence["summary"])
-
-    def test_runtime_evidence_apollo_zip_allows_larger_config_trees(self):
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w") as archive:
-            for index in range(120):
-                archive.writestr(f"apollo/apps/app-{index}/application.properties", f"feature.{index}=true")
-        zip_buffer.seek(0)
-
-        with self.app.test_client() as client:
-            self._login(client, "xiaodong.zheng@npt.sg")
-            upload = client.post(
-                "/api/source-code-qa/runtime-evidence",
-                data={
-                    "pm_team": "AF",
-                    "country": "PH",
-                    "source_type": "apollo",
-                    "file": (zip_buffer, "apollo-large.zip"),
-                },
-                content_type="multipart/form-data",
-            )
-
-        self.assertEqual(upload.status_code, 200)
-        evidence = upload.get_json()["evidence"]
-        self.assertEqual(evidence["kind"], "archive")
-        self.assertIn("apollo/apps/app-0/application.properties", evidence["summary"])
 
     def test_regular_source_code_qa_attachment_still_rejects_zip(self):
         zip_buffer = io.BytesIO()
@@ -2197,49 +1890,6 @@ class SourceCodeQARouteTests(unittest.TestCase):
         ensure_synced.assert_not_called()
         self.assertEqual(response.get_json()["auto_sync"]["status"], "skipped")
 
-    def test_af_country_query_uses_country_runtime_evidence_with_shared_repo_scope(self):
-        captured = {}
-
-        def fake_query(**kwargs):
-            captured.update(kwargs)
-            return {
-                "status": "ok",
-                "answer_mode": "auto",
-                "matches": [],
-                "trace_id": "trace-af-ph",
-                "summary": "answer",
-            }
-
-        with self.app.test_client() as client:
-            self._login(client, "xiaodong.zheng@npt.sg")
-            upload = client.post(
-                "/api/source-code-qa/runtime-evidence",
-                data={
-                    "pm_team": "AF",
-                    "country": "PH",
-                    "source_type": "apollo",
-                    "file": (io.BytesIO(b"apollo.ph.only=true"), "apollo-ph.properties"),
-                },
-                content_type="multipart/form-data",
-            )
-            self._login(client, "xiaodong.zheng@npt.sg")
-            with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.query", side_effect=fake_query), patch(
-                "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
-                return_value={"attempted": False, "status": "fresh", "key": "AF:All"},
-            ) as ensure_synced:
-                response = client.post(
-                    "/api/source-code-qa/query",
-                    json={"pm_team": "AF", "country": "PH", "question": "check PH config", "answer_mode": "auto"},
-                )
-
-        self.assertEqual(upload.status_code, 200)
-        self.assertEqual(response.status_code, 200)
-        ensure_synced.assert_not_called()
-        self.assertEqual(captured["pm_team"], "AF")
-        self.assertEqual(captured["country"], "PH")
-        self.assertEqual(captured["runtime_evidence"][0]["country"], "PH")
-        self.assertIn("apollo.ph.only=true", captured["runtime_evidence"][0]["text"])
-        self.assertEqual(response.get_json()["runtime_evidence"][0]["country"], "PH")
 
     def test_query_api_coerces_legacy_retrieval_only_to_auto(self):
         captured = {}
@@ -4847,7 +4497,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
     def test_non_crms_country_normalizes_to_shared_repository_mapping(self):
         self.assertEqual(self.service.mapping_key("AF", "PH"), "AF:All")
         self.assertEqual(self.service.mapping_key("GRC", "SG"), "GRC:All")
-        self.assertEqual(self.service.mapping_key("CRMS", "PH"), "CRMS:PH")
+        self.assertEqual(self.service.mapping_key("CRMS", "PH"), "CRMS:All")
 
     def test_sync_subprocess_timeout_is_controlled(self):
         self.service.save_mapping(
@@ -8934,8 +8584,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             country="SG",
             repositories=[{"display_name": "credit-risk-model", "url": "https://git.example.com/team/credit-risk-model.git"}],
         )
-        entry = self.service.load_config()["mappings"]["CRMS:SG"][0]
-        repo_path = self.service._repo_path("CRMS:SG", type("Entry", (), entry)())
+        entry = self.service.load_config()["mappings"]["CRMS:All"][0]
+        repo_path = self.service._repo_path("CRMS:All", type("Entry", (), entry)())
         (repo_path / ".git").mkdir(parents=True)
         feature_file = repo_path / "feature" / "retail_feature_engineering.py"
         feature_file.parent.mkdir(parents=True)
@@ -8950,7 +8600,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "        return myinfo_monthly_income\n",
             encoding="utf-8",
         )
-        self._build_index_for_entry("CRMS:SG", entry)
+        self._build_index_for_entry("CRMS:All", entry)
 
         with patch.object(self.service, "_run_agent_plan", wraps=self.service._run_agent_plan) as agent_plan:
             payload = self.service.query(
@@ -9496,7 +9146,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                     },
                     "segment_buckets": {
                         "AF:ALL": {"total": 4, "failed": 0},
-                        "CRMS:ID": {"total": 2, "failed": 0},
+                        "CRMS:ALL": {"total": 6, "failed": 0},
                         "CRMS:SG": {"total": 2, "failed": 0},
                         "CRMS:PH": {"total": 2, "failed": 0},
                         "GRC:ALL": {"total": 4, "failed": 0},
@@ -12201,8 +11851,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             country="ID",
             repositories=[{"display_name": "Credit Risk", "url": "https://git.example.com/team/credit-risk.git"}],
         )
-        entry = self.service.load_config()["mappings"]["CRMS:ID"][0]
-        repo_path = self.service._repo_path("CRMS:ID", type("Entry", (), entry)())
+        entry = self.service.load_config()["mappings"]["CRMS:All"][0]
+        repo_path = self.service._repo_path("CRMS:All", type("Entry", (), entry)())
         (repo_path / ".git").mkdir(parents=True)
 
         engine_file = repo_path / "underwriting" / "TermLoanPreCheckEngine.java"
@@ -12247,8 +11897,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             country="ID",
             repositories=[{"display_name": "Credit Risk", "url": "https://git.example.com/team/credit-risk.git"}],
         )
-        entry = self.service.load_config()["mappings"]["CRMS:ID"][0]
-        repo_path = self.service._repo_path("CRMS:ID", type("Entry", (), entry)())
+        entry = self.service.load_config()["mappings"]["CRMS:All"][0]
+        repo_path = self.service._repo_path("CRMS:All", type("Entry", (), entry)())
         (repo_path / ".git").mkdir(parents=True)
 
         engine_file = repo_path / "engine" / "TermLoanPreCheckEngine.java"
@@ -12295,7 +11945,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         )
         agent_matches = self.service._expand_agent_trace_matches(
             entries=[type("Entry", (), entry)()],
-            key="CRMS:ID",
+            key="CRMS:All",
             question="What data source does Term Loan Pre Check 1 check?",
             base_matches=base_matches,
             limit=12,
@@ -12478,8 +12128,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             country="ID",
             repositories=[{"display_name": "Credit Risk", "url": "https://git.example.com/team/credit-risk.git"}],
         )
-        entry = self.service.load_config()["mappings"]["CRMS:ID"][0]
-        repo_path = self.service._repo_path("CRMS:ID", type("Entry", (), entry)())
+        entry = self.service.load_config()["mappings"]["CRMS:All"][0]
+        repo_path = self.service._repo_path("CRMS:All", type("Entry", (), entry)())
         (repo_path / ".git").mkdir(parents=True)
 
         engine_file = repo_path / "engine" / "TermLoanPreCheckEngine.java"
@@ -12518,7 +12168,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         )
         quality_matches = self.service._run_agent_plan(
             entries=[type("Entry", (), entry)()],
-            key="CRMS:ID",
+            key="CRMS:All",
             question="What data source does Term Loan Pre Check 1 check?",
             matches=base_matches[:1],
             evidence_summary=compressed,
@@ -13222,8 +12872,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             country="PH",
             repositories=[{"display_name": "credit-risk", "url": "https://git.example.com/team/credit-risk.git"}],
         )
-        entry = service.load_config()["mappings"]["CRMS:PH"][0]
-        repo_path = service._repo_path("CRMS:PH", type("Entry", (), entry)())
+        entry = service.load_config()["mappings"]["CRMS:All"][0]
+        repo_path = service._repo_path("CRMS:All", type("Entry", (), entry)())
         (repo_path / ".git").mkdir(parents=True)
         extract_mapper = repo_path / "credit-risk-infra" / "src" / "main" / "resources" / "mapper" / "ExtractRecordDAO-ext.xml"
         extract_mapper.parent.mkdir(parents=True)
@@ -14116,8 +13766,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("Prompt mode: codex_sql_generation_brief_v1", brief)
         self.assertIn("Still inspect source code before answering", brief)
         self.assertIn("mapper/XML/DAO/repository/source SQL", brief)
-        self.assertIn("data_dictionary uploads apply to SG, ID, PH, and All", brief)
-        self.assertIn("separate DB instance", brief)
+        self.assertNotIn("data_dictionary uploads apply to SG, ID, PH, and All", brief)
+        self.assertNotIn("separate DB instance", brief)
         self.assertIn("RC and Compliance are business aliases", brief)
         self.assertIn("ticket_info", brief)
         self.assertIn("ticket_node_info", brief)
@@ -15385,7 +15035,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             {"_get_source_code_qa_runtime_evidence_store": lambda: CapabilityStore()},
         ):
             capabilities = portal_web._source_code_qa_runtime_capabilities_payload()
-        self.assertTrue(capabilities["AF"]["SG"]["hasDictionary"])
+        self.assertFalse(capabilities["AF"]["SG"]["hasDictionary"])
 
         with patch.dict(
             portal_web._source_code_qa_runtime_capabilities_payload.__globals__,
@@ -15473,8 +15123,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             portal_web._resolve_source_code_qa_runtime_evidence.__globals__,
             {"_get_source_code_qa_runtime_evidence_store": lambda: RuntimeEvidenceStore(error=ToolError("bad scope"))},
         ):
-            with self.assertRaisesRegex(ToolError, "bad scope"):
-                portal_web._resolve_source_code_qa_runtime_evidence(pm_team="AF", country="SG")
+            self.assertEqual(portal_web._resolve_source_code_qa_runtime_evidence(pm_team="AF", country="SG"), [])
         with self.app.app_context(), patch.dict(
             portal_web._resolve_source_code_qa_runtime_evidence.__globals__,
             {"_get_source_code_qa_runtime_evidence_store": lambda: RuntimeEvidenceStore(error=RuntimeError("store down"))},

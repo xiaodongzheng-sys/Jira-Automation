@@ -69,6 +69,9 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
             service = _build_source_code_qa_service(payload.get("llm_provider"))
             pm_team = str(payload.get("pm_team") or "")
             country = str(payload.get("country") or "")
+            if pm_team.upper() in {"CRMS", "GRC"}:
+                country = SourceCodeQAService.normalize_country(pm_team, country)
+                payload = {**payload, "country": country}
             query_mode = _source_code_qa_query_mode(payload.get("query_mode"))
             session_store = _get_source_code_qa_session_store()
             session_id = str(payload.get("session_id") or "").strip()
@@ -76,6 +79,8 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
             conversation_context = payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None
             if conversation_context is None and session_id:
                 conversation_context = session_store.get_context(session_id, owner_email=owner_email)
+            from bpmis_jira_tool.source_code_qa_scope import current_source_context
+            conversation_context = current_source_context(conversation_context)
             if isinstance(payload.get("_resolved_attachments"), list):
                 attachments = payload.get("_resolved_attachments") or []
             else:

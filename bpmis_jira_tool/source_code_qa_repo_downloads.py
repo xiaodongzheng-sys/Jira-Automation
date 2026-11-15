@@ -18,9 +18,7 @@ from bpmis_jira_tool.source_code_qa import SourceCodeQAService
 
 REPO_DOWNLOAD_SCOPES: tuple[dict[str, str], ...] = (
     {"label": "AF-All", "scope_key": "AF:All", "filename": "source-code-repos-AF-All.zip"},
-    {"label": "Credit Risk-ID", "scope_key": "CRMS:ID", "filename": "source-code-repos-Credit-Risk-ID.zip"},
-    {"label": "Credit Risk-SG", "scope_key": "CRMS:SG", "filename": "source-code-repos-Credit-Risk-SG.zip"},
-    {"label": "Credit Risk-PH", "scope_key": "CRMS:PH", "filename": "source-code-repos-Credit-Risk-PH.zip"},
+    {"label": "CRMS-All", "scope_key": "CRMS:All", "filename": "source-code-repos-CRMS-All.zip"},
     {"label": "GRC-All", "scope_key": "GRC:All", "filename": "source-code-repos-GRC-All.zip"},
     {"label": "SG Market", "scope_key": "SG_MARKET:All", "filename": "source-code-repos-SG-Market-All.zip"},
     {"label": "ID Market", "scope_key": "ID_MARKET:All", "filename": "source-code-repos-ID-Market-All.zip"},
@@ -80,6 +78,8 @@ def repo_download_scope_definitions() -> list[dict[str, str]]:
 
 def resolve_repo_download_scope(scope_key: str) -> dict[str, str]:
     normalized = str(scope_key or "").strip()
+    if normalized in {"CRMS:SG", "CRMS:ID", "CRMS:PH"} or _slugify_scope_label(normalized) in {"credit-risk-sg", "credit-risk-id", "credit-risk-ph", "credit-risk-all"}:
+        normalized = "CRMS:All"
     if not normalized:
         raise ToolError("Repo download scope key is required.")
     for item in REPO_DOWNLOAD_SCOPES:
@@ -299,53 +299,67 @@ def _bundle_file_priority(filename: str) -> tuple[int, str]:
     return 0, filename
 
 
-def _fit_bundle_to_limit(content: bytes, manifest: dict[str, Any]) -> bytes:
-    """Keep higher-priority files and their matching indexes within the limit.
-
-    Use actual compressed source sizes and conservative uncompressed index
-    costs. Every selected file keeps its whole contents and symbol records.
-    """
-    if len(content) < MAX_BUNDLE_BYTES:
+def _fit_bundle_to_limit(content,manifest):
+    if len(content)<MAX_BUNDLE_BYTES:
         return content
+    manifest['selection']['priority']='Build manifests and README files from every repository, then production source across all repositories, configuration, key documents, and tests/examples.'
     with zipfile.ZipFile(io.BytesIO(content)) as original:
-        candidates = []
-        for repo in manifest["repos"]:
-            files = [json.loads(line) for line in original.read(repo["file_index"]).splitlines()]
-            symbols_by_path: dict[str, list[dict[str, Any]]] = {}
-            for line in original.read(repo["symbol_index"]).splitlines():
-                symbol = json.loads(line)
-                symbols_by_path.setdefault(symbol["path"], []).append(symbol)
-            for row in files:
-                name = row["path"]
-                symbols = symbols_by_path.get(name, [])
-                info = original.getinfo(name)
-                # Two ZIP headers, file and symbol records, plus deflate margin.
-                cost = info.compress_size + 2 * len(name.encode("utf-8")) + 128
-                cost += len(_json_lines([row, *symbols]).encode("utf-8")) * 2
-                candidates.append((name, row, symbols, cost))
-        budget = MAX_BUNDLE_BYTES - 4096 - 2 * len(json.dumps(manifest).encode("utf-8"))
-        selected: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
-        for name, row, symbols, cost in sorted(candidates, key=lambda item: _bundle_file_priority(item[0])):
-            if cost <= budget:
-                selected[name] = (row, symbols)
-                budget -= cost
-        manifest["selection"]["omitted_files"] = len(candidates) - len(selected)
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-            for name in selected:
-                archive.writestr(name, original.read(name))
-            for repo in manifest["repos"]:
-                prefix = repo["archive_root"] + "/"
-                rows = [item for name, item in selected.items() if name.startswith(prefix)]
-                files = [row for row, _ in rows]
-                symbols = [symbol for _, items in rows for symbol in items]
-                repo["omitted_files"] = repo["source_files"] - len(files)
-                repo["source_files"] = len(files)
-                repo["symbols"] = len(symbols)
-                archive.writestr(repo["file_index"], _json_lines(files))
-                archive.writestr(repo["symbol_index"], _json_lines(symbols))
-            archive.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
-        return buffer.getvalue()
+        groups={}
+        index_cost=0
+        critical_names={'pom.xml','build.gradle','build.gradle.kts','settings.gradle','settings.gradle.kts','package.json','go.mod','cargo.toml','pubspec.yaml','dockerfile','makefile','readme.md','readme.rst','readme.txt','readme'}
+        for repo in manifest['repos']:
+            by_path={}
+            for line in original.read(repo['symbol_index']).splitlines():
+                symbol=json.loads(line)
+                by_path.setdefault(symbol['path'],[]).append(symbol)
+            for index_name in [repo['file_index'],repo['symbol_index']]:
+                info=original.getinfo(index_name)
+                index_cost+=info.compress_size+76+2*len(index_name.encode())
+            for line in original.read(repo['file_index']).splitlines():
+                row=json.loads(line);name=row['path']
+                relative=Path(name).relative_to(repo['archive_root'])
+                priority=_bundle_file_priority(name)[0]
+                if len(relative.parts)<=3 and relative.name.lower() in critical_names:
+                    priority=-1
+                info=original.getinfo(name)
+                cost=info.compress_size+76+2*len(name.encode())
+                groups.setdefault((priority,repo['archive_root']),[]).append((name,row,by_path.get(name,[]),cost))
+        ranked=[]
+        for (priority,folder),items in groups.items():
+            for rank,item in enumerate(sorted(items,key=lambda row:row[0])):
+                ranked.append((priority,rank,folder,item))
+        ranked.sort(key=lambda row:row[:3])
+        budget=MAX_BUNDLE_BYTES-index_cost-min(512_000,MAX_BUNDLE_BYTES//20)-2*len(json.dumps(manifest).encode())
+        for attempt in range(4):
+            selected={}
+            remaining=budget
+            for _,_,_,(name,row,symbols,cost) in ranked:
+                if cost<=remaining:
+                    selected[name]=(row,symbols)
+                    remaining-=cost
+            manifest['selection']['omitted_files']=sum(len(items) for items in groups.values())-len(selected)
+            buffer=io.BytesIO()
+            with zipfile.ZipFile(buffer,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as output:
+                for name in selected:
+                    output.writestr(name,original.read(name))
+                for repo in manifest['repos']:
+                    prefix=repo['archive_root']+'/'
+                    rows=[item for name,item in selected.items() if name.startswith(prefix)]
+                    files=[row for row,_ in rows]
+                    symbols=[symbol for _,items in rows for symbol in items]
+                    repo.setdefault('original_source_files',repo['source_files'])
+                    repo['omitted_files']=repo['original_source_files']-len(files)
+                    repo['source_files']=len(files);repo['symbols']=len(symbols)
+                    if not files:
+                        raise ToolError('Size selection omitted a repository: '+repo['display_name'])
+                    output.writestr(repo['file_index'],_json_lines(files))
+                    output.writestr(repo['symbol_index'],_json_lines(symbols))
+                output.writestr('manifest.json',json.dumps(manifest,indent=2,sort_keys=True))
+            result=buffer.getvalue()
+            if len(result)<MAX_BUNDLE_BYTES:
+                return result
+            budget-=len(result)-MAX_BUNDLE_BYTES+256_000
+    raise ToolError('Could not fit a balanced download bundle below 20 MB.')
 
 
 def require_repo_download_size(size_bytes: int) -> None:

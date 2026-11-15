@@ -72,6 +72,8 @@ class SourceCodeQASessionStore:
         llm_provider: str,
         title: str = "",
     ) -> dict[str, Any]:
+        if str(pm_team or "").strip().upper() in {"CRMS", "GRC"}:
+            country = SourceCodeQAService.normalize_country(pm_team, country)
         now = self._now()
         session_payload = {
             "id": uuid.uuid4().hex,
@@ -222,6 +224,8 @@ class SourceCodeQASessionStore:
         context: dict[str, Any],
         attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
+        if str(pm_team or "").strip().upper() in {"CRMS", "GRC"}:
+            country = SourceCodeQAService.normalize_country(pm_team, country)
         owner = str(owner_email or "").strip().lower()
         now = self._now()
         with self._lock:
@@ -300,6 +304,8 @@ class SourceCodeQASessionStore:
         job_id: str,
         attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
+        if str(pm_team or "").strip().upper() in {"CRMS", "GRC"}:
+            country = SourceCodeQAService.normalize_country(pm_team, country)
         owner = str(owner_email or "").strip().lower()
         now = self._now()
         normalized_question = str(question or "").strip()

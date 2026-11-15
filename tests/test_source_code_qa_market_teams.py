@@ -87,7 +87,7 @@ class MarketTeamTests(unittest.TestCase):
             self.assertTrue(options[team]["all_country_only"])
             self.assertNotIn(team, TEAM_PROFILE_DEFAULTS)
         self.assertEqual(self.service.mapping_key("AF", "PH"), "AF:All")
-        self.assertEqual(self.service.mapping_key("CRMS", "PH"), "CRMS:PH")
+        self.assertEqual(self.service.mapping_key("CRMS", "PH"), "CRMS:All")
 
     def test_admin_can_save_separate_market_mappings_and_reject_non_all(self):
         with self.app.test_client() as client:

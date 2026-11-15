@@ -146,19 +146,11 @@ def _build_fixture_repositories(service: SourceCodeQAService) -> None:
         ],
     )
     service.save_mapping(
-        pm_team="CRMS",
-        country="ID",
-        repositories=[{"display_name": "Credit Risk", "url": "https://git.example.com/team/credit-risk.git"}],
-    )
-    service.save_mapping(
-        pm_team="CRMS",
-        country="SG",
-        repositories=[{"display_name": "Credit Risk SG", "url": "https://git.example.com/team/credit-risk-sg.git"}],
-    )
-    service.save_mapping(
-        pm_team="CRMS",
-        country="PH",
-        repositories=[{"display_name": "Credit Risk PH", "url": "https://git.example.com/team/credit-risk-ph.git"}],
+        pm_team="CRMS", country="All", repositories=[
+            {"display_name": "Credit Risk", "url": "https://git.example.com/team/credit-risk.git"},
+            {"display_name": "Credit Risk SG", "url": "https://git.example.com/team/credit-risk-sg.git"},
+            {"display_name": "Credit Risk PH", "url": "https://git.example.com/team/credit-risk-ph.git"},
+        ],
     )
     service.save_mapping(
         pm_team="GRC",
@@ -166,15 +158,13 @@ def _build_fixture_repositories(service: SourceCodeQAService) -> None:
         repositories=[{"display_name": "Ops Risk", "url": "https://git.example.com/team/ops-risk.git"}],
     )
     af_entries = service.load_config()["mappings"]["AF:All"]
-    cr_entry = service.load_config()["mappings"]["CRMS:ID"][0]
-    cr_sg_entry = service.load_config()["mappings"]["CRMS:SG"][0]
-    cr_ph_entry = service.load_config()["mappings"]["CRMS:PH"][0]
+    cr_entry, cr_sg_entry, cr_ph_entry = service.load_config()["mappings"]["CRMS:All"]
     grc_entry = service.load_config()["mappings"]["GRC:All"][0]
     af_repo = service._repo_path("AF:All", type("Entry", (), af_entries[0])())
     issue_service_repo = service._repo_path("AF:All", type("Entry", (), af_entries[1])())
-    cr_repo = service._repo_path("CRMS:ID", type("Entry", (), cr_entry)())
-    cr_sg_repo = service._repo_path("CRMS:SG", type("Entry", (), cr_sg_entry)())
-    cr_ph_repo = service._repo_path("CRMS:PH", type("Entry", (), cr_ph_entry)())
+    cr_repo = service._repo_path("CRMS:All", type("Entry", (), cr_entry)())
+    cr_sg_repo = service._repo_path("CRMS:All", type("Entry", (), cr_sg_entry)())
+    cr_ph_repo = service._repo_path("CRMS:All", type("Entry", (), cr_ph_entry)())
     grc_repo = service._repo_path("GRC:All", type("Entry", (), grc_entry)())
     (af_repo / ".git").mkdir(parents=True, exist_ok=True)
     (issue_service_repo / ".git").mkdir(parents=True, exist_ok=True)
@@ -850,9 +840,9 @@ def _build_fixture_repositories(service: SourceCodeQAService) -> None:
     for key, raw_entry, repo_path in (
         ("AF:All", af_entries[0], af_repo),
         ("AF:All", af_entries[1], issue_service_repo),
-        ("CRMS:ID", cr_entry, cr_repo),
-        ("CRMS:SG", cr_sg_entry, cr_sg_repo),
-        ("CRMS:PH", cr_ph_entry, cr_ph_repo),
+        ("CRMS:All", cr_entry, cr_repo),
+        ("CRMS:All", cr_sg_entry, cr_sg_repo),
+        ("CRMS:All", cr_ph_entry, cr_ph_repo),
         ("GRC:All", grc_entry, grc_repo),
     ):
         service._build_repo_index(key, type("Entry", (), raw_entry)(), repo_path)

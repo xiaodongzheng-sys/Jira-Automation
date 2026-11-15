@@ -13,7 +13,6 @@
     data-effort-latest-url="{{ url_for('source_code_qa_effort_assessment_latest_api') }}"
     data-attachment-url="{{ url_for('source_code_qa_attachments_api') }}"
     data-generated-artifact-url="{{ url_for('source_code_qa_generated_artifact_api', artifact_id='__ARTIFACT_ID__') }}"
-    data-runtime-evidence-url="{{ url_for('source_code_qa_runtime_evidence_api') }}"
     data-jobs-url="{{ url_for('source_code_qa_query_job_api', job_id='__JOB_ID__') }}"
     data-effort-jobs-url="{{ url_for('source_code_qa_effort_assessment_job_api', job_id='__JOB_ID__') }}"
     data-feedback-url="{{ url_for('source_code_qa_feedback_api') }}"
@@ -54,7 +53,7 @@
               <option value="{{ country }}">{{ country }}</option>
             {% endfor %}
           </select>
-          <small class="field-help" data-source-country-help>AF/GRC dictionaries share table/field definitions; country selects the separate runtime DB/evidence.</small>
+          <small class="field-help" data-source-country-help>Select the country for your source-code question.</small>
         </label>
         <label class="field-group">
           <span>Model</span>
@@ -280,7 +279,7 @@
               <p class="eyebrow">Repository Admin</p>
               <h2>Repository Mapping</h2>
               <p class="card-help">
-                Select a PM Team above, then add one GitLab HTTPS clone URL per line. Optional format: <code>Display Name | https://gitlab.example.com/group/repo.git</code>. Market teams use Country All.
+                Select a PM Team above, then add one GitLab HTTPS clone URL per line. Optional format: <code>Display Name | https://gitlab.example.com/group/repo.git</code>. Credit Risk, Ops Risk, and Market teams use Country All.
               </p>
             </div>
             <div class="button-row">
@@ -294,56 +293,6 @@
           </div>
         </section>
 
-        <section class="panel panel-wide source-qa-admin">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Runtime Evidence</p>
-              <h2>DB / Apollo Uploads</h2>
-              <p class="card-help">Upload DB exports or UAT Apollo config snapshots by system and country. Answers use them as reference evidence, separate from source-code evidence.</p>
-            </div>
-            <button class="button button-secondary" type="button" data-source-runtime-evidence-upload>Upload Evidence</button>
-          </div>
-          <div class="field-grid source-qa-runtime-grid">
-            <label class="field-group">
-              <span>System</span>
-              <select data-source-runtime-pm-team>
-                <option value="AF">Anti-fraud (AF)</option>
-                <option value="CRMS">Credit Risk (CRMS)</option>
-                <option value="GRC">GRC (GRC)</option>
-              </select>
-            </label>
-            <label class="field-group">
-              <span>Country</span>
-              <select data-source-runtime-country>
-                <option value="{{ all_country }}">All</option>
-                <option value="ID">ID</option>
-                <option value="SG">SG</option>
-                <option value="PH">PH</option>
-              </select>
-            </label>
-            <label class="field-group">
-              <span>Source Type</span>
-              <select data-source-runtime-source-type>
-                <option value="data_dictionary">Data dictionary</option>
-                <option value="apollo">Apollo config (UAT reference)</option>
-                <option value="db">DB data</option>
-                <option value="other">Other runtime evidence</option>
-              </select>
-            </label>
-          </div>
-          <input
-            type="file"
-            data-source-runtime-evidence-input
-            hidden
-            accept=".txt,.md,.csv,.json,.xml,.yaml,.yml,.log,.sql,.properties,.conf,.cfg,.ini,.toml,.env,.pdf,.docx,.xlsx,.zip"
-          >
-          <div class="source-qa-runtime-list" data-source-runtime-evidence-list>
-            <div class="source-qa-empty">No runtime evidence loaded for this scope.</div>
-          </div>
-          <div class="source-qa-status" data-source-runtime-evidence-status>
-            Runtime evidence is scoped by system and country. Apollo uploads are treated as UAT/non-Live reference only unless Live evidence is explicitly uploaded.
-          </div>
-        </section>
 
         <article class="panel panel-wide">
           <div class="panel-head">

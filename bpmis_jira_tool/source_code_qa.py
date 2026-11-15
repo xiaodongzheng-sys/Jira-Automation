@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from bpmis_jira_tool.source_code_qa_scope import ALL_ONLY_RISK_TEAMS, RETIRED_UPLOAD_MESSAGE
+
 import ast
 from datetime import date, datetime, timedelta, timezone
 import functools
@@ -427,7 +429,7 @@ class SourceCodeQAService:
                 {
                     "code": code,
                     "label": str(profile.get("label") or code),
-                    "all_country_only": code in MARKET_TEAM_PROFILES,
+                    "all_country_only": code in MARKET_TEAM_PROFILES or code in ALL_ONLY_RISK_TEAMS,
                 }
                 for code, profile in self.team_profiles.items()
             ],
@@ -1338,6 +1340,33 @@ class SourceCodeQAService:
                 "selected_repositories": [entry.display_name for entry in repositories],
                 "available_repository_count": len(repositories),
             }
+        # Merged country repositories often share the same Git basename. An
+        # explicit phrase such as "SG credit risk" must win over "credit risk".
+        country_by_repo: dict[str, str] = {}
+        country_aliases: dict[str, list[str]] = {}
+        mentioned_countries: set[str] = set()
+        for entry in repositories:
+            name = entry.display_name
+            country_match = re.search(r"^(SG|ID|PH)\b|\b(SG|ID|PH)$", name)
+            if country_match is None:
+                continue
+            country_hint = country_match.group(1) or country_match.group(2)
+            country_by_repo[entry.url] = country_hint
+            bare_name = (name[:country_match.start()] + name[country_match.end():]).strip(" -:")
+            basename = Path(urlsplit(entry.url).path).name.removesuffix(".git")
+            aliases = [self._repo_scope_normalize(f"{country_hint} {value}") for value in [bare_name, basename]]
+            matches = [alias for alias in aliases if self._repo_alias_in_text(alias, normalized_question)]
+            if matches:
+                mentioned_countries.add(country_hint)
+                country_aliases[name] = matches
+        if mentioned_countries:
+            country_entries = [entry for entry in repositories if country_by_repo.get(entry.url) in mentioned_countries]
+            return country_entries, {
+                "active": len(country_entries) != len(repositories),
+                "selected_repositories": [entry.display_name for entry in country_entries],
+                "available_repository_count": len(repositories),
+                "matched_aliases": country_aliases,
+            }
         selected: list[RepositoryEntry] = []
         matched_aliases: dict[str, list[str]] = {}
         for entry in repositories:
@@ -1920,6 +1949,10 @@ class SourceCodeQAService:
         progress_callback: Any | None = None,
         effort_assessment: bool = False,
     ) -> dict[str, Any]:
+        if runtime_evidence:
+            raise ToolError(RETIRED_UPLOAD_MESSAGE)
+        if str(pm_team or "").strip().upper() in ALL_ONLY_RISK_TEAMS:
+            country = self.normalize_country(pm_team, country)
         key = self.mapping_key(pm_team, country)
         question = str(question or "").strip()
         query_mode = self.normalize_query_mode(query_mode)
@@ -3250,10 +3283,8 @@ class SourceCodeQAService:
         value = str(country or "").strip().upper()
         if team in MARKET_TEAM_PROFILES and value not in {"", ALL_COUNTRY.upper()}:
             raise ToolError("Market teams support Country All only.")
-        if team == "CRMS":
-            if value not in CRMS_COUNTRIES:
-                raise ToolError("Credit Risk source repositories require country SG, ID, or PH.")
-            return value
+        if team in ALL_ONLY_RISK_TEAMS and value not in {"", "ALL", *CRMS_COUNTRIES}:
+            raise ToolError("Risk teams support Country All only.")
         return ALL_COUNTRY
 
     def _sync_entry(self, key: str, entry: RepositoryEntry) -> dict[str, Any]:
@@ -7717,9 +7748,6 @@ class SourceCodeQAService:
         lines = [
             "Uploaded runtime evidence for SQL generation:",
             "- Treat these files as runtime/reference evidence, not repository source code.",
-            "- Data dictionary uploads are shared schema/reference evidence for their pm_team scope.",
-            "- For AF and GRC, data_dictionary uploads apply to SG, ID, PH, and All for that PM team; table and field definitions do not vary by country unless explicit DB evidence proves an override.",
-            "- For AF and GRC, each selected country runs against that country's separate runtime DB instance. Do not invent a country filter or cross-country union unless code/runtime evidence proves one.",
             "- For GRC reviewer SQL questions, RC and Compliance are business aliases for the same review stage.",
             "- Cross-check table names, joins, filters, and timestamp assumptions against mapper/XML/DAO/repository/source SQL before finalizing SQL.",
         ]
@@ -7841,11 +7869,8 @@ class SourceCodeQAService:
             "- Apollo uploads are UAT/non-Live configuration references unless the user explicitly proves otherwise; never use them as confirmed Live/production configuration facts.",
             "- Separate source-code evidence, runtime evidence, attachment evidence, and missing evidence in the answer.",
             "- Runtime evidence can be stale or partial; use its pm_team/country/source_type labels and do not generalize it across countries unless the file proves that.",
-            "- Data dictionary uploads are shared schema/reference evidence for their pm_team scope; use them to interpret table names, columns, and business meanings, but do not cite them as source code.",
-            "- For AF and GRC, data_dictionary uploads apply to all country selections for that PM team. SG, ID, and PH share the same table and data-field definitions; do not treat table or column names as country-specific unless uploaded DB evidence explicitly proves an override.",
             "- For GRC reviewer SQL questions, RC and Compliance are business aliases for the same review stage. Use this alias to interpret user wording, but do not claim the alias is source-code evidence unless repository evidence proves it.",
             "- For AF and GRC country-scoped SQL questions, first explain the actual SQL/table logic from code and data dictionary evidence, including the chosen table names, key filters, joins, reviewer/status rows, and timestamp assumptions.",
-            "- For AF and GRC country-scoped SQL questions, assume the selected country points to that country's separate runtime DB instance. Do not invent a country filter, cross-country union, or shared physical database unless repository/runtime evidence proves it. Treat this as an execution caveat, not the first sentence or main conclusion.",
             "- For SQL-generation questions, prefer table/column names supported by data_dictionary runtime evidence or mapper/XML/SQL source-code evidence, and include the SQL in a fenced ```sql block.",
             "- If runtime evidence conflicts with source code, describe the conflict instead of silently choosing one.",
             "- For Apollo/config archives, first identify the app/env/namespace path that matches the user's component or business flow, for example authentication-center/UAT1/... before anti-fraud-admin/UAT1/... for authentication or AMR/FV flows.",

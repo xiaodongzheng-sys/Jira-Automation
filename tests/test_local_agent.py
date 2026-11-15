@@ -2597,7 +2597,7 @@ class LocalAgentServerTests(unittest.TestCase):
         for path, payload in post_cases:
             with self.subTest(path=path):
                 response = self._post_signed(path, payload)
-                self.assertIn(response.status_code, {200, 400, 404}, msg=response.get_data(as_text=True))
+                self.assertIn(response.status_code, {200, 400, 404, 410}, msg=response.get_data(as_text=True))
                 self.assertIsInstance(response.get_json(), dict)
 
     def test_signed_source_code_storage_routes_round_trip_artifacts_and_evidence(self):
@@ -2650,7 +2650,7 @@ class LocalAgentServerTests(unittest.TestCase):
                 "content_base64": base64.b64encode(b"error=none").decode("ascii"),
             },
         )
-        evidence_id = evidence_save.get_json()["evidence"]["id"]
+        evidence_id = "retired"
         evidence_list = self._post_signed("/api/local-agent/source-code-qa/runtime-evidence/list", {"pm_team": "AF", "country": "SG"})
         evidence_resolve = self._post_signed("/api/local-agent/source-code-qa/runtime-evidence/resolve", {"pm_team": "AF", "country": "SG"})
         evidence_delete = self._post_signed(
@@ -2669,21 +2669,17 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertEqual(artifact_save.status_code, 200)
         self.assertEqual(artifact_get.status_code, 200)
         self.assertGreater(len(base64.b64decode(artifact_get.get_json()["content_base64"])), 100)
-        self.assertEqual(evidence_save.status_code, 200)
-        self.assertEqual(evidence_list.get_json()["evidence"][0]["id"], evidence_id)
-        self.assertEqual(evidence_resolve.status_code, 200)
-        self.assertEqual(evidence_resolve.get_json()["evidence"][0]["id"], evidence_id)
-        self.assertTrue(evidence_delete.get_json()["deleted"])
-        self.assertEqual(evidence_list_after_delete.get_json()["evidence"], [])
+        for response in [evidence_save, evidence_list, evidence_resolve, evidence_delete, evidence_list_after_delete]:
+            self.assertEqual(response.status_code, 410)
+            self.assertIn("removed", response.get_json()["message"])
 
     def test_signed_source_code_runtime_evidence_scope_errors_are_json(self):
         list_response = self._post_signed("/api/local-agent/source-code-qa/runtime-evidence/list", {"pm_team": "BAD", "country": "SG"})
         resolve_response = self._post_signed("/api/local-agent/source-code-qa/runtime-evidence/resolve", {"pm_team": "BAD", "country": "SG"})
 
-        self.assertEqual(list_response.status_code, 400)
-        self.assertIn("PM Team", list_response.get_json()["message"])
-        self.assertEqual(resolve_response.status_code, 400)
-        self.assertIn("PM Team", resolve_response.get_json()["message"])
+        self.assertEqual(list_response.status_code, 410)
+        self.assertEqual(resolve_response.status_code, 410)
+        self.assertIn("removed", list_response.get_json()["message"])
 
 class LocalAgentClientTests(unittest.TestCase):
     def test_client_validates_required_config_and_clamps_timeouts(self):

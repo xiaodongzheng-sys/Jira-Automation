@@ -31,7 +31,7 @@ DEFAULT_THRESHOLDS = {
     "min_eval_cases": 20,
     "min_eval_cases_per_segment": 2,
     "min_eval_cases_per_team": 4,
-    "required_eval_segments": ["AF:ALL", "CRMS:ID", "CRMS:SG", "CRMS:PH", "GRC:ALL"],
+    "required_eval_segments": ["AF:ALL", "CRMS:ALL", "GRC:ALL"],
     "required_eval_teams": ["AF", "CRMS", "GRC"],
     "require_review_queue": True,
 }
