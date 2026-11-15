@@ -65,8 +65,23 @@ def main() -> int:
             except Exception as error:  # noqa: BLE001 - report and continue with other scopes
                 print(f"repo_bundle_skipped scope={scope['scope_key']} reason={error}")
                 continue
-            ok = publish_repo_download_archive(metadata, content)
-            print(f"repo_bundle_published scope={scope['scope_key']} ok={ok} bytes={len(content)}")
+            if metadata.get("parts"):
+                from bpmis_jira_tool.source_code_qa_download_parts import cached_part_artifacts, install_local_parts
+
+                ok = True
+                artifacts = list(cached_part_artifacts(service, metadata))
+                for part, path in sorted(artifacts, key=lambda item: item[0]["part_number"] == 1):
+                    uploaded = publish_repo_download_archive(part, path.read_bytes())
+                    ok = ok and uploaded
+                    print(f"repo_bundle_part_published scope={scope['scope_key']} part={part['part_number']} ok={uploaded} bytes={path.stat().st_size}")
+                    if not uploaded:
+                        break
+                if ok:
+                    install_local_parts(service, metadata)
+            else:
+                ok = publish_repo_download_archive(metadata, content)
+                print(f"repo_bundle_published scope={scope['scope_key']} ok={ok} bytes={len(content)}")
+
 
     return 0
 

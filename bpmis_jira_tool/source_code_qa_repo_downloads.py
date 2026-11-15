@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from bpmis_jira_tool.errors import ToolError
+from bpmis_jira_tool.source_code_qa_download_sources import FULL_SOURCE_POLICY, MARKET_SCOPES, part_filename, write_git_sources, submodule_cache_version
 from bpmis_jira_tool.source_code_qa import SourceCodeQAService
 
 
@@ -80,6 +81,15 @@ def repo_download_scope_definitions() -> list[dict[str, str]]:
 
 def resolve_repo_download_scope(scope_key: str) -> dict[str, str]:
     normalized = str(scope_key or "").strip()
+    match = re.fullmatch(r"(.+)~part-([0-9]+)", normalized)
+    if match:
+        scope = resolve_repo_download_scope(match[1])
+        number = int(match[2])
+        if scope["scope_key"] not in MARKET_SCOPES:
+            raise ToolError("Unknown repo download part.")
+        scope["filename"] = part_filename(scope["filename"], number)
+        scope["part_number"] = number
+        return scope
     if normalized in {"CRMS:SG", "CRMS:ID", "CRMS:PH"} or _slugify_scope_label(normalized) in {"credit-risk-sg", "credit-risk-id", "credit-risk-ph", "credit-risk-all"}:
         normalized = "CRMS:All"
     if not normalized:
@@ -96,6 +106,9 @@ def resolve_repo_download_scope(scope_key: str) -> dict[str, str]:
 def build_repo_download_zip(service: SourceCodeQAService, scope_key: str) -> tuple[dict[str, Any], bytes]:
     scope = resolve_repo_download_scope(scope_key)
     key = scope["scope_key"]
+    requested_part = scope.get("part_number", 1)
+    full_source = key in MARKET_SCOPES
+    base_scope = resolve_repo_download_scope(key)
     entries = service._load_entries_for_key(key)
     if not entries:
         raise ToolError(f"No repositories are configured for {scope['label']}.")
@@ -110,7 +123,7 @@ def build_repo_download_zip(service: SourceCodeQAService, scope_key: str) -> tup
         revision = service._repo_git_revision(repo_path)
         if not revision:
             raise ToolError(f"{entry.display_name} does not have a readable git revision for {scope['label']}.")
-        fingerprint = service._repo_fingerprint(repo_path)
+        fingerprint = {"git_revision": revision} if full_source else service._repo_fingerprint(repo_path)
         archive_folder = _repo_archive_folder_name(entry.display_name)
         if archive_folder in used_archive_folders:
             suffix = 2
@@ -154,40 +167,68 @@ def build_repo_download_zip(service: SourceCodeQAService, scope_key: str) -> tup
             for item in repo_items
         ],
     }
+    if full_source:
+        manifest["full_source_policy"] = FULL_SOURCE_POLICY
+        manifest["submodule_cache_version"] = submodule_cache_version(service.data_root)
     cache_root = service.data_root / "repo_download_cache"
     cache_root.mkdir(parents=True, exist_ok=True)
     signature = _manifest_signature(manifest)
-    archive_path = cache_root / f"{_slugify_scope_label(scope['label'])}-{signature}.zip"
+    set_directory = cache_root / f"{_slugify_scope_label(scope['label'])}-{signature}"
+    archive_path = (set_directory / scope["filename"]) if full_source else cache_root / f"{_slugify_scope_label(scope['label'])}-{signature}.zip"
     metadata = {
         "scope_key": key,
         "scope_label": scope["label"],
-        "filename": scope["filename"],
+        "filename": base_scope["filename"],
         "generated_at": manifest["generated_at"],
         "format": BUNDLE_FORMAT,
         "repo_count": len(repo_items),
     }
-    if archive_path.exists():
+    if full_source and requested_part > 1:
+        primary_metadata = set_directory / (base_scope["filename"] + ".json")
+        if primary_metadata.is_file() and requested_part > int(json.loads(primary_metadata.read_text()).get("part_count", 1)):
+            raise ToolError("Unknown repo download part.")
+    if archive_path.exists() and (not full_source or archive_path.with_suffix(".zip.json").is_file()):
         content = archive_path.read_bytes()
         try:
             cached_manifest = validate_repo_download_archive(content, expected_scope=key)
-        except ToolError:
+            cached_metadata = {}
+            if full_source:
+                cached_metadata = json.loads(archive_path.with_suffix(".zip.json").read_text())
+                if cached_metadata["sha256"] != hashlib.sha256(content).hexdigest():
+                    raise ToolError("Cached source part checksum mismatch.")
+        except (OSError, ValueError, KeyError, ToolError):
             pass  # Replace a corrupt or obsolete cache with a fresh source bundle.
         else:
             metadata["generated_at"] = cached_manifest["generated_at"]
             metadata.update(repo_download_validation_metadata(content, cached_manifest))
+            if full_source:
+                metadata.update(cached_metadata)
             return metadata, content
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for item, repo_manifest in zip(repo_items, manifest["repos"]):
-            files = _write_repo_to_archive(archive, repo_path=item["path"], archive_root=item["folder"])
+            if full_source:
+                files, audit = write_git_sources(archive, repo_path=item["path"], archive_root=item["folder"], cache_root=service.data_root)
+                repo_manifest["full_source_audit"] = audit
+            else:
+                files = _write_repo_to_archive(archive, repo_path=item["path"], archive_root=item["folder"])
             archive.writestr(repo_manifest["file_index"], _json_lines(files))
-            symbols = _source_symbols(service, item["path"], files, item["folder"])
+            symbols = _source_symbols(service, item["path"], files, item["folder"], source_reader=archive.read if full_source else None)
             archive.writestr(repo_manifest["symbol_index"], _json_lines(symbols))
             repo_manifest["source_files"] = len(files)
             repo_manifest["symbols"] = len(symbols)
             _record_source_coverage(repo_manifest, files)
         archive.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
+    if full_source:
+        for item in repo_items:
+            if service._repo_git_revision(item["path"]) != item["revision"]:
+                raise ToolError("Repository changed during export: " + item["entry"].display_name)
+        if service._load_entries_for_key(key) != entries:
+            raise ToolError("Repository mapping changed during export.")
+        from bpmis_jira_tool.source_code_qa_download_parts import split_and_cache
+
+        return split_and_cache(buffer.getvalue(), manifest, metadata, set_directory, requested_part)
     content = _fit_bundle_to_limit(buffer.getvalue(), manifest)
     validated = validate_repo_download_archive(content, expected_scope=key)
     metadata.update(repo_download_validation_metadata(content, validated))
@@ -222,6 +263,8 @@ def existing_repo_download_archive(service: SourceCodeQAService, scope_key: str)
     try:
         stat = archive_path.stat()
         manifest = _validated_local_archive(archive_path, stat.st_ino, stat.st_size, stat.st_mtime_ns, scope["scope_key"])
+        if manifest.get("bundle_set", {}).get("part_number", 1) != scope.get("part_number", 1):
+            return None
     except (OSError, ToolError):
         return None
     return {
@@ -230,6 +273,9 @@ def existing_repo_download_archive(service: SourceCodeQAService, scope_key: str)
         "generated_at": manifest.get("generated_at"),
         "repo_count": len(manifest["repos"]),
         "format": manifest["format"],
+        "part_count": manifest.get("bundle_set", {}).get("part_count", 1),
+        "part_number": manifest.get("bundle_set", {}).get("part_number", 1),
+        "set_id": manifest.get("bundle_set", {}).get("id"),
     }, archive_path
 
 
@@ -240,7 +286,7 @@ def _validated_local_archive(path: Path, inode: int, size: int, mtime_ns: int, s
 
 
 def _manifest_signature(manifest: dict[str, Any]) -> str:
-    payload = json.dumps({"format": manifest.get("format"), "max_archive_bytes": manifest.get("max_archive_bytes"), "repos": manifest.get("repos") or []}, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    payload = json.dumps({"format": manifest.get("format"), "max_archive_bytes": manifest.get("max_archive_bytes"), "full_source_policy": manifest.get("full_source_policy"), "submodule_cache_version": manifest.get("submodule_cache_version"), "repos": manifest.get("repos") or []}, sort_keys=True, separators=(",", ":")).encode("utf-8")
     import hashlib
 
     return hashlib.sha1(payload).hexdigest()[:16]
@@ -281,7 +327,7 @@ def _write_repo_to_archive(archive: zipfile.ZipFile, *, repo_path: Path, archive
     return files
 
 
-def _source_symbols(service: SourceCodeQAService, repo_path: Path, files: list[dict[str, Any]], folder: str) -> list[dict[str, Any]]:
+def _source_symbols(service: SourceCodeQAService, repo_path: Path, files: list[dict[str, Any]], folder: str, source_reader=None) -> list[dict[str, Any]]:
     # Download indexes do not need the full Q&A SQLite/reference graph.
     kinds = {
         "class_declaration": "class", "interface_declaration": "interface",
@@ -295,9 +341,9 @@ def _source_symbols(service: SourceCodeQAService, repo_path: Path, files: list[d
     symbols = []
     for row in files:
         path = row["path"]
-        if not _is_code_file(row):
+        if not _is_code_file(row) or row.get("git_mode") == "120000":
             continue
-        source = (repo_path / Path(path).relative_to(folder)).read_bytes()
+        source = source_reader(path) if source_reader else (repo_path / Path(path).relative_to(folder)).read_bytes()
         language = service._tree_sitter_language_for_suffix(Path(path).suffix)
         parser = service._tree_sitter_parser_for_language(language) if language else None
         if parser is not None:
@@ -317,10 +363,10 @@ def _source_symbols(service: SourceCodeQAService, repo_path: Path, files: list[d
 
 
 def _is_code_file(row: dict[str, Any]) -> bool:
-    return row.get("bytes", 0) > 0 and Path(row["path"]).suffix.lower() in _SOURCE_SUFFIXES - _CONFIG_SUFFIXES - {".gradle"}
+    return row.get("bytes", 0) > 0 and row.get("git_mode") != "120000" and Path(row["path"]).suffix.lower() in _SOURCE_SUFFIXES - _CONFIG_SUFFIXES - {".gradle"}
 
 
-def _record_source_coverage(repo: dict[str, Any], files: list[dict[str, Any]]) -> None:
+def _record_source_coverage(repo: dict[str, Any], files: list[dict[str, Any]], *, allow_documents: bool = False) -> None:
     code_files = sum(_is_code_file(row) for row in files)
     repo.setdefault("original_code_files", code_files)
     repo["code_files"] = code_files
@@ -331,7 +377,10 @@ def _record_source_coverage(repo: dict[str, Any], files: list[dict[str, Any]]) -
     if not files or (repo["original_code_files"] and not code_files):
         raise ToolError("Download must retain source from repository: " + repo["display_name"])
     if not code_files and not any(row.get("bytes", 0) and (Path(row["path"]).suffix.lower() in _SOURCE_SUFFIXES or Path(row["path"]).name in _SOURCE_FILENAMES) for row in files):
-        raise ToolError("Repository has no downloadable source or configuration: " + repo["display_name"])
+        if allow_documents:
+            repo["source_kind"] = "documents"
+        else:
+            raise ToolError("Repository has no downloadable source or configuration: " + repo["display_name"])
 
 
 def _json_lines(rows: list[dict[str, Any]]) -> str:
@@ -436,8 +485,18 @@ def validate_repo_download_archive(content: bytes | Path, *, expected_scope: str
             names = set(archive.namelist())
             if len(names) != len(archive.namelist()):
                 raise ValueError("duplicate ZIP entries")
+            bundle_set = manifest.get("bundle_set")
+            if manifest.get("scope_key") in MARKET_SCOPES and not bundle_set:
+                raise ValueError("Market source set requires lossless parts")
+            if bundle_set:
+                if bundle_set["policy"] != FULL_SOURCE_POLICY or bundle_set["omitted_source_files"] != 0 or not 1 <= bundle_set["part_number"] <= bundle_set["part_count"] <= 999:
+                    raise ValueError("invalid complete source set")
+                if json.loads(archive.read(manifest["part_manifest"])) != manifest:
+                    raise ValueError("part manifest mismatch")
             roots = set()
             allowed_names = {"manifest.json"}
+            if bundle_set:
+                allowed_names.update({"READ-ME-FIRST.txt", manifest["part_manifest"]})
             for repo in manifest["repos"]:
                 root = repo["archive_root"]
                 if root in roots or not root or "/" in root:
@@ -456,7 +515,7 @@ def validate_repo_download_archive(content: bytes | Path, *, expected_scope: str
                 if repo["original_code_files"] < repo["code_files"] or repo["original_source_files"] < len(files):
                     raise ValueError("invalid original source counts")
                 checked = dict(repo)
-                _record_source_coverage(checked, files)
+                _record_source_coverage(checked, files, allow_documents=bool(bundle_set))
                 if checked["code_files"] != repo.get("code_files") or len(files) != repo.get("source_files"):
                     raise ValueError("source coverage mismatch")
                 symbols = [json.loads(line) for line in archive.read(repo["symbol_index"]).splitlines()]
@@ -475,6 +534,10 @@ def repo_download_validation_metadata(content: bytes, manifest: dict[str, Any] |
     manifest = manifest or validate_repo_download_archive(content)
     return {
         "format": BUNDLE_FORMAT,
+        "part_count": manifest.get("bundle_set", {}).get("part_count", 1),
+        "part_number": manifest.get("bundle_set", {}).get("part_number", 1),
+        "set_id": manifest.get("bundle_set", {}).get("id"),
+        "full_source": bool(manifest.get("bundle_set")),
         "scope_key": manifest["scope_key"],
         "scope_label": manifest["scope_label"],
         "generated_at": manifest["generated_at"],

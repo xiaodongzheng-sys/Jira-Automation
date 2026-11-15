@@ -64,43 +64,51 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
         return format_gmt8(value)
 
     def _repo_download_scopes_with_status() -> list:
-        scopes = repo_download_scope_definitions()
+        scopes = []
         service = _build_source_code_qa_service()
-        for scope in scopes:
-            scope["meta"] = ""
-            local_archive = existing_repo_download_archive(service, scope["scope_key"])
-            if local_archive is not None:
-                local_metadata, local_path = local_archive
-                parts = []
-                generated = _format_generated_at(local_metadata.get("generated_at"))
-                if generated:
-                    parts.append(f"Updated {generated}")
-                size = _human_size(local_path.stat().st_size)
-                if size:
-                    parts.append(size)
-                scope["meta"] = " · ".join(parts)
-                continue
+        for original in repo_download_scope_definitions():
+            local = existing_repo_download_archive(service, original["scope_key"])
             status = None
-            try:
-                from bpmis_jira_tool.public_artifacts_gcs import fetch_repo_download_status, public_gcs_read_bucket
+            if local is not None:
+                status = {**local[0], "available": True, "size_bytes": local[1].stat().st_size}
+            else:
+                try:
+                    from bpmis_jira_tool.public_artifacts_gcs import fetch_repo_download_status, public_gcs_read_bucket
 
-                if public_gcs_read_bucket():
-                    status = fetch_repo_download_status(scope["filename"])
-            except Exception:
-                status = None
-            if status is None:
-                continue
-            if not status.get("available"):
-                scope["meta"] = "Not published yet"
-                continue
-            parts = []
-            generated = _format_generated_at(status.get("generated_at"))
-            if generated:
-                parts.append(f"Updated {generated}")
-            size = _human_size(status.get("size_bytes"))
-            if size:
-                parts.append(size)
-            scope["meta"] = " · ".join(parts)
+                    if public_gcs_read_bucket():
+                        status = fetch_repo_download_status(original["filename"])
+                except Exception:
+                    status = None
+            count = int((status or {}).get("part_count") or 1)
+            if not 1 <= count <= 999:
+                count = 1
+            for number in range(1, count + 1):
+                key = original["scope_key"] if number == 1 else original["scope_key"] + f"~part-{number}"
+                scope = resolve_repo_download_scope(key)
+                scope["scope_key"] = key
+                scope["meta"] = ""
+                if count > 1:
+                    scope["label"] = original["label"] + f" · Part {number} of {count}"
+                current = status
+                if number > 1:
+                    local_part = existing_repo_download_archive(service, key) if local is not None else None
+                    if local_part:
+                        current = {**local_part[0], "available": True, "size_bytes": local_part[1].stat().st_size}
+                    else:
+                        current = next((part for part in (status or {}).get("parts", []) if part.get("part_number") == number), None)
+                if current:
+                    if current.get("available") is False:
+                        scope["meta"] = "Not published yet"
+                    else:
+                        details = []
+                        generated = _format_generated_at(current.get("generated_at"))
+                        if generated:
+                            details.append(f"Updated {generated}")
+                        size = _human_size(current.get("size_bytes"))
+                        if size:
+                            details.append(size)
+                        scope["meta"] = " · ".join(details)
+                scopes.append(scope)
         return scopes
 
     def _download_local_agent_archive(response, *, fallback_name: str):
@@ -170,7 +178,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
         try:
             scope = resolve_repo_download_scope(scope_key)
             service = _build_source_code_qa_service()
-            local_archive = existing_repo_download_archive(service, scope["scope_key"])
+            local_archive = existing_repo_download_archive(service, scope_key)
             if local_archive is not None:
                 metadata, archive_path = local_archive
                 return send_file(
@@ -220,7 +228,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
                     )
                 shutil.rmtree(temp_dir, ignore_errors=True)
             if _local_agent_source_code_qa_enabled(settings):
-                response = _build_local_agent_client(settings).source_code_qa_repo_download(scope["scope_key"])
+                response = _build_local_agent_client(settings).source_code_qa_repo_download(scope_key)
                 temp_dir, temp_path, content_type, download_name = _download_local_agent_archive(
                     response,
                     fallback_name=scope["filename"],
@@ -237,7 +245,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
                     download_name=download_name,
                     as_attachment=True,
                 )
-            metadata, content = build_repo_download_zip(service, scope["scope_key"])
+            metadata, content = build_repo_download_zip(service, scope_key)
             return send_file(
                 io.BytesIO(content),
                 mimetype="application/zip",

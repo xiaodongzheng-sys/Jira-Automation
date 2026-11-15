@@ -159,8 +159,8 @@ class MarketTeamTests(unittest.TestCase):
                     self.assertIn("Market-Repo/README.md", names)
                     self.assertIn("Market-Repo/docs/architecture.md", names)
                     self.assertIn("Market-Repo/application.yml", names)
-                    self.assertNotIn("Market-Repo/node_modules/vendor.js", names)
-                    self.assertNotIn("Market-Repo/build/compiled.py", names)
+                    self.assertIn("Market-Repo/node_modules/vendor.js", names)
+                    self.assertIn("Market-Repo/build/compiled.py", names)
                     self.assertNotIn("Market-Repo/image.png", names)
                     repo = manifest["repos"][0]
                     files = [json.loads(row) for row in archive.read(repo["file_index"]).splitlines()]
@@ -169,28 +169,42 @@ class MarketTeamTests(unittest.TestCase):
                     self.assertEqual({row["path"] for row in files}, {name for name in names if name.startswith("Market-Repo/")})
                     self.assertTrue(all(row["path"] in names for row in symbols))
 
-    def test_large_bundle_keeps_source_before_documents_and_preserves_indexes(self):
+    def test_large_market_bundle_splits_without_dropping_any_source(self):
         rng = random.Random(42)
-        self.seed(extra_files={
-            "src/decision.py": "def decide(amount):\n    return amount > 100\n# " + rng.randbytes(2500).hex(),
-            "docs/design.md": rng.randbytes(24000).hex(),
-        })
-        with patch.object(bundles, "MAX_BUNDLE_BYTES", 12_000):
+        extra = {f"src/indirect_{i}.py": f"def helper_{i}():\n    return True\n# " + rng.randbytes(6000).hex() for i in range(8)}
+        extra["src/af_client.py"] = "# RiskDecision client\nfrom indirect_7 import helper_7\n"
+        extra["spec/payment_flow.md"] = "Call helper_7 after the risk decision."
+        extra["src/main/resources/data/af_payload.json"] = '{"riskDecision":"AUTH","fields":["deviceId"]}'
+        root = self.seed(extra_files=extra)
+        with patch.object(bundles, "MAX_BUNDLE_BYTES", 28_000):
             metadata, content = bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
             cached_metadata, cached = bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
-        self.assertLess(len(content), 12_000)
-        self.assertEqual(content, cached)
-        self.assertEqual(metadata["generated_at"], cached_metadata["generated_at"])
-        self.assertGreater(metadata["omitted_files"], 0)
-        self.assertEqual(metadata["omitted_files"], cached_metadata["omitted_files"])
-        with zipfile.ZipFile(io.BytesIO(content)) as archive:
-            self.assertIn("Market-Repo/src/decision.py", archive.namelist())
-            self.assertNotIn("Market-Repo/docs/design.md", archive.namelist())
-            manifest = json.loads(archive.read("manifest.json"))
-            self.assertGreater(manifest["selection"]["omitted_files"], 0)
-            for repo in manifest["repos"]:
-                for line in archive.read(repo["symbol_index"]).splitlines():
-                    self.assertIn(json.loads(line)["path"], archive.namelist())
+            self.assertEqual(content, cached)
+            self.assertGreater(metadata["part_count"], 1)
+            self.assertEqual(metadata["omitted_files"], 0)
+            self.assertEqual(metadata["generated_at"], cached_metadata["generated_at"])
+            seen = {}
+            for part in metadata["parts"]:
+                key = "SG_MARKET:All" if part["part_number"] == 1 else "SG_MARKET:All~part-" + str(part["part_number"])
+                part_metadata, payload = bundles.build_repo_download_zip(self.service, key)
+                self.assertLess(len(payload), 28_000)
+                manifest = bundles.validate_repo_download_archive(payload)
+                self.assertEqual(manifest["bundle_set"]["omitted_source_files"], 0)
+                with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                    for repo in manifest["repos"]:
+                        for line in archive.read(repo["file_index"]).splitlines():
+                            row = json.loads(line)
+                            self.assertNotIn(row["path"], seen)
+                            seen[row["path"]] = archive.read(row["path"])
+            for relative, expected in extra.items():
+                self.assertEqual(seen["Market-Repo/" + relative], expected.encode())
+            self.assertEqual(len(seen), manifest["bundle_set"]["scope_source_files"])
+
+    def test_single_oversized_source_file_fails_instead_of_being_omitted(self):
+        self.seed(extra_files={"docs/design.md": random.Random(42).randbytes(24000).hex()})
+        with patch.object(bundles, "MAX_BUNDLE_BYTES", 12_000):
+            with self.assertRaisesRegex(ToolError, "complete source file"):
+                bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
 
     def test_strict_size_boundary_and_oversized_prebuilt_is_ignored(self):
         bundles.require_repo_download_size(19_999_999)
@@ -312,7 +326,7 @@ class MarketTeamTests(unittest.TestCase):
     def test_corrupt_cache_is_rebuilt_with_source(self):
         self.seed()
         _, original = bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
-        next((self.service.data_root / "repo_download_cache").glob("*.zip")).write_bytes(b"invalid")
+        next((self.service.data_root / "repo_download_cache").rglob("*.zip")).write_bytes(b"invalid")
         _, rebuilt = bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
         self.assertEqual(bundles.validate_repo_download_archive(original)["repos"], bundles.validate_repo_download_archive(rebuilt)["repos"])
 
@@ -331,7 +345,8 @@ class MarketTeamTests(unittest.TestCase):
 
     def test_configuration_only_repository_is_identified(self):
         root = self.seed()
-        (root / "src/decision.py").unlink()
+        for relative in ["src/decision.py", "node_modules/vendor.js", "build/compiled.py"]:
+            (root / relative).unlink()
         subprocess.run(["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qam", "configuration only"], check=True, capture_output=True)
         _, content = bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
         repo = bundles.validate_repo_download_archive(content)["repos"][0]

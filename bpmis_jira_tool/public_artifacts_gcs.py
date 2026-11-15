@@ -218,6 +218,8 @@ def fetch_repo_download_status(filename: str) -> dict[str, Any] | None:
             status["available"] = status["available"] and isinstance(parsed, dict)
             if isinstance(parsed, dict):
                 status["generated_at"] = parsed.get("generated_at")
+                status["part_count"] = parsed.get("part_count", 1)
+                status["parts"] = parsed.get("parts", [])
                 status["available"] = status["available"] and _verified_repo_download_metadata(blob, parsed)
         except (ValueError, TypeError, UnicodeDecodeError):
             status["available"] = False
@@ -228,7 +230,10 @@ def fetch_repo_download_status(filename: str) -> dict[str, Any] | None:
 
 def _verified_repo_download_metadata(blob, metadata: dict[str, Any]) -> bool:
     from bpmis_jira_tool.source_code_qa_repo_downloads import BUNDLE_FORMAT, MAX_BUNDLE_BYTES
+    from bpmis_jira_tool.source_code_qa_download_sources import MARKET_SCOPES
 
+    if metadata.get("scope_key") in MARKET_SCOPES and metadata.get("full_source") is not True:
+        return False
     return bool(
         metadata.get("format") == BUNDLE_FORMAT
         and metadata.get("source_verified") is True
