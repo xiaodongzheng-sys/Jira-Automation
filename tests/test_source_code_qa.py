@@ -133,24 +133,15 @@ class SourceCodeQARouteTests(unittest.TestCase):
         service._build_repo_index(key, entry, repo_path)
         return repo_path
 
-    def test_npt_user_gets_repo_download_page_but_blocked_chat_apis(self):
+    def test_non_allowlisted_npt_user_cannot_access_source_code_qa(self):
         with self.app.test_client() as client:
             self._login(client, "teammate@npt.sg")
-            default_response = client.get("/", follow_redirects=False)
-            self._login(client, "teammate@npt.sg")
-            page_response = client.get("/source-code-qa", follow_redirects=False)
-            api_response = client.get("/api/source-code-qa/config")
-            self._login(client, "teammate@npt.sg")
-            sessions_response = client.get("/api/source-code-qa/sessions")
-
-        # Non-admin NPT users are allowed to access Source Code QA (Repo Download
-        # view) and the config API; chat/session APIs stay admin-only.
-        self.assertEqual(page_response.status_code, 200)
-        self.assertEqual(api_response.status_code, 200)
-        self.assertEqual(sessions_response.status_code, 403)
-        page_html = page_response.get_data(as_text=True)
-        self.assertIn("Source Code Repo Download", page_html)
-        self.assertNotIn('data-source-view-tab="chat"', page_html)
+            page = client.get("/source-code-qa", follow_redirects=False)
+            config = client.get("/api/source-code-qa/config")
+            download = client.get("/api/source-code-qa/repo-downloads/AF:All")
+        self.assertEqual(page.status_code, 302)
+        self.assertEqual(config.status_code, 403)
+        self.assertEqual(download.status_code, 403)
 
     def test_admin_user_can_access_source_code_qa_directly(self):
         with self.app.test_client() as client:
@@ -249,25 +240,16 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn(b"data-source-effort-run", owner_response.data)
         self.assertIn(b"Save Config", owner_response.data)
         self.assertIn(b"Sync / Refresh", owner_response.data)
-        self.assertEqual(teammate_response.status_code, 200)
-        self.assertIn(b"Repo Download", teammate_response.data)
-        self.assertNotIn(b"Chat", teammate_response.data)
-        self.assertNotIn(b"Repository Mapping", teammate_response.data)
-        self.assertNotIn(b"Repo Admin", teammate_response.data)
-        self.assertNotIn(b"Effort Assessment", teammate_response.data)
-        self.assertNotIn(b"Save Config", teammate_response.data)
-        self.assertNotIn(b"Sync / Refresh", teammate_response.data)
-        self.assertNotIn(b'data-source-view-tab="chat"', teammate_response.data)
-        self.assertIn(b'data-source-view-tab="download"', teammate_response.data)
+        self.assertEqual(teammate_response.status_code, 302)
         self.assertNotIn(b"Model Availability", owner_response.data)
 
     def test_repo_download_endpoint_works_for_logged_in_user(self):
         self._seed_repo_download_scope()
         with self.app.test_client() as client:
-            self._login(client, "teammate@npt.sg")
+            self._login(client)
             download = client.get("/api/source-code-qa/repo-downloads/AF:All")
 
-        # No password gate; login is the only gate.
+        # The approved signed-in user can download the archive.
         self.assertEqual(download.status_code, 200)
         self.assertEqual(download.headers["Content-Type"], "application/zip")
         with zipfile.ZipFile(io.BytesIO(download.data)) as archive:
@@ -301,7 +283,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             "bpmis_jira_tool.public_artifacts_gcs.fetch_repo_download_signed_url",
             return_value=({"filename": "source-code-repos-AF-All.zip", "size_bytes": 1024}, "https://signed.example.com/af-all.zip"),
         ):
-            self._login(client, "teammate@npt.sg")
+            self._login(client)
             download = client.get("/api/source-code-qa/repo-downloads/AF:All", follow_redirects=False)
 
         self.assertEqual(download.status_code, 302)
@@ -327,7 +309,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             "bpmis_jira_tool.public_artifacts_gcs.fetch_repo_download_signed_url",
             side_effect=AssertionError("GCS should not be consulted when a local prebuilt archive exists"),
         ):
-            self._login(client, "teammate@npt.sg")
+            self._login(client)
             download = client.get("/api/source-code-qa/repo-downloads/AF:All")
 
         self.assertEqual(download.status_code, 200)
@@ -357,7 +339,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             "bpmis_jira_tool.web._build_local_agent_client",
             return_value=_UnexpectedLocalAgentClient(),
         ):
-            self._login(client, "teammate@npt.sg")
+            self._login(client)
             download = client.get("/api/source-code-qa/repo-downloads/AF:All", follow_redirects=False)
 
         self.assertEqual(download.status_code, 302)
@@ -407,7 +389,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             "bpmis_jira_tool.web.public_gcs_read_bucket",
             return_value="test-bucket",
         ):
-            self._login(client, "teammate@npt.sg")
+            self._login(client)
             download = client.get("/api/source-code-qa/repo-downloads/AF:All")
 
         self.assertEqual(download.status_code, 200)

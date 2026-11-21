@@ -147,7 +147,7 @@ class MarketTeamTests(unittest.TestCase):
             with self.subTest(team=team):
                 self.seed(team)
                 with self.app.test_client() as client:
-                    self.login(client, "teammate@npt.sg")
+                    self.login(client)
                     response = client.get(f"/api/source-code-qa/repo-downloads/{team}:All")
                 self.assertEqual(response.status_code, 200, response.get_data(as_text=False)[:100])
                 self.assertLess(len(response.data), 20_000_000)
@@ -206,6 +206,45 @@ class MarketTeamTests(unittest.TestCase):
             with self.assertRaisesRegex(ToolError, "complete source file"):
                 bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
 
+    def test_risk_scopes_serve_every_numbered_source_part(self):
+        from bpmis_jira_tool.source_code_qa_download_parts import install_local_parts
+
+        for team in ("AF", "CRMS", "GRC"):
+            with self.subTest(team=team):
+                rng = random.Random(42)
+                files = {f"src/part_{i}.py": "# " + rng.randbytes(6000).hex() for i in range(8)}
+                self.seed(team, extra_files=files)
+                scope = f"{team}:All"
+                with patch.object(bundles, "MAX_BUNDLE_BYTES", 28_000):
+                    metadata, _ = bundles.build_repo_download_zip(self.service, scope)
+                    self.assertGreater(metadata["part_count"], 1)
+                    install_local_parts(self.service, metadata)
+                    found = set()
+                    with self.app.test_client() as client:
+                        self.login(client)
+                        for part in metadata["parts"]:
+                            key = scope if part["part_number"] == 1 else scope + f"~part-{part['part_number']}"
+                            response = client.get(f"/api/source-code-qa/repo-downloads/{key}")
+                            self.assertEqual(response.status_code, 200)
+                            with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+                                self.assertIsNone(archive.testzip())
+                                found.update(archive.namelist())
+                    for name in files:
+                        self.assertIn("Market-Repo/" + name, found)
+
+    def test_download_access_is_limited_to_the_two_approved_emails(self):
+        self.seed("AF")
+        url = "/api/source-code-qa/repo-downloads/AF:All"
+        with self.app.test_client() as client:
+            self.assertIn(client.get(url).status_code, {401, 403})
+            self.login(client, "teammate@npt.sg")
+            self.assertEqual(client.get(url).status_code, 403)
+            self.assertEqual(client.get("/source-code-qa").status_code, 302)
+            for email in ("XIAODONG.ZHENG@NPT.SG", "xiaodong.zheng1991@gmail.com"):
+                self.login(client, email)
+                self.assertEqual(client.get("/source-code-qa").status_code, 200)
+                self.assertEqual(client.get(url).status_code, 200)
+
     def test_strict_size_boundary_and_oversized_prebuilt_is_ignored(self):
         bundles.require_repo_download_size(19_999_999)
         with self.assertRaises(ToolError):
@@ -248,7 +287,7 @@ class MarketTeamTests(unittest.TestCase):
             gcs, "fetch_repo_download_signed_url", return_value=None
         ), patch.object(gcs, "fetch_repo_download_archive_to_file", side_effect=hydrate):
             with self.app.test_client() as client:
-                self.login(client, "teammate@npt.sg")
+                self.login(client)
                 response = client.get("/api/source-code-qa/repo-downloads/SG_MARKET:All")
         self.assertEqual(response.status_code, 400)
         self.assertTrue(hydrated)
@@ -272,7 +311,7 @@ class MarketTeamTests(unittest.TestCase):
             source_code_qa_repo_download=lambda scope: response
         )), patch.object(bundles, "MAX_BUNDLE_BYTES", 10), patch.object(response, "close") as close:
             with self.app.test_client() as client:
-                self.login(client, "teammate@npt.sg")
+                self.login(client)
                 result = client.get("/api/source-code-qa/repo-downloads/SG_MARKET:All")
         self.assertEqual(result.status_code, 400)
         close.assert_called_once()

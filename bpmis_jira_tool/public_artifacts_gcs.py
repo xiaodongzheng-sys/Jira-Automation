@@ -230,9 +230,9 @@ def fetch_repo_download_status(filename: str) -> dict[str, Any] | None:
 
 def _verified_repo_download_metadata(blob, metadata: dict[str, Any]) -> bool:
     from bpmis_jira_tool.source_code_qa_repo_downloads import BUNDLE_FORMAT, MAX_BUNDLE_BYTES
-    from bpmis_jira_tool.source_code_qa_download_sources import MARKET_SCOPES
+    from bpmis_jira_tool.source_code_qa_download_sources import FULL_SOURCE_SCOPES
 
-    if metadata.get("scope_key") in MARKET_SCOPES and metadata.get("full_source") is not True:
+    if metadata.get("scope_key") in FULL_SOURCE_SCOPES and metadata.get("full_source") is not True:
         return False
     return bool(
         metadata.get("format") == BUNDLE_FORMAT

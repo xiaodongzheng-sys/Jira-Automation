@@ -944,11 +944,10 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self.assertEqual(default_response.status_code, 302)
                 self.assertEqual(default_response.headers["Location"], "/version-plan")
 
-                # Allowed non-admin users can access Source Code QA (Repo Download view).
+                # Source Code Q&A is restricted to the approved email accounts.
                 self._login_non_admin(client)
                 source_page = client.get("/source-code-qa", follow_redirects=False)
-                self.assertEqual(source_page.status_code, 200)
-                self.assertIn(b"Source Code Repo Download", source_page.data)
+                self.assertEqual(source_page.status_code, 302)
 
                 self._login_non_admin(client)
                 business_insights_response = client.get("/business-insights")
@@ -1170,10 +1169,10 @@ class TeamPortalAccessTests(unittest.TestCase):
 
             with app.test_client() as client:
                 route_expectations = [
-                    ("get", "/source-code-qa", {200}),
+                    ("get", "/source-code-qa", {302}),
                     ("get", "/prd-self-assessment", {302}),
                     ("get", "/prd-briefing/", {302}),
-                    ("get", "/api/source-code-qa/config", {200}),
+                    ("get", "/api/source-code-qa/config", {403}),
                     ("get", "/api/source-code-qa/sessions", {403}),
                     ("post", "/api/source-code-qa/sessions", {403}, {"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"}),
                     ("post", "/api/source-code-qa/query", {403}, {"pm_team": "AF", "country": "All", "question": "x", "llm_provider": "not-real"}),
@@ -1253,26 +1252,9 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertEqual(team_dashboard_response.status_code, 200)
         self.assertIn(b"data-version-plan-content", team_dashboard_response.data)
         # ...while allowed pages render for signed-in non-admin users.
-        self.assertEqual(source_response.status_code, 200)
+        self.assertEqual(source_response.status_code, 302)
         self.assertEqual(version_plan_response.status_code, 200)
         self.assertEqual(denied_response.status_code, 403)
-
-        source_soup = BeautifulSoup(source_response.get_data(as_text=True), "html.parser")
-        self.assertIn("Source Code Repo Download", source_soup.get_text(" ", strip=True))
-        self.assertIsNone(source_soup.select_one("[data-download-password-form]"))
-        self.assertIsNone(source_soup.select_one("[data-source-view-tab='chat']"))
-        self.assertIsNone(source_soup.select_one("[data-source-question]"))
-        self.assertIsNone(source_soup.select_one("[data-source-query]"))
-        self.assertIsNone(source_soup.select_one("[data-source-session-list]"))
-        self.assertIsNone(source_soup.select_one("[data-source-new-session]"))
-        self.assertIsNone(source_soup.select_one("[data-source-session-messages]"))
-        self.assertIsNone(source_soup.select_one("[data-source-llm-provider]"))
-        self.assertIsNone(source_soup.select_one("[data-source-view-tab='admin']"))
-        self.assertIsNone(source_soup.select_one("[data-source-view-tab='effort']"))
-        self.assertIsNotNone(source_soup.select_one("[data-source-view-tab='download']"))
-        self.assertIsNotNone(source_soup.find("link", href=lambda value: value and "source_code_qa.css" in value))
-        self.assertIsNotNone(source_soup.find("script", src=lambda value: value and "source_code_qa_api.js" in value))
-        self.assertIsNotNone(source_soup.find("script", src=lambda value: value and "source_code_qa.js" in value))
 
         version_plan_soup = BeautifulSoup(version_plan_response.get_data(as_text=True), "html.parser")
         self.assertIsNotNone(version_plan_soup.select_one("[data-version-plan-content]"))

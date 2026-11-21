@@ -13,7 +13,7 @@ import zipfile
 from bpmis_jira_tool.errors import ToolError
 
 FULL_SOURCE_POLICY = "all-available-git-text-with-pinned-runtime-submodules-v1"
-MARKET_SCOPES = {"SG_MARKET:All", "ID_MARKET:All", "PH_MARKET:All"}
+FULL_SOURCE_SCOPES = {"SG_MARKET:All", "ID_MARKET:All", "PH_MARKET:All", "AF:All", "CRMS:All", "GRC:All"}
 AF_REFERENCE = re.compile(rb"fraud|risk|ivlog|fingerprint|blackbox|threatmetrix|tongdun|(?:\b|_)af(?:\b|_)", re.I)
 
 

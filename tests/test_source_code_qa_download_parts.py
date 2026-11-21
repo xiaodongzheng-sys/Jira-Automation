@@ -82,7 +82,7 @@ class CompleteMarketDownloadTests(unittest.TestCase):
             install_local_parts(self.service, metadata)
             with self.app.test_client() as client:
                 self.assertEqual(client.get("/api/source-code-qa/repo-downloads/SG_MARKET:All~part-2").status_code, 401)
-                self.login(client, "teammate@npt.sg")
+                self.login(client)
                 html = client.get("/source-code-qa").get_data(as_text=True)
                 self.assertIn(f"Part 2 of {metadata['part_count']}", html)
                 for part in metadata["parts"]:

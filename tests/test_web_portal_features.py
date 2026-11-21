@@ -1173,7 +1173,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b">Reports<", user_response.data)
         self.assertNotIn(b">Meeting<", user_response.data)
         self.assertNotIn(b">Others<", user_response.data)
-        self.assertEqual(user_source_direct_response.status_code, 200)
+        self.assertEqual(user_source_direct_response.status_code, 302)
         self.assertEqual(user_prd_direct_response.status_code, 302)
         self.assertEqual(user_prd_direct_response.headers["Location"], "/access-denied")
         self.assertEqual(user_prd_api_response.status_code, 403)
@@ -1181,8 +1181,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn(b">Version Plan<", user_prd_denied_page.data)
         self.assertNotIn(b">Projects<", user_prd_denied_page.data)
         self.assertIn(b">Business Insights<", user_prd_denied_page.data)
-        # In local mode source-code-qa is open to all signed-in users, so
-        # the Source Code nav tab legitimately appears for non-admins.
+        # Source Code is limited to the approved email accounts.
         self.assertEqual(sophia_response.status_code, 200)
         self.assertNotIn(b">Team Default Admin<", sophia_response.data)
         self.assertNotIn(b">Team Dashboard<", sophia_response.data)
@@ -1192,7 +1191,6 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b">Meeting<", sophia_response.data)
         self.assertNotIn(b">Others<", sophia_response.data)
         self.assertNotIn(b">PRDs<", user_response.data)
-        # Source Code tab is visible to all signed-in users in local mode.
         self.assertIn(b">Meeting<", admin_response.data)
         self.assertIn(b">Others<", admin_response.data)
         self.assertIn(b">PRDs<", admin_response.data)

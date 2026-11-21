@@ -1,6 +1,11 @@
 """Source Code QA web runtime, attachment, generated artifact, access, and job payload helpers."""
 from __future__ import annotations
 
+SOURCE_CODE_QA_ALLOWED_EMAILS = frozenset({
+    "xiaodong.zheng@npt.sg",
+    "xiaodong.zheng1991@gmail.com",
+})
+
 
 def _bind_web_globals(functions: list[object], global_context: dict[str, object]) -> None:
     for function in functions:
@@ -51,9 +56,7 @@ def _get_source_code_qa_runtime_evidence_store():
 
 
 def _can_access_source_code_qa(settings: Settings) -> bool:
-    if not _shared_portal_enabled(settings):
-        return True
-    return _is_portal_user(settings=settings)
+    return str(_current_google_email() or "").strip().lower() in SOURCE_CODE_QA_ALLOWED_EMAILS
 
 
 def _can_manage_source_code_qa(settings: Settings) -> bool:
@@ -425,7 +428,7 @@ def _require_source_code_qa_access(settings: Settings, *, api: bool = False):
         login_gate = _require_google_login(settings, api=api)
         if login_gate is not None:
             return login_gate
-    message = "Source Code Q&A is restricted to signed-in NPT users."
+    message = "Source Code Q&A is restricted to approved email accounts."
     if not _can_access_source_code_qa(settings):
         if api:
             return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN

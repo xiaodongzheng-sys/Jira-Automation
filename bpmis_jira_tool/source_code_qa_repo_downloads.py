@@ -15,7 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from bpmis_jira_tool.errors import ToolError
-from bpmis_jira_tool.source_code_qa_download_sources import FULL_SOURCE_POLICY, MARKET_SCOPES, part_filename, write_git_sources, submodule_cache_version
+from bpmis_jira_tool.source_code_qa_download_sources import FULL_SOURCE_POLICY, FULL_SOURCE_SCOPES, part_filename, write_git_sources, submodule_cache_version
 from bpmis_jira_tool.source_code_qa import SourceCodeQAService
 
 
@@ -85,7 +85,7 @@ def resolve_repo_download_scope(scope_key: str) -> dict[str, str]:
     if match:
         scope = resolve_repo_download_scope(match[1])
         number = int(match[2])
-        if scope["scope_key"] not in MARKET_SCOPES:
+        if scope["scope_key"] not in FULL_SOURCE_SCOPES:
             raise ToolError("Unknown repo download part.")
         scope["filename"] = part_filename(scope["filename"], number)
         scope["part_number"] = number
@@ -107,7 +107,7 @@ def build_repo_download_zip(service: SourceCodeQAService, scope_key: str) -> tup
     scope = resolve_repo_download_scope(scope_key)
     key = scope["scope_key"]
     requested_part = scope.get("part_number", 1)
-    full_source = key in MARKET_SCOPES
+    full_source = key in FULL_SOURCE_SCOPES
     base_scope = resolve_repo_download_scope(key)
     entries = service._load_entries_for_key(key)
     if not entries:
@@ -486,8 +486,8 @@ def validate_repo_download_archive(content: bytes | Path, *, expected_scope: str
             if len(names) != len(archive.namelist()):
                 raise ValueError("duplicate ZIP entries")
             bundle_set = manifest.get("bundle_set")
-            if manifest.get("scope_key") in MARKET_SCOPES and not bundle_set:
-                raise ValueError("Market source set requires lossless parts")
+            if manifest.get("scope_key") in FULL_SOURCE_SCOPES and not bundle_set:
+                raise ValueError("Source set requires lossless parts")
             if bundle_set:
                 if bundle_set["policy"] != FULL_SOURCE_POLICY or bundle_set["omitted_source_files"] != 0 or not 1 <= bundle_set["part_number"] <= bundle_set["part_count"] <= 999:
                     raise ValueError("invalid complete source set")
