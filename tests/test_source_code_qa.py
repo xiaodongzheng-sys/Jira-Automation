@@ -575,12 +575,9 @@ class SourceCodeQARouteTests(unittest.TestCase):
             page_response = client.get("/source-code-qa")
             config_response = client.get("/api/source-code-qa/config")
 
-        # The allowlisted gmail user is just another blocked non-admin now: the
-        # renders without admin controls, and the config GET API returns 200.
-        self.assertEqual(page_response.status_code, 200)
-        self.assertNotIn(b"Repository Mapping", page_response.data)
-        self.assertNotIn(b"Repo Admin", page_response.data)
-        self.assertEqual(config_response.status_code, 200)
+        # The Source Code admin environment list does not override the owner-only access gate.
+        self.assertEqual(page_response.status_code, 302)
+        self.assertEqual(config_response.status_code, 403)
 
 
     def test_source_code_qa_builtin_owner_can_manage_when_env_owner_changes(self):
@@ -608,7 +605,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertTrue(config_payload["can_manage"])
         self.assertEqual(config_payload["auth"]["admin_match_source"], "portal_admin")
 
-    def test_source_code_qa_test_user_is_not_admin_even_with_default_allowlist(self):
+    def test_gmail_user_cannot_access_source_code_qa_with_default_portal_allowlist(self):
         with patch.dict(
             os.environ,
             {
@@ -628,7 +625,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             "results": [{"state": "ok", "display_name": "Repo One"}],
             "repo_status": [{"display_name": "Repo One", "state": "synced", "message": "ready"}],
         }
-        with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.sync", return_value=sync_result):
+        with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.sync", return_value=sync_result) as sync:
             with app.test_client() as client:
                 self._login(client, "xiaodong.zheng1991@gmail.com")
                 page_response = client.get("/source-code-qa")
@@ -641,13 +638,11 @@ class SourceCodeQARouteTests(unittest.TestCase):
                 self._login(client, "xiaodong.zheng1991@gmail.com")
                 sync_response = client.post("/api/source-code-qa/sync", json={"pm_team": "AF", "country": "All"})
 
-        # The gmail test user is an allowed portal user (not admin): public page only,
-        # config GET returns 200, but config POST and sync are rejected.
-        self.assertNotIn(b"Repository Mapping", page_response.data)
-        self.assertEqual(config_response.status_code, 200)
-
+        self.assertEqual(page_response.status_code, 302)
+        self.assertEqual(config_response.status_code, 403)
         self.assertEqual(save_response.status_code, 403)
         self.assertEqual(sync_response.status_code, 403)
+        sync.assert_not_called()
 
     def test_source_code_qa_manage_blocked_for_non_admin_with_error_payload(self):
         with self.app.test_client() as client:

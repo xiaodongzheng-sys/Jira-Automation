@@ -232,18 +232,19 @@ class MarketTeamTests(unittest.TestCase):
                     for name in files:
                         self.assertIn("Market-Repo/" + name, found)
 
-    def test_download_access_is_limited_to_the_two_approved_emails(self):
+    def test_download_access_is_limited_to_the_owner_email(self):
         self.seed("AF")
         url = "/api/source-code-qa/repo-downloads/AF:All"
         with self.app.test_client() as client:
             self.assertIn(client.get(url).status_code, {401, 403})
-            self.login(client, "teammate@npt.sg")
-            self.assertEqual(client.get(url).status_code, 403)
-            self.assertEqual(client.get("/source-code-qa").status_code, 302)
-            for email in ("XIAODONG.ZHENG@NPT.SG", "xiaodong.zheng1991@gmail.com"):
+            for email in ("teammate@npt.sg", "xiaodong.zheng1991@gmail.com", "xiaodong.zheng+alias@npt.sg"):
                 self.login(client, email)
-                self.assertEqual(client.get("/source-code-qa").status_code, 200)
-                self.assertEqual(client.get(url).status_code, 200)
+                self.assertEqual(client.get("/source-code-qa").status_code, 302)
+                self.assertEqual(client.get(url).status_code, 403)
+                self.assertEqual(client.get(url + "~part-2").status_code, 403)
+            self.login(client, "XIAODONG.ZHENG@NPT.SG")
+            self.assertEqual(client.get("/source-code-qa").status_code, 200)
+            self.assertEqual(client.get(url).status_code, 200)
 
     def test_strict_size_boundary_and_oversized_prebuilt_is_ignored(self):
         bundles.require_repo_download_size(19_999_999)

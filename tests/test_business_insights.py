@@ -468,7 +468,7 @@ class BusinessInsightsLoginRequiredTests(unittest.TestCase):
         self.assertEqual(r["cr_reports"].status_code, 200)
         self.assertEqual(r["cr_reports"].get_json()["reports"], [])
         self.assertEqual(r["cr_sql"].status_code, 404)
-        self.assertEqual(r["source_code"].status_code, 200)
+        self.assertEqual(r["source_code"].status_code, 302)
         self.assertEqual(r["version_plan"].status_code, 200)
 
     def test_monee_and_seamoney_users_are_blocked(self):
