@@ -272,24 +272,27 @@ def fetch_combined_repo_download_signed_url(filename: str, scope_key: str, set_i
         return None
 
 
-def fetch_combined_repo_download_to_file(filename: str, scope_key: str, set_id: str, local_path: Path) -> dict[str, Any] | None:
-    from bpmis_jira_tool.source_code_qa_combined import _valid_combined_file
+def stream_combined_repo_download(filename: str, scope_key: str, set_id: str):
+    """Stream a verified GCS object without Cloud Run's buffered response limit."""
+    import hashlib
 
     result = _combined_blob_and_metadata(filename, scope_key, set_id)
     if result is None:
         return None
     blob, metadata = result
-    try:
-        blob.download_to_filename(str(local_path), if_generation_match=blob.generation)
-        stat = local_path.stat()
-        if not _valid_combined_file(local_path, stat.st_ino, stat.st_size, stat.st_mtime_ns, metadata["sha256"], scope_key, set_id):
-            local_path.unlink(missing_ok=True)
-            return None
-        return metadata
-    except Exception:
-        local_path.unlink(missing_ok=True)
-        logger.warning("Could not download combined repo bundle %s", filename, exc_info=True)
-        return None
+
+    def chunks():
+        digest = hashlib.sha256()
+        size = 0
+        with blob.open("rb", chunk_size=2 * 1024 * 1024, if_generation_match=blob.generation) as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+                yield chunk
+        if size != metadata["size_bytes"] or digest.hexdigest() != metadata["sha256"]:
+            raise OSError("Combined source download checksum mismatch.")
+
+    return metadata, chunks()
 
 
 def publish_combined_repo_download(metadata: dict[str, Any], path: Path) -> bool:

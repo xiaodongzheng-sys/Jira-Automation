@@ -1,4 +1,5 @@
 import io
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -294,6 +295,38 @@ class MarketTeamTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 302)
                 self.assertEqual(response.location, "https://signed.company.test/combined")
                 self.assertEqual(signed.call_args.args[-1], "current-set")
+
+    def test_combined_cloud_fallback_streams_without_content_length(self):
+        url = "/api/source-code-qa/repo-downloads/PH_MARKET:All/combined"
+        with patch("bpmis_jira_tool.web.public_gcs_read_bucket", return_value="test"), patch.object(
+            gcs, "fetch_repo_download_status", return_value={"available": True, "set_id": "current-set"}
+        ), patch.object(gcs, "fetch_combined_repo_download_signed_url", return_value=None), patch.object(
+            gcs, "stream_combined_repo_download", return_value=({"sha256": "a" * 64}, iter((b"part-1", b"part-2")))
+        ):
+            with self.app.test_client() as client:
+                self.login(client)
+                response = client.get(url, buffered=False)
+                self.assertEqual(response.status_code, 200)
+                self.assertNotIn("Content-Length", response.headers)
+                self.assertEqual(response.headers["X-Content-SHA256"], "a" * 64)
+                self.assertEqual(b"".join(response.response), b"part-1part-2")
+                response.close()
+
+    def test_combined_gcs_stream_pins_generation_and_checks_content(self):
+        payload = b"source bundle data"
+        blob = SimpleNamespace(generation=9, open=lambda *args, **kwargs: io.BytesIO(payload))
+        metadata = {"size_bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+        with patch.object(gcs, "_combined_blob_and_metadata", return_value=(blob, metadata)), patch.object(
+            blob, "open", wraps=blob.open
+        ) as reader:
+            _, chunks = gcs.stream_combined_repo_download("bundle.zip", "PH_MARKET:All", "set")
+            self.assertEqual(b"".join(chunks), payload)
+            self.assertEqual(reader.call_args.kwargs["if_generation_match"], 9)
+        bad_metadata = {**metadata, "sha256": "0" * 64}
+        with patch.object(gcs, "_combined_blob_and_metadata", return_value=(blob, bad_metadata)):
+            _, chunks = gcs.stream_combined_repo_download("bundle.zip", "PH_MARKET:All", "set")
+            with self.assertRaisesRegex(OSError, "checksum mismatch"):
+                b"".join(chunks)
 
     def test_risk_scopes_serve_every_numbered_source_part(self):
         from bpmis_jira_tool.source_code_qa_download_parts import install_local_parts

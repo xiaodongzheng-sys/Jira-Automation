@@ -5,7 +5,7 @@ import shutil
 import tempfile
 from urllib.parse import urlsplit
 
-from flask import after_this_request, redirect
+from flask import Response, after_this_request, redirect, stream_with_context
 
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.source_code_qa_patterns import PLACEHOLDER_HOST_PATTERN
@@ -298,11 +298,10 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
                 metadata, path = local
                 return send_file(path, mimetype="application/zip", download_name=metadata["filename"], as_attachment=True)
             if public_gcs_read_bucket():
-                from pathlib import Path
                 from bpmis_jira_tool.public_artifacts_gcs import (
                     fetch_combined_repo_download_signed_url,
-                    fetch_combined_repo_download_to_file,
                     fetch_repo_download_status,
+                    stream_combined_repo_download,
                 )
 
                 primary = existing_repo_download_archive(service, scope_key)
@@ -312,17 +311,14 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
                     signed = fetch_combined_repo_download_signed_url(filename, scope["scope_key"], status["set_id"])
                     if signed:
                         return redirect(signed[1], code=302)
-                    temp_dir = tempfile.mkdtemp(prefix="source-code-combined-download-")
-                    temp_path = Path(temp_dir) / filename
-                    metadata = fetch_combined_repo_download_to_file(filename, scope["scope_key"], status["set_id"], temp_path)
-                    if metadata:
-                        @after_this_request
-                        def _cleanup_combined_temp(response):
-                            shutil.rmtree(temp_dir, ignore_errors=True)
-                            return response
-
-                        return send_file(temp_path, mimetype="application/zip", download_name=filename, as_attachment=True)
-                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    streamed = stream_combined_repo_download(filename, scope["scope_key"], status["set_id"])
+                    if streamed:
+                        metadata, chunks = streamed
+                        response = Response(stream_with_context(chunks), mimetype="application/zip")
+                        response.headers.set("Content-Disposition", "attachment", filename=filename)
+                        response.headers["X-Content-SHA256"] = metadata["sha256"]
+                        response.headers["Cache-Control"] = "private, no-store"
+                        return response
             return jsonify({"status": "error", "message": "A combined file for the current source set is not available."}), 404
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), 400
