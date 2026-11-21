@@ -10,6 +10,7 @@ from flask import after_this_request, redirect
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.source_code_qa_patterns import PLACEHOLDER_HOST_PATTERN
 from bpmis_jira_tool.source_code_qa_repo_downloads import require_repo_download_size, validate_repo_download_archive
+from bpmis_jira_tool.source_code_qa_combined import combined_filename, existing_combined_archive
 
 
 def _reject_placeholder_repo_urls(repositories: object) -> None:
@@ -109,6 +110,32 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
                             details.append(size)
                         scope["meta"] = " · ".join(details)
                 scopes.append(scope)
+            combined = existing_combined_archive(service, original["scope_key"])
+            combined_meta = combined[0] if combined else None
+            if combined_meta is None and status and status.get("available") and status.get("set_id"):
+                try:
+                    from bpmis_jira_tool.public_artifacts_gcs import fetch_combined_repo_download_status
+
+                    combined_meta = fetch_combined_repo_download_status(
+                        combined_filename(original["filename"]), original["scope_key"], status["set_id"]
+                    )
+                except Exception:
+                    combined_meta = None
+            if combined_meta:
+                details = []
+                generated = _format_generated_at(combined_meta.get("generated_at"))
+                if generated:
+                    details.append(f"Updated {generated}")
+                size = _human_size(combined_meta.get("size_bytes"))
+                if size:
+                    details.append(size)
+                scopes.append({
+                    **original,
+                    "label": original["label"] + " · Combined",
+                    "filename": combined_filename(original["filename"]),
+                    "combined": True,
+                    "meta": " · ".join(details),
+                })
         return scopes
 
     def _download_local_agent_archive(response, *, fallback_name: str):
@@ -255,6 +282,50 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
         except ToolError as error:
             status_code = HTTPStatus.SERVICE_UNAVAILABLE if _is_local_agent_unavailable_error(error) else HTTPStatus.BAD_REQUEST
             return jsonify({"status": "error", "message": str(error), "error_category": _tool_error_category(error)}), status_code
+
+    @app.get("/api/source-code-qa/repo-downloads/<scope_key>/combined")
+    def source_code_qa_repo_download_combined_api(scope_key: str):
+        access_gate = _require_source_code_qa_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            scope = resolve_repo_download_scope(scope_key)
+            if scope.get("part_number", 1) != 1:
+                return jsonify({"status": "error", "message": "Unknown source scope."}), 404
+            service = _build_source_code_qa_service()
+            local = existing_combined_archive(service, scope_key)
+            if local:
+                metadata, path = local
+                return send_file(path, mimetype="application/zip", download_name=metadata["filename"], as_attachment=True)
+            if public_gcs_read_bucket():
+                from pathlib import Path
+                from bpmis_jira_tool.public_artifacts_gcs import (
+                    fetch_combined_repo_download_signed_url,
+                    fetch_combined_repo_download_to_file,
+                    fetch_repo_download_status,
+                )
+
+                primary = existing_repo_download_archive(service, scope_key)
+                status = ({**primary[0], "available": True} if primary else fetch_repo_download_status(scope["filename"]))
+                if status and status.get("available") and status.get("set_id"):
+                    filename = combined_filename(scope["filename"])
+                    signed = fetch_combined_repo_download_signed_url(filename, scope["scope_key"], status["set_id"])
+                    if signed:
+                        return redirect(signed[1], code=302)
+                    temp_dir = tempfile.mkdtemp(prefix="source-code-combined-download-")
+                    temp_path = Path(temp_dir) / filename
+                    metadata = fetch_combined_repo_download_to_file(filename, scope["scope_key"], status["set_id"], temp_path)
+                    if metadata:
+                        @after_this_request
+                        def _cleanup_combined_temp(response):
+                            shutil.rmtree(temp_dir, ignore_errors=True)
+                            return response
+
+                        return send_file(temp_path, mimetype="application/zip", download_name=filename, as_attachment=True)
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+            return jsonify({"status": "error", "message": "A combined file for the current source set is not available."}), 404
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), 400
 
     @app.get("/api/source-code-qa/config")
     def source_code_qa_config_api():

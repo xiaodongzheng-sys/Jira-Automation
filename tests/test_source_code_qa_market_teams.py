@@ -206,6 +206,95 @@ class MarketTeamTests(unittest.TestCase):
             with self.assertRaisesRegex(ToolError, "complete source file"):
                 bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
 
+    def test_combined_download_preserves_all_parts_and_rejects_stale_set(self):
+        from bpmis_jira_tool.source_code_qa_combined import build_combined_archive, combined_filename, install_combined_archive
+        from bpmis_jira_tool.source_code_qa_download_parts import cached_part_artifacts, install_local_parts
+
+        rng = random.Random(42)
+        files = {f"src/part_{i}.py": "# " + rng.randbytes(6000).hex() for i in range(8)}
+        self.seed(extra_files=files)
+        with patch.object(bundles, "MAX_BUNDLE_BYTES", 28_000):
+            metadata, _ = bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
+            self.assertGreater(metadata["part_count"], 1)
+            artifacts = list(cached_part_artifacts(self.service, metadata))
+            combined = artifacts[0][1].parent / combined_filename("source-code-repos-SG-Market-All.zip")
+            combined_meta = build_combined_archive(artifacts, combined)
+            self.assertGreater(combined.stat().st_size, 28_000)
+            install_local_parts(self.service, metadata)
+            install_combined_archive(self.service, combined)
+            with self.app.test_client() as client:
+                url = "/api/source-code-qa/repo-downloads/SG_MARKET:All/combined"
+                self.assertEqual(client.get(url).status_code, 401)
+                self.login(client, "teammate@npt.sg")
+                self.assertEqual(client.get(url).status_code, 403)
+                self.login(client)
+                self.assertIn("SG Market · Combined", client.get("/source-code-qa").get_data(as_text=True))
+                response = client.get(url)
+                self.assertEqual(response.status_code, 200)
+                with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+                    self.assertIsNone(archive.testzip())
+                    self.assertEqual(json.loads(archive.read("manifest.json"))["set_id"], combined_meta["set_id"])
+                    for name, content in files.items():
+                        self.assertEqual(archive.read("Market-Repo/" + name), content.encode())
+                    self.assertTrue(any(name.startswith("indexes/part-") for name in archive.namelist()))
+                response.close()
+                sidecar = self.service.data_root / "repo_downloads" / (combined.name + ".json")
+                installed = self.service.data_root / "repo_downloads" / combined.name
+                with installed.open("ab") as handle:
+                    handle.write(b"unexpected bytes")
+                self.assertEqual(client.get(url).status_code, 404)
+                install_combined_archive(self.service, combined)
+                sidecar.write_text(json.dumps({**combined_meta, "set_id": "an-old-set"}))
+                self.assertEqual(client.get(url).status_code, 404)
+                self.assertNotIn("SG Market · Combined", client.get("/source-code-qa").get_data(as_text=True))
+
+    def test_combined_download_rejects_mixed_parts(self):
+        from bpmis_jira_tool.source_code_qa_combined import build_combined_archive, combined_filename
+        from bpmis_jira_tool.source_code_qa_download_parts import cached_part_artifacts
+
+        self.seed()
+        metadata, _ = bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
+        artifacts = list(cached_part_artifacts(self.service, metadata))
+        part, path = artifacts[0]
+        with self.assertRaisesRegex(ToolError, "manifest does not match"):
+            build_combined_archive([({**part, "set_id": "not-the-manifest-set"}, path)], path.parent / combined_filename("source-code-repos-SG-Market-All.zip"))
+
+    def test_combined_gcs_verifies_set_and_digest_without_the_part_size_limit(self):
+        name = "source-code-repos-PH-Market-All-combined.zip"
+        metadata = {
+            "format": "combined-source-and-index-v1", "scope_key": "PH_MARKET:All", "set_id": "current-set",
+            "filename": name, "source_verified": True, "size_bytes": 100_000_000,
+            "md5_base64": "expected-md5", "sha256": "a" * 64,
+        }
+        blob = SimpleNamespace(exists=lambda: True, reload=lambda: None, size=100_000_000,
+                               md5_hash="expected-md5", generation=9,
+                               generate_signed_url=lambda **kwargs: "https://signed.company.test/combined")
+        with patch.dict(os.environ, {"TEAM_PORTAL_PUBLIC_GCS_BUCKET": "test"}), patch.object(
+            gcs, "_bucket", return_value=SimpleNamespace(blob=lambda filename: blob)
+        ), patch.object(gcs, "gcs_read_bytes", return_value=json.dumps(metadata).encode()):
+            self.assertEqual(gcs.fetch_combined_repo_download_status(name, "PH_MARKET:All", "current-set"), metadata)
+            self.assertIsNone(gcs.fetch_combined_repo_download_status(name, "PH_MARKET:All", "older-set"))
+            with patch.object(blob, "generate_signed_url", return_value="https://signed.company.test/combined") as signer:
+                self.assertIsNotNone(gcs.fetch_combined_repo_download_signed_url(name, "PH_MARKET:All", "current-set"))
+                self.assertEqual(signer.call_args.kwargs["generation"], 9)
+            blob.md5_hash = "wrong"
+            self.assertIsNone(gcs.fetch_combined_repo_download_status(name, "PH_MARKET:All", "current-set"))
+
+    def test_combined_cloud_route_is_owner_gated_and_pins_current_set(self):
+        url = "/api/source-code-qa/repo-downloads/PH_MARKET:All/combined"
+        with patch("bpmis_jira_tool.web.public_gcs_read_bucket", return_value="test"), patch.object(
+            gcs, "fetch_repo_download_status", return_value={"available": True, "set_id": "current-set"}
+        ), patch.object(gcs, "fetch_combined_repo_download_signed_url", return_value=({}, "https://signed.company.test/combined")) as signed:
+            with self.app.test_client() as client:
+                self.assertEqual(client.get(url).status_code, 401)
+                self.login(client, "teammate@npt.sg")
+                self.assertEqual(client.get(url).status_code, 403)
+                self.login(client)
+                response = client.get(url)
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(response.location, "https://signed.company.test/combined")
+                self.assertEqual(signed.call_args.args[-1], "current-set")
+
     def test_risk_scopes_serve_every_numbered_source_part(self):
         from bpmis_jira_tool.source_code_qa_download_parts import install_local_parts
 

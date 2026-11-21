@@ -220,12 +220,101 @@ def fetch_repo_download_status(filename: str) -> dict[str, Any] | None:
                 status["generated_at"] = parsed.get("generated_at")
                 status["part_count"] = parsed.get("part_count", 1)
                 status["parts"] = parsed.get("parts", [])
+                status["set_id"] = parsed.get("set_id")
                 status["available"] = status["available"] and _verified_repo_download_metadata(blob, parsed)
         except (ValueError, TypeError, UnicodeDecodeError):
             status["available"] = False
     if not metadata_bytes:
         status["available"] = False
     return status
+
+
+def _combined_blob_and_metadata(filename: str, scope_key: str, set_id: str):
+    """Verify a combined object against the current numbered source set."""
+    from bpmis_jira_tool.source_code_qa_combined import valid_combined_metadata
+
+    bucket_name = public_gcs_read_bucket()
+    if not bucket_name or not set_id:
+        return None
+    try:
+        blob = _bucket(bucket_name).blob(f"repo-downloads/{filename}")
+        if not blob.exists():
+            return None
+        blob.reload()
+        raw = gcs_read_bytes(bucket_name, f"repo-downloads/{filename}.json")
+        metadata = json.loads(raw) if raw else None
+        if not blob.md5_hash or not valid_combined_metadata(metadata, scope_key=scope_key, set_id=set_id, filename=filename, size=int(blob.size or 0), md5_base64=blob.md5_hash):
+            return None
+        return blob, metadata
+    except (OSError, ValueError, TypeError, KeyError):
+        logger.warning("Could not read combined repo bundle %s", filename, exc_info=True)
+        return None
+    except Exception:
+        logger.warning("Could not check combined repo bundle %s", filename, exc_info=True)
+        return None
+
+
+def fetch_combined_repo_download_status(filename: str, scope_key: str, set_id: str) -> dict[str, Any] | None:
+    result = _combined_blob_and_metadata(filename, scope_key, set_id)
+    return result[1] if result else None
+
+
+def fetch_combined_repo_download_signed_url(filename: str, scope_key: str, set_id: str) -> tuple[dict[str, Any], str] | None:
+    result = _combined_blob_and_metadata(filename, scope_key, set_id)
+    if result is None:
+        return None
+    blob, metadata = result
+    try:
+        url = blob.generate_signed_url(version="v4", expiration=900, method="GET", generation=blob.generation)
+        return metadata, url
+    except Exception:
+        logger.warning("Could not sign combined repo bundle %s", filename, exc_info=True)
+        return None
+
+
+def fetch_combined_repo_download_to_file(filename: str, scope_key: str, set_id: str, local_path: Path) -> dict[str, Any] | None:
+    from bpmis_jira_tool.source_code_qa_combined import _valid_combined_file
+
+    result = _combined_blob_and_metadata(filename, scope_key, set_id)
+    if result is None:
+        return None
+    blob, metadata = result
+    try:
+        blob.download_to_filename(str(local_path), if_generation_match=blob.generation)
+        stat = local_path.stat()
+        if not _valid_combined_file(local_path, stat.st_ino, stat.st_size, stat.st_mtime_ns, metadata["sha256"], scope_key, set_id):
+            local_path.unlink(missing_ok=True)
+            return None
+        return metadata
+    except Exception:
+        local_path.unlink(missing_ok=True)
+        logger.warning("Could not download combined repo bundle %s", filename, exc_info=True)
+        return None
+
+
+def publish_combined_repo_download(metadata: dict[str, Any], path: Path) -> bool:
+    from bpmis_jira_tool.source_code_qa_combined import _valid_combined_file, file_digests, valid_combined_metadata
+
+    bucket_name = public_gcs_publish_bucket()
+    if not bucket_name:
+        return False
+    path = Path(path)
+    try:
+        stat = path.stat()
+        if not valid_combined_metadata(metadata, scope_key=metadata["scope_key"], set_id=metadata["set_id"], filename=path.name, size=stat.st_size):
+            return False
+        if not _valid_combined_file(path, stat.st_ino, stat.st_size, stat.st_mtime_ns, metadata["sha256"], metadata["scope_key"], metadata["set_id"]):
+            return False
+        if file_digests(path)[1] != metadata["md5_base64"]:
+            return False
+        if json.loads(path.with_suffix(".zip.json").read_text(encoding="utf-8")) != metadata:
+            return False
+        if not gcs_upload_file(bucket_name, path, f"repo-downloads/{path.name}"):
+            return False
+        return gcs_upload_file(bucket_name, path.with_suffix(".zip.json"), f"repo-downloads/{path.name}.json")
+    except (OSError, KeyError, ValueError, TypeError):
+        logger.warning("Could not publish combined repo bundle %s", path.name, exc_info=True)
+        return False
 
 
 def _verified_repo_download_metadata(blob, metadata: dict[str, Any]) -> bool:

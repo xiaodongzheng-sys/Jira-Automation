@@ -1144,6 +1144,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "save_team_dashboard_key_project",
                 "save_team_dashboard_project_status",
                 "source_code_qa_repo_download_api",
+                "source_code_qa_repo_download_combined_api",
                 "uat_local_agent_health_proxy",
                 "uat_local_agent_public_proxy",
             }
