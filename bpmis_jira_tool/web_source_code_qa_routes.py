@@ -64,10 +64,20 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
 
         return format_gmt8(value)
 
+    def _repo_download_scope_allowed(scope: dict) -> bool:
+        if _current_google_email() == "weilin.ang@npt.sg":
+            return scope["scope_key"] == "AF:All"
+        return True
+
+    def _repo_download_forbidden():
+        return jsonify({"status": "error", "message": "You do not have access to this repository download."}), HTTPStatus.FORBIDDEN
+
     def _repo_download_scopes_with_status() -> list:
         scopes = []
         service = _build_source_code_qa_service()
         for original in repo_download_scope_definitions():
+            if not _repo_download_scope_allowed(original):
+                continue
             local = existing_repo_download_archive(service, original["scope_key"])
             status = None
             if local is not None:
@@ -184,7 +194,7 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
             "source_code_qa.html",
             page_title="Source Code Q&A",
             user_identity=user_identity,
-            options=_source_code_qa_options_payload(service),
+            options={} if _current_google_email() == "weilin.ang@npt.sg" else _source_code_qa_options_payload(service),
             team_profiles=TEAM_PROFILE_DEFAULTS,
             country_options=list(CRMS_COUNTRIES),
             all_country=ALL_COUNTRY,
@@ -204,6 +214,8 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
             return access_gate
         try:
             scope = resolve_repo_download_scope(scope_key)
+            if not _repo_download_scope_allowed(scope):
+                return _repo_download_forbidden()
             service = _build_source_code_qa_service()
             local_archive = existing_repo_download_archive(service, scope_key)
             if local_archive is not None:
@@ -290,6 +302,8 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
             return access_gate
         try:
             scope = resolve_repo_download_scope(scope_key)
+            if not _repo_download_scope_allowed(scope):
+                return _repo_download_forbidden()
             if scope.get("part_number", 1) != 1:
                 return jsonify({"status": "error", "message": "Unknown source scope."}), 404
             service = _build_source_code_qa_service()
@@ -328,6 +342,8 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
         access_gate = _require_source_code_qa_access(settings, api=True)
         if access_gate is not None:
             return access_gate
+        if _current_google_email() == "weilin.ang@npt.sg":
+            return _repo_download_forbidden()
         try:
             service = _build_source_code_qa_service()
             codex_service = _build_source_code_qa_service("codex_cli_bridge")

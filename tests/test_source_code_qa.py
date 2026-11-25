@@ -149,16 +149,44 @@ class SourceCodeQARouteTests(unittest.TestCase):
             self._login(client, "weilin.ang@npt.sg")
             page = client.get("/source-code-qa")
             download = client.get("/api/source-code-qa/repo-downloads/AF:All")
+            config = client.get("/api/source-code-qa/config")
             chat = client.post("/api/source-code-qa/query", json={})
             admin = client.post("/api/source-code-qa/config", json={})
         self.assertEqual(page.status_code, 200)
         self.assertIn(b"Source Code Repo Download", page.data)
+        self.assertIn(b"AF-All", page.data)
+        for label in (b"CRMS-All", b"GRC-All", b"SG Market", b"ID Market", b"PH Market"):
+            self.assertNotIn(label, page.data)
         self.assertNotIn(b'data-tab-trigger="chat"', page.data)
         self.assertNotIn(b'data-tab-trigger="admin"', page.data)
         self.assertEqual(download.status_code, 200)
         self.assertTrue(zipfile.is_zipfile(io.BytesIO(download.data)))
+        self.assertEqual(config.status_code, 403)
         self.assertEqual(chat.status_code, 403)
         self.assertEqual(admin.status_code, 403)
+
+    def test_weilin_scope_restriction_applies_to_alias_parts_and_combined(self):
+        with self.app.test_client() as client:
+            self._login(client, "weilin.ang@npt.sg")
+            for scope in ("CRMS:All", "credit-risk-all", "CRMS:SG", "GRC:All", "SG_MARKET:All", "ID_MARKET:All", "PH_MARKET:All", "CRMS:All~part-2"):
+                with self.subTest(scope=scope):
+                    self.assertEqual(client.get(f"/api/source-code-qa/repo-downloads/{scope}").status_code, 403)
+                    self.assertEqual(client.get(f"/api/source-code-qa/repo-downloads/{scope}/combined").status_code, 403)
+            # A missing AF part or Combined archive is not rejected by the scope gate.
+            with patch("bpmis_jira_tool.web_source_code_qa_routes.existing_combined_archive", return_value=None), patch(
+                "bpmis_jira_tool.web_source_code_qa_routes.public_gcs_read_bucket", return_value=""
+            ):
+                self.assertEqual(client.get("/api/source-code-qa/repo-downloads/AF:All/combined").status_code, 404)
+            archive = Path(self.temp_dir.name) / "bundle.zip"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr("manifest.json", "{}")
+            with patch("bpmis_jira_tool.web.existing_repo_download_archive", return_value=({"filename": "bundle.zip"}, archive)), patch(
+                "bpmis_jira_tool.web_source_code_qa_routes.existing_combined_archive", return_value=({"filename": "bundle.zip"}, archive)
+            ):
+                for path in ("/api/source-code-qa/repo-downloads/AF:All~part-2", "/api/source-code-qa/repo-downloads/AF:All/combined"):
+                    response = client.get(path)
+                    self.assertEqual(response.status_code, 200)
+                    response.close()
 
     def test_admin_user_can_access_source_code_qa_directly(self):
         with self.app.test_client() as client:
