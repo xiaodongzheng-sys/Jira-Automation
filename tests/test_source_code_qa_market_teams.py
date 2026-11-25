@@ -124,7 +124,7 @@ class MarketTeamTests(unittest.TestCase):
             self.assertIn(f'value="{team}"', html)
             self.assertIn(profile["label"], html)
             self.assertIn(f"/repo-downloads/{team}:All", html)
-        self.assertEqual(len(payload["options"]["pm_teams"]), 6)
+        self.assertEqual(len(payload["options"]["pm_teams"]), 7)
 
     def test_market_sync_clones_and_pulls_source_with_indexes(self):
         origin = self.seed("AF")
