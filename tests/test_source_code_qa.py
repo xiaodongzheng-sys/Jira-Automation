@@ -143,6 +143,23 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(config.status_code, 403)
         self.assertEqual(download.status_code, 403)
 
+    def test_weilin_can_download_but_cannot_chat_or_manage(self):
+        self._seed_repo_download_scope()
+        with self.app.test_client() as client:
+            self._login(client, "weilin.ang@npt.sg")
+            page = client.get("/source-code-qa")
+            download = client.get("/api/source-code-qa/repo-downloads/AF:All")
+            chat = client.post("/api/source-code-qa/query", json={})
+            admin = client.post("/api/source-code-qa/config", json={})
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(b"Source Code Repo Download", page.data)
+        self.assertNotIn(b'data-tab-trigger="chat"', page.data)
+        self.assertNotIn(b'data-tab-trigger="admin"', page.data)
+        self.assertEqual(download.status_code, 200)
+        self.assertTrue(zipfile.is_zipfile(io.BytesIO(download.data)))
+        self.assertEqual(chat.status_code, 403)
+        self.assertEqual(admin.status_code, 403)
+
     def test_admin_user_can_access_source_code_qa_directly(self):
         with self.app.test_client() as client:
             self._login(client, "xiaodong.zheng@npt.sg")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 SOURCE_CODE_QA_ALLOWED_EMAILS = frozenset({
     "xiaodong.zheng@npt.sg",
+    "weilin.ang@npt.sg",
 })
 
 
