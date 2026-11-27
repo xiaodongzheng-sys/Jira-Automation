@@ -22,6 +22,7 @@ from bpmis_jira_tool.source_code_qa import SourceCodeQAService
 REPO_DOWNLOAD_SCOPES: tuple[dict[str, str], ...] = (
     {"label": "AF-All", "scope_key": "AF:All", "filename": "source-code-repos-AF-All.zip"},
     {"label": "CRMS-All", "scope_key": "CRMS:All", "filename": "source-code-repos-CRMS-All.zip"},
+    {"label": "Digital Ops", "scope_key": "DIGITAL_OPS:All", "filename": "source-code-repos-Digital-Ops-All.zip"},
     {"label": "GRC-All", "scope_key": "GRC:All", "filename": "source-code-repos-GRC-All.zip"},
     {"label": "SG Market", "scope_key": "SG_MARKET:All", "filename": "source-code-repos-SG-Market-All.zip"},
     {"label": "ID Market", "scope_key": "ID_MARKET:All", "filename": "source-code-repos-ID-Market-All.zip"},
