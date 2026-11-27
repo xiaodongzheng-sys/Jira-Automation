@@ -73,11 +73,8 @@
     {% endif %}
   </section>
 
-  <nav class="source-qa-tabs" aria-label="Source Code Q&A views" data-default-tab="{{ 'chat' if can_use_source_code_qa_chat else 'download' }}">
-    {% if can_use_source_code_qa_chat %}
-      <button class="source-qa-tab workspace-tab is-active" type="button" role="tab" data-tab-trigger="chat" data-source-view-tab="chat" aria-selected="true">Chat</button>
-    {% endif %}
-      <button class="source-qa-tab workspace-tab" type="button" role="tab" data-tab-trigger="download" data-source-view-tab="download" aria-selected="false">Repo Download</button>
+  <nav class="source-qa-tabs" aria-label="Source Code Q&A views" data-default-tab="download">
+      <button class="source-qa-tab workspace-tab is-active" type="button" role="tab" data-tab-trigger="download" data-source-view-tab="download" aria-selected="true">Repo Download</button>
     {% if can_manage_source_code_qa %}
       <button class="source-qa-tab workspace-tab" type="button" role="tab" data-tab-trigger="effort" data-source-view-tab="effort" aria-selected="false">Effort Assessment</button>
       <button class="source-qa-tab workspace-tab" type="button" role="tab" data-tab-trigger="admin" data-source-view-tab="admin" aria-selected="false">Repo Admin</button>
@@ -85,7 +82,7 @@
   </nav>
 
   {% if can_use_source_code_qa_chat %}
-    <section class="workspace-panel source-qa-panel is-active" data-tab-panel="chat" data-source-view-panel="chat">
+    <section class="workspace-panel source-qa-panel" data-tab-panel="chat" data-source-view-panel="chat" hidden>
       <section class="source-qa-chat-shell">
       <aside class="source-qa-session-sidebar" aria-label="Source Code Q&A chat history">
         <div class="source-qa-session-sidebar-head">
@@ -176,13 +173,13 @@
     </section>
   {% endif %}
 
-  <section class="workspace-panel source-qa-panel{% if not can_use_source_code_qa_chat %} is-active{% endif %}" data-tab-panel="download" data-source-view-panel="download" {% if can_use_source_code_qa_chat %}hidden{% endif %}>
+  <section class="workspace-panel source-qa-panel is-active" data-tab-panel="download" data-source-view-panel="download">
     <section class="panel panel-wide">
       <div class="panel-head">
         <div>
           <p class="eyebrow">Source Bundles</p>
           <h2>Repo Download</h2>
-          <p class="card-help">Each numbered ZIP is smaller than 20 MB. Download all numbered parts for a scope, or download its Combined ZIP, which has no size limit. Both contain the available Git text source, configuration, code documents and pinned shared-code submodules. The indexes and manifests identify files and any unavailable submodules.</p>
+          <p class="card-help">Each numbered ZIP is smaller than 20 MB. Download all numbered parts for a scope. The ZIP files contain the available Git text source, configuration, code documents and pinned shared-code submodules. The indexes and manifests identify files and any unavailable submodules.</p>
         </div>
       </div>
       <div class="table-scroll">
@@ -204,7 +201,7 @@
                   <a
                     class="button"
                     data-source-repo-download
-                    href="{{ url_for('source_code_qa_repo_download_combined_api' if item.combined else 'source_code_qa_repo_download_api', scope_key=item.scope_key) }}"
+                    href="{{ url_for('source_code_qa_repo_download_api', scope_key=item.scope_key) }}"
                     download="{{ item.filename }}"
                   >Download</a>
                 </td>

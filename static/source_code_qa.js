@@ -132,8 +132,8 @@
 
   const setSourceView = (view) => {
     const adminViews = new Set(['admin', 'effort']);
-    const sharedViews = new Set(canChat ? ['chat', 'download'] : ['download']);
-    const fallbackView = canChat ? 'chat' : 'download';
+    const sharedViews = new Set(['download']);
+    const fallbackView = 'download';
     const nextView = sharedViews.has(view) ? view : (adminViews.has(view) && canManage ? view : fallbackView);
     viewTabs.forEach((tab) => {
       const active = tab.dataset.sourceViewTab === nextView;
@@ -2723,7 +2723,7 @@
   });
   copyAnswerButton?.addEventListener('click', copyAnswerWithCitations);
 
-  setSourceView(canChat ? 'chat' : 'download');
+  setSourceView('download');
   restoreLastQueryConfig();
   restoreEffortAssessmentCache();
   loadLatestEffortAssessment();

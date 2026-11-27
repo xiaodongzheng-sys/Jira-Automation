@@ -120,32 +120,6 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
                             details.append(size)
                         scope["meta"] = " · ".join(details)
                 scopes.append(scope)
-            combined = existing_combined_archive(service, original["scope_key"])
-            combined_meta = combined[0] if combined else None
-            if combined_meta is None and status and status.get("available") and status.get("set_id"):
-                try:
-                    from bpmis_jira_tool.public_artifacts_gcs import fetch_combined_repo_download_status
-
-                    combined_meta = fetch_combined_repo_download_status(
-                        combined_filename(original["filename"]), original["scope_key"], status["set_id"]
-                    )
-                except Exception:
-                    combined_meta = None
-            if combined_meta:
-                details = []
-                generated = _format_generated_at(combined_meta.get("generated_at"))
-                if generated:
-                    details.append(f"Updated {generated}")
-                size = _human_size(combined_meta.get("size_bytes"))
-                if size:
-                    details.append(size)
-                scopes.append({
-                    **original,
-                    "label": original["label"] + " · Combined",
-                    "filename": combined_filename(original["filename"]),
-                    "combined": True,
-                    "meta": " · ".join(details),
-                })
         return scopes
 
     def _download_local_agent_archive(response, *, fallback_name: str):

@@ -57,6 +57,6 @@ never overwritten. Keep this backup private; it contains internal project data.
 If the save conflicts, refresh and retry with a new backup file. Confirm counts,
 restore lookups and repeat-preview idempotence before resuming edits/sync.
 
-Daily Brief team-member follow-ups remain in email but no longer produce Trello
-cards. Personal-action and Watch / Delegate cards are unchanged; old cards are
-not deleted or moved by this change.
+Daily Brief is email-only. It does not create Trello cards for personal actions,
+Watch / Delegate, or team-member follow-ups, even when Trello credentials or a
+legacy client argument are supplied. Old cards are not deleted or moved.

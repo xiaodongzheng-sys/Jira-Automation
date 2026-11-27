@@ -218,7 +218,7 @@ def build_repo_download_zip(service: SourceCodeQAService, scope_key: str) -> tup
             archive.writestr(repo_manifest["symbol_index"], _json_lines(symbols))
             repo_manifest["source_files"] = len(files)
             repo_manifest["symbols"] = len(symbols)
-            _record_source_coverage(repo_manifest, files)
+            _record_source_coverage(repo_manifest, files, allow_documents=full_source)
         archive.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
     if full_source:
         for item in repo_items:

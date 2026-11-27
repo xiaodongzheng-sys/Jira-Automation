@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import random
+import shutil
 import subprocess
 import tempfile
 from types import SimpleNamespace
@@ -201,6 +202,20 @@ class MarketTeamTests(unittest.TestCase):
                 self.assertEqual(seen["Market-Repo/" + relative], expected.encode())
             self.assertEqual(len(seen), manifest["bundle_set"]["scope_source_files"])
 
+    def test_full_source_bundle_accepts_readme_only_repository(self):
+        root = self.seed()
+        for child in ("src", "docs", "node_modules", "build"):
+            shutil.rmtree(root / child)
+        (root / "application.yml").unlink()
+        (root / "image.png").unlink()
+        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "readme only"], check=True)
+        metadata, content = bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            self.assertIn("Market-Repo/README.md", archive.namelist())
+            manifest = json.loads(archive.read("manifest.json"))
+            self.assertEqual(manifest["repos"][0]["source_kind"], "documents")
+
     def test_single_oversized_source_file_fails_instead_of_being_omitted(self):
         self.seed(extra_files={"docs/design.md": random.Random(42).randbytes(24000).hex()})
         with patch.object(bundles, "MAX_BUNDLE_BYTES", 12_000):
@@ -229,7 +244,7 @@ class MarketTeamTests(unittest.TestCase):
                 self.login(client, "teammate@npt.sg")
                 self.assertEqual(client.get(url).status_code, 403)
                 self.login(client)
-                self.assertIn("SG Market · Combined", client.get("/source-code-qa").get_data(as_text=True))
+                self.assertNotIn("SG Market · Combined", client.get("/source-code-qa").get_data(as_text=True))
                 response = client.get(url)
                 self.assertEqual(response.status_code, 200)
                 with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
@@ -516,8 +531,8 @@ class MarketTeamTests(unittest.TestCase):
         self.assertEqual(repo["code_files"], 0)
         (root / "application.yml").unlink()
         subprocess.run(["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qam", "docs only"], check=True, capture_output=True)
-        with self.assertRaisesRegex(ToolError, "no downloadable source"):
-            bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
+        _, content = bundles.build_repo_download_zip(self.service, "SG_MARKET:All")
+        self.assertEqual(bundles.validate_repo_download_archive(content)["repos"][0]["source_kind"], "documents")
 
     def test_signed_url_rejects_unverified_or_mismatched_metadata(self):
         blob = SimpleNamespace(exists=lambda: True, reload=lambda: None, size=1024, generation=7, md5_hash="actual", generate_signed_url=lambda **kwargs: "https://signed.test")

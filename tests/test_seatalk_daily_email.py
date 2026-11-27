@@ -5010,7 +5010,7 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
             self.assertTrue(store.already_sent(run_date="2026-04-30", run_slot="midday", recipient="xiaodong.zheng@npt.sg"))
             self.assertFalse(store.already_sent(run_date="2026-04-30", run_slot="morning", recipient="xiaodong.zheng@npt.sg"))
 
-    def test_send_daily_email_syncs_trello_cards_before_marking_sent(self):
+    def test_send_daily_email_never_syncs_trello_even_with_explicit_client(self):
         class FakeTrelloClient:
             def __init__(self):
                 self.created = []
@@ -5024,7 +5024,10 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
 
                 return TrelloCardResult(status="created", name=name, url=f"https://trello.test/{len(self.created)}", trello_id=f"card-{len(self.created)}")
 
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "bpmis_jira_tool.seatalk_daily_email.sync_daily_summary_to_trello",
+            side_effect=AssertionError("Daily Brief must never sync Trello"),
+        ) as sync_mock:
             encryption_key = Fernet.generate_key().decode("utf-8")
             settings = _settings(temp_dir, encryption_key=encryption_key)
             store = StoredGoogleCredentials(
@@ -5061,13 +5064,29 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
                             )
 
         self.assertEqual(result.status, "sent")
-        self.assertEqual(result.trello_status, "synced")
-        self.assertEqual(result.trello_created_count, 2)
+        self.assertEqual(result.trello_status, "disabled")
+        self.assertEqual(result.trello_created_count, 0)
         self.assertEqual(result.trello_skipped_count, 0)
-        self.assertEqual([card["name"] for card in result.trello_cards], [
-            "[本人处理] 评审 rollout",
-            "[关注] Monitor closure",
-        ])
+        self.assertEqual(result.trello_cards, [])
+        self.assertEqual(trello_client.created, [])
+        sync_mock.assert_not_called()
+
+    def test_cli_normal_run_is_email_only_even_with_trello_credentials(self):
+        result = seatalk_daily_email.DailyEmailResult(
+            status="sent", recipient="owner@npt.sg", subject="Daily Brief", run_date="2026-11-20",
+        )
+        with patch.dict(os.environ, {"TRELLO_API_KEY": "test-key", "TRELLO_API_TOKEN": "test-token", "TRELLO_BOARD_ID": "test-board"}), patch(
+            "bpmis_jira_tool.seatalk_daily_email.Settings.from_env", return_value=object(),
+        ), patch(
+            "bpmis_jira_tool.seatalk_daily_email.TrelloDailySummaryClient.from_env",
+            side_effect=AssertionError("Daily Brief must never initialize Trello"),
+        ) as trello_mock, patch(
+            "bpmis_jira_tool.seatalk_daily_email.send_daily_email", return_value=result,
+        ) as send_mock, patch("builtins.print"):
+            self.assertEqual(seatalk_daily_email.main(["--slot", "morning"]), 0)
+        trello_mock.assert_not_called()
+        send_mock.assert_called_once()
+        self.assertNotIn("trello_client", send_mock.call_args.kwargs)
 
     def test_send_daily_email_dry_run_does_not_archive(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -5456,7 +5475,7 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
             run_slot="midday",
         )
         with patch("bpmis_jira_tool.seatalk_daily_email.Settings.from_env", return_value=Settings.from_env()):
-            with patch("bpmis_jira_tool.seatalk_daily_email.TrelloDailySummaryClient.from_env", side_effect=ConfigError("disabled")):
+            with patch("bpmis_jira_tool.seatalk_daily_email.TrelloDailySummaryClient.from_env", side_effect=AssertionError("Daily Brief must not initialize Trello")) as trello_mock:
                 with patch("bpmis_jira_tool.seatalk_daily_email.send_daily_email", return_value=fake_result) as send_mock:
                     with patch("builtins.print") as print_mock:
                         self.assertEqual(
@@ -5474,6 +5493,8 @@ class SeaTalkDailyBriefOnePassTests(unittest.TestCase):
                             0,
                         )
         send_mock.assert_called_once()
+        trello_mock.assert_not_called()
+        self.assertNotIn("trello_client", send_mock.call_args.kwargs)
         print_mock.assert_called_once()
 
     def test_remaining_timeout_trello_and_mapping_edge_branches(self):

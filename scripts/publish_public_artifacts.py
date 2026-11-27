@@ -25,7 +25,6 @@ from bpmis_jira_tool.public_artifacts_gcs import (  # noqa: E402
     PUBLIC_GCS_PUBLISH_BUCKET_ENV,
     public_gcs_publish_bucket,
     publish_business_insights_dir,
-    publish_combined_repo_download,
     publish_repo_download_archive,
 )
 from bpmis_jira_tool.source_code_qa_factory import build_source_code_qa_service_from_settings  # noqa: E402
@@ -39,6 +38,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bucket", default="", help="Override the publish bucket name.")
     parser.add_argument("--skip-repo-bundles", action="store_true", help="Only publish Business Insights files.")
+    parser.add_argument("--skip-business-insights", action="store_true", help="Only publish repo bundles.")
+    parser.add_argument("--scope", action="append", default=[], help="Only publish the specified scope key; repeat to select more than one.")
     args = parser.parse_args()
 
     if args.bucket:
@@ -55,12 +56,20 @@ def main() -> int:
 
     data_root = Path(settings.team_portal_data_dir).expanduser()
 
-    uploaded = publish_business_insights_dir(data_root / "business_insights")
-    print(f"business_insights_files_uploaded={uploaded}")
+    if not args.skip_business_insights:
+        uploaded = publish_business_insights_dir(data_root / "business_insights")
+        print(f"business_insights_files_uploaded={uploaded}")
 
     if not args.skip_repo_bundles:
         service = build_source_code_qa_service_from_settings(settings)
+        selected = set(args.scope)
+        unknown = selected - {item["scope_key"] for item in REPO_DOWNLOAD_SCOPES}
+        if unknown:
+            print(f"Unknown repo scopes: {sorted(unknown)}", file=sys.stderr)
+            return 2
         for scope in REPO_DOWNLOAD_SCOPES:
+            if selected and scope["scope_key"] not in selected:
+                continue
             try:
                 metadata, content = build_repo_download_zip(service, scope["scope_key"])
             except Exception as error:  # noqa: BLE001 - report and continue with other scopes
@@ -68,20 +77,9 @@ def main() -> int:
                 continue
             if metadata.get("parts"):
                 from bpmis_jira_tool.source_code_qa_download_parts import cached_part_artifacts, install_local_parts
-                from bpmis_jira_tool.source_code_qa_combined import build_combined_archive, combined_filename, install_combined_archive
 
                 ok = True
                 artifacts = list(cached_part_artifacts(service, metadata))
-                combined_path = artifacts[0][1].parent / combined_filename(scope["filename"])
-                try:
-                    combined_meta = build_combined_archive(artifacts, combined_path)
-                    ok = publish_combined_repo_download(combined_meta, combined_path)
-                except Exception as error:  # noqa: BLE001 - do not publish an incomplete set
-                    ok = False
-                    print(f"repo_bundle_combined_error scope={scope['scope_key']} reason={error}")
-                print(f"repo_bundle_combined_published scope={scope['scope_key']} ok={ok}")
-                if not ok:
-                    continue
                 for part, path in sorted(artifacts, key=lambda item: item[0]["part_number"] == 1):
                     uploaded = publish_repo_download_archive(part, path.read_bytes())
                     ok = ok and uploaded
@@ -90,7 +88,6 @@ def main() -> int:
                         break
                 if ok:
                     install_local_parts(service, metadata)
-                    install_combined_archive(service, combined_path)
             else:
                 ok = publish_repo_download_archive(metadata, content)
                 print(f"repo_bundle_published scope={scope['scope_key']} ok={ok} bytes={len(content)}")
