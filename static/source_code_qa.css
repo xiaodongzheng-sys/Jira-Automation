@@ -49,7 +49,7 @@
 }
 
 .source-qa-config-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -1245,10 +1245,6 @@
 }
 
 @media (max-width: 1100px) {
-  .source-qa-config-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .source-qa-chat-shell {
     grid-template-columns: minmax(0, 1fr);
   }

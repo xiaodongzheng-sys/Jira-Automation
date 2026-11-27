@@ -68,6 +68,7 @@
   const effortCopyButton = document.querySelector('[data-source-effort-copy]');
   const viewTabs = Array.from(document.querySelectorAll('[data-source-view-tab]'));
   const viewPanels = Array.from(document.querySelectorAll('[data-source-view-panel]'));
+  const hasEffortTab = viewTabs.some((tab) => tab.dataset.sourceViewTab === 'effort');
   const sessionList = document.querySelector('[data-source-session-list]');
   const sessionTitle = document.querySelector('[data-source-session-title]');
   const sessionContext = document.querySelector('[data-source-session-context]');
@@ -131,10 +132,7 @@
   };
 
   const setSourceView = (view) => {
-    const adminViews = new Set(['admin', 'effort']);
-    const sharedViews = new Set(['download']);
-    const fallbackView = 'download';
-    const nextView = sharedViews.has(view) ? view : (adminViews.has(view) && canManage ? view : fallbackView);
+    const nextView = viewTabs.some((tab) => tab.dataset.sourceViewTab === view) ? view : 'download';
     viewTabs.forEach((tab) => {
       const active = tab.dataset.sourceViewTab === nextView;
       tab.classList.toggle('is-active', active);
@@ -166,7 +164,7 @@
   );
   const runtimeContextHelp = () => isAllCountryOnlyTeam()
     ? 'Country is fixed to All. Repository Admin can save GitLab URLs and run Sync / Refresh.'
-    : 'Select the country for your source-code question.';
+    : 'Select a country.';
   const currentCountry = () => country.value || (isCountrySpecificTeam() ? runtimeCountries()[0] || 'SG' : allCountryValue());
   const currentRepositoryCountry = () => allCountryValue();
   const currentKey = () => `${pmTeam.value}:${currentRepositoryCountry()}`;
@@ -652,6 +650,7 @@
   };
 
   const persistEffortAssessmentDraft = () => {
+    if (!hasEffortTab) return;
     persistEffortAssessmentCache({
       requirement: String(effortRequirement?.value || ''),
       language: effortLanguage?.value || 'zh',
@@ -2725,8 +2724,10 @@
 
   setSourceView('download');
   restoreLastQueryConfig();
-  restoreEffortAssessmentCache();
-  loadLatestEffortAssessment();
+  if (hasEffortTab) {
+    restoreEffortAssessmentCache();
+    loadLatestEffortAssessment();
+  }
   if (canChat) {
     applyActiveSession(null);
   }
