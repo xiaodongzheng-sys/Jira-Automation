@@ -269,6 +269,16 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
             status_code = HTTPStatus.SERVICE_UNAVAILABLE if _is_local_agent_unavailable_error(error) else HTTPStatus.BAD_REQUEST
             return jsonify({"status": "error", "message": str(error), "error_category": _tool_error_category(error)}), status_code
 
+    @app.get("/cloud-auth/api/source-code-qa/repo-downloads/<scope_key>")
+    def source_code_qa_cloud_repo_download_api(scope_key: str):
+        try:
+            scope = resolve_repo_download_scope(scope_key)
+        except ToolError:
+            return jsonify({"status": "error", "message": "Unknown repo download scope."}), HTTPStatus.NOT_FOUND
+        if scope["scope_key"] != "DIGITAL_OPS:All":
+            return jsonify({"status": "error", "message": "Unknown repo download scope."}), HTTPStatus.NOT_FOUND
+        return source_code_qa_repo_download_api(scope_key)
+
     @app.get("/api/source-code-qa/repo-downloads/<scope_key>/combined")
     def source_code_qa_repo_download_combined_api(scope_key: str):
         access_gate = _require_source_code_qa_access(settings, api=True)

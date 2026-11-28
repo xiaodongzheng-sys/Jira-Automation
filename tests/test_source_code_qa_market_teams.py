@@ -127,6 +127,25 @@ class MarketTeamTests(unittest.TestCase):
             self.assertIn(f"/repo-downloads/{team}:All", html)
         self.assertEqual(len(payload["options"]["pm_teams"]), 7)
 
+    def test_digital_ops_download_is_listed_and_contains_full_source(self):
+        self.seed("DIGITAL_OPS")
+        with self.app.test_client() as client:
+            url = "/cloud-auth/api/source-code-qa/repo-downloads/DIGITAL_OPS:All"
+            self.assertEqual(client.get(url).status_code, 401)
+            self.login(client, "teammate@npt.sg")
+            self.assertEqual(client.get(url).status_code, 403)
+            self.login(client)
+            self.assertEqual(client.get("/cloud-auth/api/source-code-qa/repo-downloads/AF:All").status_code, 404)
+            html = client.get("/source-code-qa").get_data(as_text=True)
+            self.assertIn("Digital Ops", html)
+            self.assertIn("/cloud-auth/api/source-code-qa/repo-downloads/DIGITAL_OPS:All", html)
+            response = client.get("/cloud-auth/api/source-code-qa/repo-downloads/DIGITAL_OPS:All")
+            self.assertEqual(response.status_code, 200)
+            with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+                manifest = json.loads(archive.read("manifest.json"))
+                self.assertEqual(manifest["scope_key"], "DIGITAL_OPS:All")
+                self.assertIn("Market-Repo/src/decision.py", archive.namelist())
+
     def test_market_sync_clones_and_pulls_source_with_indexes(self):
         origin = self.seed("AF")
         for team in MARKET_TEAM_PROFILES:

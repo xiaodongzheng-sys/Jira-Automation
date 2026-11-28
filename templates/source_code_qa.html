@@ -190,7 +190,7 @@
                   <a
                     class="button"
                     data-source-repo-download
-                    href="{{ url_for('source_code_qa_repo_download_api', scope_key=item.scope_key) }}"
+                    href="{{ url_for('source_code_qa_cloud_repo_download_api' if item.scope_key.split('~')[0] == 'DIGITAL_OPS:All' else 'source_code_qa_repo_download_api', scope_key=item.scope_key) }}"
                     download="{{ item.filename }}"
                   >Download</a>
                 </td>
